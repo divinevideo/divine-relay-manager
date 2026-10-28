@@ -35,6 +35,8 @@ import {
   parseOverflowMarker,
   recheckUnreadableWarning,
   sameSecondGapWarning,
+  statusDisagreeCause,
+  statusUnreadableCause,
   stillHiddenUnreadableWarning,
   stillUnchangedWarning,
   unpaginatedGapWarning,
@@ -302,7 +304,7 @@ type MediaVerdict =
 async function mayChangeMedia(
   sha256: string, mediaAction: MediaAction, env: BulkModerateEnv, blossomSecret: string | Error, pubkey: string,
 ): Promise<MediaVerdict> {
-  const unreadable = (error: unknown) => new Error(`could not read current status, left unchanged: ${formatError(error)}`);
+  const unreadable = (error: unknown) => new Error(statusUnreadableCause(formatError(error)));
   let blossom: BlossomBlob;
   try {
     if (blossomSecret instanceof Error) throw blossomSecret;
@@ -328,11 +330,7 @@ async function mayChangeMedia(
     throw unreadable(error);
   }
   const decision = decideMediaChange(mediaAction, blossom.level, moderation.level);
-  if (decision === 'disagree') {
-    throw new Error(
-      `status sources disagree (blossom ${blossom.raw}, moderation-service ${moderation.raw}), left unchanged`,
-    );
-  }
+  if (decision === 'disagree') throw new Error(statusDisagreeCause(blossom.raw, moderation.raw));
   const result = RESULT_LEVEL[mediaAction];
   return decision === 'change'
     ? { kind: 'change', resend: moderation.level === result }

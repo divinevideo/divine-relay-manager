@@ -288,6 +288,20 @@ export function mediaFailure(sha256: string, error: string): string {
   return `media:${sha256}:${error}`;
 }
 
+// A media failure's error when the worker left the file alone instead of
+// changing it (#291; mayChangeMedia in worker/src/bulk-moderate.ts): its owner
+// or one of its two statuses could not be read, and an unreadable status is
+// never treated as open.
+export function statusUnreadableCause(error: string): string {
+  return `could not read current status, left unchanged: ${error}`;
+}
+
+// The same, when the media server and the moderation record disagree, each
+// status named as its service gave it.
+export function statusDisagreeCause(blossomStatus: string, moderationStatus: string): string {
+  return `status sources disagree (blossom ${blossomStatus}, moderation-service ${moderationStatus}), left unchanged`;
+}
+
 export function enumerationWarning(pubkey: string, warning: string): string {
   return `enumeration:${pubkey}:${warning}`;
 }

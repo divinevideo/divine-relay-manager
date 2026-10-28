@@ -61,9 +61,9 @@ const LISTING_LINES: Array<[RegExp, (m: RegExpExecArray) => string]> = [
   [/^relay could not be fully paginated; (.*)$/s, (m) => `the relay's list of events could not be read in full; ${m[1]}`],
 ];
 
-// The per-file causes the worker builds when it leaves a file alone (see
-// mayChangeMedia in worker/src/bulk-moderate.ts), in words. Any other cause
-// is a change that failed, shown as written.
+// The per-file causes the worker gives when it leaves a file alone
+// (statusDisagreeCause and statusUnreadableCause in shared/bulk-moderation.ts),
+// in words. Any other cause is a change that failed, shown as written.
 function describeMediaFailure(sha256: string, error: string): string {
   const disagree = /^status sources disagree \(blossom (\S+), moderation-service (\S+)\), left unchanged$/.exec(error);
   if (disagree) {

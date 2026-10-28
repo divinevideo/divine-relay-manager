@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkNotesPanel } from './BulkNotesPanel';
 import { ApiError, type BulkNote } from '@/lib/adminApi';
+import { mediaFailure, statusDisagreeCause } from '../../shared/bulk-moderation';
 
 const api = vi.hoisted(() => ({
   moderateMedia: vi.fn(),
@@ -373,7 +374,7 @@ describe('BulkNotesPanel', () => {
   });
 
   it('says a problem whose cause the worker names in plain words', () => {
-    renderPanel({ failures: [`media:${HIDDEN_A}:status sources disagree (blossom restricted, moderation-service SAFE), left unchanged`] });
+    renderPanel({ failures: [mediaFailure(HIDDEN_A, statusDisagreeCause('restricted', 'SAFE'))] });
     expect(screen.getByText(
       `File ${HIDDEN_A} was left unchanged: the media server shows it as hidden but the moderation record says public.`,
     )).toBeInTheDocument();

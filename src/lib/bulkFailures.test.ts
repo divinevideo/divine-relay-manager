@@ -3,7 +3,8 @@ import { describeBulkFailure } from './bulkFailures';
 import {
   ABANDONED_REASON, bulkLegStoppedWarning, enumerationWarning, eventFailure, formatOverflowMarker, jobFailure,
   listFallbackWarning, mediaFailure, notesNotStoredWarning, notesOverflowWarning, notSavedWarning, outOfScopeWarning,
-  recheckUnreadableWarning, stillHiddenUnreadableWarning, stillUnchangedWarning, unpaginatedGapWarning,
+  recheckUnreadableWarning, statusDisagreeCause, statusUnreadableCause, stillHiddenUnreadableWarning,
+  stillUnchangedWarning, unpaginatedGapWarning,
 } from '../../shared/bulk-moderation';
 
 const ACCOUNT = 'a'.repeat(64);
@@ -16,16 +17,16 @@ describe('describeBulkFailure', () => {
     ['an event', eventFailure('e'.repeat(64), 'banevent failed'), `event ${'e'.repeat(64)} failed: banevent failed`],
     ['a file', mediaFailure(FILE, 'Moderation service returned 500'), `file ${FILE} could not be changed: Moderation service returned 500`],
     ['a file whose two status sources disagree',
-      mediaFailure(FILE, 'status sources disagree (blossom restricted, moderation-service SAFE), left unchanged'),
+      mediaFailure(FILE, statusDisagreeCause('restricted', 'SAFE')),
       `file ${FILE} was left unchanged: the media server shows it as hidden but the moderation record says public`],
     ['a file whose sources disagree the other way',
-      mediaFailure(FILE, 'status sources disagree (blossom active, moderation-service permanent_ban), left unchanged'),
+      mediaFailure(FILE, statusDisagreeCause('active', 'permanent_ban')),
       `file ${FILE} was left unchanged: the media server shows it as public but the moderation record says blocked`],
     ['a file with no moderation decision',
-      mediaFailure(FILE, 'status sources disagree (blossom banned, moderation-service unknown), left unchanged'),
+      mediaFailure(FILE, statusDisagreeCause('banned', 'unknown')),
       `file ${FILE} was left unchanged: the media server shows it as blocked but the moderation record has no decision`],
     ['a file whose status could not be read',
-      mediaFailure(FILE, 'could not read current status, left unchanged: blossom returned 503'),
+      mediaFailure(FILE, statusUnreadableCause('blossom returned 503')),
       `file ${FILE} was left unchanged: its current status could not be read (blossom returned 503)`],
     ['one more problem past the cap', formatOverflowMarker(1), '1 more problem was not stored'],
     ['more problems past the cap', formatOverflowMarker(12), '12 more problems were not stored'],

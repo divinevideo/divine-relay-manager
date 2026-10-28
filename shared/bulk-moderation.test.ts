@@ -17,6 +17,8 @@ import {
   parseFailure,
   parseOverflowMarker,
   sameSecondGapWarning,
+  statusDisagreeCause,
+  statusUnreadableCause,
   unpaginatedGapWarning,
 } from './bulk-moderation';
 
@@ -42,8 +44,8 @@ describe('bulk failure strings', () => {
     const sha256 = 'f'.repeat(64);
     for (const error of [
       'Moderation service returned 500',
-      'could not read current status, left unchanged: blossom returned 500',
-      'status sources disagree (blossom active, moderation-service permanent_ban), left unchanged',
+      statusUnreadableCause('blossom returned 500'),
+      statusDisagreeCause('active', 'permanent_ban'),
     ]) {
       expect(parseFailure(mediaFailure(sha256, error))).toEqual({ type: 'media', sha256, error });
     }
