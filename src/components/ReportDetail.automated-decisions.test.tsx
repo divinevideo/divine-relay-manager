@@ -127,10 +127,13 @@ describe('ReportDetail on a target the worker has decided on', () => {
 
     renderDetail();
 
-    expect(await screen.findByText('Decision History (1 action)')).toBeInTheDocument();
+    const heading = await screen.findByText('Decision History (1 action)');
     expect(screen.queryByText(/Already Handled/)).not.toBeInTheDocument();
     expect(screen.queryByText(/Last action:/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
+    // Green reads as "all clear", which only a handling decision earns.
+    expect(heading).not.toHaveClass('text-green-700');
+    expect(heading.closest('[class*="bg-green-50"]')).toBeNull();
   });
 
   it("calls it handled, and names the person's decision, once a person has decided", async () => {
@@ -138,8 +141,10 @@ describe('ReportDetail on a target the worker has decided on', () => {
 
     renderDetail();
 
-    expect(await screen.findByText('Already Handled (2 actions)')).toBeInTheDocument();
+    const heading = await screen.findByText('Already Handled (2 actions)');
     expect(screen.getByText(/Last action: reviewed/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+    expect(heading).toHaveClass('text-green-700');
+    expect(heading.closest('[class*="bg-green-50"]')).not.toBeNull();
   });
 });
