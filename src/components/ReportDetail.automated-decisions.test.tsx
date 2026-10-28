@@ -16,6 +16,8 @@ const MOD_PUBKEY = 'e'.repeat(64);
 // What GET /api/decisions/<id> answers for each target, newest first. The real
 // useDecisionLog reads it, so the pane is driven by the rows, not a canned flag.
 const decisionsByTarget = vi.hoisted(() => ({ value: {} as Record<string, ModerationDecision[]> }));
+// The report's target, when a test needs a post instead of the account.
+const reportTarget = vi.hoisted(() => ({ value: null as { type: 'event' | 'pubkey'; value: string } | null }));
 
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
@@ -46,7 +48,7 @@ vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, 
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
-    target: { type: 'pubkey', value: REPORTED_PUBKEY },
+    target: reportTarget.value ?? { type: 'pubkey', value: REPORTED_PUBKEY },
     thread: { event: undefined, ancestors: [], replies: [] },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
@@ -103,14 +105,33 @@ const REVIEWED_ROW: ModerationDecision = {
   created_at: '2026-10-19 12:00:00',
 };
 
-function renderDetail() {
+// A CSAM report on a post, and the row ReportWatcher logs when the relay
+// refuses to hide that post: the post is still up.
+const EVENT_ID = 'c'.repeat(64);
+const EVENT_REPORT: NostrEvent = {
+  ...REPORT,
+  id: '8'.repeat(64),
+  tags: [['e', EVENT_ID, 'illegal'], ['p', REPORTED_PUBKEY], ['L', 'social.nos.ontology'], ['l', 'NS-csam', 'social.nos.ontology']],
+};
+const AUTO_HIDE_FAILED_ROW: ModerationDecision = {
+  id: 3,
+  target_type: 'event',
+  target_id: EVENT_ID,
+  action: 'auto_hide_failed',
+  reason: 'Auto-hide failed',
+  moderator_pubkey: 'auto',
+  report_id: EVENT_REPORT.id,
+  created_at: '2026-10-21 12:00:00',
+};
+
+function renderDetail(report: NostrEvent = REPORT) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <ReportDetail report={REPORT} />
+        <ReportDetail report={report} />
       </TooltipProvider>
     </QueryClientProvider>,
   );
@@ -120,6 +141,7 @@ describe('ReportDetail on a target the worker has decided on', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     decisionsByTarget.value = {};
+    reportTarget.value = null;
   });
 
   it('lists the decision without calling the target handled when it is the only one', async () => {
@@ -146,5 +168,18 @@ describe('ReportDetail on a target the worker has decided on', () => {
     expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
     expect(heading).toHaveClass('text-green-700');
     expect(heading.closest('[class*="bg-green-50"]')).not.toBeNull();
+  });
+
+  it('does not call a post handled when its only auto-hide failed', async () => {
+    reportTarget.value = { type: 'event', value: EVENT_ID };
+    decisionsByTarget.value = { [EVENT_ID]: [AUTO_HIDE_FAILED_ROW] };
+
+    renderDetail(EVENT_REPORT);
+
+    const heading = await screen.findByText('Decision History (1 action)');
+    expect(screen.queryByText(/Already Handled/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Last action:/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
+    expect(heading).not.toHaveClass('text-green-700');
   });
 });

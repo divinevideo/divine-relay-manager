@@ -133,6 +133,19 @@ describe('useDecisionLog handling decisions', () => {
     expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
   });
 
+  it('names the newest handling decision, not a failed auto-hide logged after it', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'auto_hide_failed', moderator_pubkey: 'auto' },
+      { action: 'reviewed', moderator_pubkey: 'e'.repeat(64) },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.latestDecision?.action).toBe('auto_hide_failed');
+    expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
+  });
+
   // The worker records 'auto' as the moderator on decisions it makes by
   // itself, such as opening an age-review case. No person handled the report.
   it('does not count a decision the worker made by itself as handling the report', async () => {
