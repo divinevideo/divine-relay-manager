@@ -14,6 +14,7 @@ const E2 = '2'.repeat(64);
 const IMG1 = 'https://example.invalid/one.png';
 const IMG2 = 'https://example.invalid/two.png';
 const POST_IMG = 'https://example.invalid/recent.png';
+const AVATAR = 'https://example.invalid/avatar.png';
 
 const ev = (id: string, img: string): NostrEvent => ({
   id, pubkey: AUTHOR, created_at: 1751000000, kind: 1, tags: [], content: `pic ${img}`, sig: 'b'.repeat(128),
@@ -70,7 +71,7 @@ vi.mock('@/hooks/useReportContext', () => ({
         ...(ORIGINALS[eTag] ? { isRepost: true, repostedEvent: ORIGINALS[eTag] } : {}),
       },
       threadLoading: false,
-      reportedUser: { profile: undefined, pubkey: AUTHOR, isFunnelcakeUser: false },
+      reportedUser: { profile: { picture: AVATAR }, pubkey: AUTHOR, isFunnelcakeUser: false },
       userStats: {
         postCount: 1, reportCount: 0, labelCount: 0, recentPosts: [RECENT_POST], existingLabels: [], previousReports: [],
         authoredContentIncomplete: false, labelsIncomplete: false, reportsIncomplete: false, reportsTruncated: false,
@@ -95,6 +96,13 @@ vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }
 vi.mock('@/components/ReporterCard', () => ({ ReporterInline: () => null }));
 vi.mock('@/components/LinkedTicketPanel', () => ({ LinkedTicketPanel: () => null }));
 vi.mock('@/components/UserIdentifier', () => ({ UserIdentifier: () => null }));
+// Radix's AvatarImage renders an <img> only after a real load, which jsdom never
+// does; mounting it is what starts the request, so a stand-in shows the mount.
+vi.mock('@/components/ui/avatar', () => ({
+  Avatar: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
+  AvatarImage: ({ src }: { src?: string }) => <img data-testid="avatar-img" src={src} />,
+  AvatarFallback: ({ children }: { children: React.ReactNode }) => <span>{children}</span>,
+}));
 
 let n = 0;
 function report(eventId: string, tags: string[][], content: string): NostrEvent {
@@ -214,6 +222,45 @@ describe("the completeness rule under MediaPreview's null default", () => {
     const a = NONSENSITIVE(E1);
     render(treeWith(client, a, [a], false));
     expect(hasImg(IMG1)).toBe(true);
+    expect(hasImg(AVATAR)).toBe(true);
+  });
+
+  it("forgets a reveal of the account's avatar made while partial, once the reports turn out sensitive", () => {
+    const client = qc();
+    const a = A_PARTIAL_SPAM(E1);
+    const { rerender } = render(treeWith(client, a, [a], true));
+    expect(hasImg(AVATAR)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    expect(hasImg(AVATAR)).toBe(true);
+
+    rerender(treeWith(client, a, [a, CSAM(E1)], false));
+    expect(hasImg(AVATAR)).toBe(false);
+  });
+
+  it('keeps a way back to an avatar the moderator hid while partial, once the reports turn out not sensitive', () => {
+    const client = qc();
+    const a = A_PARTIAL_SPAM(E1);
+    const { rerender } = render(treeWith(client, a, [a], true));
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Hide profile picture' }));
+
+    // Read in full and not sensitive: the moderator's Hide stands, and so does the button.
+    rerender(treeWith(client, a, [a], false));
+    expect(hasImg(AVATAR)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    expect(hasImg(AVATAR)).toBe(true);
+  });
+
+  it("forgets a reveal of the account's recent-post media made while partial, once the reports turn out sensitive", () => {
+    const client = qc();
+    const a = A_PARTIAL_SPAM(E1);
+    const { rerender } = render(treeWith(client, a, [a], true));
+    expect(hasImg(POST_IMG)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: /show 1 media/i }));
+    expect(hasImg(POST_IMG)).toBe(true);
+
+    rerender(treeWith(client, a, [a, CSAM(E1)], false));
+    expect(hasImg(POST_IMG)).toBe(false);
   });
 
   // MediaPreview starts again only for a new event, so the report key is what

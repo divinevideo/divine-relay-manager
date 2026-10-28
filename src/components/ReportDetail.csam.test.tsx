@@ -105,7 +105,7 @@ vi.mock('@/components/ThreadContext', () => ({
   ),
 }));
 vi.mock('@/components/UserProfileCard', () => ({
-  UserProfileCard: ({ hideMediaByDefault }: { hideMediaByDefault?: boolean }) => (
+  UserProfileCard: ({ hideMediaByDefault }: { hideMediaByDefault?: boolean | null }) => (
     <div data-testid="profile-card" data-hide={String(hideMediaByDefault)} />
   ),
 }));
@@ -191,7 +191,7 @@ describe('ReportDetail for an old-build CSAM report', () => {
 
   it('hides the reported account images while the report set is still loading', () => {
     renderDetail(PLAIN_ILLEGAL, null);
-    expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('null');
   });
 
   it('shows media by default for a bare illegal report (control)', () => {
@@ -235,7 +235,7 @@ describe('ReportDetail when not all of the target reports may be loaded', () => 
 
   it('hides the reported account images and media by default', () => {
     renderIncomplete(true);
-    expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('null');
     // Not known yet, rather than false: see the null default in MediaPreview.
     expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'null')).toBe(true);
   });

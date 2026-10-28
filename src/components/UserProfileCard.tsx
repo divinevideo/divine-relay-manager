@@ -11,6 +11,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { useApiUrl } from "@/hooks/useAdminApi";
 import { User, FileText, Flag, Tag, ChevronDown, ChevronUp, Copy, Check, ArrowUpRight, Trash2, Globe, ExternalLink, Activity, Eye, EyeOff } from "lucide-react";
 import { InlineMediaPreview } from "@/components/MediaPreview";
+import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
 import { RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
@@ -53,25 +54,24 @@ interface UserProfileCardProps {
   onViewActivity?: () => void;
   /** Undefined until the profile lookup answers; no relay-profile badge until then. */
   isFunnelcakeUser?: boolean;
-  /** Withhold the avatar and recent-post media until a moderator asks (sensitive reports) */
-  hideMediaByDefault?: boolean;
+  /**
+   * Withhold the avatar and recent-post media until a moderator asks (sensitive
+   * reports). null while the reports that decide it are not known yet: hidden,
+   * and a later true still counts as turning sensitive, so a reveal made
+   * meanwhile is forgotten.
+   */
+  hideMediaByDefault?: boolean | null;
 }
 
 export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
-  // Keyed by pubkey so revealing one account's avatar never carries to the next
-  const [avatarRevealedFor, setAvatarRevealedFor] = useState<string | null>(null);
+  const mediaShownByDefault = hideMediaByDefault === null ? null : !hideMediaByDefault;
   // The pane is reused across reports, so, as with the post media below, a
   // reveal is forgotten when the pane moves to another account, or when the
-  // default changes, if the avatar is then hidden by default: coming back asks
-  // again. Another report on the same account, with the default unchanged,
-  // keeps it. Done during render, so the avatar is never mounted meanwhile.
-  const [revealContext, setRevealContext] = useState({ hideMediaByDefault, pubkey });
-  if (hideMediaByDefault !== revealContext.hideMediaByDefault || pubkey !== revealContext.pubkey) {
-    setRevealContext({ hideMediaByDefault, pubkey });
-    if (hideMediaByDefault) setAvatarRevealedFor(null);
-  }
-  const showAvatar = !hideMediaByDefault || avatarRevealedFor === (pubkey ?? "");
+  // default turns sensitive: coming back asks again. Another report on the
+  // same account, with the default unchanged, keeps it. Worked out during
+  // render, so the avatar is never mounted meanwhile.
+  const [showAvatar, toggleAvatar] = useMediaVisibility(mediaShownByDefault, pubkey ?? "");
   const apiUrl = useApiUrl();
 
   // Convert hex pubkey to npub
@@ -153,13 +153,14 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
               <AvatarFallback>{displayName.slice(0, 2).toUpperCase()}</AvatarFallback>
             </Avatar>
           </a>
-          {hideMediaByDefault && (
+          {/* Also while hidden by the moderator's own choice, so it can come back. */}
+          {(mediaShownByDefault !== true || !showAvatar) && (
             <Button
               variant="ghost"
               size="sm"
               aria-label={showAvatar ? "Hide profile picture" : "Show profile picture"}
               title={showAvatar ? "Hide profile picture" : "Show profile picture"}
-              onClick={() => setAvatarRevealedFor(showAvatar ? null : (pubkey ?? ""))}
+              onClick={toggleAvatar}
               className="h-6 px-1.5 shrink-0"
             >
               {showAvatar ? <EyeOff className="h-3 w-3" /> : <Eye className="h-3 w-3" />}
@@ -270,7 +271,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
         {/* Recent Posts */}
         {stats?.recentPosts && stats.recentPosts.length > 0 && (
-          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} apiUrl={apiUrl} hideMediaByDefault={hideMediaByDefault} />
+          <RecentPostsSection posts={stats.recentPosts} onDeleteEvent={onDeleteEvent} apiUrl={apiUrl} mediaShownByDefault={mediaShownByDefault} />
         )}
       </CardContent>
     </Card>
@@ -282,12 +283,12 @@ function RecentPostsSection({
   posts,
   onDeleteEvent,
   apiUrl,
-  hideMediaByDefault,
+  mediaShownByDefault,
 }: {
   posts: NostrEvent[];
   onDeleteEvent?: (eventId: string) => void;
   apiUrl: string;
-  hideMediaByDefault: boolean;
+  mediaShownByDefault: boolean | null;
 }) {
   const [expanded, setExpanded] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -363,7 +364,7 @@ function RecentPostsSection({
                 <InlineMediaPreview
                   content={displayContent}
                   tags={isRepost ? (inner?.tags ?? []) : post.tags}
-                  showByDefault={!hideMediaByDefault}
+                  showByDefault={mediaShownByDefault}
                 />
 
                 {/* Timestamp, kind, link, and delete */}
