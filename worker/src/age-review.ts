@@ -63,6 +63,11 @@ import {
 // out as success, which is right for a moderator's Ban button. Deny and expiry
 // exist to purge the account's posts, so for them that leg is not done: keep
 // it failed, with the reason, so "Enforcement incomplete" still surfaces.
+//
+// A plain `ok` here means "ban in effect, purge scheduled", not "purge done":
+// depending on funnelcake's BAN_PURGE_MODE the purge may not have run yet, and
+// this guard cannot tell a finished purge from a pending one. See banPubkey in
+// nip86.ts for what funnelcake's modes mean here.
 function failUnlessPurgeConfirmed(result: BanPubkeyResult): { success: boolean; error?: string } {
   return result.contentRemovalUnconfirmed
     ? { success: false, error: `Ban applied; content removal not confirmed: ${result.relayError}` }
