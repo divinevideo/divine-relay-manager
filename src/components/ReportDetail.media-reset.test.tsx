@@ -179,6 +179,60 @@ describe('a revealed repost original does not carry to the next repost', () => {
   });
 });
 
+// The pane may start media visible only when the reports in hand are all of the
+// target's. A history-page selection and a target of a feed that stopped early
+// both reach the pane as targetReportsMayBePartial (pinned in
+// Reports.history-switch.test.tsx); here, what the pane does with that under
+// MediaPreview's null-means-not-known default.
+describe("the completeness rule under MediaPreview's null default", () => {
+  function treeWith(client: QueryClient, r: NostrEvent, all: NostrEvent[], partial: boolean) {
+    return (
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <ReportDetail report={r} allReportsForTarget={all} targetReportsMayBePartial={partial} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+  }
+
+  it('starts a history-page or truncated-feed report hidden, and forgets a Show once its reports turn out sensitive', () => {
+    const client = qc();
+    const a = A_PARTIAL_SPAM(E1);
+    const { rerender } = render(treeWith(client, a, [a], true));
+    expect(hasImg(IMG1)).toBe(false);
+    fireEvent.click(mediaCard()[0]);
+    expect(hasImg(IMG1)).toBe(true);
+
+    // The same report, now read in full: another report on the target carries
+    // a CSAM signal. Null, unlike false, makes this a change that drops the Show.
+    rerender(treeWith(client, a, [a, CSAM(E1)], false));
+    expect(hasImg(IMG1)).toBe(false);
+  });
+
+  it('starts a complete, non-sensitive report visible', () => {
+    const client = qc();
+    const a = NONSENSITIVE(E1);
+    render(treeWith(client, a, [a], false));
+    expect(hasImg(IMG1)).toBe(true);
+  });
+
+  // MediaPreview starts again only for a new event, so the report key is what
+  // keeps a Show from carrying to another report on the same event whose
+  // default does not change.
+  it('does not carry a Show to another CSAM-signal report on the same event', () => {
+    const client = qc();
+    const first = CSAM(E1);
+    const { rerender } = render(treeWith(client, first, [first], false));
+    expect(hasImg(IMG1)).toBe(false);
+    fireEvent.click(mediaCard()[0]);
+    expect(hasImg(IMG1)).toBe(true);
+
+    const second = CSAM(E1);
+    rerender(treeWith(client, second, [first, second], false));
+    expect(hasImg(IMG1)).toBe(false);
+  });
+});
+
 describe('opening a CSAM-signal report after a non-sensitive one', () => {
   // The image element must never be created, not just hidden after the first
   // commit: setting its src starts the request.

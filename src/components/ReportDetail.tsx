@@ -380,6 +380,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
     }) || hasCsamSignal(allReportsForTarget);
   }, [allReportsForTarget, targetReportsMayBePartial]);
+  // The pane's media viewers take "not known yet" as null rather than false:
+  // both start hidden, but only under null does a later false (the reports turn
+  // out sensitive) forget a Show the moderator made meanwhile.
+  const mediaShownByDefault = hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
 
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({
@@ -942,7 +946,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     <MediaPreview
                       key={report.id}
                       event={context.thread.repostedEvent}
-                      showByDefault={hasHighPriorityReports === false}
+                      showByDefault={mediaShownByDefault}
                       maxItems={6}
                     />
                   </div>
@@ -957,14 +961,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
           {/* Media Preview - show the actual content being reported */}
           {/* Keyed by report: the thread of the next report is often cached, so
-              this stays mounted, and a viewer the moderator revealed would stay
-              revealed (and render before its hide effect runs) on a CSAM-signal
-              report. A fresh mount starts from showByDefault. */}
+              this stays mounted. MediaPreview itself starts again for a new
+              event, and hides when its default turns false, but another report
+              on the same event with the same default would keep a Show the
+              moderator made on this one. A fresh mount starts from
+              showByDefault. */}
           {displayEvent && (
             <MediaPreview
               key={report.id}
               event={displayEvent}
-              showByDefault={hasHighPriorityReports === false}
+              showByDefault={mediaShownByDefault}
               maxItems={6}
             />
           )}

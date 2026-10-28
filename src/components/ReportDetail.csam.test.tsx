@@ -114,7 +114,7 @@ vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
 // Stand-in that exposes showByDefault, so no media is ever loaded or fetched.
 vi.mock('@/components/MediaPreview', () => ({
-  MediaPreview: ({ showByDefault }: { showByDefault?: boolean }) => (
+  MediaPreview: ({ showByDefault }: { showByDefault?: boolean | null }) => (
     <div data-testid="media" data-show={String(showByDefault)} />
   ),
 }));
@@ -236,7 +236,8 @@ describe('ReportDetail when not all of the target reports may be loaded', () => 
   it('hides the reported account images and media by default', () => {
     renderIncomplete(true);
     expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
-    expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'false')).toBe(true);
+    // Not known yet, rather than false: see the null default in MediaPreview.
+    expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'null')).toBe(true);
   });
 
   it('shows them for the same reports once they are known to be complete (control)', () => {
