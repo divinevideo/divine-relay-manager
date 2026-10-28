@@ -1,5 +1,5 @@
 // ABOUTME: Read every note a bulk run stored for a person (#299): a finished
-// ABOUTME: queued job's, or the ones an age-review case kept from its transitions.
+// ABOUTME: queued job's, or an age-review case's latest step that kept any.
 import { useQuery } from '@tanstack/react-query';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { isTerminal } from '@/hooks/useBulkModerateJob';

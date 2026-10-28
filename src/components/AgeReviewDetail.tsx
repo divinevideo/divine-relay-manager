@@ -275,8 +275,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       }
       if (requestedState && ENFORCEMENT_STATES.includes(requestedState)) {
         // keycast refuses to flag a row with no login credentials until the account
-        // is claimed, and the worker retries it hourly: "automated retry will
-        // continue" would not say what the moderator is waiting for.
+        // is claimed, and the worker retries it hourly, so that toast says the
+        // flag applies once the account is claimed: a bare "retried
+        // automatically" would not say what the moderator is waiting for.
         const unclaimed = enforcement?.keycastMinorSetUnclaimed === true;
         const retryable = unclaimed ? failed.filter((leg) => leg !== 'protected-minor account flag') : failed;
         // Only the protected-minor steps have a retry: the deadline cron
