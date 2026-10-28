@@ -148,23 +148,26 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     expect(body.oldest_covered).toBe(95);
   });
 
-  // Today's contract, matching the queue's Hide resolved: a decision the worker
-  // wrote itself resolves its target here too. The sensitive switch must not
-  // read it that way (TODO(#284) in reports-needing-attention.ts); passing the
-  // `automated` flag through for that will make this fail on purpose.
-  it('drops a target only the worker has decided on, as Hide resolved does', async () => {
+  // No person has handled a target only the worker has decided on, so the
+  // sensitive switch must still be able to take it: the read keeps it, and
+  // marks it so the queue's Hide resolved can still count it as resolved (#332).
+  it('keeps a target only the worker has decided on, and marks it', async () => {
     stubRelay([
       report(1, 100, [['p', P1]]),   // an account whose only decision is the worker's age-review case
       report(2, 99, [['e', E(2)]]),  // unresolved
+      report(3, 98, [['e', E(3)]]),  // the worker's row and a person's: handled
     ]);
     await decide('pubkey', P1, 'age_review_case_created', 'auto');
+    await decide('event', E(3), 'age_review_case_created', 'auto');
+    await decide('event', E(3), 'reviewed', 'f'.repeat(64));
 
     const body = await (await get('/api/reports?needs_attention=1')).json() as {
-      events: RelayEvent[]; counts: { targets: number; resolved: number };
+      events: RelayEvent[]; counts: { targets: number; resolved: number }; automated_targets: string[];
     };
 
-    expect(body.events.map(e => e.id)).toEqual([id(2)]);
-    expect(body.counts).toEqual({ targets: 1, resolved: 1 });
+    expect(body.events.map(e => e.id)).toEqual([id(1), id(2)]);
+    expect(body.automated_targets).toEqual([`pubkey:${P1}`]);
+    expect(body.counts).toEqual({ targets: 2, resolved: 1 });
   });
 
   it('asks the relay for the page size its pager treats as full, and walks past a full page', async () => {
@@ -300,6 +303,55 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
   });
 });
 
+// The two reads split every target between them, the worker's own decisions
+// included, when those sit on either side of getResolvedTargets' 1000-row chunk.
+describe('needs-attention and resolved history with automated decisions across a chunk boundary', () => {
+  const PA = 'a1'.repeat(32);  // the worker's row, then a person's in the next chunk: handled
+  const PB = 'b2'.repeat(32);  // the worker's rows in both chunks: automation only
+  const PG = 'c3'.repeat(32);  // the worker's row, and auto-hidden: pending review
+
+  it('puts each target in exactly one of them, and marks only the automation-only ones', async () => {
+    stubRelay([
+      report(1, 100, [['p', PA]]),
+      report(2, 99, [['p', PB]]),
+      report(3, 98, [['e', E(3)]]),
+      report(4, 97, [['e', E(4)]]),  // unresolved
+      report(5, 96, [['p', PG]]),
+    ]);
+    await decide('pubkey', PA, 'age_review_case_created', 'auto');
+    await decide('pubkey', PB, 'age_review_case_created', 'auto');
+    await decide('event', E(3), 'reviewed', 'f'.repeat(64));
+    await decide('pubkey', PG, 'age_review_case_created', 'auto');
+    await DB.prepare(
+      `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 1000)
+       INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at)
+       SELECT 'event', printf('%064x', i + 100000), 'reviewed', NULL, '2026-01-01 00:00:00' FROM n`,
+    ).run();
+    await decide('pubkey', PA, 'reviewed', 'f'.repeat(64));
+    await decide('pubkey', PB, 'age_review_case_created', 'auto');
+    await decide('event', E(3), 'age_review_case_created', 'auto');
+    await decide('pubkey', PG, 'auto_hidden', 'auto');
+
+    // The second-chunk rows really are past the first chunk.
+    const firstLate = await DB.prepare(
+      "SELECT MIN(id) AS id FROM moderation_decisions WHERE target_id = ? AND action = 'reviewed'",
+    ).bind(PA).first<{ id: number }>();
+    expect(firstLate!.id).toBeGreaterThan(1000);
+
+    const feed = await (await get('/api/reports?needs_attention=1')).json() as {
+      events: RelayEvent[]; automated_targets: string[];
+    };
+    const history = await (await get('/api/reports/resolved?limit=50')).json() as { events: RelayEvent[]; done: boolean };
+
+    const feedIds = feed.events.map(e => e.id).sort();
+    const historyIds = history.events.map(e => e.id).sort();
+    expect(feedIds).toEqual([id(2), id(4), id(5)].sort());
+    expect(historyIds).toEqual([id(1), id(3)].sort());
+    expect(history.done).toBe(true);
+    expect([...feed.automated_targets].sort()).toEqual([`pubkey:${PB}`, `pubkey:${PG}`].sort());
+  });
+});
+
 describe('GET /api/reports single-target lookups', () => {
   it('returns every report for one account, past the old cap of 200', async () => {
     stubRelay(Array.from({ length: 250 }, (_, i) => report(i, 1_760_000_000 - i, [['p', P1]])));
@@ -355,6 +407,19 @@ describe('GET /api/reports/resolved', () => {
     expect(body.next_cursor).toBe(97);
     expect(body.done).toBe(false);
     expect(body.skipped_within_second).toBe(false);
+  });
+
+  it('leaves out a target only the worker has decided on: no person handled it', async () => {
+    stubRelay([
+      report(1, 100, [['p', P1]]),   // only the worker's age-review case
+      report(2, 99, [['e', E(2)]]),  // a person's decision
+    ]);
+    await decide('pubkey', P1, 'age_review_case_created', 'auto');
+    await decide('event', E(2), 'reviewed', 'f'.repeat(64));
+
+    const body = await (await get('/api/reports/resolved?limit=50')).json() as { events: RelayEvent[] };
+
+    expect(body.events.map(e => e.id)).toEqual([id(2)]);
   });
 
   it('reads the page ending at the cursor, and says done when the relay runs out', async () => {
