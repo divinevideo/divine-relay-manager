@@ -268,18 +268,41 @@ through Blossom's own admin UI do not write there, so they are not reflected.
 
 ### GET /api/check-result/:sha256
 
-Check the moderation status of a media file.
+Check the moderation status of a media file. The worker passes moderation-service's answer through.
 
-**Response:**
+**Response, with a decision** (an excerpt; the full record also carries `blocked`, `quarantined`, `age_restricted`, `needs_review`, `provider`, `scores`, `categories`, `videoseal` and `moderated_at`):
 ```json
 {
-  "success": true,
-  "sha256": "abc123...",
+  "sha256": "<64-char hex>",
+  "status": "permanent_ban",
+  "moderated": true,
   "action": "PERMANENT_BAN",
-  "reason": "Blocked by moderator",
-  "created_at": "2025-01-05T12:00:00Z"
+  "reviewed_by": "...",
+  "reviewed_at": "..."
 }
 ```
+
+**Response, with no decision:** a 200 with no `action`.
+```json
+{
+  "sha256": "<64-char hex>",
+  "status": "unknown",
+  "moderated": false,
+  "blocked": false,
+  "age_restricted": false
+}
+```
+
+**Errors**, all `{ "success": false, "error": "..." }`:
+
+| Status | When |
+|--------|------|
+| 400 | `Invalid sha256`: the path is not a 64-character hex hash. |
+| 502 | `Moderation service error: 404`: moderation-service rejected the request (for example an unknown host). It returns 404 only then, never for "no decision". |
+| Upstream status | `Moderation service error: <status>`: any other moderation-service error, passed through. |
+| 500 | The error's message: the call failed, or the reply was not JSON. |
+
+A caller must treat any error as "status unknown", never as "no decision": read as open, a blocked file would be offered Age Restrict, which weakens it.
 
 ---
 

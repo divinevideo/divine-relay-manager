@@ -76,7 +76,7 @@ vi.mock('@/hooks/useBannedEvent', () => ({
 vi.mock('@/hooks/useUserSummary', () => ({
   useUserSummary: () => ({ data: null, isLoading: false }),
 }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 // Shaped against the real hook's return (src/hooks/useReportContext.ts). A
 // partial mock here silently drives the component into its "event not found"
 // branch, which still renders Reopen -- so the tests would pass while

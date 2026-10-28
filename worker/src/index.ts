@@ -2283,15 +2283,13 @@ async function handleCheckResult(
       : await fetch(moderationRequest);
 
     if (!response.ok) {
-      if (response.status === 404) {
-        return new Response(JSON.stringify(null), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json', ...corsHeaders },
-        });
-      }
+      // "No decision" is a 200 with status 'unknown' (handlePublicCheckResult in
+      // divine-moderation-service). A 404 means it rejected the request, such as
+      // an unknown host, so the state is unread, not open: passed on as "no
+      // decision", a blocked file would be offered Age Restrict, which weakens it.
       return jsonResponse(
         { success: false, error: `Moderation service error: ${response.status}` },
-        response.status,
+        response.status === 404 ? 502 : response.status,
         corsHeaders
       );
     }
