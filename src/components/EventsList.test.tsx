@@ -277,3 +277,39 @@ describe('EventsList no-relay-profile globe', () => {
     expect(globe()).toBeInTheDocument();
   });
 });
+
+// Kind 0 content is whatever the profile's author published, so a field can
+// hold any JSON value and the content need not be an object at all.
+describe('EventsList profile row', () => {
+  function renderProfileRow(content: string) {
+    setRelay({ list: [event({ id: 'd'.repeat(64), kind: 0, content })] });
+    renderEvents('/events');
+  }
+
+  it('shows the name and about when they are text', async () => {
+    renderProfileRow(JSON.stringify({ display_name: 'Synthetic Name', about: 'synthetic about' }));
+    expect(await screen.findByText('Synthetic Name — synthetic about')).toBeInTheDocument();
+  });
+
+  it('leaves out fields that are not text', async () => {
+    renderProfileRow(JSON.stringify({
+      display_name: { nested: true },
+      about: ['about-as-a-list', 'second-item'],
+      nip05: 'synthetic@example.test',
+    }));
+    expect(await screen.findByText('synthetic@example.test')).toBeInTheDocument();
+    expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/about-as-a-list/)).not.toBeInTheDocument();
+  });
+
+  it('says "Profile update" when no field is text', async () => {
+    renderProfileRow(JSON.stringify({ display_name: 4205, about: { a: 1 }, nip05: ['n'] }));
+    expect(await screen.findByText('Profile update')).toBeInTheDocument();
+    expect(screen.queryByText(/4205/)).not.toBeInTheDocument();
+  });
+
+  it('shows the content as written when it is JSON but not an object', async () => {
+    renderProfileRow('["not","a","profile"]');
+    expect(await screen.findByText('["not","a","profile"]')).toBeInTheDocument();
+  });
+});
