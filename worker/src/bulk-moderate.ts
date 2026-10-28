@@ -1719,10 +1719,12 @@ export const VIDEO_MAX_PAGES = 100000; // anti-runaway guard for a non-terminati
 // next_cursor always null, silently capping enumeration at the first page (100
 // videos) and reporting success -- the exact under-enforcement this path fixes.
 // v2's opaque cursor walks an account of any size (v1 offset degrades + can
-// skip/repeat). funnelcake's deduped view returns every video (vs the WebSocket
-// REQ's ~1/kind, funnelcake#471). deriveFunnelcakeApiUrl honors FUNNELCAKE_API_URL
-// when the REST and relay hosts diverge; the timeout stops a hung endpoint
-// stalling moderation.
+// skip/repeat). funnelcake's deduped view returns every video it shows (vs the
+// WebSocket REQ's ~1/kind, funnelcake#471), which leaves out a banned event's
+// and every video of a banned or suspended account (#299; listAccountVideos in
+// media-server.ts is the list bulk relies on). deriveFunnelcakeApiUrl honors
+// FUNNELCAKE_API_URL when the REST and relay hosts diverge; the timeout stops a
+// hung endpoint stalling moderation.
 export async function queryUserVideosPage(
   pubkey: string,
   env: Pick<BulkModerateEnv, 'RELAY_URL' | 'FUNNELCAKE_API_URL'>,
