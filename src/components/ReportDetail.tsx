@@ -86,12 +86,12 @@ interface ReportDetailProps {
   switchState?: SwitchState;
 }
 
-// Helper to extract report target
 // The http(s) URLs in some text, joined, so only a hash inside a URL is read.
 function mediaUrlsIn(text: string): string {
   return (text.match(/https?:\/\/[^\s"'\\]+/g) ?? []).join(' ');
 }
 
+// Helper to extract report target
 function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
   const eTag = event.tags.find(t => t[0] === 'e');
   if (eTag) return { type: 'event', value: eTag[1] };
