@@ -86,9 +86,13 @@ describe('EventDetail profile metadata card', () => {
     expect(screen.getByRole('link', { name: 'example.test/me' })).toHaveAttribute('href', 'https://example.test/me');
   });
 
-  it('shows a website that is not an http or https address as text, not a link', () => {
-    renderProfile(JSON.stringify({ name: 'synthetic-name', website: 'ftp://files.example.test/me' }));
-    expect(screen.getByText('ftp://files.example.test/me')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: /files\.example\.test/ })).not.toBeInTheDocument();
+  // A javascript: address linked here would run in the admin app when a
+  // moderator clicks it.
+  it.each([
+    'ftp://files.example.test/me',
+    'javascript:alert(document.domain)',
+  ])('shows a website that is not an http or https address as text, not a link (%s)', (website) => {
+    renderProfile(JSON.stringify({ name: 'synthetic-name', website }));
+    expect(screen.getByText(website).closest('a')).toBeNull();
   });
 });
