@@ -60,14 +60,19 @@ describe('EventDetail profile metadata card', () => {
     renderProfile(JSON.stringify({
       name: 'synthetic-name',
       display_name: { nested: true },
-      about: ['not', 'text'],
-      nip05: 42,
-      website: 7,
+      about: ['about-as-a-list', 'second-item'],
+      nip05: 4205,
+      website: 7007,
       lud16: { address: 'x' },
       picture: { url: 'x' },
     }));
     expect(screen.getByText('@synthetic-name')).toBeInTheDocument();
     expect(screen.queryByText(/\[object Object\]/)).not.toBeInTheDocument();
+    // React renders a list or a number as text without complaint, so each is
+    // looked for by its value.
+    expect(screen.queryByText(/about-as-a-list/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/4205/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/7007/)).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /profile images/ })).not.toBeInTheDocument();
   });
 
