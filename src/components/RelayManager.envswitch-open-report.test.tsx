@@ -372,6 +372,60 @@ describe('a link that names its environment', () => {
     await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
     expect(window.location.pathname).toBe(`/reports/${OPEN_REPORT.id}`);
   });
+
+  // RelayManager's clear is the only one on this route. Alpha has resolved a
+  // target that Beta has not; if Alpha's cached state survived the switch it
+  // would hide that target in Beta's queue.
+  const alphaResolvedOther = { [ENV_A.apiUrl]: [{ target_type: 'event', target_id: OTHER_EVENT }] };
+
+  it("decides what is hidden from the new environment's resolution state, not the old one's", async () => {
+    const feedReads = stubWorkers(
+      { [ENV_A.apiUrl]: [OTHER_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] },
+      alphaResolvedOther,
+    );
+    renderAppAt(`/reports?event=${OPEN_EVENT}&env=beta`);
+
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+    // Beta has not resolved it, so Beta's queue lists it.
+    expect(await screen.findByText(nip19.noteEncode(OTHER_EVENT))).toBeInTheDocument();
+    expect(feedReads[`${ENV_B.apiUrl}/resolution-state`]).toBeGreaterThan(0);
+  });
+
+  it("does not let Alpha's settled state hide Beta's report after an in-app link", async () => {
+    const feedReads = stubWorkers(
+      { [ENV_A.apiUrl]: [OTHER_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] },
+      alphaResolvedOther,
+    );
+    renderAppAt('/reports');
+    await screen.findByRole('switch', { name: /hide resolved/i });
+    await waitFor(() => expect(feedReads[`${ENV_A.apiUrl}/resolution-state`]).toBeGreaterThan(0));
+    await flush();
+    // Resolved in Alpha, so Alpha's queue does not list it.
+    expect(screen.queryByText(nip19.noteEncode(OTHER_EVENT))).not.toBeInTheDocument();
+
+    await act(async () => {
+      window.history.pushState({}, '', `/reports?event=${OPEN_EVENT}&env=beta`);
+      window.dispatchEvent(new PopStateEvent('popstate'));
+    });
+    await flush();
+
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+    expect(await screen.findByText(nip19.noteEncode(OTHER_EVENT))).toBeInTheDocument();
+    expect(feedReads[`${ENV_B.apiUrl}/resolution-state`]).toBeGreaterThan(0);
+  });
+
+  // Reports is held for the pass in which the switch is seen, link or not.
+  // Mounted in that pass it would read, be cleared, and read again.
+  it("reads the new environment's feed and resolution state once", async () => {
+    const feedReads = stubWorkers({ [ENV_A.apiUrl]: [OTHER_REPORT], [ENV_B.apiUrl]: [OPEN_REPORT, OTHER_REPORT] });
+    renderAppAt(`/reports?event=${OPEN_EVENT}&env=beta`);
+
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', OPEN_REPORT.id));
+    await flush();
+
+    expect(feedReads[ENV_B.apiUrl]).toBe(1);
+    expect(feedReads[`${ENV_B.apiUrl}/resolution-state`]).toBe(1);
+  });
 });
 
 describe("the new environment's first reads", () => {
