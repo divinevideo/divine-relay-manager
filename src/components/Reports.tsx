@@ -717,6 +717,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     const handled = new Set(resolved);
 
+    // Targets only the worker's own decisions resolved: from this read's
+    // `automated` flag, and from the feed, which keeps these targets and marks
+    // them so Hide resolved does not depend on this read having landed.
+    const automated = new Set<string>(queueFeed?.automatedTargets);
+
     // Add from moderation decisions (ban_user, delete_event, etc.). The worker
     // already excluded auto-hide actions and collapsed the table to distinct
     // targets, so what arrives here is the resolved set itself rather than a
@@ -725,14 +730,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       for (const target of resolvedDecisionTargets) {
         if (target.target_type === 'pubkey' || target.target_type === 'event') {
           const key = `${target.target_type}:${target.target_id}`;
-          resolved.add(key);
-          if (!target.automated) handled.add(key);
+          if (target.automated) {
+            automated.add(key);
+          } else {
+            resolved.add(key);
+            handled.add(key);
+          }
         }
       }
     }
 
+    // TODO(#332): whether Hide resolved should count a target only automation
+    // resolved is open. It does today, as it always has; the switch does not.
+    // Dropping this loop is the whole change if #332 decides otherwise.
+    for (const key of automated) resolved.add(key);
+
     return { resolvedTargets: resolved, handledTargets: handled };
-  }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets]);
+  }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets, queueFeed?.automatedTargets]);
 
   // Set of relay-banned pubkeys, used to cross-resolve an event-scoped report
   // whose author has been banned. banpubkey purges the account's events without
@@ -992,7 +1006,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // The reports the switch classifies: the needs-attention feed plus deep-linked
   // reports (`reports`), never loaded history. A history page holds targets the
-  // worker already resolved, which a person has handled by definition. Built
+  // worker already resolved, which a person has handled by definition: one only
+  // the worker's own decisions resolved stays in the feed instead. Built
   // over them, a resolved CSAM-signal target the browser cannot yet see as
   // resolved (a label read still loading or overridden) would become a member
   // and leave the list as soon as the switch opened, and the deep-link effects
@@ -1197,10 +1212,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Whether a listed target is resolved, from both halves of the history view.
   // A target neither the feed nor a deep link carries came from resolved
-  // history, which the worker resolved by a decision or a label. One they do
-  // carry is resolved if the browser's own sources say so: a relay ban,
+  // history, which the worker resolved by a person's decision or a label. One
+  // they do carry is resolved if the browser's own sources say so: a relay ban,
   // including a banned author's posts, or a decision or label (which is how a
-  // deep-linked resolved target counts).
+  // deep-linked resolved target counts), or only the worker's own decisions
+  // (the feed keeps those; see resolvedTargets).
   const isListedTargetResolved = (target: ReportTarget, authorPubkey: string | undefined) =>
     !feedTargetKeys.has(reportTargetKey(target))
     || isConsolidatedReportResolved({ target, authorPubkey }, resolvedTargets, bannedPubkeySet);

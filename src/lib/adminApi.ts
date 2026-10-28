@@ -542,9 +542,13 @@ export async function fetchReportsByTarget(
 
 // The queue's read: every report whose target still needs a moderator, at any
 // age, from GET /api/reports?needs_attention=1. The worker has already removed
-// targets resolved by a decision or a resolution label. Targets resolved by a
-// relay ban are still here, and the queue filters those itself so each ban
-// list keeps its own failure handling (#221).
+// targets resolved by a person's decision or a resolution label. Targets
+// resolved by a relay ban are still here, and the queue filters those itself so
+// each ban list keeps its own failure handling (#221). So are targets only the
+// worker's own decisions resolved: no person has handled them, so the
+// sensitive switch must be able to take them. `automatedTargets` holds their
+// keys, which the queue's Hide resolved still counts as resolved (#332). A
+// worker from before this field sends none and leaves those targets out.
 //
 // `truncated` means the worker's walk over the relay's reports stopped at its
 // page bound, so older reports may be missing. The response's `counts` are
@@ -557,6 +561,8 @@ export interface ReportsNeedingAttention {
   truncated: boolean;
   // Epoch milliseconds, via parseOldestCovered.
   oldestCovered: number | null;
+  // Target keys ("pubkey:<hex>", "event:<hex>") from `automated_targets`.
+  automatedTargets: ReadonlySet<string>;
 }
 
 export async function fetchReportsNeedingAttention(apiUrl: string): Promise<ReportsNeedingAttention> {
@@ -565,6 +571,7 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     events?: unknown;
     truncated?: boolean;
     oldest_covered?: number | null;
+    automated_targets?: unknown;
     error?: string;
   }>(apiUrl, '/api/reports?needs_attention=1', 'GET');
 
@@ -576,6 +583,12 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     events: sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at),
     truncated: data.truncated === true,
     oldestCovered: parseOldestCovered(data.oldest_covered),
+    // Only strings: anything else in the list names no target.
+    automatedTargets: new Set(
+      Array.isArray(data.automated_targets)
+        ? data.automated_targets.filter((key): key is string => typeof key === 'string')
+        : [],
+    ),
   };
 }
 

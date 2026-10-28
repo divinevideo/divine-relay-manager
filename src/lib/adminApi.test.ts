@@ -1893,6 +1893,24 @@ describe('adminApi', () => {
       expect((await fetchReportsNeedingAttention(API_URL)).truncated).toBe(false);
     });
 
+    it('reads the keys of targets only automation resolved, keeping strings only', async () => {
+      const key = `pubkey:${'a'.repeat(64)}`;
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, events: [], automated_targets: [key, 42, null, ['x']] }),
+      });
+
+      expect([...(await fetchReportsNeedingAttention(API_URL)).automatedTargets]).toEqual([key]);
+    });
+
+    it('reads none from a worker that sends no automated_targets, or not a list', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets.size).toBe(0);
+
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [], automated_targets: 'pubkey:x' }) });
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets.size).toBe(0);
+    });
+
     it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {
       const events = [
         { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, content: '', sig: '' },
