@@ -1,19 +1,14 @@
 // ABOUTME: Reads from the media server's (blossom's) admin API: an account's
 // ABOUTME: video files, and one file's owner and status (#299).
 
+import { isHex64 } from './hex';
+
 // The bindings these reads need. BulkModerateEnv and the worker's Env both
 // carry them.
 export interface MediaServerEnv {
   CDN_DOMAIN?: string;
   BLOSSOM_WEBHOOK_SECRET?: string | { get(): Promise<string> };
 }
-
-// 64 hex characters in either case: what another service may send for a hash
-// or a pubkey, before this worker lowercases it.
-export const SHA256_HEX = /^[a-f0-9]{64}$/i;
-// Exactly what this worker writes for a pubkey or a hash, and what it compares
-// them against.
-export const LOWER_HEX_64 = /^[0-9a-f]{64}$/;
 
 // Strength of a blob's current state, as either status source reports it.
 export type MediaLevel = 'open' | 'gated' | 'hidden' | 'blocked' | 'deleted';
@@ -71,7 +66,7 @@ export async function readBlossomStatus(sha256: string, env: MediaServerEnv, sec
   const { status, owner } = await response.json() as { status?: unknown; owner?: unknown };
   const level = typeof status === 'string' ? BLOSSOM_LEVEL.get(status) : undefined;
   if (!level) throw new Error(`blossom returned unrecognised status ${JSON.stringify(status)}`);
-  if (typeof owner !== 'string' || !SHA256_HEX.test(owner)) {
+  if (typeof owner !== 'string' || !isHex64(owner)) {
     throw new Error(`blossom returned no usable owner (${JSON.stringify(owner)})`);
   }
   return { raw: status as string, level, owner: owner.toLowerCase() };
@@ -141,7 +136,7 @@ export async function listAccountVideos(pubkey: string, env: MediaServerEnv): Pr
     const videos = new Map<string, AccountVideo>();
     for (const blob of body as Array<{ sha256?: unknown; type?: unknown; owner?: unknown; status?: unknown } | null>) {
       const sha256 = blob?.sha256;
-      if (typeof sha256 !== 'string' || !SHA256_HEX.test(sha256)) {
+      if (typeof sha256 !== 'string' || !isHex64(sha256)) {
         throw new Error(`media server listed a file with no valid sha256 (${JSON.stringify(sha256)})`);
       }
       const type = blob?.type;
@@ -151,7 +146,7 @@ export async function listAccountVideos(pubkey: string, env: MediaServerEnv): Pr
       const status = blob?.status;
       videos.set(sha256.toLowerCase(), {
         sha256: sha256.toLowerCase(),
-        owner: typeof owner === 'string' && SHA256_HEX.test(owner) ? owner.toLowerCase() : null,
+        owner: typeof owner === 'string' && isHex64(owner) ? owner.toLowerCase() : null,
         level: (typeof status === 'string' && BLOSSOM_LEVEL.get(status)) || null,
       });
     }

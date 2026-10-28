@@ -6,6 +6,7 @@ import {
   handleBulkJobStatus,
   queryRelayEvents,
   queryUserVideosPage,
+  queryUserMediaHashes,
   queryRelayEventsPage,
   handleBulkKindCounts,
   KIND_COUNT_BUDGET_MS,
@@ -45,7 +46,7 @@ beforeEach(() => {
 // Mock the funnelcake REST videos endpoint that queryUserMediaHashes fetches.
 // This is the dedup-correct source for media hashes (funnelcake#471), distinct
 // from the WebSocket REQ used for event IDs.
-function mockUserVideos(videos: Array<{ sha256: string }>) {
+function mockUserVideos(videos: Array<{ sha256: unknown }>) {
   vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
     const url = new URL(String(input));
     // blossom's per-uploader list (#299). Empty here, so these tests keep
@@ -134,6 +135,23 @@ describe('queryUserVideosPage', () => {
     const page = await queryUserVideosPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
     expect(page.hashes).toHaveLength(100);
     expect(page.nextCursor).toBe('100');
+  });
+  // A bare RegExp.test coerces its argument, so an array holding a valid hash
+  // would pass it and then throw on toLowerCase, failing the whole walk.
+  it('skips a row whose sha256 is an array holding a valid hash', async () => {
+    mockUserVideos([{ sha256: 'a'.repeat(64) }, { sha256: ['b'.repeat(64)] }, { sha256: 'c'.repeat(64) }]);
+    const page = await queryUserVideosPage('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(page.hashes).toEqual(['a'.repeat(64), 'c'.repeat(64)]);
+    expect(page.nextCursor).toBeNull();
+  });
+  it('walks on past that row to the next page', async () => {
+    const videos: Array<{ sha256: unknown }> = Array.from({ length: 150 }, (_, i) => ({ sha256: i.toString(16).padStart(64, '0') }));
+    videos[1] = { sha256: ['b'.repeat(64)] };
+    mockUserVideos(videos);
+    const hashes = await queryUserMediaHashes('a'.repeat(64), { RELAY_URL: 'wss://relay.test' });
+    expect(hashes).toHaveLength(149);
+    expect(hashes).not.toContain('b'.repeat(64));
+    expect(hashes).toContain((149).toString(16).padStart(64, '0'));
   });
 });
 

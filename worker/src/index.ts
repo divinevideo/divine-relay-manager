@@ -42,7 +42,7 @@ import {
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
 import { handleBulkJobNotes, handleCaseBulkNotesJob, markStillHiddenRestored } from './bulk-notes';
-import { LOWER_HEX_64, readMediaRecord, SHA256_HEX, type BlossomBlob } from './media-server';
+import { readMediaRecord, type BlossomBlob } from './media-server';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -51,7 +51,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
-import { isHex64 } from './hex';
+import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
@@ -2382,14 +2382,14 @@ async function handleModerateMedia(
     // again by the SAFE check before the write.
     let blob: BlossomBlob | undefined;
     if (subject !== undefined) {
-      if (typeof subject !== 'string' || !LOWER_HEX_64.test(subject)) {
+      if (typeof subject !== 'string' || !isLowerHex64(subject)) {
         return jsonResponse(
           { success: false, error: "`pubkey` must be the account's 64-character lowercase hex pubkey", code: 'invalid_pubkey' },
           400,
           corsHeaders
         );
       }
-      if (typeof body.sha256 !== 'string' || !SHA256_HEX.test(body.sha256)) {
+      if (typeof body.sha256 !== 'string' || !isHex64(body.sha256)) {
         return jsonResponse(
           { success: false, error: '`sha256` must be a 64-character hex hash to name an account', code: 'invalid_sha256' },
           400,

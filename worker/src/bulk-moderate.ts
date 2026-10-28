@@ -1,7 +1,8 @@
 import { getAdminPubkey, banEvent, type Nip86Env } from './nip86';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
+import { isHex64, isLowerHex64 } from './hex';
 import {
-  listAccountVideos, LOWER_HEX_64, readBlossomSecret, readBlossomStatus, SHA256_HEX,
+  listAccountVideos, readBlossomSecret, readBlossomStatus,
   STATUS_READ_TIMEOUT_MS, type AccountVideo, type BlossomBlob, type MediaLevel, type MediaStatus,
 } from './media-server';
 import { ensureBulkNotesTable, storeBulkNotes } from './bulk-notes';
@@ -582,7 +583,7 @@ export async function runBulkModeration(
 ): Promise<BulkModerateResult> {
   // A mixed-case or malformed pubkey would match no owner, so every file would
   // be left alone and the run would report success.
-  if (!LOWER_HEX_64.test(pubkey)) throw new Error(`refusing ${JSON.stringify(pubkey)}: not a lowercase hex pubkey`);
+  if (!isLowerHex64(pubkey)) throw new Error(`refusing ${JSON.stringify(pubkey)}: not a lowercase hex pubkey`);
   const moderatorPubkey = await getAdminPubkey(env);
   const result: BulkModerateResult = { success: true, eventsProcessed: 0, mediaProcessed: 0, mediaSkipped: 0, failures: [], notes: [] };
   const mediaAction = BULK_MEDIA_ACTION[action];
@@ -949,7 +950,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
     }
     // The enqueue accepts only lowercase hex; a row that holds anything else
     // would match no file's owner and report every file as left alone.
-    if (!LOWER_HEX_64.test(msg.pubkey)) {
+    if (!isLowerHex64(msg.pubkey)) {
       throw new Error(`refusing ${JSON.stringify(msg.pubkey)}: not a lowercase hex pubkey`);
     }
 
@@ -1188,7 +1189,7 @@ export async function processBulkJob(msg: BulkJobMessage, env: BulkModerateEnv):
         // TODO(divinevideo/divine-blossom#309): walk by hash with the list's own paging once it pages.
         let after: string | undefined;
         if (msg.mediaWalk === 'blossom' && msg.mediaAfter !== undefined) {
-          if (LOWER_HEX_64.test(msg.mediaAfter)) after = msg.mediaAfter;
+          if (isLowerHex64(msg.mediaAfter)) after = msg.mediaAfter;
           else console.warn(`[bulk-job] ${msgJobId}: media position is not a hash; restarting the file walk from the start`);
         }
         try {
@@ -1744,7 +1745,7 @@ export async function queryUserVideosPage(
   }
   const hashes: string[] = [];
   for (const v of data) {
-    if (v.sha256 && SHA256_HEX.test(v.sha256)) hashes.push(v.sha256.toLowerCase());
+    if (v.sha256 && isHex64(v.sha256)) hashes.push(v.sha256.toLowerCase());
   }
   if (data.length > 0 && hashes.length === 0) {
     // Rows present but none carried a usable sha256: the response shape drifted.
