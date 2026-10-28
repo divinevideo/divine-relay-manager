@@ -65,6 +65,15 @@ describe('ReportClientText', () => {
       .toContain('\u2068Evil¶\u202Eppa\u2069 · 1 with no app named');
   });
 
+  // Any reporter can set a long app name, and the line truncates it. The count of
+  // reports naming no app is ours, so it sits outside the part that truncates.
+  it('keeps the no-app count out of the part a long name truncates', () => {
+    render(<ReportClientText reports={[report([['client', 'Long App '.repeat(20)]]), report([])]} />);
+    const count = screen.getByText('· 1 with no app named');
+    expect(count.className).toContain('shrink-0');
+    expect(count.closest('.truncate')).toBeNull();
+  });
+
   it('carries no verification caveat when no app is named', () => {
     render(<ReportClientText reports={[report([])]} />);
     expect(screen.getByText('No app named')).toHaveAttribute('title', 'No app named');
