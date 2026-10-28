@@ -173,13 +173,15 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
                   <ArrowUpRight className="h-3 w-3 text-muted-foreground shrink-0" />
                 </CardTitle>
               </a>
+              {/* The link, not the badge, is the row's flex item, so it holds the
+                  badge to one line while a long name truncates beside it. */}
               {isFunnelcakeUser === true ? (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.present.title}>
-                  <Badge variant="outline" className="text-xs text-muted-foreground shrink-0">{RELAY_PROFILE_BADGE.present.label}</Badge>
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="shrink-0" title={RELAY_PROFILE_BADGE.present.title}>
+                  <Badge variant="outline" className="text-xs text-muted-foreground">{RELAY_PROFILE_BADGE.present.label}</Badge>
                 </a>
               ) : isFunnelcakeUser === false && (
-                <a href={profileUrl} target="_blank" rel="noopener noreferrer" title={RELAY_PROFILE_BADGE.absent.title}>
-                  <Badge variant="outline" className="text-xs text-muted-foreground gap-1 shrink-0">
+                <a href={profileUrl} target="_blank" rel="noopener noreferrer" className="shrink-0" title={RELAY_PROFILE_BADGE.absent.title}>
+                  <Badge variant="outline" className="text-xs text-muted-foreground gap-1">
                     <Globe className="h-3 w-3" />{RELAY_PROFILE_BADGE.absent.label}
                   </Badge>
                 </a>

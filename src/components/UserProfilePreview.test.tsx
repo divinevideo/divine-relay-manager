@@ -51,6 +51,16 @@ describe('UserProfilePreview relay-profile badge', () => {
     expect(screen.queryByText('Nostr')).not.toBeInTheDocument();
   });
 
+  // The name's link may shrink, so a long name truncates; the badge's link may not,
+  // so the multi-word badge keeps one line instead of wrapping into a tall pill.
+  it('truncates a long name instead of squeezing the badge', () => {
+    const name = 'Synthetic Creator With A Rather Long Display Name';
+    authorState.result = { data: { metadata: { name }, isFunnelcakeUser: false }, isLoading: false };
+    renderPreview();
+    expect(screen.getByText(name).closest('a')!.className).toContain('min-w-0');
+    expect(screen.getByText('No relay profile found').closest('a')!.className).toContain('shrink-0');
+  });
+
   it('shows no badge when the profile lookup produced no answer', () => {
     renderPreview();
     expect(screen.queryByText('Profile on relay')).not.toBeInTheDocument();
