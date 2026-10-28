@@ -435,7 +435,7 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
     expect(result.success).toBe(false);
     expect(result.failures).toEqual([
-      expect.stringMatching(new RegExp(`^media:${hashA}:.*blossom active.*moderation-service ${recorded}`)),
+      `media:${hashA}:status sources disagree (blossom active, moderation-service ${recorded}), left unchanged`,
     ]);
     expect(result.mediaSkipped).toBe(0);
   });
@@ -458,7 +458,7 @@ describe('bulk actions never weaken a stronger decision (#291)', () => {
     const result = await runBulkModeration(mockEnv, 'a'.repeat(64), action, 'r');
     expect(moderationActionFor(mockEnv, hashA)).toBeUndefined();
     expect(result.failures).toEqual([
-      expect.stringMatching(new RegExp(`^media:${hashA}:.*blossom ${blossom}.*moderation-service ${recorded}`)),
+      `media:${hashA}:status sources disagree (blossom ${blossom}, moderation-service ${recorded}), left unchanged`,
     ]);
     expect(result.mediaSkipped).toBe(0);
   });
