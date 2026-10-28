@@ -320,7 +320,7 @@ describe('bulk media actions find the account\'s files through the media server 
   describe('when the file list cannot be read', () => {
     const FAILURES: ReadonlyArray<readonly [string, () => void, RegExp]> = [
       ['answers 500', () => world.failList(500), /media server returned 500/],
-      ['answers with something that is not JSON', () => world.failList('not-json'), /./],
+      ['answers with something that is not JSON', () => world.failList('not-json'), /JSON/],
       ['answers with something that is not a list', () => world.failList('not-array'), /not a list/],
       ['lists a file with no valid hash', () => world.failList('bad-row'), /no valid sha256/],
       ['does not answer in time', () => {
