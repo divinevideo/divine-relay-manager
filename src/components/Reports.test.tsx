@@ -539,7 +539,9 @@ describe('Reports category sort', () => {
     const queryClient = new QueryClient({
       defaultOptions: { queries: { retry: false, retryDelay: 0, staleTime: Infinity } },
     });
-    queryClient.setQueryData(['reports', 'wss://relay.example'], reports);
+    // Seeded as the needs-attention feed the queue reads, so the reports keep
+    // their counting getter: a fetched response would be parsed into plain objects.
+    queryClient.setQueryData(['reports', 'wss://relay.example'], { events: reports, truncated: false, oldestCovered: null });
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports')) return new Promise<Response>(() => {});
