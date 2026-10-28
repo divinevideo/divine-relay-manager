@@ -1403,10 +1403,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (currentEnv?.id !== envParam) {
         const targetEnv = getEnvironmentById(envParam);
         if (targetEnv) {
+          // RelayManager sees the change, clears the cache and remounts this
+          // screen on the new environment, keeping this link.
           updateConfig(c => ({ ...c, relayUrl: targetEnv.relayUrl, apiUrl: targetEnv.apiUrl }));
-          queryClient.clear();
-          queryClient.refetchQueries();
-          return; // Data will reload, effect re-runs with matching environment
+          return; // The remounted screen's effect runs with the matching environment
         }
       }
     }
@@ -1548,7 +1548,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {

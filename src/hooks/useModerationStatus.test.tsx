@@ -1414,7 +1414,7 @@ describe('useModerationStatus', () => {
   it('does not hold a cleared cache behind the old marks when the environment stays the same', async () => {
     // A cleared cache replaces the lists' queries, which then count from zero
     // with no apiUrl change. (RelayManager clears only on a real environment
-    // change now, not on a re-select, but nothing else guarantees the cache is
+    // change, not on a re-select, but nothing else guarantees the cache is
     // never cleared under one apiUrl.)
     const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     const clientWrapper = ({ children }: { children: ReactNode }) => (

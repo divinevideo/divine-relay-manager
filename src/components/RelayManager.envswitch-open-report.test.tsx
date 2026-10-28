@@ -4,6 +4,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { QueryClient } from '@tanstack/react-query';
+import { useCallback } from 'react';
 import { Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { nip19 } from 'nostr-tools';
@@ -19,7 +20,10 @@ const { ENV_A, ENV_B } = vi.hoisted(() => ({
 }));
 
 // A router that applies a navigation late models React Router's transition
-// updates (v7, or v6 with v7_startTransition). 0 passes straight through.
+// updates (v7, or v6 with v7_startTransition). 0 passes straight through. The
+// wrapper keeps the real navigate's identity (the real one is memoised), so the
+// effects that list navigate as a dependency re-run exactly as in production;
+// a new function every render would hide a missing dependency from every test.
 const routerLag = vi.hoisted(() => ({ ms: 0 }));
 vi.mock('react-router-dom', async (importOriginal) => {
   const actual = await importOriginal<typeof import('react-router-dom')>();
@@ -27,10 +31,10 @@ vi.mock('react-router-dom', async (importOriginal) => {
     ...actual,
     useNavigate: () => {
       const navigate = actual.useNavigate();
-      return ((to: unknown, options?: unknown) => {
+      return useCallback(((to: unknown, options?: unknown) => {
         if (routerLag.ms === 0) return navigate(to as never, options as never);
         setTimeout(() => navigate(to as never, options as never), routerLag.ms);
-      }) as typeof navigate;
+      }) as typeof navigate, [navigate]);
     },
   };
 });
@@ -422,6 +426,32 @@ describe('re-selecting the environment in use, with many queries cached', () => 
     await flush();
 
     expect(reads - before).toBe(0);
+  });
+});
+
+describe('re-selecting the environment in use marks the cached queries stale', () => {
+  // invalidateQueries marks every cached query stale and re-reads the active
+  // ones, so an inactive one re-reads when next used even within its staleTime.
+  // A refetch limited to the active queries would leave it marked fresh.
+  it('so an inactive query re-reads when next used, within its staleTime', async () => {
+    stubWorkers(feedsWhereBetaLacksTheReport());
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    renderAppAt('/reports', queryClient);
+    await screen.findByText(nip19.noteEncode(OPEN_EVENT));
+    let reads = 0;
+    const read = () => queryClient.fetchQuery({
+      queryKey: ['stale-probe'], queryFn: async () => { reads += 1; return reads; }, staleTime: 60_000, gcTime: Infinity,
+    });
+    await read();
+    await read();
+    expect(reads).toBe(1);
+
+    await selectEnvironment(user, 'Alpha');
+    await flush();
+    await read();
+
+    expect(reads).toBe(2);
   });
 });
 

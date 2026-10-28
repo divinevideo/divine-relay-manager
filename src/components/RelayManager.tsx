@@ -128,18 +128,20 @@ export function RelayManager() {
     && linkEnvironment.relayUrl === config.relayUrl && linkEnvironment.apiUrl === config.apiUrl;
   const stripUrl = environmentChanged && urlCarriesReport && !linkIsForThisEnvironment;
   const holdReports = environmentChanged;
-  const clearedForKey = useRef(environmentKey);
+  // The key whose reads the cache holds: the one it was last cleared for, and
+  // the settled key whenever nothing is mid-change. A change to a different key
+  // clears. A change undone before it settles must not leave the undone key
+  // recorded, or the next real switch to it would find it "held" and skip the
+  // clear, serving the other environment's reads.
+  const cacheHoldsKey = useRef(environmentKey);
   useEffect(() => {
     if (!environmentChanged) {
-      // Settled, or a change undone before it settled: what was last cleared
-      // for is the settled key again, so the next real change to the key an
-      // undone one had reached is cleared too.
-      clearedForKey.current = environmentKey;
+      cacheHoldsKey.current = environmentKey;
       return;
     }
-    if (clearedForKey.current !== environmentKey) {
+    if (cacheHoldsKey.current !== environmentKey) {
       queryClient.clear();
-      clearedForKey.current = environmentKey;
+      cacheHoldsKey.current = environmentKey;
     }
     if (stripUrl) {
       // Replace: the old environment's report URL does not stay as an entry.
