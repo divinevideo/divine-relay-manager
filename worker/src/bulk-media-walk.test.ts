@@ -663,7 +663,10 @@ describe('bulk media actions find the account\'s files through the media server 
         ? (await runQueued('delete-all')).failures
         : (await runBulkModeration(env, ACCOUNT, 'delete-all', 'r')).failures;
       expect(failures).toEqual([`media:${files[0]}:Moderation service returned 500`]);
-      expect(world.writesFor(files[0])).toEqual([]);
+      // Two writes were sent for it, the walk's and the check's, and both failed.
+      const writes = vi.mocked(world.moderationApi.fetch).mock.calls
+        .filter(([input, init]) => String(input).endsWith('/api/v1/moderate') && String(init?.body).includes(files[0]));
+      expect(writes).toHaveLength(2);
     });
 
     // A row with no usable owner, or this account's row with a status this
