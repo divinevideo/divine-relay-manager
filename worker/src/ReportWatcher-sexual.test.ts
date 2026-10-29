@@ -278,6 +278,19 @@ describe('sexual quarantine watcher integration', () => {
     expect(f.storage.setAlarm).toHaveBeenCalled();
   });
 
+  it('reconnects the watcher before slow case recovery and replay', async () => {
+    const f = fixture();
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true, trustedClients: [], tiers: [] }) }));
+    await f.durable.put('sexual-jobs-exist', true);
+    const order: string[] = [];
+    vi.spyOn(SexualQuarantine.prototype, 'tick').mockImplementation(async () => { order.push('tick'); });
+    vi.spyOn(replay, 'replayAdultReports').mockImplementation(async () => { order.push('replay'); });
+    vi.spyOn(f.watcher as unknown as { connect(): void }, 'connect').mockImplementation(() => { order.push('connect'); });
+    (f.watcher as unknown as { running: boolean }).running = true;
+    await f.watcher.alarm();
+    expect(order).toEqual(['connect', 'tick', 'replay']);
+  });
+
   it('does not admit new replay reports while watching is stopped', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent');
     const replayReports = vi.spyOn(replay, 'replayAdultReports').mockResolvedValue();

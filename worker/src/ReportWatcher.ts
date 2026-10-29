@@ -1657,8 +1657,19 @@ export class ReportWatcher implements DurableObject {
   async alarm(): Promise<void> {
     console.log('[ReportWatcher] Alarm triggered');
 
+    // Reconnect first. Case recovery and replay below make slow network calls,
+    // and live auto-hide for every category waits on this socket.
+    if (this.running) {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        console.log('[ReportWatcher] Connection lost, reconnecting...');
+        this.connect();
+      } else {
+        console.log('[ReportWatcher] Connection healthy');
+      }
+    }
+
     if (await this.state.storage.get('sexual-jobs-exist')) {
-      // Case recovery must not abort the watcher's own reconnect and health check.
+      // Case recovery must not abort the watcher's next health check.
       try {
         await this.sexualQuarantine().tick();
       } catch (error) {
@@ -1683,14 +1694,6 @@ export class ReportWatcher implements DurableObject {
     if (!this.running) {
       console.log('[ReportWatcher] Not running, skipping alarm');
       return;
-    }
-
-    // Check if we need to reconnect
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.log('[ReportWatcher] Connection lost, reconnecting...');
-      this.connect();
-    } else {
-      console.log('[ReportWatcher] Connection healthy');
     }
 
     // Schedule next health check
