@@ -197,6 +197,20 @@ describe('adult sexual report quarantine', () => {
     expect((await q.history(EVENT)).filter(entry => (entry as { action: string }).action === 'overdue')).toHaveLength(1);
   });
 
+  it('lets every selected case finish before reporting a failed tick', async () => {
+    const f = fixture(); const q = f.engine();
+    const other = '2'.repeat(64);
+    await q.admit(EVENT, report(1), 2); await q.admit(other, report(2), 2);
+    let finished = false;
+    vi.spyOn(q, 'advance').mockImplementation(async eventId => {
+      if (eventId === EVENT) throw new Error('storage unavailable');
+      await new Promise(resolve => setTimeout(resolve, 10));
+      finished = true;
+    });
+    await expect(q.tick()).rejects.toThrow('storage unavailable');
+    expect(finished).toBe(true);
+  });
+
   it('drains overdue deadlines without repeatedly selecting already escalated cases', async () => {
     const f = fixture(); const q = f.engine();
     for (let n = 1; n <= 101; n++) await q.admit(n.toString(16).padStart(64, '0'), report(n), 2);

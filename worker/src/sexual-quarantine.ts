@@ -407,6 +407,9 @@ export class SexualQuarantine {
     let slow = await this.storage.list<string>({ prefix: RECONCILE, startAfter: after, limit: 1 });
     if (slow.size === 0) slow = await this.storage.list<string>({ prefix: RECONCILE, limit: 1 });
     for (const key of slow.keys()) await this.storage.put('sexual-reconcile-scan', key);
-    await Promise.all([...new Set([...due.values(), ...slow.values()])].map(eventId => this.advance(eventId)));
+    // One failing case must not leave the others running unawaited.
+    const results = await Promise.allSettled([...new Set([...due.values(), ...slow.values()])].map(eventId => this.advance(eventId)));
+    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    if (failed) throw failed.reason;
   }
 }
