@@ -809,7 +809,12 @@ export class ReportWatcher implements DurableObject {
    * Schedule health check alarm
    */
   private async scheduleHealthCheck(): Promise<void> {
-    await this.state.storage.setAlarm(Date.now() + HEALTH_CHECK_INTERVAL_MS);
+    // Never postpone an earlier alarm. Every admitted report and case decision
+    // calls this, and a steady stream of them must not starve a pending
+    // reconnect or recovery pass. Inside alarm() getAlarm() reads null.
+    const next = Date.now() + HEALTH_CHECK_INTERVAL_MS;
+    const pending = await this.state.storage.getAlarm();
+    if (pending === null || pending > next) await this.state.storage.setAlarm(next);
   }
 
   /**

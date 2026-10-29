@@ -10,12 +10,14 @@ import { finalizeEvent } from 'nostr-tools';
 vi.mock('./sexual-quarantine-io', () => ({ createQuarantineIO: vi.fn() }));
 const ID = '1'.repeat(64);
 function fixture(enabled = 'true', data = new Map<string, unknown>()) {
+  let alarm: number | null = null;
   const storage = {
     get: async (key: string) => structuredClone(data.get(key)),
     put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
     delete: async (key: string) => data.delete(key),
     list: async ({ prefix = '', limit = 1000, startAfter = '' } = {}) => new Map([...data].filter(([k]) => k.startsWith(prefix) && k > startAfter).sort(([a], [b]) => a.localeCompare(b)).slice(0, limit)),
-    setAlarm: vi.fn(),
+    setAlarm: vi.fn(async (time: number) => { alarm = time; }),
+    getAlarm: vi.fn(async () => alarm),
   };
   const durable = { ...storage, transaction: async (fn: (tx: unknown) => unknown) => fn(storage) } as unknown as DurableObjectStorage;
   const state = { storage: durable, blockConcurrencyWhile: async (fn: () => unknown) => fn(), waitUntil: vi.fn() } as unknown as DurableObjectState;
@@ -244,6 +246,15 @@ describe('sexual quarantine watcher integration', () => {
     expect(c?.state).toBe('hidden');
     expect(c?.reporters).toBe(2);
     expect(f.storage.setAlarm).toHaveBeenCalled();
+  });
+
+  it('does not postpone a pending alarm as admitted reports keep arriving', async () => {
+    const f = fixture();
+    // A pending reconnect, or the previous report's recovery pass.
+    const pending = Date.now() + 1000;
+    await f.storage.setAlarm(pending);
+    await f.send(1, 'NS-sexualContent'); await f.send(2, 'nudity'); await f.send(3, 'NS-sexualContent');
+    expect(await f.storage.getAlarm()).toBe(pending);
   });
 
   it('resumes durable work while report watching is stopped', async () => {

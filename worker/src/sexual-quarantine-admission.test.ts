@@ -44,6 +44,7 @@ it('admits and enforces a signed video despite unusable ancillary metadata', asy
     list: async ({ prefix = '', limit = 1000, startAfter = '' } = {}) => new Map([...data]
       .filter(([key]) => key.startsWith(prefix) && key > startAfter).sort(([a], [b]) => a.localeCompare(b)).slice(0, limit)),
     setAlarm: vi.fn(),
+    getAlarm: vi.fn(async () => null),
   };
   const storage = { ...store, transaction: async (fn: (tx: unknown) => unknown) => fn(store) };
   const state = { storage, blockConcurrencyWhile: async (fn: () => unknown) => fn(), waitUntil: vi.fn() } as unknown as DurableObjectState;
