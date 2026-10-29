@@ -1719,6 +1719,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // there is no list to draw the target's reports from; the deep link's own
   // lookup holds them.
   const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
+  const selectedPaneReports = selectedReport
+    ? paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id))?.reports
+    : undefined;
+
+  // Whether the open report's target has left the list: none of its reports is
+  // in hand, and no read in flight could bring it back. The feed and resolved
+  // history re-read together after a resolve or Refresh, and in the history
+  // view the target moves from one to the other (or back, on a reopen); while
+  // either is still reading, a target missing from both is only between them.
+  // A report is only ever selected from reports in hand, so one missing from
+  // them with nothing in flight had them and lost them.
+  const selectedTargetLeftList = !!selectedReport
+    && !selectedPaneReports
+    && !isFetching
+    && !(historyView && history.isFetching);
 
   // The open report's side of the switch, so the pane carries the row's label.
   const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;
@@ -1786,15 +1801,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     >
       <ReportDetail
         report={selectedReport}
-        allReportsForTarget={
-          selectedReport
-            ? paneConsolidated.find(c =>
-                c.reports.some(r => r.id === selectedReport.id)
-              )?.reports
-            : undefined
-        }
+        allReportsForTarget={selectedPaneReports}
         allReportsForTargetTruncated={selectedTargetCountTruncated}
         targetReportsMayBePartial={selectedTargetReportsPartial}
+        targetLeftList={selectedTargetLeftList}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />

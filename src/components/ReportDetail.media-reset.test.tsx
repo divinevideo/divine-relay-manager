@@ -306,16 +306,16 @@ describe("the completeness rule under MediaPreview's null default", () => {
 });
 
 // The open report's target can leave the list (handled elsewhere), and with it
-// every report on it: allReportsForTarget goes from defined to undefined. No
-// later report can reach the pane then, so it treats them as sensitive, as main
-// does: what showed by default hides, a Show on a non-sensitive target is
-// forgotten, and a Show on a sensitive one is kept.
+// every report on it. The queue says so (targetLeftList) once no read in flight
+// could bring it back; no later report can reach the pane then, so it treats
+// them as sensitive, as main does: what showed by default hides, a Show on a
+// non-sensitive target is forgotten, and a Show on a sensitive one is kept.
 describe("when the open report's reports leave hand", () => {
-  function treeAll(client: QueryClient, r: NostrEvent, all: NostrEvent[] | undefined) {
+  function treeAll(client: QueryClient, r: NostrEvent, all: NostrEvent[] | undefined, left = false) {
     return (
       <QueryClientProvider client={client}>
         <TooltipProvider>
-          <ReportDetail report={r} allReportsForTarget={all} />
+          <ReportDetail report={r} allReportsForTarget={all} targetLeftList={left} />
         </TooltipProvider>
       </QueryClientProvider>
     );
@@ -329,7 +329,7 @@ describe("when the open report's reports leave hand", () => {
     expect(hasImg(AVATAR)).toBe(true);
     expect(hasImg(POST_IMG)).toBe(true);
 
-    rerender(treeAll(client, a, undefined));
+    rerender(treeAll(client, a, undefined, true));
     expect(hasImg(IMG1)).toBe(false);
     expect(hasImg(AVATAR)).toBe(false);
     expect(hasImg(POST_IMG)).toBe(false);
@@ -343,7 +343,7 @@ describe("when the open report's reports leave hand", () => {
     fireEvent.click(mediaCard()[0]); // Show
     expect(hasImg(IMG1)).toBe(true);
 
-    rerender(treeAll(client, a, undefined));
+    rerender(treeAll(client, a, undefined, true));
     expect(hasImg(IMG1)).toBe(false);
   });
 
@@ -355,14 +355,15 @@ describe("when the open report's reports leave hand", () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
     fireEvent.click(screen.getByRole('button', { name: /show 1 media/i }));
 
-    rerender(treeAll(client, a, undefined));
+    rerender(treeAll(client, a, undefined, true));
     expect(hasImg(IMG1)).toBe(true);
     expect(hasImg(AVATAR)).toBe(true);
     expect(hasImg(POST_IMG)).toBe(true);
   });
 
-  // Not the same as reports that have not arrived yet: a Show made while they
-  // load is still forgotten when they land sensitive.
+  // Reports that have not arrived yet are not reports that left (the queue does
+  // not say so): a Show made while they load is still forgotten when they land
+  // sensitive.
   it('does not take a first load for reports that left', () => {
     const client = qc();
     const a = NONSENSITIVE(E1);

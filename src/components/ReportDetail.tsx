@@ -88,6 +88,11 @@ interface ReportDetailProps {
   // that stopped early is partial, but a partial set is also one that was never
   // read for this target (a history page, or a fallback pool).
   targetReportsMayBePartial?: boolean;
+  // The open report's target has left the list (handled elsewhere): none of its
+  // reports is in hand, and no read still in flight could bring it back, so no
+  // later report on it can reach the pane. The queue decides this, since only
+  // it knows both reads; a target that is only being re-read is not one.
+  targetLeftList?: boolean;
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
@@ -95,7 +100,7 @@ interface ReportDetailProps {
   switchState?: SwitchState;
 }
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, onDismiss, switchState }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -389,20 +394,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     // Show, read undefined as hidden and do hide.
     return targetReportsMayBePartial ? undefined : false;
   }, [allReportsForTarget, targetReportsMayBePartial]);
-  // The report whose target has had reports in hand while the pane showed it.
-  // When they go (the target left the list, handled elsewhere), no later report
-  // on it can reach the pane, so its media is treated as sensitive, as main
-  // does: what showed by default hides, a Show on a target not known to be
-  // sensitive is forgotten, and a Show on a sensitive one is kept. Not the
-  // same as reports that have not arrived yet. Set during render, so the media
-  // is never mounted meanwhile.
-  const [hadReportsFor, setHadReportsFor] = useState<string | null>(null);
-  if (allReportsForTarget && report && hadReportsFor !== report.id) setHadReportsFor(report.id);
-  const targetReportsLeft = !allReportsForTarget && !!report && hadReportsFor === report.id;
   // The pane's media viewers take "not known yet" as null rather than false:
   // both start hidden, but only under null does a later false (the reports turn
-  // out sensitive) forget a Show the moderator made meanwhile.
-  const mediaShownByDefault = targetReportsLeft ? false
+  // out sensitive) forget a Show the moderator made meanwhile. A target that
+  // left the list (see targetLeftList) is treated as sensitive, as main does:
+  // what showed by default hides, a Show on a target not known to be sensitive
+  // is forgotten, and a Show on a sensitive one is kept.
+  const mediaShownByDefault = targetLeftList ? false
     : hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
 
   // Confirm auto-hidden content (approve the auto-hide decision)

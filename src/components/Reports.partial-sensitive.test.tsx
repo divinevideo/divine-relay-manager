@@ -10,6 +10,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import TestApp from '@/test/TestApp';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
+import { resolvedPage } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
@@ -180,5 +181,138 @@ describe('a poll on which the open target has left the feed', () => {
     expect(hasImg(POST_IMG)).toBe(false);
     expect(hasImg(AVATAR)).toBe(false);
     expect(hasImg(RECENT_IMG)).toBe(false);
+  });
+});
+
+// In the history view (Hide resolved off), resolving the open target moves it
+// from the feed into resolved history, and both re-read. Whichever lands first,
+// the target never leaves the list for good: it turns partial (a history-only
+// target), so what was showing keeps showing. Only a target neither read brings
+// back has left.
+describe('in the history view, the open target moving into resolved history', () => {
+  // `inHistory`: whether resolved history's re-read holds the target, as it does
+  // when its report is on a loaded page. Once resolved, each read waits for its
+  // gate, so a test decides which lands first.
+  async function openThenResolve(inHistory: boolean) {
+    let resolved = false;
+    const gate = () => {
+      let open = () => {};
+      const opened = new Promise<void>(r => { open = r; });
+      return { opened, open: () => open() };
+    };
+    const gates = { feed: gate(), history: gate() };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports?needs_attention=1')) {
+        if (resolved) await gates.feed.opened;
+        return jsonResponse({ success: true, events: resolved ? [] : [SPAM_REPORT], truncated: false });
+      }
+      if (url.includes('/api/reports/resolved')) {
+        if (resolved) await gates.history.opened;
+        return jsonResponse(resolvedPage(resolved && inHistory ? [SPAM_REPORT] : [], { nextCursor: null, done: true }));
+      }
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={queryClient}><TooltipProvider><Reports relayUrl={RELAY_URL} /></TooltipProvider></TestApp>);
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    await waitFor(() => expect(hasImg(POST_IMG)).toBe(true));
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(RECENT_IMG)).toBe(true);
+    resolved = true;
+    // Both re-reads start together, as a resolve or Refresh starts them.
+    const feed = queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] });
+    const history = queryClient.refetchQueries({ queryKey: ['reports-resolved'] });
+    return { gates, feed, history };
+  }
+
+  // Lets one read answer and the screen settle, while the other still waits.
+  const land = (gate: { open: () => void }, read: Promise<unknown>) =>
+    act(async () => { gate.open(); await read; await new Promise(r => setTimeout(r, 50)); });
+  const allShowing = () => [hasImg(POST_IMG), hasImg(AVATAR), hasImg(RECENT_IMG)];
+
+  it("keeps showing when the queue's re-read lands before history's", async () => {
+    const { gates, feed, history } = await openThenResolve(true);
+    await land(gates.feed, feed);
+    expect(allShowing()).toEqual([true, true, true]);
+
+    await land(gates.history, history);
+    expect(screen.getByText(nip19.noteEncode(EVENT))).toBeInTheDocument();
+    expect(allShowing()).toEqual([true, true, true]);
+  });
+
+  it("keeps showing when history's re-read lands before the queue's", async () => {
+    const { gates, feed, history } = await openThenResolve(true);
+    await land(gates.history, history);
+    expect(allShowing()).toEqual([true, true, true]);
+
+    await land(gates.feed, feed);
+    expect(screen.getByText(nip19.noteEncode(EVENT))).toBeInTheDocument();
+    expect(allShowing()).toEqual([true, true, true]);
+  });
+
+  it('hides once both reads have answered without the target', async () => {
+    const { gates, feed, history } = await openThenResolve(false);
+    await land(gates.feed, feed);
+    await land(gates.history, history);
+    expect(screen.queryByText(nip19.noteEncode(EVENT))).not.toBeInTheDocument();
+    expect(screen.getByText('Media Content')).toBeInTheDocument();
+    expect(allShowing()).toEqual([false, false, false]);
+  });
+
+  // The other way: reopening a history-only target moves it from resolved
+  // history back into the feed. If history's re-read lands first, the target is
+  // in neither until the feed's does.
+  it("keeps a Show on a history-only target that is reopened, when history's re-read lands first", async () => {
+    let reopened = false;
+    let openFeed = () => {};
+    const feedGate = new Promise<void>(r => { openFeed = r; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports?needs_attention=1')) {
+        if (reopened) await feedGate;
+        return jsonResponse({ success: true, events: reopened ? [SPAM_REPORT] : [], truncated: false });
+      }
+      if (url.includes('/api/reports/resolved')) {
+        return jsonResponse(resolvedPage(reopened ? [] : [SPAM_REPORT], { nextCursor: null, done: true }));
+      }
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={queryClient}><TooltipProvider><Reports relayUrl={RELAY_URL} /></TooltipProvider></TestApp>);
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    // History-only, so partial: its media starts hidden, and the moderator shows it.
+    await screen.findByText('Media Content');
+    expect(hasImg(POST_IMG)).toBe(false);
+    await user.click(screen.getAllByRole('button', { name: /^Show$/ })[0]);
+    expect(hasImg(POST_IMG)).toBe(true);
+
+    reopened = true;
+    const feed = queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] });
+    await act(async () => {
+      await queryClient.refetchQueries({ queryKey: ['reports-resolved'] });
+      await new Promise(r => setTimeout(r, 50));
+    });
+    // In neither read for now, but the feed's is still coming.
+    expect(screen.queryByText(nip19.noteEncode(EVENT))).not.toBeInTheDocument();
+    expect(hasImg(POST_IMG)).toBe(true);
+
+    await land({ open: openFeed }, feed);
+    expect(screen.getByText(nip19.noteEncode(EVENT))).toBeInTheDocument();
+    expect(hasImg(POST_IMG)).toBe(true);
   });
 });
