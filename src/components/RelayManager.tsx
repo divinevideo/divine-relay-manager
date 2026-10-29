@@ -41,13 +41,12 @@ function loadTabOrder(): TabId[] {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as TabId[];
-      // Validate: must contain all tab IDs exactly once
-      if (
-        parsed.length === DEFAULT_TAB_ORDER.length &&
-        DEFAULT_TAB_ORDER.every(id => parsed.includes(id))
-      ) {
-        return parsed;
+      const parsed: unknown = JSON.parse(stored);
+      // Keep the saved order of known tabs, once each, and append tabs added
+      // since it was saved, so a new tab does not discard a custom order
+      if (Array.isArray(parsed)) {
+        const saved = [...new Set(parsed)].filter((id): id is TabId => DEFAULT_TAB_ORDER.includes(id as TabId));
+        return [...saved, ...DEFAULT_TAB_ORDER.filter(id => !saved.includes(id))];
       }
     }
   } catch {
