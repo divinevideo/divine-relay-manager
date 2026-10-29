@@ -27,7 +27,7 @@ import { isLowerHex64 } from './hex';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
-import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, QuarantineConflict, adultSexualCategory, type QuarantineSnapshot } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit, QuarantineConflict, adultSexualCategory, type QuarantineSnapshot } from './sexual-quarantine';
 import { createQuarantineIO, type SexualQuarantineEnv } from './sexual-quarantine-io';
 import { replayAdultReports, reportCategory } from './sexual-report-replay';
 
@@ -946,12 +946,17 @@ export class ReportWatcher implements DurableObject {
         console.error(`[ALERT] Sexual quarantine report ${event.id} not admitted: invalid signature or over the evidence bound`);
         return;
       }
+      if (!isLowerHex64(targetEventId)) {
+        console.error(`[ALERT] Sexual quarantine report ${wire.id} not admitted: invalid target identifier`);
+        return;
+      }
       const legacyKey = `sexual-legacy-processed:${targetEventId}:${event.id}`;
       if (await this.state.storage.get(legacyKey)) return;
       const q = this.sexualQuarantine();
       const existing = await q.get(targetEventId);
       const absentKey = `sexual-absent:${targetEventId}:${event.id}`;
-      if (await this.state.storage.get(absentKey)) return;
+      const boundKey = `sexual-target-bound:${targetEventId}:${event.id}`;
+      if (await this.state.storage.get(absentKey) || await this.state.storage.get(boundKey)) return;
       let nonvideo = existing?.state === 'out_of_scope';
       let snapshot: QuarantineSnapshot | undefined;
       if (!nonvideo && !existing?.snapshot) {
@@ -960,14 +965,16 @@ export class ReportWatcher implements DurableObject {
         // archived separately so one missing target cannot pin unrelated reports.
         try { snapshot = await createQuarantineIO(this.env).snapshot(targetEventId); }
         catch (error) {
-          if (error instanceof ConfirmedAbsentTarget) {
+          if (error instanceof ConfirmedAbsentTarget || error instanceof TargetEvidenceLimit) {
+            const archiveKey = error instanceof TargetEvidenceLimit ? boundKey : absentKey;
+            const disposition = error instanceof TargetEvidenceLimit ? 'target evidence exceeds capture limit' : 'target absent';
             const source = JSON.stringify(wire);
             await this.state.storage.transaction(async tx => {
               const parts = Math.ceil(source.length / 16000);
-              for (let part = 0; part < parts; part++) await tx.put(`${absentKey}:part:${part}`, source.slice(part * 16000, (part + 1) * 16000));
-              await tx.put(absentKey, { targetId: targetEventId, reportId: event.id, category, parts, receivedAt: Date.now() });
+              for (let part = 0; part < parts; part++) await tx.put(`${archiveKey}:part:${part}`, source.slice(part * 16000, (part + 1) * 16000));
+              await tx.put(archiveKey, { targetId: targetEventId, reportId: event.id, category, disposition, parts, receivedAt: Date.now() });
             });
-            console.error(`[ALERT] Sexual quarantine target absent: ${targetEventId}; archived report ${event.id} for backfill review`);
+            console.error(`[ALERT] Sexual quarantine ${disposition}: ${targetEventId}; archived report ${event.id} for backfill review`);
             return;
           }
           if (!(error instanceof OutsideVideoScope)) throw error;

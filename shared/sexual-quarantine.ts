@@ -20,6 +20,7 @@ export interface SexualCase {
   decisionAt?: number;
   decisionRecordedAt?: number;
   holdsAppliedAt?: number;
+  mediaHoldAssets?: string[];
   deliveryAttempts?: number;
   deliveryRetryAt?: number;
   firstHiddenAt?: number;

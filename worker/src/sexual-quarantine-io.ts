@@ -5,7 +5,7 @@ import { readBlossomSecret, type MediaServerEnv } from './media-server';
 import { isLowerHex64 } from './hex';
 import { recordSexualQuarantineDecision } from './sexual-quarantine-decision';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
-import { OutsideVideoScope, ConfirmedAbsentTarget, type QuarantineIO, type QuarantineSnapshot } from './sexual-quarantine';
+import { OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit, type QuarantineIO, type QuarantineSnapshot } from './sexual-quarantine';
 
 export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv, ZendeskSyncEnv {
   DB?: D1Database;
@@ -36,9 +36,10 @@ export function snapshotVideo(eventId: string, raw: unknown, env: MediaServerEnv
   const event = JSON.parse(JSON.stringify(raw ?? null)) as NostrEvent;
   if (!event || event.id !== eventId || !verifyEvent(event)) throw new Error('Unverified video event');
   if (![21, 22, 34235, 34236].includes(event.kind)) throw new OutsideVideoScope();
-  // The bound protects stored evidence, so it applies only to videos this stream
-  // keeps. A large verified non-video target must still reach the legacy writer.
-  if (JSON.stringify(raw).length > 60_000) throw new Error('Video event exceeds the evidence bound');
+  // Chunked evidence covers the relay's default 512 KiB message envelope. A
+  // larger configured relay limit requires explicit capture qualification.
+  // Apply this only after signature and scope classification.
+  if (new TextEncoder().encode(JSON.stringify(event)).byteLength > 512 * 1024) throw new TargetEvidenceLimit();
   const assets = new Set<string>();
   const paths = new Set<string>();
   const unmapped = new Set<string>();
@@ -192,11 +193,6 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
         if (!snapshot.assets.includes(sha) || !await eligible(sha, (snapshot.event as NostrEvent).pubkey)) {
           throw new Error('Media eligibility not confirmed');
         }
-      } else {
-        // A release can retry an existing ID, including after ownership metadata
-        // changes. It need not allocate a tombstone for an ID never applied here.
-        const state = await media(sha);
-        if (!state.holds.some(h => h.hold_id === hold)) return;
       }
       const secret = await readBlossomSecret(env);
       if (secret instanceof Error) throw new Error('Media credentials unavailable');

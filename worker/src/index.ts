@@ -3308,7 +3308,7 @@ async function handleReportWatcherRoutes(
 
   try {
     // Forward the request to the DO
-    const doRequest = new Request(`https://do${subPath}`, {
+    const doRequest = new Request(`https://do${subPath}${new URL(request.url).search}`, {
       method: request.method,
       headers: request.headers,
       body: request.body,

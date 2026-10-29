@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent } from 'nostr-tools';
-import { OutsideVideoScope, ConfirmedAbsentTarget } from './sexual-quarantine';
+import { OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit } from './sexual-quarantine';
 import { createQuarantineIO, snapshotVideo } from './sexual-quarantine-io';
 import { callNip86Rpc } from './nip86';
 import { queryRelay } from './relay-profile';
@@ -54,15 +54,33 @@ describe('quarantine service IO', () => {
     await expect(createQuarantineIO(env).mediaHold(HASH, `sexual:${event.id}`, true, 2)).rejects.toThrow();
   });
 
-  it('verifies scoped release when this case never held an unresolved media candidate', async () => {
+  it('writes a newer release fence after an ambiguous media hold response', async () => {
     const event = video(); const hold = `sexual:${event.id}`;
     vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [{ hold_id: hold, version: 3, active: 0 }] });
-    const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => Response.json({ quarantined: false, holds: [] }));
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    let row: { hold_id: string; version: number; active: boolean } | undefined;
+    let delayedHold!: () => void;
+    const status = () => ({ quarantined: !!row?.active, holds: row ? [row] : [] });
+    const fetcher = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/admin/api/blob/')) return Response.json({ sha256: HASH, owner: event.pubkey });
+      if (init?.method === 'POST') {
+        const body = JSON.parse(init.body as string);
+        const apply = () => {
+          if (!row || body.version > row.version) row = { hold_id: body.hold_id, version: body.version, active: body.action === 'hold' };
+        };
+        if (body.action === 'hold') { delayedHold = apply; throw new DOMException('Timed out', 'TimeoutError'); }
+        apply();
+      }
+      return Response.json(status());
+    });
     vi.stubGlobal('fetch', fetcher);
     const io = createQuarantineIO(env);
+    await expect(io.mediaHold(HASH, hold, true, 2)).rejects.toThrow();
     await io.mediaHold(HASH, hold, false, 3);
     expect(await io.verify(snapshotVideo(event.id, event, env), hold, false)).toBe(true);
-    expect(fetcher.mock.calls.every(call => !(call[1] as RequestInit)?.method)).toBe(true);
+    delayedHold();
+    expect(row).toMatchObject({ version: 3, active: false });
+    expect(await io.verify(snapshotVideo(event.id, event, env), hold, false)).toBe(true);
   });
 
   it('distinguishes an absent target response from an incomplete lookup', async () => {
@@ -199,8 +217,9 @@ describe('quarantine service IO', () => {
     const article = finalizeEvent({ kind: 30023, created_at: 1, tags: [['d', 'synthetic']], content: 'x'.repeat(70_000) }, new Uint8Array(32).fill(2));
     expect(() => snapshotVideo(article.id, article, env)).toThrow(OutsideVideoScope);
     const large = video([['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${HASH}`], ['alt', 'x'.repeat(70_000)]]);
-    expect(() => snapshotVideo(large.id, large, env)).toThrow();
-    expect(() => snapshotVideo(large.id, large, env)).not.toThrow(OutsideVideoScope);
+    expect(snapshotVideo(large.id, large, env).assets).toEqual([HASH]);
+    const overLimit = video([['alt', 'x'.repeat(530_000)]]);
+    expect(() => snapshotVideo(overLimit.id, overLimit, env)).toThrow(TargetEvidenceLimit);
   });
 
   it('sends a versioned independent event hold, never global unban', async () => {

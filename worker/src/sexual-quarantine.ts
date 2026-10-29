@@ -10,6 +10,7 @@ const RECONCILE = 'sexual-reconcile-v3:';
 class Superseded extends Error {}
 export class OutsideVideoScope extends Error {}
 export class ConfirmedAbsentTarget extends Error {}
+export class TargetEvidenceLimit extends Error {}
 export class QuarantineConflict extends Error {}
 const REVIEW_MS = 15 * 60_000;
 const ADULT_ALIASES = new Set([
@@ -202,6 +203,7 @@ export class SexualQuarantine {
       if (!latest || latest.revision !== c.revision) throw new Superseded();
       // Reports may arrive without changing the operation revision.
       c.reporters = latest.reporters;
+      c.mediaHoldAssets = latest.mediaHoldAssets;
       // Delivery is a separate worker. Its current-revision acknowledgments and
       // backoff must survive an enforcement result that began before them.
       c.reviewAcceptedAt = latest.reviewAcceptedAt;
@@ -224,6 +226,23 @@ export class SexualQuarantine {
     });
   }
 
+  private async mediaIntent(c: SexualCase, sha256: string): Promise<void> {
+    await this.storage.transaction(async tx => {
+      const latest = await tx.get<SexualCase>(PREFIX + c.eventId);
+      if (!latest || latest.revision !== c.revision) throw new Superseded();
+      // An absent journal predates this fence. Conservatively retain every signed
+      // candidate that an older worker might already have attempted.
+      latest.mediaHoldAssets = [...new Set([...(latest.mediaHoldAssets ?? c.snapshot!.assets), sha256])];
+      const intentKey = `sexual-media-intent:${c.eventId}:${sha256}`;
+      if (!await tx.get(intentKey)) {
+        await this.audit(tx, c.eventId, 'media_hold_intent', { revision: c.revision, sha256 });
+        await tx.put(intentKey, true);
+      }
+      await this.save(tx, latest);
+      c.mediaHoldAssets = latest.mediaHoldAssets;
+    });
+  }
+
   async admit(eventId: string, report: QuarantineReport, threshold: number, verifiedSnapshot?: QuarantineSnapshot): Promise<SexualCase> {
     if (!isLowerHex64(eventId) || !isLowerHex64(report.id) || !isLowerHex64(report.pubkey)
       || !adultSexualCategory(report.reason) || !Number.isInteger(threshold) || threshold < 2) {
@@ -236,7 +255,7 @@ export class SexualQuarantine {
       if (!c) c = {
         eventId, revision: 1, goal: 'review', state: 'review', reporters: 0, threshold,
         firstReport: report, createdAt: this.now(), updatedAt: this.now(),
-        deadlineAt: this.now() + REVIEW_MS, attempts: 0, retryAt: 0,
+        deadlineAt: this.now() + REVIEW_MS, attempts: 0, retryAt: 0, mediaHoldAssets: [],
         ...(verifiedSnapshot ? { snapshot: verifiedSnapshot } : {}),
       };
       const reporterKey = `sexual-reporter:${eventId}:${report.pubkey}`;
@@ -337,7 +356,8 @@ export class SexualQuarantine {
         await this.current(c);
         stage = 'event_hold';
         await this.io.eventHold(eventId, held, c.revision);
-        let verificationSnapshot = c.snapshot;
+        let verificationSnapshot = held ? c.snapshot
+          : { ...c.snapshot, assets: c.mediaHoldAssets ?? c.snapshot.assets };
         if (held && this.io.resolveAssets) {
           await this.current(c);
           stage = 'media_resolution';
@@ -350,6 +370,7 @@ export class SexualQuarantine {
         for (const sha of verificationSnapshot.assets) {
           await this.current(c);
           stage = 'media_hold';
+          if (held) { await this.mediaIntent(c, sha); await this.current(c); }
           await this.io.mediaHold(sha, hold, held, c.revision);
         }
         await this.current(c);

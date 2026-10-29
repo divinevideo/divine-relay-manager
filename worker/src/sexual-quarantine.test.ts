@@ -184,6 +184,115 @@ describe('adult sexual report quarantine', () => {
     expect(new Set(seen).size).toBe(201);
   });
 
+  it('journals ambiguous hold attempts before IO and restores only attempted assets with a newer fence', async () => {
+    const f = fixture(); const q = f.engine();
+    const ineligible = 'b'.repeat(64);
+    const snapshot = { event: { id: EVENT }, assets: [HASH, ineligible], mediaPaths: ['/video.mp4', '/preview.jpg'] };
+    f.io.resolveAssets = async () => ({ assets: [HASH], incomplete: true });
+    const heldVersions = new Map<string, { held: boolean; version: number }>();
+    const apply = (sha: string, held: boolean, version: number) => {
+      if (version >= (heldVersions.get(sha)?.version || 0)) heldVersions.set(sha, { held, version });
+    };
+    const observedJournals: (string[] | undefined)[] = [];
+    const commands: { sha: string; held: boolean; version: number }[] = [];
+    let finishOldWrite!: () => void;
+    f.io.mediaHold = async (sha, _hold, held, version) => {
+      commands.push({ sha, held, version });
+      if (held) {
+        observedJournals.push((await f.engine().get(EVENT))?.mediaHoldAssets);
+        finishOldWrite = () => apply(sha, held, version);
+        throw new Error('response timed out before the service applied the request');
+      }
+      apply(sha, held, version);
+    };
+    vi.mocked(f.io.verify).mockImplementation(async (candidate, _hold, held) => !held && candidate.assets.every(sha => !heldVersions.get(sha)?.held));
+    vi.mocked(f.io.restorationStatus).mockResolvedValue('visible');
+    await q.admit(EVENT, report(1), 2, snapshot); await q.admit(EVENT, report(2), 2);
+    await q.advance(EVENT);
+    expect(observedJournals).toEqual([[HASH]]);
+    expect((await f.engine().get(EVENT))?.mediaHoldAssets).toEqual([HASH]);
+    expect((await q.get(EVENT))?.holdsAppliedAt).toBeUndefined();
+    f.later(); await q.advance(EVENT);
+    expect(observedJournals).toEqual([[HASH], [HASH]]);
+    expect((await q.history(EVENT)).filter(entry => (entry as { action?: string }).action === 'media_hold_intent'))
+      .toEqual([expect.objectContaining({ revision: 2, sha256: HASH })]);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    expect((await q.get(EVENT))?.mediaHoldAssets).toEqual([HASH]);
+    await f.engine().advance(EVENT);
+    expect(commands.filter(command => !command.held)).toEqual([{ sha: HASH, held: false, version: 3 }]);
+    expect(f.io.verify).toHaveBeenLastCalledWith({ ...snapshot, assets: [HASH] }, `sexual:${EVENT}`, false);
+    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot);
+    finishOldWrite();
+    expect(heldVersions.get(HASH)).toEqual({ held: false, version: 3 });
+    expect(heldVersions.has(ineligible)).toBe(false);
+    expect((await q.get(EVENT))?.state).toBe('restored');
+    expect((await f.engine().get(EVENT))?.snapshot).toEqual(snapshot);
+  });
+
+  it('retains the union of attempted media across resolver changes and human decisions', async () => {
+    const f = fixture(); const q = f.engine();
+    const second = 'b'.repeat(64); let eligible = [HASH];
+    f.io.resolveAssets = async () => ({ assets: eligible, incomplete: true });
+    vi.mocked(f.io.verify).mockResolvedValue(false);
+    await q.admit(EVENT, report(1), 2, { event: { id: EVENT }, assets: [HASH, second] });
+    await q.admit(EVENT, report(2), 2); await q.advance(EVENT);
+    eligible = [second]; f.later(); await q.advance(EVENT);
+    expect((await q.get(EVENT))?.mediaHoldAssets).toEqual([HASH, second]);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'remove', 'reviewer', 'reviewed');
+    eligible = [HASH]; await q.advance(EVENT);
+    expect((await f.engine().get(EVENT))?.mediaHoldAssets).toEqual([HASH, second]);
+    const intents = (await q.history(EVENT)).filter(entry => (entry as { action?: string }).action === 'media_hold_intent');
+    expect(intents).toHaveLength(2);
+    expect(intents).toEqual(expect.arrayContaining([
+      expect.objectContaining({ sha256: HASH, revision: 2 }), expect.objectContaining({ sha256: second, revision: 2 }),
+    ]));
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    await q.advance(EVENT);
+    expect(f.io.mediaHold).toHaveBeenCalledWith(HASH, `sexual:${EVENT}`, false, 4);
+    expect(f.io.mediaHold).toHaveBeenCalledWith(second, `sexual:${EVENT}`, false, 4);
+  });
+
+  it('restores a first-report case without allocating any media hold IDs', async () => {
+    const f = fixture(); const q = f.engine();
+    const snapshot = { event: { id: EVENT }, assets: [HASH], mediaPaths: ['/video.mp4'] };
+    await q.admit(EVENT, report(1), 2, snapshot);
+    expect((await f.engine().get(EVENT))?.mediaHoldAssets).toEqual([]);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    await q.advance(EVENT);
+    expect(f.io.mediaHold).not.toHaveBeenCalled();
+    expect(f.io.verify).toHaveBeenLastCalledWith({ ...snapshot, assets: [] }, `sexual:${EVENT}`, false);
+    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot);
+    expect((await q.get(EVENT))?.state).toBe('restored');
+    expect((await f.engine().get(EVENT))?.snapshot).toEqual(snapshot);
+  });
+
+  it('detects an independent restriction on a candidate this case never attempted to hold', async () => {
+    const f = fixture(); const q = f.engine();
+    const independent = 'b'.repeat(64);
+    const snapshot = { event: { id: EVENT }, assets: [HASH, independent], mediaPaths: ['/video.mp4', '/preview.jpg'] };
+    vi.mocked(f.io.restorationStatus).mockImplementation(async candidate => candidate.assets.includes(independent) ? 'restricted' : 'visible');
+    await q.admit(EVENT, report(1), 2, snapshot);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    await q.advance(EVENT);
+    expect(f.io.mediaHold).not.toHaveBeenCalled();
+    expect(f.io.verify).toHaveBeenLastCalledWith({ ...snapshot, assets: [] }, `sexual:${EVENT}`, false);
+    expect((await q.get(EVENT))?.state).toBe('restored_restricted');
+    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot);
+  });
+
+  it('conservatively releases every signed candidate for a legacy case without an attempt journal', async () => {
+    const f = fixture(); const q = f.engine();
+    const second = 'b'.repeat(64);
+    const c = await q.admit(EVENT, report(1), 2, { event: { id: EVENT }, assets: [HASH, second] });
+    const stored = f.data.get(`sexual-case:${EVENT}`) as SexualCase;
+    delete stored.mediaHoldAssets; f.data.set(`sexual-case:${EVENT}`, stored);
+    await q.decide(EVENT, c.revision, 'restore', 'reviewer', 'approved');
+    await q.advance(EVENT);
+    expect(f.io.mediaHold).toHaveBeenCalledWith(HASH, `sexual:${EVENT}`, false, 2);
+    expect(f.io.mediaHold).toHaveBeenCalledWith(second, `sexual:${EVENT}`, false, 2);
+    expect((await q.get(EVENT))?.state).toBe('restored');
+  });
+
   it('retries temporary media eligibility gaps without changing archived candidate evidence', async () => {
     const f = fixture(); const q = f.engine();
     const snapshot = { event: { id: EVENT }, assets: [HASH] };

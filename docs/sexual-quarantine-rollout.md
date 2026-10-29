@@ -46,6 +46,12 @@ absence response, not proof of deletion or global freshness. Repeated ingestion 
 those same archived bytes is deduplicated; operators must inspect and backfill
 them if the target later becomes available. Never advance a cursor merely to silence
 a transport failure.
+Video evidence is bounded to 512 KiB of serialized UTF-8, covering Funnelcake's
+default message envelope. Verify deployed `MAX_MESSAGE_LENGTH` and associated
+content/tag limits before activation; a larger envelope needs capture qualification.
+Verified targets beyond the bound archive their signed report under
+`sexual-target-bound:<target ID>:<report ID>` and alert for manual target review,
+without blocking unrelated replay or invoking legacy enforcement.
 
 An exact configured adult category keeps its own trusted-client and threshold
 policy; canonical alias fallback is used only when that category is unconfigured.
@@ -84,7 +90,12 @@ cannot supersede an existing human Remove; use the current case revision.
 Blossom limits each hash to 128 lifetime hold IDs, including released tombstones.
 This caller reuses one bounded ID per event. A capacity 409 means no hold was
 applied; it remains pending and must alert an operator. Never allocate a new ID to
-retry it or discard tombstones. A release skips candidates with no existing own hold.
+retry it or discard tombstones. New cases journal eligible media attempts before
+network IO. Restore writes newer release tombstones for every possibly applied
+attempt, including after ambiguous timeouts or absent status reads. It does not
+allocate media IDs for never-attempted candidates. Older cases without a journal
+conservatively fence their signed candidates. Read-only visibility inspection still
+checks original candidates for independent restrictions.
 
 Cases capture the signed video event and signed reports, source and receive times,
 canonical category, controlled-origin hashes/paths, deadlines and audit decisions.

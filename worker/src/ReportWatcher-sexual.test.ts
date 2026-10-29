@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent } from './ReportWatcher';
 import { createQuarantineIO } from './sexual-quarantine-io';
-import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit } from './sexual-quarantine';
 import * as nip86 from './nip86';
 import * as replay from './sexual-report-replay';
 import * as relayProfile from './relay-profile';
@@ -56,6 +56,18 @@ describe('sexual quarantine watcher integration', () => {
     const prefix = `sexual-absent:${ID}:${event.id}`;
     expect(await f.durable.get(prefix)).toMatchObject({ targetId: ID, reportId: event.id, parts: 1 });
     expect(JSON.parse(await f.durable.get<string>(`${prefix}:part:0`) || 'null')).toEqual(JSON.parse(JSON.stringify(event)));
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('archives permanently unadmittable target evidence without blocking unrelated replay', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValue(new TargetEvidenceLimit());
+    const event = await f.send(1, 'NS-sexualContent');
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [event] });
+    await replay.replayAdultReports(f.durable, f.env.RELAY_URL,
+      (report, category, target) => (f.watcher as unknown as { processAutoHide(e: ReportEvent, c: string, t: string, advance: boolean): Promise<void> }).processAutoHide(report, category, target, false), 10);
+    expect(await f.durable.get('sexual-replay-through')).toBe(10);
+    expect(await f.durable.get(`sexual-target-bound:${ID}:${event.id}`)).toMatchObject({ targetId: ID, reportId: event.id, parts: 1 });
     expect(f.io.eventHold).not.toHaveBeenCalled();
   });
 
@@ -165,6 +177,20 @@ describe('sexual quarantine watcher integration', () => {
     expect(await f.durable.get('sexual-replay-through')).toBe(10);
     expect(f.io.snapshot).not.toHaveBeenCalled();
     expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
+  });
+
+  it('skips invalid target identifiers before storage and transport work', async () => {
+    const f = fixture();
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['nudity'], threshold: 2, requireTrustedClient: false }],
+    }) }));
+    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', 'invalid-target', 'nudity']] }, new Uint8Array(32).fill(9));
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [event] });
+    await replay.replayAdultReports(f.durable, f.env.RELAY_URL,
+      (report, category, target) => (f.watcher as unknown as { processAutoHide(e: ReportEvent, c: string, t: string, advance: boolean): Promise<void> }).processAutoHide(report, category, target, false), 10);
+    expect(await f.durable.get('sexual-replay-through')).toBe(10);
+    expect(f.io.snapshot).not.toHaveBeenCalled();
+    expect(f.io.eventHold).not.toHaveBeenCalled();
   });
 
   it('preserves exact-category legacy eligibility when the video tier rejects the client', async () => {
