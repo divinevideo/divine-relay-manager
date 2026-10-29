@@ -950,10 +950,9 @@ export class ReportWatcher implements DurableObject {
       const videoTier = legacyTier || config.tiers.find(t => t.categories.some(c => adultSexualCategory(c)));
       const client = event.tags.find(t => t[0] === 'client')?.[1]?.trim().toLowerCase();
       const trusted = config.trustedClients.some(c => c.trim().toLowerCase() === client);
-      const qualifies = (tier: AutoHideTier | undefined) => !!tier && (!tier.requireTrustedClient || trusted);
       // An ignored/untrusted report must not pin replay behind an unavailable
-      // target. The exact-category legacy tier can qualify independently.
-      if (!qualifies(videoTier) && !qualifies(legacyTier)) return;
+      // target. videoTier is the exact-category tier whenever one exists.
+      if (!videoTier || (videoTier.requireTrustedClient && !trusted)) return;
       // Rejection is permanent for these bytes. Throwing would hold the replay
       // window on this report forever, so alert and skip it instead.
       const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
@@ -983,7 +982,7 @@ export class ReportWatcher implements DurableObject {
 
       // Once activated, video admission rollback must not resume base bans:
       // those cannot be released by this stream's named-hold Restore.
-      if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true' || !videoTier || !qualifies(videoTier)) return;
+      if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true') return;
       const admitted = await this.state.blockConcurrencyWhile(async () => {
         const human = await this.hasBlockingHumanResolution(targetEventId, false);
         if (human !== false) return false;
