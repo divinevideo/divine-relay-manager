@@ -96,6 +96,9 @@ attempt, including after ambiguous timeouts or absent status reads. It does not
 allocate media IDs for never-attempted candidates. Older cases without a journal
 conservatively fence their signed candidates. Read-only visibility inspection still
 checks original candidates for independent restrictions.
+The only absent-ID release shortcut requires all 128 lifetime slots to belong to
+other IDs. Under the preserved-tombstone contract no delayed request can allocate
+this ID, so a definitively unapplied capacity rejection does not strand Restore.
 
 Cases capture the signed video event and signed reports, source and receive times,
 canonical category, controlled-origin hashes/paths, deadlines and audit decisions.

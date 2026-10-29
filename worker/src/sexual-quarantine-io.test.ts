@@ -83,6 +83,23 @@ describe('quarantine service IO', () => {
     expect(await io.verify(snapshotVideo(event.id, event, env), hold, false)).toBe(true);
   });
 
+  it('can release a definitively unapplied ID at lifetime capacity without clearing other holds', async () => {
+    const event = video(); const hold = `sexual:${event.id}`;
+    const full = Array.from({ length: 128 }, (_, i) => ({ hold_id: `other:${i}`, version: 1, active: i === 0 }));
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [{ hold_id: hold, version: 3, active: 0 }] });
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+      if (String(input).includes('/admin/api/blob/')) return Response.json({ sha256: HASH, owner: event.pubkey });
+      if (init?.method === 'POST') return new Response(null, { status: 409 });
+      return Response.json({ quarantined: true, holds: full });
+    }));
+    const io = createQuarantineIO(env);
+    await expect(io.mediaHold(HASH, hold, true, 2)).rejects.toThrow();
+    await expect(io.mediaHold(HASH, hold, false, 3)).resolves.toBeUndefined();
+    expect(await io.verify(snapshotVideo(event.id, event, env), hold, false)).toBe(true);
+    expect(await io.restorationStatus(snapshotVideo(event.id, event, env))).toBe('restricted');
+  });
+
   it('distinguishes an absent target response from an incomplete lookup', async () => {
     vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [] });
     vi.mocked(callNip86Rpc).mockResolvedValue({ success: false, error: 'Event not found or not banned' });

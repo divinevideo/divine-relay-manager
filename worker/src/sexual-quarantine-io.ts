@@ -193,6 +193,12 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
         if (!snapshot.assets.includes(sha) || !await eligible(sha, (snapshot.event as NostrEvent).pubkey)) {
           throw new Error('Media eligibility not confirmed');
         }
+      } else {
+        const state = await media(sha);
+        // Lifetime IDs cannot be removed under this API's contract. If all
+        // slots belong to other IDs, this ID cannot have a delayed acquisition.
+        // Every other absence still needs a newer release tombstone.
+        if (state.holds.length === 128 && !state.holds.some(h => h.hold_id === hold)) return;
       }
       const secret = await readBlossomSecret(env);
       if (secret instanceof Error) throw new Error('Media credentials unavailable');

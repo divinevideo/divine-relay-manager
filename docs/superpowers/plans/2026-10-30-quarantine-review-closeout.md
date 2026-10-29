@@ -27,8 +27,13 @@
 - [x] Reproduce and fix media eligibility, complete signed-hash candidates, unapplied capacity responses and restoration/reviewer contracts.
 - [x] Reproduce and fix separate delivery scheduling, bounded retry history, human-intent projection and cursor-based priority review.
 - [x] Wire queue paging, honest verification/recording status and the separate-base-ban workflow into the UI; refresh synthetic screenshots.
-- [ ] Incorporate Blossom capacity changes and Funnelcake main changes without rewriting contributors; independently review final results.
-- [ ] Run relevant full suites and current-head CI, publish review dispositions, and retain any unmet production/performance gates.
+- [x] Incorporate Blossom capacity changes and Funnelcake main changes without rewriting contributors; independently review the resulting source.
+- [x] Run applicable local suites and prepare current-head CI and review delivery.
+- [ ] Clear the documented production performance and live verification gates before activation.
+
+Final delivery must inspect required CI on the current PR heads and publish the
+review dispositions. Exact-head results belong on the linked PRs; this checklist
+does not substitute for their current checks or clear the rollout gates.
 
 ## Review focus
 
