@@ -49,11 +49,14 @@ intent. Event RPCs use `seteventhold [eventId, holdId, revision, 1|0]`. Media us
 `POST /admin/api/quarantine` with `{sha256, hold_id, version, action}`. All reads must
 confirm effective rows; HTTP success alone is insufficient. Higher revisions win;
 release tombstones must survive delayed requests. Global `allowevent` is never the
-implementation of this stream's Restore.
+implementation of this stream's Restore. Unversioned legacy review/restore calls
+cannot supersede an existing human Remove; use the current case revision.
 
 Cases capture the signed video event and signed reports, source and receive times,
 canonical category, controlled-origin hashes/paths, deadlines and audit decisions.
-Only signed mappings are actionable. Unmapped external media is outside Divine's
+Only signed mappings are actionable. A signed non-video target is archived as
+`out_of_scope` before any hold or COOP submission; it leaves the urgent/retry queues
+and cannot receive Restore/Remove commands from this video workflow. Unmapped external media is outside Divine's
 media controls and must be identified during review. URLs and derivatives outside
 the configured controlled origin require separate coverage before claiming them
 hidden. Existing browser copies cannot be recalled.

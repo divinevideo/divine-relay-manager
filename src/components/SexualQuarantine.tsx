@@ -14,7 +14,7 @@ import type { SexualCase } from '../../shared/sexual-quarantine';
 
 const STATES: Record<SexualCase['state'], string> = {
   review: 'Awaiting review', pending: 'Pending verification', hidden: 'Hidden',
-  restored: 'Restored', restored_restricted: 'Restored with remaining restrictions', removed: 'Removed',
+  restored: 'Restored', restored_restricted: 'Restored with remaining restrictions', removed: 'Removed', out_of_scope: 'Outside video scope',
 };
 const GOALS: Record<SexualCase['goal'], string> = {
   review: 'Review', hide: 'Temporary hide', restore: 'Restore', remove: 'Remove',
@@ -22,7 +22,7 @@ const GOALS: Record<SexualCase['goal'], string> = {
 const time = (at?: number) => at ? new Date(at).toLocaleString() : 'Not recorded';
 
 function Urgency({ item }: { item: SexualCase }) {
-  if (item.actor && item.state !== 'pending') return null;
+  if (item.state === 'out_of_scope' || (item.actor && item.state !== 'pending')) return null;
   return <Badge variant="destructive">{item.deadlineAt <= Date.now() ? 'Overdue' : 'Urgent review'}</Badge>;
 }
 
@@ -136,10 +136,10 @@ function CaseDetail({ eventId }: { eventId: string }) {
       <div className="space-y-2">
         {session.identityUnavailable && <p role="alert">Moderator identity unavailable. Decisions will be attributed as unattributed.</p>}
         <label htmlFor="sexual-decision-reason" className="font-semibold">Decision reason</label>
-        <Textarea id="sexual-decision-reason" value={reason} maxLength={2000} disabled={decision.isPending} onChange={e => setReason(e.target.value)} />
+        <Textarea id="sexual-decision-reason" value={reason} maxLength={2000} disabled={decision.isPending || c.state === 'out_of_scope'} onChange={e => setReason(e.target.value)} />
         <p className="text-sm text-muted-foreground">Restore releases this case’s hold. Remove keeps the event and media unavailable within Divine. Other restrictions remain in force.</p>
         <div className="flex gap-2">{(['restore', 'remove'] as const).map(choice => <Button key={choice} variant={choice === 'remove' ? 'destructive' : 'default'}
-          disabled={!reason.trim() || decision.isPending || item.isFetching || item.isError} onClick={() => { setNotice(''); decision.mutate(choice); }}>
+          disabled={c.state === 'out_of_scope' || !reason.trim() || decision.isPending || item.isFetching || item.isError} onClick={() => { setNotice(''); decision.mutate(choice); }}>
           {choice === 'restore' ? 'Restore' : 'Remove'}
         </Button>)}</div>
         {decision.isPending && <p role="status">Recording decision…</p>}

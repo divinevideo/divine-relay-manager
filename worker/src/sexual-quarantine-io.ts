@@ -3,7 +3,7 @@ import { callNip86Rpc, type Nip86Env, type SecretStoreSecret } from './nip86';
 import { queryRelay } from './relay-profile';
 import { readBlossomSecret, type MediaServerEnv } from './media-server';
 import { isLowerHex64 } from './hex';
-import type { QuarantineIO, QuarantineSnapshot } from './sexual-quarantine';
+import { OutsideVideoScope, type QuarantineIO, type QuarantineSnapshot } from './sexual-quarantine';
 
 export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv {
   SEXUAL_QUARANTINE_ENABLED?: string;
@@ -31,8 +31,9 @@ export function snapshotVideo(eventId: string, raw: unknown, env: MediaServerEnv
   // nostr-tools memoizes verification on a symbol. Copy only wire data so a
   // previously verified, subsequently changed object cannot reuse that result.
   const event = JSON.parse(JSON.stringify(raw ?? null)) as NostrEvent;
-  if (!event || event.id !== eventId || ![21, 22, 34235, 34236].includes(event.kind)
-    || JSON.stringify(raw).length > 60_000 || !verifyEvent(event)) throw new Error('Unverified video event');
+  if (!event || event.id !== eventId || JSON.stringify(raw).length > 60_000
+    || !verifyEvent(event)) throw new Error('Unverified video event');
+  if (![21, 22, 34235, 34236].includes(event.kind)) throw new OutsideVideoScope();
   const assets = new Set<string>();
   const paths = new Set<string>();
   const add = (value: string, expectedHash?: string) => {

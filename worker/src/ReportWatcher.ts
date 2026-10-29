@@ -414,9 +414,11 @@ export class ReportWatcher implements DurableObject {
         // admission. External enforcement runs after leaving this gate.
         const sexual = this.sexualQuarantine();
         const existingCase = await sexual.get(operation.eventId);
-        if (existingCase && ['allow', 'review'].includes(operation.relayAction)) {
+        if (existingCase && existingCase.state !== 'out_of_scope' && ['allow', 'review'].includes(operation.relayAction)) {
           if (!operation.humanAction) return { success: false, conflict: true,
             error: 'Use a recorded reviewer decision for this quarantine' };
+          if (existingCase.actor && existingCase.goal !== 'restore') return { success: false, conflict: true,
+            error: 'A human decision exists; use the current case revision to change it' };
           try {
             if (existingCase.goal !== 'restore' || !existingCase.actor) {
               await sexual.decide(operation.eventId, existingCase.revision, 'restore',

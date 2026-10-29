@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SexualQuarantine, adultSexualCategory, type QuarantineIO } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope, adultSexualCategory, type QuarantineIO } from './sexual-quarantine';
 
 const EVENT = '1'.repeat(64);
 const HASH = 'a'.repeat(64);
@@ -88,6 +88,20 @@ describe('adult sexual report quarantine', () => {
     expect((await q.get(EVENT))?.lastFailureStage).toBe('public_verification');
     expect((await q.get(EVENT))?.state).toBe('pending');
     expect((await q.get(EVENT))?.verifiedAt).toBeUndefined();
+  });
+
+  it('archives a verified non-video target without holds or repeated work', async () => {
+    const f = fixture(); const q = f.engine();
+    vi.mocked(f.io.snapshot).mockRejectedValue(new OutsideVideoScope());
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2); await q.advance(EVENT);
+    expect((await q.get(EVENT))?.state).toBe('out_of_scope');
+    expect(await q.list()).toEqual([]);
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+    expect(f.io.mediaHold).not.toHaveBeenCalled();
+    expect(f.io.review).not.toHaveBeenCalled();
+    await q.admit(EVENT, report(3), 2); f.later(); await q.tick(); await q.advance(EVENT);
+    expect(f.io.snapshot).toHaveBeenCalledTimes(1);
+    await expect(q.decide(EVENT, (await q.get(EVENT))!.revision, 'remove', 'reviewer', 'wrong stream')).rejects.toThrow('scope');
   });
 
   it('normalizes adult aliases without taking over child safety', () => {

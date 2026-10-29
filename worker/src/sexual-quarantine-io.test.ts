@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent } from 'nostr-tools';
+import { OutsideVideoScope } from './sexual-quarantine';
 import { createQuarantineIO, snapshotVideo } from './sexual-quarantine-io';
 import { callNip86Rpc } from './nip86';
 import { queryRelay } from './relay-profile';
@@ -94,6 +95,12 @@ describe('quarantine service IO', () => {
       ? Response.json({ quarantined: false, holds: [{ hold_id: hold, version: 3, active: false }] })
       : new Response(null, { status: String(url).endsWith('master.m3u8') ? 404 : 200 })));
     expect(await createQuarantineIO(env).restorationStatus(snapshotVideo(event.id, event, env))).toBe('pending');
+  });
+
+  it('distinguishes a verified comment from an invalid event', () => {
+    const comment = finalizeEvent({ kind: 1, created_at: 1, tags: [], content: 'Synthetic comment' }, new Uint8Array(32).fill(2));
+    expect(() => snapshotVideo(comment.id, comment, env)).toThrow(OutsideVideoScope);
+    expect(() => snapshotVideo(comment.id, { ...comment, content: 'tampered' }, env)).not.toThrow(OutsideVideoScope);
   });
 
   it('sends a versioned independent event hold, never global unban', async () => {

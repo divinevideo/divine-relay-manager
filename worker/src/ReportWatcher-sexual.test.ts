@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent } from './ReportWatcher';
 import { createQuarantineIO } from './sexual-quarantine-io';
-import { SexualQuarantine } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope } from './sexual-quarantine';
 import * as nip86 from './nip86';
 import * as replay from './sexual-report-replay';
 import { finalizeEvent } from 'nostr-tools';
@@ -35,6 +35,35 @@ function fixture(enabled = 'true') {
 afterEach(() => vi.restoreAllMocks());
 
 describe('sexual quarantine watcher integration', () => {
+  it('leaves generic non-video moderation with its existing owner', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValueOnce(new OutsideVideoScope());
+    await f.send(1, 'NS-sexualContent');
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    for (const [relayAction, humanAction] of [['hide', 'hide_event'], ['allow', 'allow_event'], ['review', 'dismiss_report']]) {
+      const response = await f.watcher.fetch(new Request('https://do/event-visibility', {
+        method: 'POST', body: JSON.stringify({ eventId: ID, relayAction, humanAction, reason: 'other stream decision' }),
+      }));
+      expect(response.status).toBe(200);
+    }
+    expect(rpc).toHaveBeenCalledWith('banevent', [ID, 'other stream decision'], expect.anything());
+    expect(rpc).toHaveBeenCalledWith('allowevent', [ID], expect.anything());
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unversioned legacy restore after a newer human remove', async () => {
+    const f = fixture(); await f.send(1, 'NS-sexualContent'); await f.send(2, 'NS-sexualContent');
+    const q = new SexualQuarantine(f.durable, f.io);
+    await q.decide(ID, (await q.get(ID))!.revision, 'remove', 'reviewer', 'Explicit activity confirmed');
+    await q.advance(ID);
+    const response = await f.watcher.fetch(new Request('https://do/event-visibility', {
+      method: 'POST', body: JSON.stringify({ eventId: ID, relayAction: 'allow', humanAction: 'allow_event', reason: 'old delivery' }),
+    }));
+    expect(response.status).toBe(409);
+    expect((await q.get(ID))?.goal).toBe('remove');
+    expect(f.io.eventHold).not.toHaveBeenCalledWith(ID, false, expect.anything());
+  });
+
   it('keeps unrelated human hides independent from the sexual case', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent');
     const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });

@@ -5,7 +5,7 @@ export interface SexualCase {
   eventId: string;
   revision: number;
   goal: QuarantineGoal;
-  state: 'review' | 'pending' | 'hidden' | 'restored' | 'restored_restricted' | 'removed';
+  state: 'review' | 'pending' | 'hidden' | 'restored' | 'restored_restricted' | 'removed' | 'out_of_scope';
   reporters: number;
   threshold: number;
   firstReport: QuarantineReport;

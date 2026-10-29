@@ -4,6 +4,7 @@ const PREFIX = 'sexual-case:';
 const JOB = 'sexual-job:';
 const QUEUE = 'sexual-review:';
 class Superseded extends Error {}
+export class OutsideVideoScope extends Error {}
 const REVIEW_MS = 15 * 60_000;
 const ADULT_ALIASES = new Set([
   'ns-sexualcontent', 'ns-sexual-content', 'sexualcontent', 'sexual-content',
@@ -60,6 +61,11 @@ export class SexualQuarantine {
   private async save(store: DurableObjectStorage | DurableObjectTransaction, c: SexualCase): Promise<void> {
     c.updatedAt = this.now();
     await store.put(PREFIX + c.eventId, c);
+    if (c.state === 'out_of_scope') {
+      await store.delete(this.queueKey(c));
+      await store.delete(JOB + c.eventId);
+      return;
+    }
     if (!c.actor || c.state === 'pending') await store.put(this.queueKey(c), c.eventId);
     else await store.delete(this.queueKey(c));
     if (c.actor && ['restored', 'restored_restricted'].includes(c.state) && c.reviewAcceptedAt) {
@@ -92,7 +98,7 @@ export class SexualQuarantine {
     }
     return this.storage.transaction(async tx => {
       let c = await tx.get<SexualCase>(PREFIX + eventId);
-      if (c && await tx.get(`sexual-report:${report.id}`)) return c;
+      if (c?.state === 'out_of_scope' || (c && await tx.get(`sexual-report:${report.id}`))) return c;
       if (!c) c = {
         eventId, revision: 1, goal: 'review', state: 'review', reporters: 0, threshold,
         firstReport: report, createdAt: this.now(), updatedAt: this.now(),
@@ -122,6 +128,7 @@ export class SexualQuarantine {
     return this.storage.transaction(async tx => {
       const c = await tx.get<SexualCase>(PREFIX + eventId);
       if (!c || c.revision !== revision) throw new Error('Case revision conflict');
+      if (c.state === 'out_of_scope') throw new Error('Target outside video scope');
       if (!actor || !reason.trim() || reason.length > 2000) throw new Error('Reviewer and reason are required');
       await tx.delete(this.queueKey(c));
       c.revision++;
@@ -158,7 +165,7 @@ export class SexualQuarantine {
 
   private async run(eventId: string): Promise<void> {
     const c = await this.get(eventId);
-    if (!c) return;
+    if (!c || c.state === 'out_of_scope') return;
     if ((!c.actor || c.state === 'pending') && !c.escalatedAt && this.now() >= c.deadlineAt) {
       c.escalatedAt = this.now();
       await this.commit(c, 'overdue');
@@ -222,6 +229,13 @@ export class SexualQuarantine {
       c.retryAt = this.now() + 60_000;
     } catch (error) {
       if (error instanceof Superseded) throw error;
+      if (stage === 'snapshot' && !c.snapshot && error instanceof OutsideVideoScope) {
+        c.goal = 'review';
+        c.state = 'out_of_scope';
+        c.lastError = 'Target is outside the video quarantine scope';
+        await this.commit(c, 'out_of_scope');
+        return;
+      }
       // Do not retain service errors: they may contain credentials/private URLs.
       if (stage === 'public_verification' && ['hidden', 'removed'].includes(c.state)) {
         c.state = 'pending';

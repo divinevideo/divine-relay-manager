@@ -67,6 +67,15 @@ describe('Sexual quarantine review', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it('does not offer video decisions for a non-video target', async () => {
+    current = makeCase({ goal: 'review', state: 'out_of_scope', snapshot: undefined });
+    renderQueue();
+    expect(await screen.findByText('Outside video scope')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
+    expect(screen.queryByText('Overdue')).not.toBeInTheDocument();
+  });
+
   it('keeps requested hide separate from confirmed state and provides authorized media and safe history', async () => {
     renderQueue();
     expect(await screen.findByText('Pending verification')).toBeInTheDocument();
