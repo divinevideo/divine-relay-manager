@@ -3,6 +3,7 @@ import { queryRelay } from './relay-profile';
 import { adultSexualCategory } from './sexual-quarantine';
 import type { ReportEvent } from './ReportWatcher';
 import { CSAM_CATEGORIES } from '../../shared/report-classification';
+import { getReportedList } from '../../shared/list-report';
 
 const PAGE = 100;
 const CHILD_CATEGORIES = new Set(CSAM_CATEGORIES.map(c => c.toLowerCase()));
@@ -44,7 +45,11 @@ export async function replayAdultReports(
     oldest = Math.min(oldest, event.created_at);
     const category = reportCategory(event.tags);
     const target = event.tags.find(t => t[0] === 'e')?.[1];
-    if (adultSexualCategory(category) && target) await ingest(event as ReportEvent, category, target);
+    // List reports never enter the quarantine. The live path already logged
+    // them for human review; replaying them would repeat that log and alert.
+    if (adultSexualCategory(category) && target && !getReportedList(event)) {
+      await ingest(event as ReportEvent, category, target);
+    }
   }
   if (events.length < PAGE) {
     await storage.put('sexual-replay-through', window.through);

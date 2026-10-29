@@ -27,6 +27,16 @@ describe('adult report replay', () => {
     await expect(replayAdultReports(f.storage, 'wss://relay.test', ingest, 300)).rejects.toThrow();
     expect(f.data.get('sexual-replay-through')).toBe(200);
   });
+  it('leaves list reports to the live human-review path', async () => {
+    const f = fixture(); const ingest = vi.fn(async () => {});
+    const list = finalizeEvent({ kind: 1984, created_at: 100, content: '', tags: [
+      ['e', 'a'.repeat(64), 'NS-sexualContent'], ['a', `30005:${'b'.repeat(64)}:favorites`],
+    ] }, new Uint8Array(32).fill(4));
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [list] });
+    await replayAdultReports(f.storage, 'wss://relay.test', ingest, 200);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(f.data.get('sexual-replay-through')).toBe(200);
+  });
   it('keeps its window when admission fails', async () => {
     const f = fixture();
     vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
