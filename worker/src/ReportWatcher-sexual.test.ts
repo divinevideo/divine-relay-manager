@@ -79,6 +79,18 @@ describe('sexual quarantine watcher integration', () => {
     expect((await q.get(ID))?.state).toBe('hidden');
   });
 
+  it('keeps the watcher alarm running when case recovery fails', async () => {
+    const f = fixture();
+    await f.durable.put('sexual-jobs-exist', true);
+    await f.durable.put(`sexual-job:${ID}`, true);
+    vi.spyOn(SexualQuarantine.prototype, 'tick').mockRejectedValue(new Error('storage unavailable'));
+    const connect = vi.spyOn(f.watcher as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+    (f.watcher as unknown as { running: boolean }).running = true;
+    await expect(f.watcher.alarm()).resolves.toBeUndefined();
+    expect(connect).toHaveBeenCalled();
+    expect(f.storage.setAlarm).toHaveBeenCalled();
+  });
+
   it('does not admit new replay reports while watching is stopped', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent');
     const replayReports = vi.spyOn(replay, 'replayAdultReports').mockResolvedValue();

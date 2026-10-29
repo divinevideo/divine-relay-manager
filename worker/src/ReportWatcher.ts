@@ -1599,7 +1599,12 @@ export class ReportWatcher implements DurableObject {
     console.log('[ReportWatcher] Alarm triggered');
 
     if (await this.state.storage.get('sexual-jobs-exist')) {
-      await this.sexualQuarantine().tick();
+      // Case recovery must not abort the watcher's own reconnect and health check.
+      try {
+        await this.sexualQuarantine().tick();
+      } catch (error) {
+        console.error('[ALERT] Sexual quarantine recovery incomplete; retry scheduled:', error);
+      }
       const sexualJobs = await this.state.storage.list({ prefix: 'sexual-job:', limit: 1 });
       if (sexualJobs.size) await this.scheduleHealthCheck();
     }
