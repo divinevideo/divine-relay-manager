@@ -3,6 +3,7 @@
 
 import { sha256 } from '@noble/hashes/sha256';
 import { RETENTION_DAYS } from '../../shared/retention';
+import { verifyAccessJwt, type FetchFn } from './access-jwt';
 
 export const CONSENT_VIDEO_LIMIT = 80_000_000;
 export const CONSENT_BODY_LIMIT = 82_000_000;
@@ -331,51 +332,21 @@ export class R2MultipartVideoWriter {
 // never accepts X-Admin-Key here.
 // ---------------------------------------------------------------------------
 
-type FetchFn = (url: string) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
-
-function b64UrlDecode(value: string): Uint8Array {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-  const binary = atob(padded);
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
-}
-
 export async function verifyConsentAccessJwt(
   token: string,
   env: { CONSENT_ACCESS_TEAM_DOMAIN?: string; CONSENT_ACCESS_AUD?: string },
-  fetchFn: FetchFn = fetch as FetchFn,
+  fetchFn?: FetchFn,
 ): Promise<boolean> {
-  const teamDomain = env.CONSENT_ACCESS_TEAM_DOMAIN;
-  const audience = env.CONSENT_ACCESS_AUD;
-  if (!teamDomain || !audience || !token) return false;
-  try {
-    const [headerPart, payloadPart, signaturePart] = token.split('.');
-    if (!headerPart || !payloadPart || !signaturePart) return false;
-    const header = JSON.parse(new TextDecoder().decode(b64UrlDecode(headerPart))) as { kid?: string; alg?: string };
-    const payload = JSON.parse(new TextDecoder().decode(b64UrlDecode(payloadPart))) as {
-      iss?: string; aud?: string | string[]; exp?: number;
-    };
-    if (header.alg !== 'RS256' || !header.kid) return false;
-    if (payload.iss !== `https://${teamDomain}`) return false;
-    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (!audiences.includes(audience)) return false;
-    if (!payload.exp || payload.exp <= Math.floor(Date.now() / 1000)) return false;
-
-    const certsRes = await fetchFn(`https://${teamDomain}/cdn-cgi/access/certs`);
-    if (!certsRes.ok) return false;
-    const certs = (await certsRes.json()) as { keys?: Array<JsonWebKey & { kid?: string }> };
-    const jwk = certs.keys?.find((k) => k.kid === header.kid);
-    if (!jwk) return false;
-    const key = await crypto.subtle.importKey(
-      'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
-    );
-    return await crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5', key,
-      b64UrlDecode(signaturePart) as Uint8Array<ArrayBuffer>,
-      new TextEncoder().encode(`${headerPart}.${payloadPart}`),
-    );
-  } catch {
-    return false;
-  }
+  const claims = await verifyAccessJwt(
+    token,
+    {
+      teamDomain: env.CONSENT_ACCESS_TEAM_DOMAIN,
+      audience: env.CONSENT_ACCESS_AUD,
+      onReject: (reason) => console.warn(`[consent-video] Cf-Access-Jwt-Assertion refused: ${reason}`),
+    },
+    fetchFn,
+  );
+  return claims !== null;
 }
 
 interface ConsentSubmissionRow {

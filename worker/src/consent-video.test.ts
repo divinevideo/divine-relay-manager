@@ -8,6 +8,8 @@ import {
   ConsentUploadError,
   type ConsentVideoEnv,
 } from './consent-video';
+import { __resetAccessCertsCacheForTests } from './access-jwt';
+import { makeAccessJwtSigner } from './test-helpers/access-jwt';
 
 // Generate a digest only for parser fixtures that are not testing a supplied digest.
 async function parseConsentMultipart(
@@ -168,17 +170,9 @@ describe('R2MultipartVideoWriter', () => {
 });
 
 async function makeJwt() {
-  const pair = await crypto.subtle.generateKey({ name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256', modulusLength: 2048, publicExponent: new Uint8Array([1, 0, 1]) }, true, ['sign', 'verify']) as CryptoKeyPair;
-  const jwk = await crypto.subtle.exportKey('jwk', pair.publicKey);
-  const b64 = (o: unknown) => btoa(JSON.stringify(o)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  const now = Math.floor(Date.now() / 1000);
-  const header = { alg: 'RS256', kid: 'k1', typ: 'JWT' };
-  const payload = { iss: 'https://team.example.com', aud: 'aud-1', exp: now + 600, iat: now, email: 'rev@example.com' };
-  const data = `${b64(header)}.${b64(payload)}`;
-  const sig = await crypto.subtle.sign('RSASSA-PKCS1-v1_5', pair.privateKey, new TextEncoder().encode(data));
-  const sigB64 = btoa(String.fromCharCode(...new Uint8Array(sig))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  const fetchFn = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [{ ...jwk, kid: 'k1' }] }) }));
-  return { token: `${data}.${sigB64}`, fetchFn };
+  const signer = await makeAccessJwtSigner();
+  const token = await signer.sign({ payload: { aud: 'aud-1', email: 'rev@example.com' } });
+  return { token, fetchFn: signer.fetchFn };
 }
 
 describe('large clip streaming', () => {
@@ -210,12 +204,24 @@ describe('large clip streaming', () => {
 });
 
 describe('verifyConsentAccessJwt + handleConsentVideo', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    __resetAccessCertsCacheForTests();
+  });
   it('accepts a valid Access JWT and rejects a tampered one', async () => {
     const { token, fetchFn } = await makeJwt();
     const env = { CONSENT_ACCESS_TEAM_DOMAIN: 'team.example.com', CONSENT_ACCESS_AUD: 'aud-1' };
     expect(await verifyConsentAccessJwt(token, env, fetchFn as never)).toBe(true);
     expect(await verifyConsentAccessJwt(`${token}x`, env, fetchFn as never)).toBe(false);
+  });
+
+  it('logs why a reviewer token was refused, without the token', async () => {
+    const { token, fetchFn } = await makeJwt();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const env = { CONSENT_ACCESS_TEAM_DOMAIN: 'team.example.com', CONSENT_ACCESS_AUD: 'aud-other' };
+    expect(await verifyConsentAccessJwt(token, env, fetchFn as never)).toBe(false);
+    expect(warn).toHaveBeenCalledWith('[consent-video] Cf-Access-Jwt-Assertion refused: audience');
+    warn.mockRestore();
   });
 
   it('fails closed without config, 401 without JWT, serves range with valid JWT', async () => {
