@@ -38,15 +38,30 @@ export function snapshotVideo(eventId: string, raw: unknown, env: MediaServerEnv
   if (![21, 22, 34235, 34236].includes(event.kind)) throw new OutsideVideoScope();
   const assets = new Set<string>();
   const paths = new Set<string>();
+  const unmapped = new Set<string>();
+  let mappingIncomplete = false;
+  const recordPath = (set: Set<string>, value: string) => {
+    if (paths.size + unmapped.size < 64 || set.has(value)) set.add(value);
+    else mappingIncomplete = true;
+  };
   const add = (value: string, expectedHash?: string) => {
-    const url = new URL(value);
+    // Ancillary metadata and prose are not proof of a usable media URL. Keep
+    // their signed source, but do not let them veto verified video admission.
+    let url: URL;
+    try { url = new URL(value); } catch { return; }
     if (url.origin !== mediaOrigin(env)) return;
+    const path = url.pathname + url.search;
     const hash = /^\/([a-f0-9]{64})(?:\.[a-z0-9]+|\/(?:(?:720p|480p)(?:\.mp4)?|hls\/[a-z0-9_.-]+))?$/i.exec(url.pathname)?.[1]?.toLowerCase();
-    if (!hash || !isLowerHex64(hash) || (expectedHash && expectedHash.toLowerCase() !== hash)) {
-      throw new Error('Media URL and hash disagree');
+    if (!hash || !isLowerHex64(hash)) { recordPath(unmapped, path); return; }
+    if ((expectedHash && expectedHash.toLowerCase() !== hash) || (!assets.has(hash) && assets.size >= 8)) {
+      // Do not act on a disputed mapping or exceed the bounded IO budget.
+      // Safely mapped assets/event can still be held; full verification stays pending.
+      mappingIncomplete = true;
+      recordPath(unmapped, path);
+      return;
     }
     assets.add(hash);
-    paths.add(url.pathname + url.search);
+    recordPath(paths, path);
   };
   for (const tag of event.tags) {
     if (tag[0] === 'imeta') {
@@ -59,9 +74,8 @@ export function snapshotVideo(eventId: string, raw: unknown, env: MediaServerEnv
     } else if (['url', 'image', 'thumb', 'thumbnail'].includes(tag[0]) && tag[1]) add(tag[1]);
   }
   for (const url of event.content.match(/https?:\/\/[^\s<>"')\]]+/g) || []) add(url.replace(/[.,;!?]+$/, ''));
-  if (paths.size > 64) throw new Error('Video URL limit exceeded');
-  if (assets.size > 8) throw new Error('Video asset limit exceeded');
-  return { event, assets: [...assets], mediaPaths: [...paths] };
+  return { event, assets: [...assets], mediaPaths: [...paths],
+    ...(unmapped.size ? { unmappedMediaPaths: [...unmapped] } : {}), ...(mappingIncomplete ? { mappingIncomplete: true } : {}) };
 }
 
 async function serviceRequest(url: string, init: RequestInit): Promise<Response> {
@@ -131,6 +145,7 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
       if (!row || row.version < version || row.active !== held) throw new Error('Media hold not confirmed');
     },
     async verify(snapshot, hold, held) {
+      if (held && snapshot.mappingIncomplete) return false;
       const row = (await eventHolds((snapshot.event as NostrEvent).id)).find(h => h.hold_id === hold);
       if (!row || row.active !== (held ? 1 : 0)) return false;
       for (const sha of snapshot.assets) {
@@ -145,6 +160,10 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
           const statuses = await Promise.all([...paths].map(path => publicStatus(path)));
           if (statuses.some(s => s !== 404) || await publicStatus(`/${sha}.mp4`, 'HEAD') !== 404) return false;
         }
+      }
+      if (held) {
+        const unknown = await Promise.all((snapshot.unmappedMediaPaths || []).flatMap(path => [publicStatus(path), publicStatus(path, 'HEAD')]));
+        if (unknown.some(status => status !== 404)) return false;
       }
       return !held || !await visible(snapshot);
     },

@@ -18,9 +18,33 @@ describe('quarantine service IO', () => {
     const event = video();
     expect(snapshotVideo(event.id, event, env).assets).toEqual([HASH]);
     expect(() => snapshotVideo(event.id, { ...event, content: 'changed' }, env)).toThrow();
-    expect(() => snapshotVideo(event.id, video([['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${'b'.repeat(64)}`]]), env)).toThrow();
+    const mismatch = video([['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${'b'.repeat(64)}`]]);
+    expect(snapshotVideo(mismatch.id, mismatch, env)).toMatchObject({ assets: [], mappingIncomplete: true });
     const external = video([['imeta', `url https://external.example.test/${HASH}.mp4`, `x ${HASH}`]]);
     expect(snapshotVideo(external.id, external, env).assets).toEqual([]);
+  });
+
+  it('preserves valid video mappings when ancillary metadata is unusable', async () => {
+    const event = video([['url', `https://media.example.test/${HASH}.mp4`],
+      ['image', 'not-a-url'], ['thumb', 'https://media.example.test/thumbnail.jpg']]);
+    const snapshot = snapshotVideo(event.id, event, env);
+    expect(snapshot.assets).toEqual([HASH]);
+    expect(snapshot.unmappedMediaPaths).toEqual(['/thumbnail.jpg']);
+    const hold = `sexual:${event.id}`;
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [{ hold_id: hold, version: 2, active: 1 }] });
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [] });
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => String(url).includes('/admin/api/quarantine/')
+      ? Response.json({ quarantined: true, holds: [{ hold_id: hold, version: 2, active: true }] })
+      : new Response(null, { status: String(url).endsWith('/thumbnail.jpg') ? 200 : 404 })));
+    expect(await createQuarantineIO(env).verify(snapshot, hold, true)).toBe(false);
+  });
+
+  it('retains bounded partial mappings without claiming full hiding', () => {
+    const tags = Array.from({ length: 9 }, (_, i) => ['url', `https://media.example.test/${(i + 1).toString(16).padStart(64, '0')}.mp4`]);
+    const event = video(tags);
+    const snapshot = snapshotVideo(event.id, event, env);
+    expect(snapshot.assets).toHaveLength(8);
+    expect(snapshot.mappingIncomplete).toBe(true);
   });
 
   it('does not use a hash from free text or a reporter-provided field', () => {

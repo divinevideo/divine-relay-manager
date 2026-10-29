@@ -1,5 +1,5 @@
 export interface QuarantineReport { id: string; pubkey: string; reason: string; source?: object; sourceRef?: string }
-export interface QuarantineSnapshot { event: object; assets: string[]; mediaPaths?: string[] }
+export interface QuarantineSnapshot { event: object; assets: string[]; mediaPaths?: string[]; unmappedMediaPaths?: string[]; mappingIncomplete?: boolean }
 export type QuarantineGoal = 'review' | 'hide' | 'restore' | 'remove';
 export interface SexualCase {
   eventId: string;

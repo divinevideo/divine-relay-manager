@@ -79,7 +79,12 @@ before admission and stay with the legacy writer. Older cases classified as
 commands. Missing or invalid targets remain retryable, never assumed non-video.
 Signed source objects and snapshots are archived under immutable full-ID references
 in bounded parts, without truncation; hydrated reviewer reads reproduce the originals.
-The case metadata and audit rows remain below Durable Object KV value limits. Unmapped external media is outside Divine's
+The case metadata and audit rows remain below Durable Object KV value limits.
+Malformed ancillary URLs do not veto signed video admission. Unknown controlled
+paths remain review evidence and must deny public probes before hiding is verified.
+Disputed or over-budget mappings keep complete verification pending while the event
+and safely mapped assets can be held. Failed enforcement never suppresses COOP
+handoff; each pass makes at most one handoff attempt. Unmapped external media is outside Divine's
 media controls and must be identified during review. URLs and derivatives outside
 the configured controlled origin require separate coverage before claiming them
 hidden. Existing browser copies cannot be recalled.

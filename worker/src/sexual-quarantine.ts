@@ -264,6 +264,7 @@ export class SexualQuarantine {
     c.attempts++;
     await this.commit(c);
     let stage = 'snapshot';
+    let reviewAttempted = false;
     try {
       if (!c.snapshot) {
         c.snapshot = await this.io.snapshot(eventId);
@@ -318,6 +319,7 @@ export class SexualQuarantine {
       if (!c.reviewAcceptedAt) {
         await this.current(c);
         stage = 'review_delivery';
+        reviewAttempted = true;
         await this.io.review(c);
         c.reviewAcceptedAt = this.now();
       }
@@ -342,6 +344,18 @@ export class SexualQuarantine {
       c.lastFailureStage = stage;
       c.retryAt = this.now() + Math.min(60_000, 1000 * 2 ** Math.min(c.attempts, 6));
       await this.commit(c, 'retry', { attempt: c.attempts, stage });
+    }
+    // Review delivery must not wait for a failed enforcement service or probe.
+    // Avoid a second handoff attempt in the same pass after an ambiguous response.
+    if (c.snapshot && !c.reviewAcceptedAt && !reviewAttempted) {
+      try {
+        await this.current(c);
+        await this.io.review(c);
+        c.reviewAcceptedAt = this.now();
+      } catch (error) {
+        if (error instanceof Superseded) throw error;
+        await this.commit(c, 'review_delivery_retry');
+      }
     }
     await this.commit(c);
   }

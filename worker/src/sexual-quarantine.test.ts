@@ -117,6 +117,16 @@ describe('adult sexual report quarantine', () => {
     expect((await q.get(EVENT))?.goal).toBe('review');
   });
 
+  it('delivers priority review even while enforcement needs a retry', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    vi.mocked(f.io.mediaHold).mockRejectedValueOnce(new Error('unavailable'));
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.state).toBe('pending');
+    expect(f.io.review).toHaveBeenCalledTimes(1);
+    expect((await q.get(EVENT))?.reviewAcceptedAt).toBeDefined();
+  });
+
   it('processes an urgent retry before a thousand removed reconciliation jobs', async () => {
     const f = fixture(); const q = f.engine();
     removedBacklog(f, 1000);
