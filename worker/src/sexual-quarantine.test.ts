@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { finalizeEvent } from 'nostr-tools';
-import { SexualQuarantine, OutsideVideoScope, adultSexualCategory, type QuarantineIO, type SexualCase } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope, QuarantineConflict, adultSexualCategory, type QuarantineIO, type SexualCase } from './sexual-quarantine';
 
 const EVENT = '1'.repeat(64);
 const HASH = 'a'.repeat(64);
@@ -54,6 +54,254 @@ function removedBacklog(f: ReturnType<typeof fixture>, count: number) {
 }
 
 describe('adult sexual report quarantine', () => {
+  it('keeps COOP delivery outages out of the three urgent enforcement slots', async () => {
+    const f = fixture(); const q = f.engine();
+    vi.mocked(f.io.review).mockRejectedValue(new Error('COOP unavailable'));
+    vi.mocked(f.io.verify).mockResolvedValue(true);
+    for (let n = 1; n <= 3; n++) {
+      const id = n.toString(16).padStart(64, '0');
+      await q.admit(id, report(n * 2), 2); await q.admit(id, report(n * 2 + 1), 2);
+      await q.advance(id);
+    }
+    f.later();
+    const targets = ['d'.repeat(64), 'e'.repeat(64), 'f'.repeat(64)];
+    for (const [n, id] of targets.entries()) {
+      await q.admit(id, report(100 + n * 2), 2); await q.admit(id, report(101 + n * 2), 2);
+    }
+    vi.mocked(f.io.mediaHold).mockRejectedValue(new Error('temporary enforcement outage'));
+    await q.tick();
+    vi.mocked(f.io.mediaHold).mockResolvedValue(undefined);
+    f.later(); await q.tick();
+    for (const id of targets) expect((await q.get(id))?.state).toBe('hidden');
+    expect((await q.get('1'.padStart(64, '0')))?.reviewAcceptedAt).toBeUndefined();
+  });
+
+  it('retains report provenance while coalescing repeated failures by revision and stage', async () => {
+    const f = fixture(); const q = f.engine();
+    const source = { id: report(1).id, content: 'original synthetic report evidence' };
+    await q.admit(EVENT, { ...report(1), source }, 2); await q.admit(EVENT, report(2), 2);
+    vi.mocked(f.io.verify).mockResolvedValue(false);
+    vi.mocked(f.io.review).mockRejectedValue(new Error('COOP unavailable'));
+    for (let n = 0; n < 110; n++) {
+      await q.advance(EVENT);
+      for (let minute = 0; minute < 5; minute++) f.later();
+    }
+    const history = await q.history(EVENT) as Record<string, unknown>[];
+    expect(history.find(entry => entry.id === report(1).id)).toMatchObject({ source });
+    const failures = history.filter(entry => entry.action === 'retry' && entry.stage === 'public_verification');
+    expect(failures).toHaveLength(1);
+    expect(failures[0]).toMatchObject({ revision: 2, occurrences: 110 });
+    expect(history.filter(entry => entry.stage === 'review_delivery')).toHaveLength(1);
+  });
+
+  it.each(['restore', 'remove'] as const)('records acknowledged human %s intent while public verification remains pending', async decision => {
+    const f = fixture(); const q = f.engine();
+    const recorded: SexualCase[] = [];
+    f.io.recordDecision = async c => { recorded.push(structuredClone(c)); };
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2); await q.advance(EVENT);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, decision, 'reviewer', 'human review');
+    expect((await q.get(EVENT))?.holdsAppliedAt).toBeUndefined();
+    vi.mocked(f.io.verify).mockResolvedValue(false);
+    await q.advance(EVENT);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({ goal: decision, revision: 3, state: 'pending', holdsAppliedAt: 1000 });
+    const c = (await q.get(EVENT))!;
+    expect(c.state).toBe('pending');
+    expect(c.holdsAppliedAt).toBe(1000);
+    expect(c.decisionRecordedAt).toBe(1000);
+    expect(c.verifiedAt).toBeUndefined();
+    f.later(); await q.tick();
+    expect(recorded).toHaveLength(1);
+    await q.decide(EVENT, c.revision, decision === 'restore' ? 'remove' : 'restore', 'reviewer', 'changed decision');
+    expect((await q.get(EVENT))?.holdsAppliedAt).toBeUndefined();
+  });
+
+  it('does not record human intent until every own hold command is acknowledged', async () => {
+    const f = fixture(); const q = f.engine();
+    const recorded: SexualCase[] = [];
+    f.io.recordDecision = async c => { recorded.push(structuredClone(c)); };
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2); await q.advance(EVENT);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'remove', 'reviewer', 'human review');
+    vi.mocked(f.io.mediaHold).mockRejectedValueOnce(new Error('uncertain acknowledgment'));
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.holdsAppliedAt).toBeUndefined();
+    expect(recorded).toEqual([]);
+    f.later(); await q.tick();
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0].holdsAppliedAt).toBe(61_000);
+  });
+
+  it('starts a fresh hide deadline when a later report crosses the threshold', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2);
+    for (let n = 0; n < 16; n++) f.later();
+    await q.tick();
+    expect((await q.get(EVENT))?.escalatedAt).toBeDefined();
+    await q.admit(EVENT, report(2), 2);
+    const c = (await q.get(EVENT))!;
+    expect(c.createdAt).toBe(1000);
+    expect(c.hideTriggeredAt).toBe(961_000);
+    expect(c.deadlineAt).toBe(1_861_000);
+    expect(c.escalatedAt).toBeUndefined();
+    await q.tick();
+    expect((await q.get(EVENT))?.escalatedAt).toBeUndefined();
+  });
+
+  it('pages the review queue exclusively while prioritizing pending cases over older review cases', async () => {
+    const f = fixture(); const q = f.engine();
+    for (let n = 1; n <= 101; n++) await q.admit(n.toString(16).padStart(64, '0'), report(n), 2);
+    f.later();
+    const urgent = 'f'.repeat(64);
+    await q.admit(urgent, report(201), 2); await q.admit(urgent, report(202), 2);
+    const first = await q.listPage();
+    expect(first.cases).toHaveLength(100);
+    expect(first.cases[0].eventId).toBe(urgent);
+    expect(first.nextCursor).toBeDefined();
+    const second = await q.listPage(first.nextCursor);
+    expect(second.cases).toHaveLength(2);
+    expect(second.nextCursor).toBeUndefined();
+    expect(new Set([...first.cases, ...second.cases].map(c => c.eventId)).size).toBe(102);
+    await expect(q.listPage('foreign-index:key')).rejects.toThrow('cursor');
+  });
+
+  it('reindexes every legacy queue page even when the previous scheduler marked migration ready', async () => {
+    const f = fixture(); const q = f.engine();
+    f.data.set('sexual-scheduler-v2-ready', true);
+    for (let n = 1; n <= 201; n++) {
+      const eventId = n.toString(16).padStart(64, '0');
+      const c: SexualCase = { eventId, revision: 1, goal: 'review', state: 'review', reporters: 1, threshold: 2,
+        firstReport: report(n), createdAt: 1000, updatedAt: 1000, deadlineAt: 901000, attempts: 0, retryAt: 0 };
+      f.data.set(`sexual-case:${eventId}`, c);
+      f.data.set(`sexual-review:0000000000901000:${eventId}`, eventId);
+      f.data.set(`sexual-job:${eventId}`, true);
+    }
+    const seen: string[] = []; let cursor: string | undefined;
+    do {
+      const page = await q.listPage(cursor);
+      seen.push(...page.cases.map(c => c.eventId)); cursor = page.nextCursor;
+    } while (cursor);
+    expect(seen).toHaveLength(201);
+    expect(new Set(seen).size).toBe(201);
+  });
+
+  it('retries temporary media eligibility gaps without changing archived candidate evidence', async () => {
+    const f = fixture(); const q = f.engine();
+    const snapshot = { event: { id: EVENT }, assets: [HASH] };
+    const resolveAssets = vi.fn().mockResolvedValueOnce({ assets: [], incomplete: true })
+      .mockResolvedValue({ assets: [HASH], incomplete: false });
+    f.io.resolveAssets = resolveAssets;
+    vi.mocked(f.io.verify).mockImplementation(async candidate => !candidate.mappingIncomplete && candidate.assets.includes(HASH));
+    await q.admit(EVENT, report(1), 2, snapshot); await q.admit(EVENT, report(2), 2);
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.state).toBe('pending');
+    expect(f.io.mediaHold).not.toHaveBeenCalled();
+    expect(f.io.verify).toHaveBeenLastCalledWith(expect.objectContaining({ assets: [], mappingIncomplete: true }), `sexual:${EVENT}`, true);
+    expect((await f.engine().get(EVENT))?.snapshot).toEqual(snapshot);
+    f.later(); await q.tick();
+    expect((await q.get(EVENT))?.state).toBe('hidden');
+    expect(f.io.mediaHold).toHaveBeenLastCalledWith(HASH, `sexual:${EVENT}`, true, 2);
+    expect((await f.engine().get(EVENT))?.snapshot).toEqual(snapshot);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    resolveAssets.mockRejectedValue(new Error('eligibility service unavailable'));
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.state).toBe('restored');
+    expect(f.io.mediaHold).toHaveBeenLastCalledWith(HASH, `sexual:${EVENT}`, false, 3);
+    expect(resolveAssets).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not let a missing snapshot block delivery of another ready case', async () => {
+    const f = fixture(); const q = f.engine();
+    const missing = '1'.padStart(64, '0');
+    vi.mocked(f.io.snapshot).mockImplementation(async id => {
+      if (id === missing) throw new Error('target unavailable');
+      return { event: { id }, assets: [HASH] };
+    });
+    vi.mocked(f.io.verify).mockResolvedValue(true);
+    await q.admit(missing, report(1), 2); await q.advance(missing);
+    await q.admit(EVENT, report(2), 2); await q.admit(EVENT, report(3), 2);
+    vi.mocked(f.io.review).mockRejectedValueOnce(new Error('COOP unavailable'));
+    await q.advance(EVENT);
+    f.later(); await q.tick();
+    expect((await q.get(missing))?.snapshot).toBeUndefined();
+    expect((await q.get(EVENT))?.reviewAcceptedAt).toBeDefined();
+  });
+
+  it('keeps original audit entries immutable while exposing summarized retry counts', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    vi.mocked(f.io.verify).mockResolvedValue(false);
+    await q.advance(EVENT);
+    const [key, initial] = [...f.data].find(([key, value]) => key.startsWith(`sexual-audit:${EVENT}:`)
+      && (value as { stage?: string }).stage === 'public_verification')!;
+    f.later(); await q.advance(EVENT);
+    expect(f.data.get(key)).toEqual(initial);
+    expect((await q.history(EVENT)).find(entry => (entry as { stage?: string }).stage === 'public_verification'))
+      .toMatchObject({ occurrences: 2, at: 1000, lastAt: 61_000 });
+  });
+
+  it('clears a recovered enforcement failure after public verification succeeds', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    vi.mocked(f.io.verify).mockResolvedValueOnce(false);
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.lastFailureStage).toBe('public_verification');
+    f.later(); await q.tick();
+    expect((await q.get(EVENT))?.state).toBe('hidden');
+    expect((await q.get(EVENT))?.lastError).toBeUndefined();
+    expect((await q.get(EVENT))?.lastFailureStage).toBeUndefined();
+  });
+
+  it('backs delivery off independently from frequent enforcement retries', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    vi.mocked(f.io.verify).mockResolvedValue(false);
+    vi.mocked(f.io.review).mockRejectedValue(new Error('COOP unavailable'));
+    await q.advance(EVENT); await q.advance(EVENT);
+    expect((await q.get(EVENT))?.deliveryAttempts).toBe(1);
+    for (let n = 0; n < 3; n++) { f.later(); await q.tick(); }
+    const c = (await q.get(EVENT))!;
+    expect(c.deliveryAttempts).toBe(3);
+    expect(c.deliveryRetryAt).toBe(241_000);
+    expect(c.state).toBe('pending');
+    expect(c.attempts).toBe(4);
+  });
+
+  it('enforces a newer decision while an older COOP request is still in flight', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    let release!: () => void; let started!: () => void;
+    const begun = new Promise<void>(resolve => { started = resolve; });
+    vi.mocked(f.io.review).mockImplementationOnce(async () => {
+      started(); await new Promise<void>(resolve => { release = resolve; });
+    });
+    const old = q.advance(EVENT); await begun;
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    await q.advance(EVENT, false);
+    expect((await q.get(EVENT))?.state).toBe('restored');
+    expect((await q.get(EVENT))?.reviewAcceptedAt).toBeUndefined();
+    release(); await old;
+    expect((await q.get(EVENT))?.revision).toBe(3);
+    expect((await q.get(EVENT))?.reviewAcceptedAt).toBeDefined();
+    expect(f.io.review).toHaveBeenLastCalledWith(expect.objectContaining({ revision: 3, goal: 'restore' }));
+  });
+
+  it('archives an admission snapshot without repeating the target read', async () => {
+    const f = fixture(); const q = f.engine();
+    const snapshot = { event: { id: EVENT, kind: 21 }, assets: [HASH] };
+    await q.admit(EVENT, report(1), 2, snapshot);
+    await q.admit(EVENT, report(2), 2, { event: { id: EVENT, changed: true }, assets: [] });
+    await q.advance(EVENT);
+    expect(f.io.snapshot).not.toHaveBeenCalled();
+    expect((await f.engine().get(EVENT))?.snapshot).toEqual(snapshot);
+  });
+
+  it('uses a typed conflict only for stale or missing case revisions', async () => {
+    const f = fixture(); const q = f.engine();
+    const c = await q.admit(EVENT, report(1), 2);
+    await expect(q.decide(EVENT, c.revision + 1, 'remove', 'reviewer', 'reviewed')).rejects.toBeInstanceOf(QuarantineConflict);
+    await expect(q.decide(EVENT, c.revision, 'remove', 'auto', 'reviewed')).rejects.not.toBeInstanceOf(QuarantineConflict);
+  });
+
   it('preserves complete large Unicode evidence across storage and eviction', async () => {
     const f = fixture(); const q = f.engine();
     const video = structuredClone(finalizeEvent({ kind: 21, created_at: 1, tags: [], content: '€'.repeat(45000) }, new Uint8Array(32).fill(1)));

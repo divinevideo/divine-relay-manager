@@ -14,8 +14,8 @@ describe('report category', () => {
     expect(reportCategory([['e', 'a'.repeat(64), 'spam'], ['p', 'b'.repeat(64), 'NS-csam']])).toBe('NS-csam');
   });
   it('lets every shared CSAM category win over an adult category, ignoring case', () => {
-    for (const child of ['sexual_minors', 'CSAM', 'NS-csam']) {
-      expect(reportCategory([['report', 'NS-sexualContent'], ['l', child, 'MOD']])).toBe(child);
+    for (const [child, canonical] of [['sexual_minors', 'sexual_minors'], ['CSAM', 'csam'], ['ns-CSAM', 'NS-csam']]) {
+      expect(reportCategory([['report', 'NS-sexualContent'], ['l', child, 'MOD']])).toBe(canonical);
     }
     expect(reportCategory([['report', 'NS-sexualContent'], ['l', 'NS-childSafety', 'social.nos.ontology']])).toBe('NS-sexualContent');
   });

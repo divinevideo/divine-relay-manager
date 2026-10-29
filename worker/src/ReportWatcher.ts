@@ -4,7 +4,7 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
-import { quarantineRestoreResult, type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
+import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
   AUTO_HIDE_ACTION,
@@ -27,7 +27,7 @@ import { isLowerHex64 } from './hex';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
-import { SexualQuarantine, OutsideVideoScope, adultSexualCategory } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, QuarantineConflict, adultSexualCategory, type QuarantineSnapshot } from './sexual-quarantine';
 import { createQuarantineIO, type SexualQuarantineEnv } from './sexual-quarantine-io';
 import { replayAdultReports, reportCategory } from './sexual-report-replay';
 
@@ -404,29 +404,24 @@ export class ReportWatcher implements DurableObject {
       return Response.json({ success: false, error: 'Invalid event visibility operation' }, { status: 400 });
     }
 
-    const result = await this.state.blockConcurrencyWhile(async (): Promise<EventVisibilityResult & { sexualRestore?: boolean }> => {
+    const result = await this.state.blockConcurrencyWhile(async (): Promise<EventVisibilityResult> => {
       try {
         if (this.env.DB && !this.schemaReady) {
           await ensureSchema(this.env.DB);
           this.schemaReady = true;
         }
 
-        // Route and persist the case decision under the same short gate as
-        // admission. External enforcement runs after leaving this gate.
+        // Reports may have been loaded before this case's current revision.
+        // Only the versioned case view can decide this stream's holds. Once its
+        // scoped release is complete, Allow remains a separate base-ban action.
         const sexual = this.sexualQuarantine();
         const existingCase = await sexual.get(operation.eventId);
         if (existingCase && existingCase.state !== 'out_of_scope' && ['allow', 'review'].includes(operation.relayAction)) {
-          if (!operation.humanAction) return { success: false, conflict: true,
-            error: 'Use a recorded reviewer decision for this quarantine' };
-          if (existingCase.actor && existingCase.goal !== 'restore') return { success: false, conflict: true,
-            error: 'A human decision exists; use the current case revision to change it' };
-          try {
-            if (existingCase.goal !== 'restore' || !existingCase.actor) {
-              await sexual.decide(operation.eventId, existingCase.revision, 'restore',
-                operation.moderatorPubkey || 'admin', operation.reason || operation.humanAction);
-            }
-          } catch { return { success: false, conflict: true, error: 'Case revision conflict' }; }
-          return { success: false, sexualRestore: true };
+          if (!existingCase.actor || existingCase.goal !== 'restore' || !existingCase.decisionRecordedAt
+            || !['restored', 'restored_restricted'].includes(existingCase.state)) {
+            return { success: false, conflict: true,
+              error: `Review the current revision and provide a reason at /sexual-quarantine/${operation.eventId}` };
+          }
         }
 
         let relayFailure: EventVisibilityResult | undefined;
@@ -574,15 +569,6 @@ export class ReportWatcher implements DurableObject {
         return { success: false, error: error instanceof Error ? error.message : 'Unknown error' };
       }
     });
-
-    if (result.sexualRestore) {
-      await this.scheduleHealthCheck();
-      const sexual = this.sexualQuarantine();
-      await sexual.advance(operation.eventId);
-      const current = await sexual.get(operation.eventId);
-      const outcome = quarantineRestoreResult(current);
-      return Response.json(outcome, { status: outcome.success ? 200 : outcome.conflict ? 409 : 502 });
-    }
 
     return Response.json(result, { status: result.success ? 200 : result.conflict ? 409 : 502 });
   }
@@ -964,13 +950,26 @@ export class ReportWatcher implements DurableObject {
       if (await this.state.storage.get(legacyKey)) return;
       const q = this.sexualQuarantine();
       const existing = await q.get(targetEventId);
+      const absentKey = `sexual-absent:${targetEventId}:${event.id}`;
+      if (await this.state.storage.get(absentKey)) return;
       let nonvideo = existing?.state === 'out_of_scope';
+      let snapshot: QuarantineSnapshot | undefined;
       if (!nonvideo && !existing?.snapshot) {
         // IO validates the target signature before throwing OutsideVideoScope.
-        // Missing/unavailable/unverified targets must retain the replay window;
-        // a failed lookup never authorizes the irreversible legacy writer.
-        try { await createQuarantineIO(this.env).snapshot(targetEventId); }
+        // Transport uncertainty retains replay. A confirmed absent response is
+        // archived separately so one missing target cannot pin unrelated reports.
+        try { snapshot = await createQuarantineIO(this.env).snapshot(targetEventId); }
         catch (error) {
+          if (error instanceof ConfirmedAbsentTarget) {
+            const source = JSON.stringify(wire);
+            await this.state.storage.transaction(async tx => {
+              const parts = Math.ceil(source.length / 16000);
+              for (let part = 0; part < parts; part++) await tx.put(`${absentKey}:part:${part}`, source.slice(part * 16000, (part + 1) * 16000));
+              await tx.put(absentKey, { targetId: targetEventId, reportId: event.id, category, parts, receivedAt: Date.now() });
+            });
+            console.error(`[ALERT] Sexual quarantine target absent: ${targetEventId}; archived report ${event.id} for backfill review`);
+            return;
+          }
           if (!(error instanceof OutsideVideoScope)) throw error;
           nonvideo = true;
         }
@@ -988,7 +987,7 @@ export class ReportWatcher implements DurableObject {
         if (human !== false) return false;
         await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
           source: JSON.parse(JSON.stringify(wire)) as object }, // A legacy fractional threshold means the next whole reporter count.
-          Math.max(2, Math.ceil(videoTier.threshold)));
+          Math.max(2, Math.ceil(videoTier.threshold)), snapshot);
         return true;
       });
       if (!admitted) return;
@@ -1708,7 +1707,13 @@ export class ReportWatcher implements DurableObject {
     const [, , eventId, suffix] = path.split('/');
     const headers = { 'Cache-Control': 'private, no-store' };
     const q = this.sexualQuarantine();
-    if (!eventId && request.method === 'GET') return Response.json({ cases: await q.list() }, { headers });
+    if (!eventId && request.method === 'GET') {
+      const cursor = new URL(request.url).searchParams.get('cursor') ?? undefined;
+      if (cursor !== undefined && !/^sexual-review-v3:[01]:[0-9]{16}:[0-9a-f]{64}$/.test(cursor)) {
+        return Response.json({ error: 'Invalid review queue cursor' }, { status: 400, headers });
+      }
+      return Response.json(await q.listPage(cursor), { headers });
+    }
     if (!isLowerHex64(eventId)) return Response.json({ error: 'Invalid event ID' }, { status: 400, headers });
     if (request.method === 'GET') {
       const c = await q.get(eventId);
@@ -1725,8 +1730,10 @@ export class ReportWatcher implements DurableObject {
     const { revision, decision, actor, reason } = input;
     try {
       await q.decide(eventId, revision as number, decision as 'restore' | 'remove', actor as string, reason as string);
-    } catch {
-      return Response.json({ error: 'Case revision conflict' }, { status: 409, headers });
+    } catch (error) {
+      return error instanceof QuarantineConflict
+        ? Response.json({ error: 'Case revision conflict' }, { status: 409, headers })
+        : Response.json({ error: 'Could not save the decision; retry' }, { status: 500, headers });
     }
     await this.scheduleHealthCheck();
     await q.advance(eventId);

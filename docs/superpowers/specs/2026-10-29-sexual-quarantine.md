@@ -10,8 +10,10 @@ dedicated path. Broad nudity scores are not explicit-act determinations.
 
 An event case lives in ReportWatcher's durable storage. Before side effects it
 records intent, report provenance, revision, deadlines, and a signed video-event
-snapshot. Only media URLs on the configured media origin are eligible for media
-actions; reporter-supplied hashes are never enforcement targets.
+snapshot. Signed URLs and hash tags identify media candidates. Authenticated
+metadata must establish eligibility before media actions; reporter-supplied
+hashes are never enforcement targets. Unresolved eligibility stays pending and
+is retried without changing the original signed evidence.
 
 The media server supplies independent named holds. A hold denies public and owner
 access, preserves admin review, and never changes the underlying media status.
@@ -20,7 +22,8 @@ age restriction, or deletion. No bytes are deleted by this workflow.
 
 Case states distinguish requested actions from verified outcomes. Retryable work
 survives eviction and watcher stop. A restore supersedes pending hide work and is
-not called complete until public event/media visibility agrees. Confirmation of
+not called complete until public event/media visibility agrees. Human intent is
+recorded after accepted scoped commands independently of public verification. Confirmation of
 removal retains holds; physical deletion is a separate approved retention action.
 
 Review cases preserve report IDs, original and canonical reasons, timestamps,

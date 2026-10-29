@@ -32,6 +32,7 @@ it('admits and enforces a signed video despite unusable ancillary metadata', asy
   vi.stubGlobal('fetch', vi.fn(async (input: string | URL | Request) => {
     const url = String(input); requests.push(url);
     if (url.startsWith('https://coop.example.test/')) return new Response(null, { status: 202 });
+    if (url.includes('/admin/api/blob/')) return Response.json({ sha256: hash, owner: video.pubkey });
     if (url.includes('/admin/api/quarantine')) return Response.json({ quarantined: held,
       holds: [{ hold_id: hold, version: 2, active: held }] });
     return new Response(null, { status: held || url.endsWith('/thumbnail.jpg') ? 404 : 200 });

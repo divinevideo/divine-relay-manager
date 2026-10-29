@@ -21,8 +21,8 @@ import type { SexualCase } from "../../shared/sexual-quarantine";
 
 export interface SexualQuarantineAudit { at: number; action: string; revision?: number; actor?: string; reason?: string; id?: string; pubkey?: string }
 const SEXUAL_QUARANTINE = '/api/report-watcher/sexual-quarantine';
-export const getSexualQuarantineCases = (apiUrl: string) =>
-  apiRequest<{ cases: SexualCase[] }>(apiUrl, SEXUAL_QUARANTINE, 'GET');
+export const getSexualQuarantineCases = (apiUrl: string, cursor?: string) =>
+  apiRequest<{ cases: SexualCase[]; nextCursor?: string }>(apiUrl, SEXUAL_QUARANTINE + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''), 'GET');
 export const getSexualQuarantineCase = (apiUrl: string, eventId: string) =>
   apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'GET');
 export const getSexualQuarantineHistory = (apiUrl: string, eventId: string) =>

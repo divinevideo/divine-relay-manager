@@ -6,7 +6,7 @@ import { CSAM_CATEGORIES } from '../../shared/report-classification';
 import { getReportedList } from '../../shared/list-report';
 
 const PAGE = 100;
-const CHILD_CATEGORIES = new Set(CSAM_CATEGORIES.map(c => c.toLowerCase()));
+const CHILD_CATEGORIES = new Map(CSAM_CATEGORIES.map(c => [c.toLowerCase(), c]));
 
 export function reportCategory(tags: string[][]): string {
   const candidates = [...tags.filter(t => t[0] === 'report').map(t => t[1]),
@@ -16,7 +16,8 @@ export function reportCategory(tags: string[][]): string {
     ...tags.filter(t => t[0] === 'p').map(t => t[2])];
   // An explicit child-safety allegation keeps its dedicated owner even when a
   // report also carries an adult-sexual category. No new immediate categories.
-  return candidates.find(c => c && CHILD_CATEGORIES.has(c.toLowerCase())) || candidates.find(Boolean) || 'unknown';
+  const child = candidates.find(c => c && CHILD_CATEGORIES.has(c.toLowerCase()));
+  return (child && CHILD_CATEGORIES.get(child.toLowerCase())) || candidates.find(Boolean) || 'unknown';
 }
 
 export async function replayAdultReports(

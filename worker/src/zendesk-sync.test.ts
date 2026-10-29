@@ -517,7 +517,7 @@ describe('addZendeskInternalNote solve payload', () => {
     expect(resolvedUpdate?.bindings).toEqual(['reviewed', expect.any(String), LINKED_TICKET_ID]);
   });
 
-  it.each(['hide_event', 'allow_event'])('resolves a linked ticket for final human action %s', async (action) => {
+  it.each(['hide_event', 'allow_event', 'sexual_quarantine_restore', 'sexual_quarantine_remove'])('resolves a linked ticket for final human action %s', async (action) => {
     const { db, sqlLog } = createMockDB();
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
     vi.stubGlobal('fetch', mockFetch);
@@ -574,6 +574,17 @@ describe('addZendeskInternalNote solve payload', () => {
     // The Zendesk solve was attempted...
     expect(mockFetch).toHaveBeenCalledTimes(1);
     // ...but failed, so D1 must NOT be marked resolved — the panel keeps the Close button.
+    expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
+
+  it('keeps timed-out quarantine ticket delivery retryable', async () => {
+    const { db, sqlLog } = createMockDB([111]);
+    vi.stubGlobal('fetch', vi.fn(async (_url: string, init: RequestInit) => {
+      if (init.signal?.aborted) throw new DOMException('Aborted', 'AbortError');
+      return { ok: true, text: async () => '' };
+    }));
+    await syncZendeskAfterAction(makeEnv({ DB: db }), 'sexual_quarantine_remove', 'event',
+      'a'.repeat(64), 'b'.repeat(64), AbortSignal.abort());
     expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
   });
 });

@@ -111,7 +111,8 @@ export async function addZendeskInternalNote(
   ticketId: number,
   note: string,
   env: ZendeskSyncEnv,
-  solve: boolean = false
+  solve: boolean = false,
+  signal?: AbortSignal
 ): Promise<boolean> {
   const creds = await resolveZendeskCreds(env);
   if (!creds) {
@@ -155,6 +156,7 @@ export async function addZendeskInternalNote(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
+      ...(signal ? { signal } : {}),
     });
 
     if (!response.ok) {
@@ -174,7 +176,8 @@ export async function syncZendeskAfterAction(
   action: string,
   targetType: 'event' | 'pubkey' | 'media',
   targetId: string,
-  moderator: string
+  moderator: string,
+  signal?: AbortSignal
 ): Promise<void> {
   console.log('[syncZendeskAfterAction] Called with:', { action, targetType, targetId, moderator });
 
@@ -230,6 +233,8 @@ export async function syncZendeskAfterAction(
       'ban_user',
       'auto_hide_confirmed',
       'auto_hide_restored',
+      'sexual_quarantine_restore',
+      'sexual_quarantine_remove',
     ];
     const isResolution = resolutionActions.includes(action);
 
@@ -246,7 +251,7 @@ export async function syncZendeskAfterAction(
     ].join('\n');
 
     for (const { ticket_id } of linkedTickets) {
-      const posted = await addZendeskInternalNote(ticket_id, note, env, isResolution);
+      const posted = await addZendeskInternalNote(ticket_id, note, env, isResolution, signal);
 
       // Record the D1 resolution ONLY when Zendesk actually confirmed the close.
       // The panel reads this status; marking a row resolved after a failed solve

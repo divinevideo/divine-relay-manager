@@ -30,7 +30,7 @@ describe('sexual quarantine human decision projection', () => {
     await recordSexualQuarantineDecision(db, item(3));
     const logs = await db.prepare('SELECT * FROM moderation_decisions WHERE target_id = ?').bind(eventId).all();
     expect(logs.results).toHaveLength(1);
-    expect(logs.results[0]).toMatchObject({ action: 'sexual_quarantine_restore', moderator_pubkey: 'unattributed',
+    expect(logs.results[0]).toMatchObject({ action: 'sexual_quarantine_restore', moderator_pubkey: null,
       report_id: 'b'.repeat(64), reporter_pubkey: 'c'.repeat(64), reason: 'Synthetic human review' });
     expect(await db.prepare('SELECT * FROM moderation_targets WHERE target_id = ?').bind(eventId).first())
       .toMatchObject({ ever_human_reviewed: 1, last_human_action: 'sexual_quarantine_restore' });
@@ -57,5 +57,13 @@ describe('sexual quarantine human decision projection', () => {
       { ...item(8), verifiedAt: undefined }, { ...item(8), actor: 'auto' }, item(7, 'removed')]) {
       await expect(recordSexualQuarantineDecision(db, invalid)).rejects.toThrow();
     }
+  });
+
+  it('records acknowledged human remove while full public verification remains pending', async () => {
+    await recordSexualQuarantineDecision(db, { ...item(9, 'removed'), state: 'pending', verifiedAt: undefined, holdsAppliedAt: 2100 });
+    expect(await db.prepare('SELECT * FROM moderation_targets WHERE target_id = ?').bind(eventId).first())
+      .toMatchObject({ ever_human_reviewed: 1, last_human_action: 'sexual_quarantine_remove' });
+    expect((await db.prepare('SELECT action FROM moderation_decisions WHERE target_id = ? ORDER BY id DESC LIMIT 1').bind(eventId).first())?.action)
+      .toBe('sexual_quarantine_remove');
   });
 });

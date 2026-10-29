@@ -19,6 +19,9 @@ export interface SexualCase {
   actor?: string;
   decisionAt?: number;
   decisionRecordedAt?: number;
+  holdsAppliedAt?: number;
+  deliveryAttempts?: number;
+  deliveryRetryAt?: number;
   firstHiddenAt?: number;
   hideTriggeredAt?: number;
   lastFailureStage?: string;

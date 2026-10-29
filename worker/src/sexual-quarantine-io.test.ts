@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent } from 'nostr-tools';
-import { OutsideVideoScope } from './sexual-quarantine';
+import { OutsideVideoScope, ConfirmedAbsentTarget } from './sexual-quarantine';
 import { createQuarantineIO, snapshotVideo } from './sexual-quarantine-io';
 import { callNip86Rpc } from './nip86';
 import { queryRelay } from './relay-profile';
@@ -14,6 +14,74 @@ const video = (tags = [['imeta', `url https://media.example.test/${HASH}.mp4`, `
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('quarantine service IO', () => {
+  it('admits media eligibility from authenticated owner metadata', async () => {
+    const event = video();
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    const fetcher = vi.fn(async () => Response.json({ sha256: HASH, owner: event.pubkey }));
+    vi.stubGlobal('fetch', fetcher);
+    const io = createQuarantineIO(env);
+    expect(await io.resolveAssets!(await io.snapshot(event.id))).toEqual({ assets: [HASH], incomplete: false });
+    expect(fetcher).toHaveBeenCalledWith(`https://media.example.test/admin/api/blob/${HASH}`,
+      expect.objectContaining({ headers: { Authorization: 'Bearer test-only-secret' }, redirect: 'manual' }));
+  });
+
+  it('keeps unresolved media eligibility pending while preserving signed evidence', async () => {
+    const event = video();
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ sha256: HASH, owner: 'f'.repeat(64) })));
+    const io = createQuarantineIO(env);
+    const snapshot = await io.snapshot(event.id);
+    expect(snapshot).toMatchObject({ event, assets: [HASH] });
+    expect(await io.resolveAssets!(snapshot)).toEqual({ assets: [], incomplete: true });
+    await expect(createQuarantineIO(env).mediaHold(HASH, `sexual:${event.id}`, true, 2)).rejects.toThrow();
+  });
+
+  it('maps signed hash candidates with authenticated metadata even for mirror URLs', async () => {
+    const event = video([['imeta', `url https://mirror.example.test/${HASH}.mp4`, `x ${HASH}`], ['x', 'b'.repeat(64)]]);
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => Response.json({
+      sha256: String(url).split('/').pop(), owner: event.pubkey,
+    })));
+    expect((await createQuarantineIO(env).snapshot(event.id)).assets).toEqual([HASH, 'b'.repeat(64)]);
+  });
+
+  it('does not treat an unapplied media capacity response as a hold', async () => {
+    const event = video();
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    const fetcher = vi.fn(async (url: string | URL | Request) => String(url).includes('/admin/api/blob/')
+      ? Response.json({ sha256: HASH, owner: event.pubkey }) : new Response(null, { status: 409 }));
+    vi.stubGlobal('fetch', fetcher);
+    await expect(createQuarantineIO(env).mediaHold(HASH, `sexual:${event.id}`, true, 2)).rejects.toThrow();
+  });
+
+  it('verifies scoped release when this case never held an unresolved media candidate', async () => {
+    const event = video(); const hold = `sexual:${event.id}`;
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [{ hold_id: hold, version: 3, active: 0 }] });
+    const fetcher = vi.fn(async (_input: string | URL | Request, _init?: RequestInit) => Response.json({ quarantined: false, holds: [] }));
+    vi.stubGlobal('fetch', fetcher);
+    const io = createQuarantineIO(env);
+    await io.mediaHold(HASH, hold, false, 3);
+    expect(await io.verify(snapshotVideo(event.id, event, env), hold, false)).toBe(true);
+    expect(fetcher.mock.calls.every(call => !(call[1] as RequestInit)?.method)).toBe(true);
+  });
+
+  it('distinguishes an absent target response from an incomplete lookup', async () => {
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [] });
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: false, error: 'Event not found or not banned' });
+    await expect(createQuarantineIO(env).snapshot('f'.repeat(64))).rejects.toBeInstanceOf(ConfirmedAbsentTarget);
+    vi.mocked(queryRelay).mockResolvedValue({ success: false, events: [] });
+    await expect(createQuarantineIO(env).snapshot('f'.repeat(64))).rejects.not.toBeInstanceOf(ConfirmedAbsentTarget);
+  });
+
+  it('records an author deletion as a remaining restriction after scoped release', async () => {
+    const event = video([]);
+    const deletion = finalizeEvent({ kind: 5, created_at: 2, tags: [['e', event.id]], content: '' }, new Uint8Array(32).fill(2));
+    vi.mocked(queryRelay).mockImplementation(async filter => ({ success: true, events: (filter as { kinds?: number[] }).kinds?.includes(5) ? [deletion] : [] }));
+    vi.mocked(callNip86Rpc).mockImplementation(async method => method === 'geteventholds'
+      ? { success: true, result: [{ hold_id: `sexual:${event.id}`, version: 3, active: 0 }] }
+      : { success: false, error: 'Event not found or not banned' });
+    expect(await createQuarantineIO(env).restorationStatus(snapshotVideo(event.id, event, env))).toBe('restricted');
+  });
   it('binds media actions to a signed event and matching controlled URL', () => {
     const event = video();
     expect(snapshotVideo(event.id, event, env).assets).toEqual([HASH]);
@@ -21,7 +89,7 @@ describe('quarantine service IO', () => {
     const mismatch = video([['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${'b'.repeat(64)}`]]);
     expect(snapshotVideo(mismatch.id, mismatch, env)).toMatchObject({ assets: [], mappingIncomplete: true });
     const external = video([['imeta', `url https://external.example.test/${HASH}.mp4`, `x ${HASH}`]]);
-    expect(snapshotVideo(external.id, external, env).assets).toEqual([]);
+    expect(snapshotVideo(external.id, external, env).assets).toEqual([HASH]);
   });
 
   it('preserves valid video mappings when ancillary metadata is unusable', async () => {
@@ -47,9 +115,9 @@ describe('quarantine service IO', () => {
     expect(snapshot.mappingIncomplete).toBe(true);
   });
 
-  it('does not use a hash from free text or a reporter-provided field', () => {
+  it('captures signed hash candidates while requiring a verified event identity', () => {
     const event = video([['x', HASH]]);
-    expect(snapshotVideo(event.id, event, env).assets).toEqual([]);
+    expect(snapshotVideo(event.id, event, env).assets).toEqual([HASH]);
     expect(() => snapshotVideo('f'.repeat(64), event, env)).toThrow();
   });
 

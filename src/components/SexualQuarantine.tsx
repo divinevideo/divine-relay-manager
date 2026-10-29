@@ -41,19 +41,25 @@ export function SexualQuarantine() {
   return <div className="h-full overflow-y-auto space-y-4 pb-4">
     <h2 className="text-xl font-semibold">Sexual content quarantine</h2>
     <p className="text-sm text-muted-foreground">Review reported explicit sexual activity. A requested action remains pending until enforcement is verified.</p>
-    {eventId ? <CaseDetail key={`${apiUrl}:${eventId}`} eventId={eventId} /> : <CaseList />}
+    {eventId ? <CaseDetail key={`${apiUrl}:${eventId}`} eventId={eventId} /> : <CaseList key={apiUrl} />}
   </div>;
 }
 
 function CaseList() {
   const api = useAdminApi();
   const apiUrl = useApiUrl();
-  const cases = useQuery({ queryKey: ['sexual-quarantine', apiUrl], queryFn: api.getSexualQuarantineCases, refetchInterval: 15_000 });
+  const [pages, setPages] = useState<(string | undefined)[]>([undefined]);
+  const cursor = pages[pages.length - 1];
+  const cases = useQuery({ queryKey: ['sexual-quarantine', apiUrl, cursor], queryFn: () => api.getSexualQuarantineCases(cursor), refetchInterval: 15_000 });
   return <>
     <Button variant="outline" onClick={() => void cases.refetch()} disabled={cases.isFetching}>Refresh cases</Button>
     {cases.isLoading && <p role="status">Loading cases…</p>}
     {cases.isError && <p role="alert">Could not load cases. Refresh to retry.</p>}
-    {cases.data && <p className="text-sm text-muted-foreground">Showing up to 100 open cases, earliest deadline first.</p>}
+    {cases.data && <p className="text-sm text-muted-foreground">Page {pages.length} · Up to 100 open cases. Enforcement cases first, then earliest review deadline.</p>}
+    <div className="flex gap-2">
+      <Button variant="outline" disabled={pages.length === 1 || cases.isFetching} onClick={() => setPages(p => p.slice(0, -1))}>Previous cases</Button>
+      <Button variant="outline" disabled={!cases.data?.nextCursor || cases.isFetching} onClick={() => setPages(p => [...p, cases.data!.nextCursor])}>Next cases</Button>
+    </div>
     {cases.data?.cases.length === 0 && <p>No quarantine cases.</p>}
     {cases.data?.cases.map(item => <Card key={item.eventId} className="p-4 space-y-2">
       <div className="flex flex-wrap gap-2"><Urgency item={item} /><Badge variant="secondary">{STATES[item.state]}</Badge></div>
@@ -116,12 +122,14 @@ function CaseDetail({ eventId }: { eventId: string }) {
         <div><dt className="font-semibold">Review deadline</dt><dd>{time(c.deadlineAt)}</dd></div>
         <div><dt className="font-semibold">Created / updated</dt><dd>{time(c.createdAt)} / {time(c.updatedAt)}</dd></div>
         <div><dt className="font-semibold">Last verified</dt><dd>{time(c.verifiedAt)}</dd></div>
+        <div><dt className="font-semibold">Scoped commands confirmed</dt><dd>{time(c.holdsAppliedAt)}</dd></div>
         <div><dt className="font-semibold">Attempts / next retry</dt><dd>{c.attempts} / {time(c.retryAt)}</dd></div>
         <div><dt className="font-semibold">Review handoff accepted</dt><dd>{time(c.reviewAcceptedAt)}</dd></div>
         <div><dt className="font-semibold">Human review recorded in Reports</dt><dd>{time(c.decisionRecordedAt)}</dd></div>
         <div><dt className="font-semibold">Escalated</dt><dd>{time(c.escalatedAt)}</dd></div>
       </dl>
-      {c.state === 'restored_restricted' && <p>This quarantine hold was released; other restrictions still apply. Public visibility is not restored.</p>}
+      {c.state === 'restored_restricted' && <p>This quarantine hold was released; other restrictions still apply. Public visibility is not restored. To lift a separate event ban after release is recorded, use Allow in <Link to="/reports" className="underline">Reports</Link>. Other holds remain independently controlled.</p>}
+      {c.actor && c.decisionRecordedAt && c.state === 'pending' && <p>Human decision recorded. Public enforcement verification remains pending and will retry.</p>}
       {c.actor && !c.decisionRecordedAt && <p>Human decision saved; recording in Reports is pending.</p>}
       {c.lastError && <p role="alert">{c.lastError}</p>}
       <section aria-label="Report provenance" className="space-y-1 text-sm break-all">

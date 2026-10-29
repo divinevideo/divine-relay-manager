@@ -24,7 +24,7 @@ export function useAdminApi() {
 
   // Memoize bound functions to prevent unnecessary re-renders
   const boundApi = useMemo(() => ({
-    getSexualQuarantineCases: () => adminApi.getSexualQuarantineCases(apiUrl),
+    getSexualQuarantineCases: (cursor?: string) => adminApi.getSexualQuarantineCases(apiUrl, cursor),
     getSexualQuarantineCase: (eventId: string) => adminApi.getSexualQuarantineCase(apiUrl, eventId),
     getSexualQuarantineHistory: (eventId: string) => adminApi.getSexualQuarantineHistory(apiUrl, eventId),
     decideSexualQuarantine: (eventId: string, body: Parameters<typeof adminApi.decideSexualQuarantine>[2]) =>

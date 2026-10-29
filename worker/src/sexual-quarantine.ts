@@ -2,12 +2,15 @@ import { isLowerHex64 } from './hex';
 
 const PREFIX = 'sexual-case:';
 const JOB = 'sexual-job:';
-const QUEUE = 'sexual-review:';
-const DUE = 'sexual-due:';
-const DEADLINE = 'sexual-deadline:';
-const RECONCILE = 'sexual-reconcile:';
+const QUEUE = 'sexual-review-v3:';
+const DUE = 'sexual-due-v3:';
+const DELIVERY = 'sexual-delivery-v3:';
+const DEADLINE = 'sexual-deadline-v3:';
+const RECONCILE = 'sexual-reconcile-v3:';
 class Superseded extends Error {}
 export class OutsideVideoScope extends Error {}
+export class ConfirmedAbsentTarget extends Error {}
+export class QuarantineConflict extends Error {}
 const REVIEW_MS = 15 * 60_000;
 const ADULT_ALIASES = new Set([
   'ns-sexualcontent', 'ns-sexual-content', 'sexualcontent', 'sexual-content',
@@ -26,6 +29,7 @@ import type { QuarantineReport, QuarantineSnapshot, SexualCase } from '../../sha
 export interface QuarantineIO {
   snapshot(eventId: string): Promise<QuarantineSnapshot>;
   eventHold(eventId: string, held: boolean, version: number): Promise<void>;
+  resolveAssets?(snapshot: QuarantineSnapshot): Promise<{ assets: string[]; incomplete: boolean }>;
   mediaHold(sha256: string, holdId: string, held: boolean, version: number): Promise<void>;
   verify(snapshot: QuarantineSnapshot, holdId: string, held: boolean): Promise<boolean>;
   restorationStatus(snapshot: QuarantineSnapshot): Promise<'visible' | 'restricted' | 'pending'>;
@@ -35,6 +39,7 @@ export interface QuarantineIO {
 
 export class SexualQuarantine {
   private running = new Map<string, Promise<void>>();
+  private delivering = new Map<string, Promise<void>>();
 
   constructor(private storage: DurableObjectStorage, private io: QuarantineIO, private now = Date.now) {}
 
@@ -77,20 +82,38 @@ export class SexualQuarantine {
   }
 
   async list(): Promise<SexualCase[]> {
-    const ids = [...(await this.storage.list<string>({ prefix: QUEUE, limit: 100 })).values()];
-    const cases = await Promise.all(ids.map(id => this.storage.get<SexualCase>(PREFIX + id)));
-    return cases.filter((c): c is SexualCase => !!c).map(c => {
-      const summary = { ...c, firstReport: { ...c.firstReport } };
-      delete summary.firstReport.source;
-      delete summary.snapshot;
-      return summary;
-    });
+    return (await this.listPage()).cases;
+  }
+
+  async listPage(cursor?: string): Promise<{ cases: SexualCase[]; nextCursor?: string }> {
+    if (cursor !== undefined && !new RegExp(`^${QUEUE}[01]:[0-9]{16}:[0-9a-f]{64}$`).test(cursor)) {
+      throw new Error('Invalid review queue cursor');
+    }
+    // Finish the one-time index upgrade before issuing a cursor. Otherwise a
+    // later batch can insert an old case before an already-issued page boundary.
+    while (!await this.storage.get('sexual-scheduler-v3-ready')) await this.bootstrap();
+    const entries = [...(await this.storage.list<string>({ prefix: QUEUE, startAfter: cursor, limit: 101 })).entries()];
+    const page = entries.slice(0, 100);
+    const cases = await Promise.all(page.map(([, id]) => this.storage.get<SexualCase>(PREFIX + id)));
+    return {
+      cases: cases.filter((c): c is SexualCase => !!c).map(c => {
+        const summary = { ...c, firstReport: { ...c.firstReport } };
+        delete summary.firstReport.source;
+        delete summary.snapshot;
+        return summary;
+      }),
+      ...(entries.length > 100 ? { nextCursor: page[page.length - 1][0] } : {}),
+    };
   }
 
   async history(eventId: string): Promise<unknown[]> {
     const entries = [...(await this.storage.list<Record<string, unknown>>({ prefix: `sexual-audit:${eventId}:`, reverse: true, limit: 100 })).values()];
     return Promise.all(entries.map(async entry => {
       if (typeof entry.sourceRef === 'string') entry.source = await this.evidence<object>(entry.sourceRef);
+      if (typeof entry.failureRef === 'string') {
+        const summary = await this.storage.get<Record<string, unknown>>(entry.failureRef);
+        if (summary) Object.assign(entry, summary);
+      }
       return entry;
     }));
   }
@@ -109,7 +132,8 @@ export class SexualQuarantine {
   }
 
   private queueKey(c: SexualCase): string {
-    return `${QUEUE}${String(c.deadlineAt).padStart(16, '0')}:${c.eventId}`;
+    const priority = c.state === 'review' ? 1 : 0;
+    return `${QUEUE}${priority}:${String(c.deadlineAt).padStart(16, '0')}:${c.eventId}`;
   }
 
   private timedKey(prefix: string, time: number, eventId = ''): string {
@@ -122,19 +146,25 @@ export class SexualQuarantine {
   }
 
   private needsWork(c: SexualCase): boolean {
-    return c.state !== 'out_of_scope' && ((!c.snapshot && !c.snapshotRef) || c.state === 'pending' || !c.reviewAcceptedAt
-      || (!!c.actor && !c.decisionRecordedAt && !!this.io.recordDecision));
+    return c.state !== 'out_of_scope' && ((!c.snapshot && !c.snapshotRef) || c.state === 'pending');
+  }
+
+  private needsDelivery(c: SexualCase): boolean {
+    return c.state !== 'out_of_scope' && !!(c.snapshot || c.snapshotRef) && (!c.reviewAcceptedAt
+      || (!!c.actor && !!c.holdsAppliedAt && !c.decisionRecordedAt && !!this.io.recordDecision));
   }
 
   private async index(store: DurableObjectStorage | DurableObjectTransaction, c: SexualCase, previous = c): Promise<void> {
     await store.delete(this.queueKey(previous));
     await store.delete(this.timedKey(DUE, previous.retryAt, c.eventId));
+    await store.delete(this.timedKey(DELIVERY, previous.deliveryRetryAt || 0, c.eventId));
     await store.delete(this.timedKey(DEADLINE, previous.deadlineAt, c.eventId));
     await store.delete(RECONCILE + c.eventId);
     if (this.open(c)) {
       await store.put(this.queueKey(c), c.eventId);
       if (!c.escalatedAt) await store.put(this.timedKey(DEADLINE, c.deadlineAt, c.eventId), c.eventId);
     }
+    if (this.needsDelivery(c)) await store.put(this.timedKey(DELIVERY, c.deliveryRetryAt || 0, c.eventId), c.eventId);
     if (this.needsWork(c)) await store.put(this.timedKey(DUE, c.retryAt, c.eventId), c.eventId);
     else if (c.state === 'hidden' || c.state === 'removed') await store.put(RECONCILE + c.eventId, c.eventId);
     if (c.state === 'out_of_scope' || (c.actor && ['restored', 'restored_restricted'].includes(c.state)
@@ -172,15 +202,29 @@ export class SexualQuarantine {
       if (!latest || latest.revision !== c.revision) throw new Superseded();
       // Reports may arrive without changing the operation revision.
       c.reporters = latest.reporters;
+      // Delivery is a separate worker. Its current-revision acknowledgments and
+      // backoff must survive an enforcement result that began before them.
+      c.reviewAcceptedAt = latest.reviewAcceptedAt;
+      c.decisionRecordedAt = latest.decisionRecordedAt;
+      c.deliveryAttempts = latest.deliveryAttempts;
+      c.deliveryRetryAt = latest.deliveryRetryAt;
+      if (['review_delivery', 'decision_record'].includes(latest.lastFailureStage || '')
+        && (!c.lastFailureStage || ['review_delivery', 'decision_record'].includes(c.lastFailureStage))) {
+        c.lastError = latest.lastError;
+        c.lastFailureStage = latest.lastFailureStage;
+      } else if (['review_delivery', 'decision_record'].includes(c.lastFailureStage || '') && !latest.lastFailureStage) {
+        delete c.lastError; delete c.lastFailureStage;
+      }
       // The alarm's deadline phase can escalate while this worker awaits IO.
       // Its newer metadata belongs to this revision and must survive the result.
       if (latest.escalatedAt) c.escalatedAt = latest.escalatedAt;
       await this.save(tx, c);
-      if (action) await this.audit(tx, c.eventId, action, { revision: c.revision, ...detail });
+      if (action === 'retry') await this.failureAudit(tx, c, String((detail as { stage?: string }).stage), detail);
+      else if (action) await this.audit(tx, c.eventId, action, { revision: c.revision, ...detail });
     });
   }
 
-  async admit(eventId: string, report: QuarantineReport, threshold: number): Promise<SexualCase> {
+  async admit(eventId: string, report: QuarantineReport, threshold: number, verifiedSnapshot?: QuarantineSnapshot): Promise<SexualCase> {
     if (!isLowerHex64(eventId) || !isLowerHex64(report.id) || !isLowerHex64(report.pubkey)
       || !adultSexualCategory(report.reason) || !Number.isInteger(threshold) || threshold < 2) {
       throw new Error('Invalid adult sexual report');
@@ -193,6 +237,7 @@ export class SexualQuarantine {
         eventId, revision: 1, goal: 'review', state: 'review', reporters: 0, threshold,
         firstReport: report, createdAt: this.now(), updatedAt: this.now(),
         deadlineAt: this.now() + REVIEW_MS, attempts: 0, retryAt: 0,
+        ...(verifiedSnapshot ? { snapshot: verifiedSnapshot } : {}),
       };
       const reporterKey = `sexual-reporter:${eventId}:${report.pubkey}`;
       if (!await tx.get(reporterKey)) {
@@ -202,7 +247,11 @@ export class SexualQuarantine {
       // Human decisions are terminal for the unchanged event; another report does
       // not undo an accepted restore. New child-safety allegations use their owner.
       if (!c.actor && c.reporters >= c.threshold) {
-        if (c.goal !== 'hide') { c.hideTriggeredAt = this.now(); c.revision++; c.retryAt = 0; delete c.reviewAcceptedAt; }
+        if (c.goal !== 'hide') {
+          c.hideTriggeredAt = this.now(); c.deadlineAt = this.now() + REVIEW_MS;
+          c.revision++; c.retryAt = 0; c.deliveryRetryAt = 0; c.deliveryAttempts = 0;
+          delete c.escalatedAt; delete c.holdsAppliedAt; delete c.reviewAcceptedAt;
+        }
         c.goal = 'hide';
         if (c.state !== 'hidden') c.state = 'pending';
       }
@@ -218,7 +267,7 @@ export class SexualQuarantine {
   async decide(eventId: string, revision: number, decision: 'restore' | 'remove', actor: string, reason: string): Promise<SexualCase> {
     const result = await this.storage.transaction(async tx => {
       const c = await tx.get<SexualCase>(PREFIX + eventId);
-      if (!c || c.revision !== revision) throw new Error('Case revision conflict');
+      if (!c || c.revision !== revision) throw new QuarantineConflict('Case revision conflict');
       if (c.state === 'out_of_scope') throw new Error('Target outside video scope');
       const reviewer = actor.trim();
       if (!reviewer || reviewer === 'auto' || !reason.trim() || reason.length > 2000) throw new Error('Reviewer and reason are required');
@@ -234,6 +283,8 @@ export class SexualQuarantine {
       c.retryAt = 0;
       delete c.verifiedAt;
       delete c.decisionRecordedAt;
+      delete c.holdsAppliedAt;
+      c.deliveryRetryAt = 0; c.deliveryAttempts = 0;
       await this.audit(tx, eventId, decision, { actor: reviewer, reason, revision: c.revision });
       await this.save(tx, c);
       return c;
@@ -241,19 +292,21 @@ export class SexualQuarantine {
     return this.hydrate(result);
   }
 
-  async advance(eventId: string): Promise<void> {
-    const existing = this.running.get(eventId);
-    if (existing) return existing;
-    const work = (async () => {
-      // An in-flight old request may finish after a human decision. Immediately
-      // pick up its newer revision rather than waiting for the next alarm.
-      for (let pass = 0; pass < 3; pass++) {
-        try { await this.run(eventId); return; }
-        catch (error) { if (!(error instanceof Superseded)) throw error; }
-      }
-    })();
-    this.running.set(eventId, work);
-    try { await work; } finally { this.running.delete(eventId); }
+  async advance(eventId: string, deliver = true): Promise<void> {
+    let work = this.running.get(eventId);
+    if (!work) {
+      work = (async () => {
+        // Network results from a superseded operation immediately pick up the
+        // new revision. Neither enforcement nor delivery runs under a DO gate.
+        for (let pass = 0; pass < 3; pass++) {
+          try { await this.run(eventId); return; }
+          catch (error) { if (!(error instanceof Superseded)) throw error; }
+        }
+      })();
+      this.running.set(eventId, work);
+    }
+    try { await work; } finally { if (this.running.get(eventId) === work) this.running.delete(eventId); }
+    if (deliver) await this.deliver(eventId);
   }
 
   private async run(eventId: string): Promise<void> {
@@ -264,7 +317,6 @@ export class SexualQuarantine {
     c.attempts++;
     await this.commit(c);
     let stage = 'snapshot';
-    let reviewAttempted = false;
     try {
       if (!c.snapshot) {
         c.snapshot = await this.io.snapshot(eventId);
@@ -285,14 +337,29 @@ export class SexualQuarantine {
         await this.current(c);
         stage = 'event_hold';
         await this.io.eventHold(eventId, held, c.revision);
-        for (const sha of c.snapshot.assets) {
+        let verificationSnapshot = c.snapshot;
+        if (held && this.io.resolveAssets) {
+          await this.current(c);
+          stage = 'media_resolution';
+          const resolved = await this.io.resolveAssets(c.snapshot);
+          // Signed candidates remain immutable evidence. Retry eligibility reads
+          // independently, and require complete coverage before claiming hidden.
+          verificationSnapshot = { ...c.snapshot, assets: resolved.assets,
+            mappingIncomplete: !!c.snapshot.mappingIncomplete || resolved.incomplete };
+        }
+        for (const sha of verificationSnapshot.assets) {
           await this.current(c);
           stage = 'media_hold';
           await this.io.mediaHold(sha, hold, held, c.revision);
         }
         await this.current(c);
+        c.holdsAppliedAt = this.now();
+        await this.commit(c);
+        // A human decision becomes durable once every own-hold RPC accepted it.
+        // Public mapping and visibility checks remain an independent requirement.
+        await this.recordDecision(c);
         stage = 'public_verification';
-        if (!await this.io.verify(c.snapshot, hold, held)) throw new Error('Enforcement verification incomplete');
+        if (!await this.io.verify(verificationSnapshot, hold, held)) throw new Error('Enforcement verification incomplete');
         if (held) c.state = c.goal === 'remove' ? 'removed' : 'hidden';
         else {
           stage = 'restore_visibility';
@@ -308,23 +375,10 @@ export class SexualQuarantine {
           elapsedMs: this.now() - (c.decisionAt ?? c.hideTriggeredAt ?? c.createdAt),
           sinceFirstReportMs: this.now() - c.createdAt, attempts: c.attempts }));
       }
-      if (c.actor && ['restored', 'restored_restricted', 'removed'].includes(c.state)
-        && !c.decisionRecordedAt && this.io.recordDecision) {
-        await this.current(c);
-        stage = 'decision_record';
-        await this.io.recordDecision(c);
-        c.decisionRecordedAt = this.now();
-        await this.commit(c);
+      if (!c.lastFailureStage || !['review_delivery', 'decision_record'].includes(c.lastFailureStage)) {
+        delete c.lastError;
+        delete c.lastFailureStage;
       }
-      if (!c.reviewAcceptedAt) {
-        await this.current(c);
-        stage = 'review_delivery';
-        reviewAttempted = true;
-        await this.io.review(c);
-        c.reviewAcceptedAt = this.now();
-      }
-      delete c.lastError;
-      delete c.lastFailureStage;
       c.retryAt = this.now() + 60_000;
     } catch (error) {
       if (error instanceof Superseded) throw error;
@@ -345,19 +399,86 @@ export class SexualQuarantine {
       c.retryAt = this.now() + Math.min(60_000, 1000 * 2 ** Math.min(c.attempts, 6));
       await this.commit(c, 'retry', { attempt: c.attempts, stage });
     }
-    // Review delivery must not wait for a failed enforcement service or probe.
-    // Avoid a second handoff attempt in the same pass after an ambiguous response.
-    if (c.snapshot && !c.reviewAcceptedAt && !reviewAttempted) {
-      try {
-        await this.current(c);
-        await this.io.review(c);
-        c.reviewAcceptedAt = this.now();
-      } catch (error) {
-        if (error instanceof Superseded) throw error;
-        await this.commit(c, 'review_delivery_retry');
-      }
-    }
     await this.commit(c);
+  }
+
+  private async failureAudit(store: DurableObjectStorage | DurableObjectTransaction, c: SexualCase, stage: string, detail: object = {}): Promise<void> {
+    const marker = `sexual-failure:${c.eventId}:${c.revision}:${stage}`;
+    const existing = await store.get<{ occurrences: number }>(marker);
+    const summary = { ...detail, lastAt: this.now(), occurrences: (existing?.occurrences || 0) + 1 };
+    // The first failure is an append-only audit event. Repeated attempts update
+    // a separate summary, so an outage cannot evict the original report history.
+    if (!existing) await this.audit(store, c.eventId, 'retry', { revision: c.revision, stage, failureRef: marker, ...summary });
+    await store.put(marker, summary);
+  }
+
+  private async deliveryResult(c: SexualCase, stage: 'review_delivery' | 'decision_record', success: boolean): Promise<void> {
+    await this.storage.transaction(async tx => {
+      const latest = await tx.get<SexualCase>(PREFIX + c.eventId);
+      if (!latest || latest.revision !== c.revision) throw new Superseded();
+      if (success) {
+        if (stage === 'review_delivery') latest.reviewAcceptedAt = this.now();
+        else latest.decisionRecordedAt = this.now();
+        if (latest.lastFailureStage === stage) {
+          delete latest.lastError; delete latest.lastFailureStage;
+        }
+        if (!this.needsDelivery(latest)) { latest.deliveryAttempts = 0; latest.deliveryRetryAt = 0; }
+      } else {
+        latest.deliveryAttempts = (latest.deliveryAttempts || 0) + 1;
+        latest.deliveryRetryAt = this.now() + Math.min(5 * 60_000, 30_000 * 2 ** Math.min(latest.deliveryAttempts - 1, 4));
+        latest.lastError = 'Quarantine delivery incomplete; retry scheduled';
+        latest.lastFailureStage = stage;
+        await this.failureAudit(tx, latest, stage, { attempt: latest.deliveryAttempts });
+      }
+      await this.save(tx, latest);
+      c.reviewAcceptedAt = latest.reviewAcceptedAt;
+      c.decisionRecordedAt = latest.decisionRecordedAt;
+      c.deliveryAttempts = latest.deliveryAttempts;
+      c.deliveryRetryAt = latest.deliveryRetryAt;
+      if (!c.lastFailureStage || ['review_delivery', 'decision_record'].includes(c.lastFailureStage)) {
+        c.lastError = latest.lastError; c.lastFailureStage = latest.lastFailureStage;
+      }
+    });
+  }
+
+  private async recordDecision(c: SexualCase): Promise<void> {
+    if (!c.actor || !c.holdsAppliedAt || c.decisionRecordedAt || !this.io.recordDecision
+      || (c.deliveryRetryAt || 0) > this.now()) return;
+    await this.current(c);
+    try {
+      await this.io.recordDecision(c);
+      await this.deliveryResult(c, 'decision_record', true);
+    } catch (error) {
+      if (error instanceof Superseded) throw error;
+      await this.deliveryResult(c, 'decision_record', false);
+    }
+  }
+
+  private async deliver(eventId: string): Promise<void> {
+    const existing = this.delivering.get(eventId);
+    if (existing) return existing;
+    const work = (async () => {
+      for (let pass = 0; pass < 3; pass++) {
+        try {
+          const c = await this.get(eventId);
+          if (!c || c.state === 'out_of_scope' || !c.snapshot || (c.deliveryRetryAt || 0) > this.now()) return;
+          await this.recordDecision(c);
+          if (!c.reviewAcceptedAt) {
+            await this.current(c);
+            try {
+              await this.io.review(c);
+              await this.deliveryResult(c, 'review_delivery', true);
+            } catch (error) {
+              if (error instanceof Superseded) throw error;
+              await this.deliveryResult(c, 'review_delivery', false);
+            }
+          }
+          return;
+        } catch (error) { if (!(error instanceof Superseded)) throw error; }
+      }
+    })();
+    this.delivering.set(eventId, work);
+    try { await work; } finally { this.delivering.delete(eventId); }
   }
 
   private async escalate(eventIds: string[]): Promise<void> {
@@ -377,18 +498,25 @@ export class SexualQuarantine {
   }
 
   // Upgrade older persisted cases incrementally without making the first alarm
-  // scan the entire case history. New writes already maintain all three indices.
+  // scan the entire case history. New writes already maintain the current indices.
+  // TODO(#346): remove the compatibility reindex only after every environment's
+  // stored-case inventory proves the older index generations are retired.
   private async bootstrap(): Promise<void> {
-    if (await this.storage.get('sexual-scheduler-v2-ready')) return;
+    if (await this.storage.get('sexual-scheduler-v3-ready')) return;
     await this.storage.transaction(async tx => {
-      if (await tx.get('sexual-scheduler-v2-ready')) return;
-      const after = await tx.get<string>('sexual-scheduler-v2-cursor') || '';
+      if (await tx.get('sexual-scheduler-v3-ready')) return;
+      const after = await tx.get<string>('sexual-scheduler-v3-cursor') || '';
       const cases = await tx.list<SexualCase>({ prefix: PREFIX, startAfter: after, limit: 100 });
       for (const [key, c] of cases) {
+        // Previous verified terminal states already required every hold ACK.
+        if (c.actor && c.verifiedAt && ['removed', 'restored', 'restored_restricted'].includes(c.state) && !c.holdsAppliedAt) {
+          c.holdsAppliedAt = c.verifiedAt;
+          await tx.put(key, c);
+        }
         await this.index(tx, c);
-        await tx.put('sexual-scheduler-v2-cursor', key);
+        await tx.put('sexual-scheduler-v3-cursor', key);
       }
-      if (cases.size < 100) await tx.put('sexual-scheduler-v2-ready', true);
+      if (cases.size < 100) await tx.put('sexual-scheduler-v3-ready', true);
     });
   }
 
@@ -403,13 +531,21 @@ export class SexualQuarantine {
     const due = await this.storage.list<string>({
       prefix: DUE, end: this.timedKey(DUE, this.now() + 1), limit: 3,
     });
-    const after = await this.storage.get<string>('sexual-reconcile-scan') || '';
+    const after = await this.storage.get<string>('sexual-reconcile-v3-scan') || '';
     let slow = await this.storage.list<string>({ prefix: RECONCILE, startAfter: after, limit: 1 });
     if (slow.size === 0) slow = await this.storage.list<string>({ prefix: RECONCILE, limit: 1 });
-    for (const key of slow.keys()) await this.storage.put('sexual-reconcile-scan', key);
+    for (const key of slow.keys()) await this.storage.put('sexual-reconcile-v3-scan', key);
     // One failing case must not leave the others running unawaited.
-    const results = await Promise.allSettled([...new Set([...due.values(), ...slow.values()])].map(eventId => this.advance(eventId)));
-    const failed = results.find((r): r is PromiseRejectedResult => r.status === 'rejected');
+    const results = await Promise.allSettled([...new Set([...due.values(), ...slow.values()])].map(eventId => this.advance(eventId, false)));
+    // Select after enforcement, so a newly archived snapshot can be handed off
+    // immediately. Unavailable snapshots never occupy the delivery lane.
+    const delivery = await this.storage.list<string>({
+      prefix: DELIVERY, end: this.timedKey(DELIVERY, this.now() + 1), limit: 1,
+    });
+    // COOP and decision-log retries have their own single slow lane. They never
+    // consume one of the three enforcement slots, including after an outage.
+    const deliveryResults = await Promise.allSettled([...delivery.values()].map(eventId => this.deliver(eventId)));
+    const failed = [...results, ...deliveryResults].find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failed) throw failed.reason;
   }
 }

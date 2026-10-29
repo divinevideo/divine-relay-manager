@@ -6,9 +6,10 @@ import { isLowerHex64 } from './hex';
 // this hold says nothing about an independent ban or another stream's decision.
 export async function recordSexualQuarantineDecision(db: D1Database, c: SexualCase): Promise<void> {
   if (!isLowerHex64(c.eventId) || !Number.isSafeInteger(c.revision) || c.revision < 1
-    || !c.actor || c.actor === 'auto' || !c.reason?.trim() || !c.verifiedAt
-    || !['restored', 'restored_restricted', 'removed'].includes(c.state)
-    || c.goal !== (c.state === 'removed' ? 'remove' : 'restore')) {
+    || !c.actor || c.actor === 'auto' || !c.reason?.trim()
+    || (!c.holdsAppliedAt && !c.verifiedAt)
+    || !(c.goal === 'remove' ? ['pending', 'removed'] : c.goal === 'restore' ? ['pending', 'restored', 'restored_restricted'] : []).includes(c.state)
+    || (c.state === 'pending' && !c.holdsAppliedAt)) {
     throw new Error('Unverified human quarantine decision');
   }
   await ensureSchema(db);
@@ -25,10 +26,10 @@ export async function recordSexualQuarantineDecision(db: D1Database, c: SexualCa
         action = excluded.action, reason = excluded.reason, moderator_pubkey = excluded.moderator_pubkey,
         report_id = excluded.report_id, reporter_pubkey = excluded.reporter_pubkey
       WHERE excluded.revision > sexual_quarantine_reviews.revision`)
-      .bind(c.eventId, c.revision, action, c.reason, c.actor, c.firstReport.id, c.firstReport.pubkey),
+      .bind(c.eventId, c.revision, action, c.reason, isLowerHex64(c.actor) ? c.actor : '', c.firstReport.id, c.firstReport.pubkey),
     db.prepare(`INSERT INTO moderation_decisions
         (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey)
-      SELECT 'event', event_id, action, reason, moderator_pubkey, report_id, reporter_pubkey
+      SELECT 'event', event_id, action, reason, NULLIF(moderator_pubkey, ''), report_id, reporter_pubkey
       FROM sexual_quarantine_reviews
       WHERE event_id = ? AND revision = ? AND action = ? AND logged_revision < revision`)
       .bind(c.eventId, c.revision, action),

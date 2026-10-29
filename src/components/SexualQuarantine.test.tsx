@@ -53,6 +53,18 @@ beforeEach(() => {
 });
 
 describe('Sexual quarantine review', () => {
+  it('lets moderators reach later queue pages and return to the first page', async () => {
+    const second = 'f'.repeat(64);
+    vi.stubGlobal('fetch', vi.fn(async (url: string) => Response.json(url.includes('cursor=')
+      ? { cases: [makeCase({ eventId: second })] }
+      : { cases: [current], nextCursor: 'sexual-review-v3:0:0000000000001000:' + EVENT })));
+    renderQueue('/sexual-quarantine');
+    expect(await screen.findByRole('link', { name: EVENT })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Next cases' }));
+    expect(await screen.findByRole('link', { name: second })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Previous cases' }));
+    expect(await screen.findByRole('link', { name: EVENT })).toBeInTheDocument();
+  });
   it('lists overdue cases with navigable full event IDs and actual pending state', async () => {
     renderQueue('/sexual-quarantine');
     expect(await screen.findByRole('link', { name: EVENT })).toHaveAttribute('href', `/sexual-quarantine/${EVENT}`);

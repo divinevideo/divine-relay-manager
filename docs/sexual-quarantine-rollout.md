@@ -37,11 +37,15 @@ from falling back to legacy adult base bans. Do not erase that marker. Before th
 first activation, the existing legacy behavior remains in effect. Verified non-video
 reports retain the legacy writer, including after video admission is disabled; a
 durable per-target/report marker prevents replay from repeating that attempt.
-Unavailable or invalid targets never authorize legacy fallback: a qualifying
-report retains the replay window until classification can complete. This can hold
-historical replay behind an unavailable target; live known-video handling continues.
-Monitor replay age and restore lookup availability or perform an authorized
-backfill; do not skip the cursor to silence the failure.
+Unavailable or invalid targets never authorize legacy fallback. Transport failures
+retain the replay window. A successful empty public read plus the relay's explicit
+`Event not found or not banned` response instead archives the complete signed
+report under `sexual-absent:<target ID>:<report ID>` in bounded parts and alerts for
+operator backfill review, without pinning unrelated replay. This is a point-in-time
+absence response, not proof of deletion or global freshness. Repeated ingestion of
+those same archived bytes is deduplicated; operators must inspect and backfill
+them if the target later becomes available. Never advance a cursor merely to silence
+a transport failure.
 
 An exact configured adult category keeps its own trusted-client and threshold
 policy; canonical alias fallback is used only when that category is unconfigured.
@@ -50,13 +54,20 @@ whole reporter count, matching the legacy count comparison. A case retains the
 threshold captured at its creation.
 
 Each alarm escalates up to 100 overdue deadlines before network IO, independently
-of the four-case IO budget. Three due cases take priority and one stable
-hidden/removed case retains reconciliation capacity.
+of network IO. Three due cases take priority, one stable hidden/removed case retains
+reconciliation capacity, and a separate one-case lane handles COOP/decision delivery.
+Delivery retries back off from 30 seconds to five minutes and do not consume urgent
+enforcement slots. Repeated failures update a separate counter while retaining the
+first append-only audit event, so an outage cannot displace provenance from history.
 Stable cases do not sit ahead of urgent retries. This still bounds throughput:
 measure due-queue age, deadline backlog, and drift repair delay at expected load.
-Existing unindexed cases are migrated in 100-case alarm transactions; newly
-admitted cases are indexed immediately. A first-report-only case is escalated
-after 15 minutes.
+Existing unindexed cases are migrated in 100-case alarm transactions; the first
+queue read finishes remaining batches before issuing a cursor. That first read is
+proportional to retained case history. Subsequent pages contain at most 100 cases,
+with enforcement cases before below-threshold reviews, ordered by deadline within
+each group. Newly admitted cases are indexed immediately. A first-report-only case
+escalates after 15 minutes. Crossing the hide threshold starts a fresh 15-minute
+deadline and escalation while preserving the original report timestamp.
 Pending human actions receive their own 15-minute deadline. Alert delivery must be
 routed from the `[ALERT] Sexual quarantine` and replay messages to the staffed
 on-call destination before activation; the code emits logs, not a paging service.
@@ -70,13 +81,21 @@ confirm effective rows; HTTP success alone is insufficient. Higher revisions win
 release tombstones must survive delayed requests. Global `allowevent` is never the
 implementation of this stream's Restore. Unversioned legacy review/restore calls
 cannot supersede an existing human Remove; use the current case revision.
+Blossom limits each hash to 128 lifetime hold IDs, including released tombstones.
+This caller reuses one bounded ID per event. A capacity 409 means no hold was
+applied; it remains pending and must alert an operator. Never allocate a new ID to
+retry it or discard tombstones. A release skips candidates with no existing own hold.
 
 Cases capture the signed video event and signed reports, source and receive times,
 canonical category, controlled-origin hashes/paths, deadlines and audit decisions.
-Only signed mappings are actionable. Verified non-video targets are classified
+Signed URLs and hash tags are candidates. Authenticated media metadata must confirm
+ownership eligibility before applying a media hold, including hashes advertised
+with mirror URLs. Eligibility is retried separately without changing signed evidence.
+Unknown eligibility prevents a verified-hiding claim while eligible assets and the
+event can be held. Verified non-video targets are classified
 before admission and stay with the legacy writer. Older cases classified as
 `out_of_scope` leave this stream's queues and cannot receive its Restore/Remove
-commands. Missing or invalid targets remain retryable, never assumed non-video.
+commands. Missing or invalid targets are never assumed non-video.
 Signed source objects and snapshots are archived under immutable full-ID references
 in bounded parts, without truncation; hydrated reviewer reads reproduce the originals.
 The case metadata and audit rows remain below Durable Object KV value limits.
@@ -91,14 +110,21 @@ hidden. Existing browser copies cannot be recalled.
 
 Remove keeps this case's holds; it does not erase bytes. Restore releases only this
 case's holds. `restored_restricted` means release is confirmed but another hold or
-base restriction still applies; it is not successful public restoration. The
-generic Allow/Review returns a conflict with `quarantineReleased: true` and
-`remainingRestrictions: true` for this outcome rather than claiming success.
-Both reviewer entry points project the same revisioned human intent to D1 as
+base restriction still applies; it is not successful public restoration. A verified,
+signed author deletion is a remaining restriction, never an instruction to revive
+the event. Generic Reports Allow/Review returns 409 while the case still needs a
+revisioned decision. After a scoped Restore is verified and recorded, a separate
+Reports Allow can lift the base event ban; other named holds remain intact.
+Versioned decisions project human intent to D1 as
 `sexual_quarantine_restore` or `sexual_quarantine_remove`, set target human-review
-protection, and append an idempotent Reports decision. A D1 failure retains the
-verified enforcement state, retries the recording stage, and does not claim the
-review is recorded. A newer revision fences delayed projections. The additive
+protection, and append an idempotent Reports decision. This happens after accepted
+scoped commands even when complete public verification remains pending; recorded
+human intent is not a claim that delivery is hidden or restored. D1 failures retry
+without claiming the review is recorded. Moderator pubkeys are hex or NULL;
+unattributed reviewer labels remain in the case audit. The human decision resolves
+linked Zendesk review tickets on a best-effort, three-second request budget; failed
+ticket updates remain open for manual retry. Enforcement remains separately urgent
+until verified. A newer revision fences delayed projections. The additive
 `sexual_quarantine_reviews` table is initialized through the repository's existing
 `ensureSchema` path; no out-of-band production schema command has been run.
 
