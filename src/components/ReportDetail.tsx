@@ -386,10 +386,21 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     // keeps what is showing: nothing known about it is sensitive.
     return targetReportsMayBePartial ? undefined : false;
   }, [allReportsForTarget, targetReportsMayBePartial]);
+  // The report whose target has had reports in hand while the pane showed it.
+  // When they go (the target left the list, handled elsewhere), no later report
+  // on it can reach the pane, so its media is treated as sensitive, as main
+  // does: what showed by default hides, a Show on a target not known to be
+  // sensitive is forgotten, and a Show on a sensitive one is kept. Not the
+  // same as reports that have not arrived yet. Set during render, so the media
+  // is never mounted meanwhile.
+  const [hadReportsFor, setHadReportsFor] = useState<string | null>(null);
+  if (allReportsForTarget && report && hadReportsFor !== report.id) setHadReportsFor(report.id);
+  const targetReportsLeft = !allReportsForTarget && !!report && hadReportsFor === report.id;
   // The pane's media viewers take "not known yet" as null rather than false:
   // both start hidden, but only under null does a later false (the reports turn
   // out sensitive) forget a Show the moderator made meanwhile.
-  const mediaShownByDefault = hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
+  const mediaShownByDefault = targetReportsLeft ? false
+    : hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
 
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({
@@ -1066,7 +1077,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
-            hideMediaByDefault={hasHighPriorityReports ?? null}
+            hideMediaByDefault={mediaShownByDefault === null ? null : !mediaShownByDefault}
             onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this
               // user (#156). Encoded: the p tag comes from an attacker-authored

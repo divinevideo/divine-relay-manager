@@ -305,6 +305,77 @@ describe("the completeness rule under MediaPreview's null default", () => {
   });
 });
 
+// The open report's target can leave the list (handled elsewhere), and with it
+// every report on it: allReportsForTarget goes from defined to undefined. No
+// later report can reach the pane then, so it treats them as sensitive, as main
+// does: what showed by default hides, a Show on a non-sensitive target is
+// forgotten, and a Show on a sensitive one is kept.
+describe("when the open report's reports leave hand", () => {
+  function treeAll(client: QueryClient, r: NostrEvent, all: NostrEvent[] | undefined) {
+    return (
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <ReportDetail report={r} allReportsForTarget={all} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+  }
+
+  it('hides the post media, avatar and recent-post media that showed by default', () => {
+    const client = qc();
+    const a = NONSENSITIVE(E1);
+    const { rerender } = render(treeAll(client, a, [a]));
+    expect(hasImg(IMG1)).toBe(true);
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(POST_IMG)).toBe(true);
+
+    rerender(treeAll(client, a, undefined));
+    expect(hasImg(IMG1)).toBe(false);
+    expect(hasImg(AVATAR)).toBe(false);
+    expect(hasImg(POST_IMG)).toBe(false);
+  });
+
+  it('forgets a Show the moderator made on a non-sensitive target', () => {
+    const client = qc();
+    const a = NONSENSITIVE(E1);
+    const { rerender } = render(treeAll(client, a, [a]));
+    fireEvent.click(mediaCard()[0]); // Hide
+    fireEvent.click(mediaCard()[0]); // Show
+    expect(hasImg(IMG1)).toBe(true);
+
+    rerender(treeAll(client, a, undefined));
+    expect(hasImg(IMG1)).toBe(false);
+  });
+
+  it('keeps a Show the moderator made on a sensitive target, as main does', () => {
+    const client = qc();
+    const a = CSAM(E1);
+    const { rerender } = render(treeAll(client, a, [a]));
+    fireEvent.click(mediaCard()[0]);
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    fireEvent.click(screen.getByRole('button', { name: /show 1 media/i }));
+
+    rerender(treeAll(client, a, undefined));
+    expect(hasImg(IMG1)).toBe(true);
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(POST_IMG)).toBe(true);
+  });
+
+  // Not the same as reports that have not arrived yet: a Show made while they
+  // load is still forgotten when they land sensitive.
+  it('does not take a first load for reports that left', () => {
+    const client = qc();
+    const a = NONSENSITIVE(E1);
+    const { rerender } = render(treeAll(client, a, undefined));
+    expect(hasImg(IMG1)).toBe(false);
+    fireEvent.click(mediaCard()[0]);
+    expect(hasImg(IMG1)).toBe(true);
+
+    rerender(treeAll(client, a, [a, CSAM(E1)]));
+    expect(hasImg(IMG1)).toBe(false);
+  });
+});
+
 describe('opening a CSAM-signal report after a non-sensitive one', () => {
   // The image element must never be created, not just hidden after the first
   // commit: setting its src starts the request.
