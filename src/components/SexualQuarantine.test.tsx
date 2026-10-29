@@ -94,7 +94,7 @@ describe('Sexual quarantine review', () => {
     fireEvent.change(screen.getByLabelText('Decision reason'), { target: { value: '  No explicit activity  ' } });
     fireEvent.click(restore);
     await waitFor(() => expect(lastDecision).toEqual({ revision: 3, decision: 'restore', actor: 'd'.repeat(64), reason: 'No explicit activity' }));
-    expect(await screen.findByText(/decision recorded.*verification pending/i)).toBeInTheDocument();
+    expect(await screen.findByText(/decision saved.*verification or reports recording pending/i)).toBeInTheDocument();
     expect(screen.getByText('Pending verification')).toBeInTheDocument();
     expect(screen.queryByText('Restored')).not.toBeInTheDocument();
   });
@@ -108,6 +108,13 @@ describe('Sexual quarantine review', () => {
     expect(await screen.findByText('Revision 9')).toBeInTheDocument();
     expect(lastDecision).toMatchObject({ revision: 3, decision: 'remove' });
     expect(vi.mocked(fetch).mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1);
+  });
+
+  it('keeps unrecorded human decisions visible as urgent work', async () => {
+    current = makeCase({ goal: 'remove', state: 'removed', actor: 'reviewer' });
+    renderQueue();
+    expect(await screen.findByText('Human decision saved; recording in Reports is pending.')).toBeInTheDocument();
+    expect(screen.getByText('Overdue')).toBeInTheDocument();
   });
 
   it('explains remaining restrictions after a restore', async () => {

@@ -3,9 +3,11 @@ import { callNip86Rpc, type Nip86Env, type SecretStoreSecret } from './nip86';
 import { queryRelay } from './relay-profile';
 import { readBlossomSecret, type MediaServerEnv } from './media-server';
 import { isLowerHex64 } from './hex';
+import { recordSexualQuarantineDecision } from './sexual-quarantine-decision';
 import { OutsideVideoScope, type QuarantineIO, type QuarantineSnapshot } from './sexual-quarantine';
 
 export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv {
+  DB?: D1Database;
   SEXUAL_QUARANTINE_ENABLED?: string;
   COOP_URL?: string;
   COOP_API_KEY?: string | SecretStoreSecret;
@@ -166,6 +168,10 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
         return 'restricted';
       }
       return 'pending';
+    },
+    async recordDecision(c) {
+      if (!env.DB) throw new Error('Moderation database unavailable');
+      await recordSexualQuarantineDecision(env.DB, c);
     },
     async review(c) {
       if (!env.COOP_URL || !env.COOP_API_KEY || !env.REVIEWER_BASE_URL) throw new Error('Review delivery not configured');

@@ -1259,15 +1259,11 @@ async function handleModerate(
           moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
-          // Flatten to 500, matching delete_event, and ban_pubkey for anything but an
-          // outright refusal. Neither banevent nor allowevent is age-review guarded
-          // (that guard covers only suspendpubkey, unsuspendpubkey and unbanpubkey),
-          // so there is no 409/503 whose code a caller would need preserved -- and
-          // forwarding would relabel a transient relay 502 as a terminal 400, which
-          // retrying clients read as "do not retry".
+          // A case revision conflict or a verified scoped release with other
+          // restrictions is terminal for this request. Transient IO still retries.
           return jsonResponse(
-            { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
-            500,
+            { ...result, success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            result.conflict ? 409 : 500,
             corsHeaders,
           );
         }

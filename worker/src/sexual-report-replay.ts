@@ -12,7 +12,8 @@ export function reportCategory(tags: string[][]): string {
   const candidates = [...tags.filter(t => t[0] === 'report').map(t => t[1]),
     ...tags.filter(t => t[0] === 'l' && t[2] === 'social.nos.ontology').map(t => t[1]),
     ...tags.filter(t => t[0] === 'l' && t[2] === 'MOD').map(t => t[1]),
-    ...tags.filter(t => t[0] === 'e' || t[0] === 'p').map(t => t[2])];
+    ...tags.filter(t => t[0] === 'e').map(t => t[2]),
+    ...tags.filter(t => t[0] === 'p').map(t => t[2])];
   // An explicit child-safety allegation keeps its dedicated owner even when a
   // report also carries an adult-sexual category. No new immediate categories.
   return candidates.find(c => c && CHILD_CATEGORIES.has(c.toLowerCase())) || candidates.find(Boolean) || 'unknown';

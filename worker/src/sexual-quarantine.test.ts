@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { SexualQuarantine, OutsideVideoScope, adultSexualCategory, type QuarantineIO } from './sexual-quarantine';
+import { finalizeEvent } from 'nostr-tools';
+import { SexualQuarantine, OutsideVideoScope, adultSexualCategory, type QuarantineIO, type SexualCase } from './sexual-quarantine';
 
 const EVENT = '1'.repeat(64);
 const HASH = 'a'.repeat(64);
@@ -12,10 +13,13 @@ function fixture() {
   const data = new Map<string, unknown>();
   const store = {
     get: async (key: string) => structuredClone(data.get(key)),
-    put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
+    put: async (key: string, value: unknown) => {
+      if (new TextEncoder().encode(JSON.stringify(value)).byteLength > 128 * 1024) throw new Error('Durable value exceeds 128 KiB');
+      data.set(key, structuredClone(value));
+    },
     delete: async (key: string) => data.delete(key),
-    list: async ({ prefix, limit = 1000, startAfter = '', reverse = false }: { prefix: string; limit?: number; startAfter?: string; reverse?: boolean }) =>
-      new Map([...data].filter(([k]) => k.startsWith(prefix) && k > startAfter).sort(([a], [b]) => reverse ? b.localeCompare(a) : a.localeCompare(b)).slice(0, limit)),
+    list: async ({ prefix, limit = 1000, startAfter = '', end, reverse = false }: { prefix: string; limit?: number; startAfter?: string; end?: string; reverse?: boolean }) =>
+      new Map([...data].filter(([k]) => k.startsWith(prefix) && k > startAfter && (!end || k < end)).sort(([a], [b]) => reverse ? b.localeCompare(a) : a.localeCompare(b)).slice(0, limit)),
   };
   const storage = { ...store, transaction: async (fn: (tx: unknown) => unknown) => fn(store) } as unknown as DurableObjectStorage;
   const eventHolds = new Set<string>();
@@ -34,7 +38,210 @@ function fixture() {
     engine: () => new SexualQuarantine(storage, io, () => time) };
 }
 
+// Persisted cases from the previous scheduler have only the legacy job marker.
+function removedBacklog(f: ReturnType<typeof fixture>, count: number) {
+  for (let n = 1; n <= count; n++) {
+    const eventId = n.toString(16).padStart(64, '0');
+    const c: SexualCase = {
+      eventId, revision: 3, goal: 'remove', state: 'removed', reporters: 2, threshold: 2,
+      firstReport: report(n + 1000), createdAt: 1000, updatedAt: 1000, deadlineAt: 901000,
+      attempts: 1, retryAt: 0, snapshot: { event: { id: eventId }, assets: [HASH] },
+      actor: 'reviewer', reason: 'explicit activity', reviewAcceptedAt: 1000, verifiedAt: 1000,
+    };
+    f.data.set(`sexual-case:${eventId}`, c);
+    f.data.set(`sexual-job:${eventId}`, true);
+  }
+}
+
 describe('adult sexual report quarantine', () => {
+  it('preserves complete large Unicode evidence across storage and eviction', async () => {
+    const f = fixture(); const q = f.engine();
+    const video = structuredClone(finalizeEvent({ kind: 21, created_at: 1, tags: [], content: '€'.repeat(45000) }, new Uint8Array(32).fill(1)));
+    const source = structuredClone(finalizeEvent({ kind: 1984, created_at: 2,
+      tags: [['e', video.id, 'NS-sexualContent']], content: '€'.repeat(45000) }, new Uint8Array(32).fill(2)));
+    const originalReport = { id: source.id, pubkey: source.pubkey, reason: 'NS-sexualContent', source };
+    const snapshot = { event: video, assets: [HASH] };
+    expect(JSON.stringify(source).length).toBeLessThan(60000);
+    expect(JSON.stringify(video).length).toBeLessThan(60000);
+    expect(new TextEncoder().encode(JSON.stringify(source)).byteLength).toBeGreaterThan(128 * 1024);
+    vi.mocked(f.io.snapshot).mockResolvedValue(snapshot);
+    vi.mocked(f.io.verify).mockResolvedValue(true);
+    await q.admit(video.id, originalReport, 2); await q.admit(video.id, report(2), 2);
+    await q.advance(video.id);
+    const stored = f.data.get(`sexual-case:${video.id}`) as SexualCase;
+    expect(stored.firstReport.source).toBeUndefined();
+    expect(stored.snapshot).toBeUndefined();
+    expect(stored.firstReport.sourceRef).toBeDefined();
+    expect(stored.snapshotRef).toBeDefined();
+    const summary = (await q.list())[0];
+    expect(summary.firstReport.source).toBeUndefined();
+    expect(summary.snapshot).toBeUndefined();
+    expect(summary.firstReport.sourceRef).toBe(stored.firstReport.sourceRef);
+    expect(summary.snapshotRef).toBe(stored.snapshotRef);
+    const evicted = f.engine();
+    expect((await evicted.get(video.id))?.firstReport.source).toEqual(source);
+    expect((await evicted.get(video.id))?.snapshot).toEqual(snapshot);
+    expect((await evicted.history(video.id)).find(entry => (entry as { id?: string }).id === source.id)).toMatchObject({ source });
+    await evicted.admit(video.id, originalReport, 2);
+    expect((await evicted.get(video.id))?.reporters).toBe(2);
+    expect((await evicted.history(video.id)).filter(entry => (entry as { action: string }).action === 'report')).toHaveLength(2);
+    f.later(); await evicted.tick();
+    expect((await evicted.get(video.id))?.state).toBe('hidden');
+    expect(f.io.snapshot).toHaveBeenCalledTimes(1);
+    for (const [key, value] of f.data) {
+      if (key.includes(':part:')) expect(new TextEncoder().encode(JSON.stringify(value)).byteLength).toBeLessThanOrEqual(64 * 1024);
+    }
+  });
+
+  it('counts a report for each named target while deduplicating each target replay', async () => {
+    const f = fixture(); const q = f.engine();
+    const second = 'b'.repeat(64);
+    await q.admit(second, report(1), 2);
+    const shared = report(2);
+    await q.admit(EVENT, shared, 2);
+    await q.admit(second, shared, 2);
+    expect((await q.get(second))?.reporters).toBe(2);
+    expect((await q.get(second))?.goal).toBe('hide');
+    await q.admit(second, shared, 2);
+    expect((await q.get(second))?.reporters).toBe(2);
+    expect((await q.history(second)).filter(entry => (entry as { action: string }).action === 'report')).toHaveLength(2);
+  });
+
+  it('rejects the reserved automation identity for human decisions', async () => {
+    const f = fixture(); const q = f.engine();
+    const c = await q.admit(EVENT, report(1), 2);
+    for (const actor of ['auto', ' auto ', ' ']) {
+      await expect(q.decide(EVENT, c.revision, 'remove', actor, 'reviewed')).rejects.toThrow('Reviewer');
+    }
+    expect((await q.get(EVENT))?.revision).toBe(c.revision);
+    expect((await q.get(EVENT))?.goal).toBe('review');
+  });
+
+  it('processes an urgent retry before a thousand removed reconciliation jobs', async () => {
+    const f = fixture(); const q = f.engine();
+    removedBacklog(f, 1000);
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    vi.mocked(f.io.mediaHold).mockRejectedValueOnce(new Error('timeout'));
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.state).toBe('pending');
+    vi.mocked(f.io.verify).mockResolvedValue(true);
+    f.later(); await q.tick();
+    expect((await q.get(EVENT))?.state).toBe('hidden');
+    expect(f.io.verify).toHaveBeenCalledTimes(2);
+  });
+
+  it('reserves reconciliation capacity while processing three urgent cases', async () => {
+    const f = fixture(); const q = f.engine();
+    removedBacklog(f, 1000);
+    const targets = ['d'.repeat(64), 'e'.repeat(64), 'f'.repeat(64), EVENT].sort();
+    for (const [n, eventId] of targets.entries()) {
+      await q.admit(eventId, report(n * 2 + 1), 2); await q.admit(eventId, report(n * 2 + 2), 2);
+    }
+    vi.mocked(f.io.verify).mockResolvedValue(true);
+    await q.tick();
+    for (const eventId of targets.slice(0, 3)) expect((await q.get(eventId))?.state).toBe('hidden');
+    expect((await q.get(targets[3]))?.state).toBe('pending');
+    expect(f.io.snapshot).toHaveBeenCalledTimes(3);
+    expect(f.io.verify).toHaveBeenCalledTimes(4);
+  });
+
+  it('escalates overdue cases before IO despite a thousand removed jobs', async () => {
+    const f = fixture(); const q = f.engine();
+    removedBacklog(f, 1000);
+    await q.admit(EVENT, report(1), 2);
+    const second = 'f'.repeat(64);
+    await q.admit(second, report(2), 2);
+    for (let n = 0; n < 16; n++) f.later();
+    vi.mocked(f.io.snapshot).mockImplementation(async () => {
+      expect((await q.get(EVENT))?.escalatedAt).toBeDefined();
+      expect((await q.get(second))?.escalatedAt).toBeDefined();
+      return { event: { id: EVENT }, assets: [HASH] };
+    });
+    vi.mocked(f.io.verify).mockResolvedValue(true);
+    await q.tick();
+    expect((await q.get(EVENT))?.escalatedAt).toBeDefined();
+    expect((await q.get(second))?.escalatedAt).toBeDefined();
+    expect(f.io.snapshot).toHaveBeenCalledTimes(2);
+    expect(f.io.verify).toHaveBeenCalledTimes(1);
+  });
+
+  it('preserves escalation when an older same-revision worker finishes', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2);
+    let release!: () => void; let started!: () => void;
+    const begun = new Promise<void>(resolve => { started = resolve; });
+    vi.mocked(f.io.snapshot).mockImplementationOnce(async () => {
+      started(); await new Promise<void>(resolve => { release = resolve; });
+      return { event: { id: EVENT }, assets: [HASH] };
+    });
+    const running = q.advance(EVENT); await begun;
+    for (let n = 0; n < 16; n++) f.later();
+    const tick = q.tick();
+    // The deadline phase must commit while the existing IO is still blocked.
+    for (let n = 0; n < 100 && !(await q.get(EVENT))?.escalatedAt; n++) await Promise.resolve();
+    const escalatedAt = (await q.get(EVENT))?.escalatedAt;
+    release(); await Promise.all([running, tick]);
+    expect(escalatedAt).toBeDefined();
+    expect((await q.get(EVENT))?.escalatedAt).toBe(escalatedAt);
+    f.later(); await q.tick();
+    expect((await q.history(EVENT)).filter(entry => (entry as { action: string }).action === 'overdue')).toHaveLength(1);
+  });
+
+  it('drains overdue deadlines without repeatedly selecting already escalated cases', async () => {
+    const f = fixture(); const q = f.engine();
+    for (let n = 1; n <= 101; n++) await q.admit(n.toString(16).padStart(64, '0'), report(n), 2);
+    for (let n = 0; n < 16; n++) f.later();
+    await q.tick();
+    expect((await q.get('64'.padStart(64, '0')))?.escalatedAt).toBeDefined();
+    expect((await q.get('65'.padStart(64, '0')))?.escalatedAt).toBeUndefined();
+    await q.tick();
+    expect((await q.get('65'.padStart(64, '0')))?.escalatedAt).toBeDefined();
+    expect((await q.history('1'.padStart(64, '0'))).filter(entry => (entry as { action: string }).action === 'overdue')).toHaveLength(1);
+  });
+
+  it('recovers an older stored pending case and stops work after a successful restore', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2);
+    const c = (await q.get(EVENT))!;
+    // Keep only data written by the previous scheduler version.
+    f.data.clear(); f.data.set(`sexual-case:${EVENT}`, c); f.data.set(`sexual-job:${EVENT}`, true);
+    await q.tick();
+    expect((await q.get(EVENT))?.state).toBe('hidden');
+    await q.decide(EVENT, c.revision, 'restore', 'reviewer', 'approved');
+    await q.tick();
+    expect((await q.get(EVENT))?.state).toBe('restored');
+    for (let n = 0; n < 16; n++) f.later();
+    await q.tick();
+    expect(f.io.verify).toHaveBeenCalledTimes(2);
+    expect((await q.history(EVENT)).some(entry => (entry as { action: string }).action === 'overdue')).toBe(false);
+  });
+
+  it('retries decision recording after restoration without undoing verified visibility', async () => {
+    const f = fixture(); const q = f.engine();
+    const recordDecision = vi.fn(async () => {});
+    Object.assign(f.io, { recordDecision });
+    await q.admit(EVENT, report(1), 2); await q.admit(EVENT, report(2), 2); await q.advance(EVENT);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'restore', 'reviewer', 'approved');
+    recordDecision.mockRejectedValue(new Error('D1 unavailable'));
+    await q.advance(EVENT);
+    expect((await q.get(EVENT))?.state).toBe('restored');
+    expect((await q.get(EVENT))?.lastFailureStage).toBe('decision_record');
+    expect((await q.get(EVENT))?.decisionRecordedAt).toBeUndefined();
+    expect((await q.list()).map(item => item.eventId)).toContain(EVENT);
+    for (let n = 0; n < 16; n++) f.later();
+    await q.tick();
+    expect((await q.get(EVENT))?.escalatedAt).toBeDefined();
+    expect((await q.list()).map(item => item.eventId)).toContain(EVENT);
+    recordDecision.mockResolvedValue(undefined);
+    f.later(); await q.tick();
+    expect((await q.get(EVENT))?.decisionRecordedAt).toBeDefined();
+    expect((await q.get(EVENT))?.lastError).toBeUndefined();
+    expect(recordDecision).toHaveBeenCalledTimes(3);
+    expect(await q.list()).toEqual([]);
+    await q.decide(EVENT, (await q.get(EVENT))!.revision, 'remove', 'reviewer', 'new decision');
+    expect((await q.get(EVENT))?.decisionRecordedAt).toBeUndefined();
+  });
+
   it('orders the urgent queue by deadline before limiting its size', async () => {
     const f = fixture(); const q = f.engine();
     const oldest = 'f'.repeat(64);

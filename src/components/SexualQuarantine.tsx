@@ -22,7 +22,7 @@ const GOALS: Record<SexualCase['goal'], string> = {
 const time = (at?: number) => at ? new Date(at).toLocaleString() : 'Not recorded';
 
 function Urgency({ item }: { item: SexualCase }) {
-  if (item.state === 'out_of_scope' || (item.actor && item.state !== 'pending')) return null;
+  if (item.state === 'out_of_scope' || (item.actor && item.state !== 'pending' && item.decisionRecordedAt)) return null;
   return <Badge variant="destructive">{item.deadlineAt <= Date.now() ? 'Overdue' : 'Urgent review'}</Badge>;
 }
 
@@ -88,7 +88,7 @@ function CaseDetail({ eventId }: { eventId: string }) {
       client.setQueryData(key, result);
       if (active.current) {
         setReason('');
-        setNotice(result.state === 'pending' ? 'Decision recorded; verification pending.' : 'Decision recorded; check the verified state below.');
+        setNotice(result.state === 'pending' || (result.actor && !result.decisionRecordedAt) ? 'Decision saved; verification or Reports recording pending.' : 'Decision recorded; check the verified state below.');
       }
       await client.invalidateQueries({ queryKey: ['sexual-quarantine', apiUrl] });
     },
@@ -118,9 +118,11 @@ function CaseDetail({ eventId }: { eventId: string }) {
         <div><dt className="font-semibold">Last verified</dt><dd>{time(c.verifiedAt)}</dd></div>
         <div><dt className="font-semibold">Attempts / next retry</dt><dd>{c.attempts} / {time(c.retryAt)}</dd></div>
         <div><dt className="font-semibold">Review handoff accepted</dt><dd>{time(c.reviewAcceptedAt)}</dd></div>
+        <div><dt className="font-semibold">Human review recorded in Reports</dt><dd>{time(c.decisionRecordedAt)}</dd></div>
         <div><dt className="font-semibold">Escalated</dt><dd>{time(c.escalatedAt)}</dd></div>
       </dl>
       {c.state === 'restored_restricted' && <p>This quarantine hold was released; other restrictions still apply. Public visibility is not restored.</p>}
+      {c.actor && !c.decisionRecordedAt && <p>Human decision saved; recording in Reports is pending.</p>}
       {c.lastError && <p role="alert">{c.lastError}</p>}
       <section aria-label="Report provenance" className="space-y-1 text-sm break-all">
         <h3 className="font-semibold">First report</h3>

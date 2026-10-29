@@ -4,12 +4,12 @@ import { createQuarantineIO } from './sexual-quarantine-io';
 import { SexualQuarantine, OutsideVideoScope } from './sexual-quarantine';
 import * as nip86 from './nip86';
 import * as replay from './sexual-report-replay';
+import * as relayProfile from './relay-profile';
 import { finalizeEvent } from 'nostr-tools';
 
 vi.mock('./sexual-quarantine-io', () => ({ createQuarantineIO: vi.fn() }));
 const ID = '1'.repeat(64);
-function fixture(enabled = 'true') {
-  const data = new Map<string, unknown>();
+function fixture(enabled = 'true', data = new Map<string, unknown>()) {
   const storage = {
     get: async (key: string) => structuredClone(data.get(key)),
     put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
@@ -20,7 +20,7 @@ function fixture(enabled = 'true') {
   const durable = { ...storage, transaction: async (fn: (tx: unknown) => unknown) => fn(storage) } as unknown as DurableObjectStorage;
   const state = { storage: durable, blockConcurrencyWhile: async (fn: () => unknown) => fn(), waitUntil: vi.fn() } as unknown as DurableObjectState;
   const io = { snapshot: vi.fn(async () => ({ event: { id: ID }, assets: [] })), eventHold: vi.fn(async () => {}),
-    mediaHold: vi.fn(async () => {}), verify: vi.fn(async () => true), restorationStatus: vi.fn(async () => 'visible' as const), review: vi.fn(async () => {}) };
+    mediaHold: vi.fn(async () => {}), verify: vi.fn(async () => true), restorationStatus: vi.fn(async () => 'visible' as const), review: vi.fn(async () => {}), recordDecision: vi.fn(async () => {}) };
   vi.mocked(createQuarantineIO).mockReturnValue(io);
   const env = { NOSTR_NSEC: 'test', RELAY_URL: 'wss://relay.test', AUTO_HIDE_ENABLED: 'true', SEXUAL_QUARANTINE_ENABLED: enabled } as ReportWatcherEnv;
   const watcher = new ReportWatcher(state, env);
@@ -29,12 +29,101 @@ function fixture(enabled = 'true') {
     await watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true, trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['NS-sexualContent'], threshold: 2, requireTrustedClient: false }] }) }));
     const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, reason]] }, new Uint8Array(32).fill(n + 1));
     await (watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
+    return event as ReportEvent;
   };
-  return { watcher, io, send, durable, storage, env };
+  return { watcher, io, send, durable, storage, state, env, data };
 }
 afterEach(() => vi.restoreAllMocks());
 
 describe('sexual quarantine watcher integration', () => {
+  it('keeps verified nonvideo reports on legacy enforcement while video quarantine is enabled', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    vi.spyOn(f.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    await f.send(1, 'NS-sexualContent');
+    expect(rpc).toHaveBeenCalledWith('banevent', [ID, expect.stringContaining('Auto-hidden: NS-sexualContent')], f.env);
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('keeps verified nonvideo legacy enforcement after quarantine admission is disabled', async () => {
+    const f = fixture();
+    f.env.SEXUAL_QUARANTINE_ENABLED = 'false';
+    f.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    vi.spyOn(f.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    await f.send(1, 'NS-sexualContent');
+    expect(rpc).toHaveBeenCalledWith('banevent', [ID, expect.stringContaining('Auto-hidden: NS-sexualContent')], f.env);
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('retains replay on unknown targets then delivers verified nonvideo reports once', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValue(new Error('Target unavailable'));
+    vi.spyOn(f.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    const event = await f.send(1, 'NS-sexualContent');
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [event] });
+    const ingest = (report: ReportEvent, category: string, target: string) =>
+      (f.watcher as unknown as { processAutoHide(e: ReportEvent, c: string, t: string, advance: boolean): Promise<void> }).processAutoHide(report, category, target, false);
+    await expect(replay.replayAdultReports(f.durable, f.env.RELAY_URL, ingest, 10)).rejects.toThrow();
+    expect(await f.durable.get('sexual-replay-through')).toBeUndefined();
+    expect(rpc).not.toHaveBeenCalled();
+    f.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    await replay.replayAdultReports(f.durable, f.env.RELAY_URL, ingest, 10);
+    await replay.replayAdultReports(f.durable, f.env.RELAY_URL, ingest, 30);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(await f.durable.get('sexual-replay-through')).toBe(30);
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('does not pin replay on untrusted reports for unavailable targets', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValue(new Error('Target unavailable'));
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: ['Divine'], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['NS-sexualContent'], threshold: 2, requireTrustedClient: true }],
+    }) }));
+    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, 'NS-sexualContent'], ['client', 'Untrusted']] }, new Uint8Array(32).fill(9));
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [event] });
+    await replay.replayAdultReports(f.durable, f.env.RELAY_URL,
+      (report, category, target) => (f.watcher as unknown as { processAutoHide(e: ReportEvent, c: string, t: string, advance: boolean): Promise<void> }).processAutoHide(report, category, target, false), 10);
+    expect(f.io.snapshot).not.toHaveBeenCalled();
+    expect(await f.durable.get('sexual-replay-through')).toBe(10);
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
+  });
+
+  it('preserves exact-category legacy eligibility when the video tier rejects the client', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    vi.spyOn(f.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: ['Divine'], tiers: [
+        { kind: 'threshold', name: 'Video', categories: ['NS-sexualContent'], threshold: 2, requireTrustedClient: true },
+        { kind: 'threshold', name: 'Other', categories: ['nudity'], threshold: 2, requireTrustedClient: false },
+      ],
+    }) }));
+    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, 'nudity']] }, new Uint8Array(32).fill(9));
+    await (f.watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
+    expect(rpc).toHaveBeenCalledWith('banevent', [ID, expect.stringContaining('Auto-hidden: nudity')], f.env);
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('retains legacy processed-report dedup across watcher restart', async () => {
+    const f = fixture();
+    f.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    vi.spyOn(f.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    await f.send(1, 'NS-sexualContent');
+    const restarted = fixture('true', f.data);
+    restarted.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    vi.spyOn(restarted.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    await restarted.send(1, 'NS-sexualContent');
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(restarted.io.snapshot).not.toHaveBeenCalled();
+  });
+
   it('leaves generic non-video moderation with its existing owner', async () => {
     const f = fixture();
     f.io.snapshot.mockRejectedValueOnce(new OutsideVideoScope());
@@ -133,6 +222,25 @@ describe('sexual quarantine watcher integration', () => {
       method: 'POST', body: JSON.stringify({ revision: 0, decision: 'restore', actor: 'reviewer', reason: 'approved' }),
     }));
     expect(response.status).toBe(409);
+  });
+
+  it('reports failed human-decision projection instead of a successful restore', async () => {
+    const f = fixture(); await f.send(1, 'NS-sexualContent'); await f.send(2, 'NS-sexualContent');
+    f.io.recordDecision.mockRejectedValue(new Error('Projection unavailable'));
+    const response = await f.watcher.fetch(new Request('https://do/event-visibility', {
+      method: 'POST', body: JSON.stringify({ eventId: ID, relayAction: 'allow', humanAction: 'allow_event', reason: 'approved' }),
+    }));
+    expect(response.status).toBe(502);
+    expect((await new SexualQuarantine(f.durable, f.io).get(ID))?.decisionRecordedAt).toBeUndefined();
+  });
+
+  it.each(['auto', ' auto ', '   '])('rejects automated or blank actor %j on the human case-decision endpoint', async actor => {
+    const f = fixture(); await f.send(1, 'NS-sexualContent');
+    const response = await f.watcher.fetch(new Request(`https://do/sexual-quarantine/${ID}`, {
+      method: 'POST', body: JSON.stringify({ revision: 1, decision: 'restore', actor, reason: 'approved' }),
+    }));
+    expect(response.status).toBe(400);
+    expect((await new SexualQuarantine(f.durable, f.io).get(ID))?.actor).toBeUndefined();
   });
 
   it('existing human restore coordinates the independent holds', async () => {

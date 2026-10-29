@@ -4,7 +4,7 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
-import type { EventVisibilityOperation, EventVisibilityResult } from './event-visibility';
+import { quarantineRestoreResult, type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
   AUTO_HIDE_ACTION,
@@ -27,7 +27,7 @@ import { isLowerHex64 } from './hex';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
-import { SexualQuarantine, adultSexualCategory } from './sexual-quarantine';
+import { SexualQuarantine, OutsideVideoScope, adultSexualCategory } from './sexual-quarantine';
 import { createQuarantineIO, type SexualQuarantineEnv } from './sexual-quarantine-io';
 import { replayAdultReports, reportCategory } from './sexual-report-replay';
 
@@ -162,6 +162,7 @@ export class ReportWatcher implements DurableObject {
   private autoHideConfig: AutoHideConfig | null = null;
   private pendingAgeReviewPubkeys = new Set<string>();
   private sexualEngine?: SexualQuarantine;
+  private pendingLegacySexualReports = new Map<string, Promise<void>>();
 
   constructor(state: DurableObjectState, env: ReportWatcherEnv) {
     this.state = state;
@@ -579,11 +580,8 @@ export class ReportWatcher implements DurableObject {
       const sexual = this.sexualQuarantine();
       await sexual.advance(operation.eventId);
       const current = await sexual.get(operation.eventId);
-      const success = !!current && ['restored', 'restored_restricted'].includes(current.state);
-      let recorded = false;
-      if (success && this.env.DB) recorded = await markHumanAction(this.env.DB, 'event', operation.eventId, operation.humanAction!);
-      return Response.json({ success, recorded, error: success ? undefined : 'Decision saved; enforcement verification is pending' },
-        { status: success ? 200 : 502 });
+      const outcome = quarantineRestoreResult(current);
+      return Response.json(outcome, { status: outcome.success ? 200 : outcome.conflict ? 409 : 502 });
     }
 
     return Response.json(result, { status: result.success ? 200 : result.conflict ? 409 : 502 });
@@ -937,26 +935,48 @@ export class ReportWatcher implements DurableObject {
       return;
     }
 
-    // Once activated, admission rollback must not resume the legacy adult
-    // writer: its base bans cannot be released by named-hold Restore.
-    if (adultSexualCategory(category) && this.env.SEXUAL_QUARANTINE_ENABLED !== 'true'
-      && await this.state.storage.get('sexual-quarantine-activated')) return;
-
-    // Adult sexual reports have their own reversible, versioned holds. Keep the
-    // immediate child-safety path and every other report stream unchanged.
-    if (this.env.SEXUAL_QUARANTINE_ENABLED === 'true' && adultSexualCategory(category) && !getReportedList(event)) {
+    const adultReport = adultSexualCategory(category) && !getReportedList(event);
+    const quarantineActivated = adultReport && (this.env.SEXUAL_QUARANTINE_ENABLED === 'true'
+      || await this.state.storage.get('sexual-quarantine-activated'));
+    if (quarantineActivated) {
       const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
       if (JSON.stringify(wire).length > 60_000 || wire.kind !== 1984 || !verifyEvent(wire)) throw new Error('Invalid sexual report signature');
-      const tier = config.tiers.find(t => t.categories.some(c => adultSexualCategory(c)));
-      if (!tier) return;
+      const videoTier = config.tiers.find(t => t.categories.some(c => adultSexualCategory(c)));
+      const legacyTier = config.tiers.find(t => t.categories.includes(category));
       const client = event.tags.find(t => t[0] === 'client')?.[1]?.trim().toLowerCase();
-      if (tier.requireTrustedClient && !config.trustedClients.some(c => c.trim().toLowerCase() === client)) return;
+      const trusted = config.trustedClients.some(c => c.trim().toLowerCase() === client);
+      const qualifies = (tier: AutoHideTier | undefined) => !!tier && (!tier.requireTrustedClient || trusted);
+      // An ignored/untrusted report must not pin replay behind an unavailable
+      // target. The exact-category legacy tier can qualify independently.
+      if (!qualifies(videoTier) && !qualifies(legacyTier)) return;
+      const legacyKey = `sexual-legacy-processed:${targetEventId}:${event.id}`;
+      if (await this.state.storage.get(legacyKey)) return;
       const q = this.sexualQuarantine();
+      const existing = await q.get(targetEventId);
+      let nonvideo = existing?.state === 'out_of_scope';
+      if (!nonvideo && !existing?.snapshot) {
+        // IO validates the target signature before throwing OutsideVideoScope.
+        // Missing/unavailable/unverified targets must retain the replay window;
+        // a failed lookup never authorizes the irreversible legacy writer.
+        try { await createQuarantineIO(this.env).snapshot(targetEventId); }
+        catch (error) {
+          if (!(error instanceof OutsideVideoScope)) throw error;
+          nonvideo = true;
+        }
+      }
+      if (nonvideo) {
+        await this.processLegacySexualReport(event, category, targetEventId, legacyKey);
+        return;
+      }
+
+      // Once activated, video admission rollback must not resume base bans:
+      // those cannot be released by this stream's named-hold Restore.
+      if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true' || !videoTier || !qualifies(videoTier)) return;
       const admitted = await this.state.blockConcurrencyWhile(async () => {
         const human = await this.hasBlockingHumanResolution(targetEventId, false);
         if (human !== false) return false;
         await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
-          source: JSON.parse(JSON.stringify(event)) as object }, Math.max(2, tier.threshold));
+          source: JSON.parse(JSON.stringify(wire)) as object }, Math.max(2, videoTier.threshold));
         return true;
       });
       if (!admitted) return;
@@ -964,7 +984,26 @@ export class ReportWatcher implements DurableObject {
       if (advanceNow) await q.advance(targetEventId);
       return;
     }
+    await this.processLegacyAutoHide(event, category, targetEventId);
+  }
 
+  private async processLegacySexualReport(event: ReportEvent, category: string, targetEventId: string, key: string): Promise<void> {
+    const pending = this.pendingLegacySexualReports.get(key);
+    if (pending) return pending;
+    const work = (async () => {
+      if (await this.state.storage.get(key)) return;
+      await this.processLegacyAutoHide(event, category, targetEventId);
+      // Records processing, not confirmed enforcement: the legacy writer keeps
+      // its existing skip/failure policy. Prevent duplicate replay decisions.
+      await this.state.storage.put(key, true);
+    })();
+    this.pendingLegacySexualReports.set(key, work);
+    try { await work; } finally { this.pendingLegacySexualReports.delete(key); }
+  }
+
+  private async processLegacyAutoHide(event: ReportEvent, category: string, targetEventId: string): Promise<void> {
+    const config = this.autoHideConfig;
+    if (!config?.enabled) return;
     // Find which tier this category belongs to
     const tier = config.tiers.find(t => t.categories.includes(category));
     if (!tier) {
@@ -1664,7 +1703,7 @@ export class ReportWatcher implements DurableObject {
     let input: { revision?: unknown; decision?: unknown; actor?: unknown; reason?: unknown };
     try { input = await request.json(); } catch { return Response.json({ error: 'Invalid JSON' }, { status: 400, headers }); }
     if (!Number.isSafeInteger(input.revision) || (input.decision !== 'restore' && input.decision !== 'remove')
-      || typeof input.actor !== 'string' || !input.actor || input.actor.length > 200
+      || typeof input.actor !== 'string' || !input.actor.trim() || input.actor.trim() === 'auto' || input.actor.length > 200
       || typeof input.reason !== 'string' || !input.reason.trim() || input.reason.length > 2000) {
       return Response.json({ error: 'Revision, decision, reviewer and reason are required' }, { status: 400, headers });
     }
@@ -1677,6 +1716,6 @@ export class ReportWatcher implements DurableObject {
     await this.scheduleHealthCheck();
     await q.advance(eventId);
     const c = await q.get(eventId);
-    return Response.json(c, { status: c?.state === 'pending' ? 202 : 200, headers });
+    return Response.json(c, { status: c?.state === 'pending' || (c?.actor && !c.decisionRecordedAt) ? 202 : 200, headers });
   }
 }

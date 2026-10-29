@@ -34,10 +34,23 @@ Do not enable admission against old APIs. Existing case recovery continues even
 when the admission flag or watcher is stopped. Stopping the watcher stops new
 replay admission. Once activated, a persisted marker prevents disabled admission
 from falling back to legacy adult base bans. Do not erase that marker. Before the
-first activation, the existing legacy behavior remains in effect. The internal alarm rotates four
-jobs at a time, with per-case retries; measure backlog delay at expected peak load.
-Normal success rechecks hidden/removed enforcement at least every 60 seconds when
-its job is visited. A first-report-only case is also escalated after 15 minutes.
+first activation, the existing legacy behavior remains in effect. Verified non-video
+reports retain the legacy writer, including after video admission is disabled; a
+durable per-target/report marker prevents replay from repeating that attempt.
+Unavailable or invalid targets never authorize legacy fallback: a qualifying
+report retains the replay window until classification can complete. This can hold
+historical replay behind an unavailable target; live known-video handling continues.
+Monitor replay age and restore lookup availability or perform an authorized
+backfill; do not skip the cursor to silence the failure.
+
+Each alarm escalates up to 100 overdue deadlines before network IO, independently
+of the four-case IO budget. Three due cases take priority and one stable
+hidden/removed case retains reconciliation capacity.
+Stable cases do not sit ahead of urgent retries. This still bounds throughput:
+measure due-queue age, deadline backlog, and drift repair delay at expected load.
+Existing unindexed cases are migrated in 100-case alarm transactions; newly
+admitted cases are indexed immediately. A first-report-only case is escalated
+after 15 minutes.
 Pending human actions receive their own 15-minute deadline. Alert delivery must be
 routed from the `[ALERT] Sexual quarantine` and replay messages to the staffed
 on-call destination before activation; the code emits logs, not a paging service.
@@ -54,9 +67,13 @@ cannot supersede an existing human Remove; use the current case revision.
 
 Cases capture the signed video event and signed reports, source and receive times,
 canonical category, controlled-origin hashes/paths, deadlines and audit decisions.
-Only signed mappings are actionable. A signed non-video target is archived as
-`out_of_scope` before any hold or COOP submission; it leaves the urgent/retry queues
-and cannot receive Restore/Remove commands from this video workflow. Unmapped external media is outside Divine's
+Only signed mappings are actionable. Verified non-video targets are classified
+before admission and stay with the legacy writer. Older cases classified as
+`out_of_scope` leave this stream's queues and cannot receive its Restore/Remove
+commands. Missing or invalid targets remain retryable, never assumed non-video.
+Signed source objects and snapshots are archived under immutable full-ID references
+in bounded parts, without truncation; hydrated reviewer reads reproduce the originals.
+The case metadata and audit rows remain below Durable Object KV value limits. Unmapped external media is outside Divine's
 media controls and must be identified during review. URLs and derivatives outside
 the configured controlled origin require separate coverage before claiming them
 hidden. Existing browser copies cannot be recalled.
@@ -64,7 +81,17 @@ hidden. Existing browser copies cannot be recalled.
 Remove keeps this case's holds; it does not erase bytes. Restore releases only this
 case's holds. `restored_restricted` means release is confirmed but another hold or
 base restriction still applies; it is not successful public restoration. The
-Blossom hold is not a legal-retention lock: independently authorized erasure can
+generic Allow/Review returns a conflict with `quarantineReleased: true` and
+`remainingRestrictions: true` for this outcome rather than claiming success.
+Both reviewer entry points project the same revisioned human intent to D1 as
+`sexual_quarantine_restore` or `sexual_quarantine_remove`, set target human-review
+protection, and append an idempotent Reports decision. A D1 failure retains the
+verified enforcement state, retries the recording stage, and does not claim the
+review is recorded. A newer revision fences delayed projections. The additive
+`sexual_quarantine_reviews` table is initialized through the repository's existing
+`ensureSchema` path; no out-of-band production schema command has been run.
+
+The Blossom hold is not a legal-retention lock: independently authorized erasure can
 still occur. Define retention/access/erasure obligations before using it as legal
 preservation. Reviewers use the existing authenticated media proxy with private,
 no-store full/Range responses. Do not attach media or user-linked case data to PRs.

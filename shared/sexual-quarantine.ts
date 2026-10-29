@@ -1,4 +1,4 @@
-export interface QuarantineReport { id: string; pubkey: string; reason: string; source?: object }
+export interface QuarantineReport { id: string; pubkey: string; reason: string; source?: object; sourceRef?: string }
 export interface QuarantineSnapshot { event: object; assets: string[]; mediaPaths?: string[] }
 export type QuarantineGoal = 'review' | 'hide' | 'restore' | 'remove';
 export interface SexualCase {
@@ -15,8 +15,10 @@ export interface SexualCase {
   attempts: number;
   retryAt: number;
   snapshot?: QuarantineSnapshot;
+  snapshotRef?: string;
   actor?: string;
   decisionAt?: number;
+  decisionRecordedAt?: number;
   firstHiddenAt?: number;
   hideTriggeredAt?: number;
   lastFailureStage?: string;
