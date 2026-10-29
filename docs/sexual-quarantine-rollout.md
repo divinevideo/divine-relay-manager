@@ -43,6 +43,12 @@ historical replay behind an unavailable target; live known-video handling contin
 Monitor replay age and restore lookup availability or perform an authorized
 backfill; do not skip the cursor to silence the failure.
 
+An exact configured adult category keeps its own trusted-client and threshold
+policy; canonical alias fallback is used only when that category is unconfigured.
+For existing fractional thresholds, case admission rounds upward to the next
+whole reporter count, matching the legacy count comparison. A case retains the
+threshold captured at its creation.
+
 Each alarm escalates up to 100 overdue deadlines before network IO, independently
 of the four-case IO budget. Three due cases take priority and one stable
 hidden/removed case retains reconciliation capacity.

@@ -110,6 +110,50 @@ describe('sexual quarantine watcher integration', () => {
     expect(f.io.eventHold).not.toHaveBeenCalled();
   });
 
+  it('preserves the count semantics of accepted fractional legacy thresholds', async () => {
+    const f = fixture();
+    const response = await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: [], tiers: [
+        { kind: 'threshold', name: 'Legacy fractional', categories: ['nudity'], threshold: 2.5, requireTrustedClient: false },
+      ],
+    }) }));
+    expect(response.status).toBe(200);
+    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, 'nudity']] }, new Uint8Array(32).fill(9));
+    await (f.watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toMatchObject({ reporters: 1, threshold: 3 });
+  });
+
+  it('uses the exact adult category policy for video admission and threshold', async () => {
+    const f = fixture();
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: ['Divine'], tiers: [
+        { kind: 'threshold', name: 'Strict', categories: ['NS-sexualContent'], threshold: 3, requireTrustedClient: true },
+        { kind: 'threshold', name: 'Nudity', categories: ['nudity'], threshold: 5, requireTrustedClient: false },
+      ],
+    }) }));
+    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, 'nudity']] }, new Uint8Array(32).fill(9));
+    await (f.watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toMatchObject({ reporters: 1, threshold: 5 });
+  });
+
+  it('does not bypass a stricter exact video policy through another adult alias', async () => {
+    const f = fixture();
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: ['Divine'], tiers: [
+        { kind: 'threshold', name: 'Broad', categories: ['nudity'], threshold: 2, requireTrustedClient: false },
+        { kind: 'threshold', name: 'Strict', categories: ['NS-sexualContent'], threshold: 5, requireTrustedClient: true },
+      ],
+    }) }));
+    const send = async (trusted: boolean) => {
+      const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, 'NS-sexualContent'], ...(trusted ? [['client', 'Divine']] : [])] }, new Uint8Array(32).fill(trusted ? 8 : 9));
+      await (f.watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
+    };
+    await send(false);
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
+    await send(true);
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toMatchObject({ reporters: 1, threshold: 5 });
+  });
+
   it('retains legacy processed-report dedup across watcher restart', async () => {
     const f = fixture();
     f.io.snapshot.mockRejectedValue(new OutsideVideoScope());

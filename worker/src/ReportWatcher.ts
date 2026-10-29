@@ -941,8 +941,10 @@ export class ReportWatcher implements DurableObject {
     if (quarantineActivated) {
       const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
       if (JSON.stringify(wire).length > 60_000 || wire.kind !== 1984 || !verifyEvent(wire)) throw new Error('Invalid sexual report signature');
-      const videoTier = config.tiers.find(t => t.categories.some(c => adultSexualCategory(c)));
       const legacyTier = config.tiers.find(t => t.categories.includes(category));
+      // Preserve an explicitly configured category's trust and count policy.
+      // Canonical adult fallback is only for an otherwise unconfigured alias.
+      const videoTier = legacyTier || config.tiers.find(t => t.categories.some(c => adultSexualCategory(c)));
       const client = event.tags.find(t => t[0] === 'client')?.[1]?.trim().toLowerCase();
       const trusted = config.trustedClients.some(c => c.trim().toLowerCase() === client);
       const qualifies = (tier: AutoHideTier | undefined) => !!tier && (!tier.requireTrustedClient || trusted);
@@ -976,7 +978,8 @@ export class ReportWatcher implements DurableObject {
         const human = await this.hasBlockingHumanResolution(targetEventId, false);
         if (human !== false) return false;
         await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
-          source: JSON.parse(JSON.stringify(wire)) as object }, Math.max(2, videoTier.threshold));
+          source: JSON.parse(JSON.stringify(wire)) as object }, // A legacy fractional threshold means the next whole reporter count.
+          Math.max(2, Math.ceil(videoTier.threshold)));
         return true;
       });
       if (!admitted) return;

@@ -2,7 +2,7 @@
 
 Before source: `ddf6da544feab172bcb57a0f8d697cb1ba6e38f7` in an isolated detached worktree.
 After source: `93623731a92abf2234d403eb5b12120c8aeb5b8a`.
-The following artifact commit adds only these captures and their provenance.
+The artifact commit adds only these captures and their provenance. Later worker-only policy fixes leave the captured UI source unchanged.
 
 Captured with Playwright and headless Google Chrome in a new browser context,
 light theme, 1440×1280 desktop and 390×1000 mobile viewports. Capture command:

@@ -55,7 +55,7 @@ Files: docs/sexual-quarantine-rollout.md; affected source/tests only as needed.
 - [x] Run worker regression suite and frontend checks; record baseline blockers.
 - [ ] Perform a fresh independent review and address substantive findings.
 - [x] Document activation, safe canary, rollback, metrics and remaining live gates.
-- [ ] Commit with agent attribution, push an owned branch and open a focused PR.
+- [x] Commit with agent attribution, push an owned branch and open a focused PR.
 
 ## Execution record
 
@@ -66,9 +66,10 @@ Ruling: proceed from the user's approved proposal without an additional plan
 confirmation. Root worker install has a pre-existing Cloudflare/Vitest peer conflict;
 no dependency changes or peer-resolution bypasses are authorized by this plan.
 
-Local validation: frontend typecheck/lint/full tests/build passed before final
-environment-link fix; fresh full rerun is in progress. Locked Vitest 4 unit and
-real Miniflare D1 runs pass, and the worker full typecheck passes. Existing worker
+Local validation: frontend typecheck/lint/full tests/build, the full locked
+Vitest 4 worker unit suite, real Miniflare D1 suite, and worker typecheck pass.
+The PR records the current checked counts and head; synthetic desktop/mobile
+captures document queue, detail, pending, remaining-restriction, empty and error states. Existing worker
 `npm ci` fails its pre-existing pool-runner peer conflict; exact locked-version
 test tools were installed outside the repository and linked only in ignored
 node_modules, without project dependency/lockfile changes or peer bypass.
@@ -79,3 +80,9 @@ restoration recognition, audit/queue ordering, COOP empty-202 handling, stopped
 replay, rollback fallback, and cross-environment review links. Backend reviews
 also found late-origin cache refill and relay cache expiry/propagation issues;
 those are repaired and undergoing final full-diff review in their own worktrees.
+
+Follow-up review repaired non-video legacy routing, category policy selection,
+fractional legacy threshold compatibility, independent deadline/retry scheduling,
+bounded complete source persistence, and versioned D1 human-decision recording.
+Generic Restore reports remaining restrictions as incomplete public restoration.
+No service was deployed and no admission or visual provider was activated.
