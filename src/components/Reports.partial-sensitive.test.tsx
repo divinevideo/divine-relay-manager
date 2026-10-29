@@ -182,6 +182,55 @@ describe('a poll on which the open target has left the feed', () => {
     expect(hasImg(AVATAR)).toBe(false);
     expect(hasImg(RECENT_IMG)).toBe(false);
   });
+
+  // While a later poll is in flight the queue can no longer say the target has
+  // left, so the pane's default goes back to "not known", which changes nothing.
+  it('keeps them hidden while a later poll is in flight and after it answers', async () => {
+    let feedReads = 0;
+    let openThird = () => {};
+    const thirdGate = new Promise<void>(r => { openThird = r; });
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports?needs_attention=1')) {
+        feedReads += 1;
+        if (feedReads === 1) return jsonResponse({ success: true, events: [SPAM_REPORT], truncated: false });
+        if (feedReads >= 3) await thirdGate;
+        return jsonResponse({ success: true, events: [], truncated: false });
+      }
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={queryClient}><TooltipProvider><Reports relayUrl={RELAY_URL} /></TooltipProvider></TestApp>);
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    await waitFor(() => expect(hasImg(POST_IMG)).toBe(true));
+
+    // The target leaves, and its media hides.
+    await act(async () => { await queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] }); });
+    await waitFor(() => expect(hasImg(POST_IMG)).toBe(false));
+    const hidden = () => [hasImg(POST_IMG), hasImg(AVATAR), hasImg(RECENT_IMG)];
+    expect(hidden()).toEqual([false, false, false]);
+
+    // A later poll, held in flight.
+    let poll: Promise<unknown> = Promise.resolve();
+    await act(async () => {
+      poll = queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] });
+      await new Promise(r => setTimeout(r, 50));
+    });
+    expect(feedReads).toBe(3);
+    expect(queryClient.isFetching({ queryKey: ['reports', RELAY_URL] })).toBe(1);
+    expect(screen.getByText('Media Content')).toBeInTheDocument();
+    expect(hidden()).toEqual([false, false, false]);
+
+    await act(async () => { openThird(); await poll; await new Promise(r => setTimeout(r, 50)); });
+    expect(queryClient.isFetching({ queryKey: ['reports', RELAY_URL] })).toBe(0);
+    expect(hidden()).toEqual([false, false, false]);
+  });
 });
 
 // In the history view (Hide resolved off), resolving the open target moves it
