@@ -137,12 +137,14 @@ function makeParseReportRequest(description: string, ticketId = 12345) {
   });
 }
 
+const PUBLISH_ADMIN_KEY = 'test-admin-key';
+
 function makeResolutionPublishRequest(targetEventId: string) {
   return new Request('https://api-relay-prod.divine.video/api/publish', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Cf-Access-Jwt-Assertion': 'test',
+      'X-Admin-Key': PUBLISH_ADMIN_KEY,
     },
     body: JSON.stringify({
       kind: 1985,
@@ -490,7 +492,7 @@ describe('addZendeskInternalNote solve payload', () => {
     const targetEventId = 'ab13eb2c66bea4cd8f538798054d23a02d5dca879401be5045b8482590e2482c';
     const response = await worker.fetch(
       makeResolutionPublishRequest(targetEventId),
-      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687', ADMIN_API_KEY: PUBLISH_ADMIN_KEY }),
       ctx,
     );
 

@@ -130,6 +130,14 @@ PROTECTED_MINOR_REPLACEMENT_ENABLED = "false"
 # application exists (see PR rollout steps); while unset, playback fails
 # closed (503) and no real clip should be accepted.
 CONSENT_ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
+# Admin API gate (verifyAdminAccess): a Cf-Access-Jwt-Assertion is accepted only
+# if it verifies against this team's certs and the main API Access application's
+# audience. That audience (AUD tag) is the API_ACCESS_AUD worker secret, set
+# from 1Password BEFORE the first deploy of a build that checks it (#338):
+#   op read ... | npx wrangler secret put API_ACCESS_AUD --config wrangler.staging.toml
+# Without it every Access login is refused (401) and moderators are locked out;
+# X-Admin-Key callers are unaffected.
+ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
 
 # D1 Database for moderation decision log (staging)
 [[d1_databases]]

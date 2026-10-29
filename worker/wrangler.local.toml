@@ -108,6 +108,9 @@ bindings = [
 tag = "v1"
 new_classes = ["ReportWatcher"]
 
+# ACCESS_TEAM_DOMAIN / API_ACCESS_AUD are deliberately unset: there is no
+# Cloudflare Access locally, so the admin API accepts only X-Admin-Key here.
+
 # Greenlight parent-consent videos (private; no public domain, no r2.dev).
 # Create before deploying: npx wrangler r2 bucket create divine-consent-videos-local
 # CONSENT_ACCESS_* must name the dedicated Cloudflare Access application on

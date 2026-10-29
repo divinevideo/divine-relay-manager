@@ -61,6 +61,7 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 | `MANAGEMENT_PATH` | No | Path for NIP-86 management API (default: `/management`) | `/` |
 | `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation-api.divine.video` |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated allowed CORS origins | `https://relay.admin.divine.video,*.pages.dev` |
+| `ACCESS_TEAM_DOMAIN` | Yes (staging, prod) | Cloudflare Access team domain whose certs sign the `Cf-Access-Jwt-Assertion` | `divinevideo.cloudflareaccess.com` |
 
 ### Secrets (must be set via CLI or Dashboard)
 
@@ -74,6 +75,7 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 | `CF_ACCESS_CLIENT_SECRET` | Cloudflare Access service token secret |
 | `ZENDESK_JWT_SECRET` | Shared secret for Zendesk JWT verification |
 | `ZENDESK_WEBHOOK_SECRET` | Shared secret for Zendesk webhook signatures |
+| `API_ACCESS_AUD` | Audience (AUD) tag of the Access application in front of the API. Without it, the worker refuses every Access login (401) and moderators are locked out. `X-Admin-Key` callers are unaffected. Set it **before** deploying a build that checks it (issue #338). |
 
 Set secrets via CLI:
 ```bash
@@ -194,6 +196,14 @@ curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
 ### "Secret key not configured"
 - Ensure `NOSTR_NSEC` is set via `wrangler secret put`
 - Secrets don't appear in dashboard after setting (security feature)
+
+### Every admin UI request returns 401 after a deploy
+- The worker logs `[auth] Cf-Access-Jwt-Assertion refused: <reason>`
+- `API_ACCESS_AUD is not set` or `ACCESS_TEAM_DOMAIN is not set`: set it (secret / `[vars]`)
+- `audience`: `API_ACCESS_AUD` doesn't match the Access application in front of this host or path
+- `issuer`: `ACCESS_TEAM_DOMAIN` isn't the team that signs this host's tokens (bare hostname, no `https://`, no trailing slash)
+- `reading API_ACCESS_AUD failed`: the secret binding couldn't be read
+- `certs-unavailable`: the worker can't fetch `https://<team>/cdn-cgi/access/certs`
 
 ### Admin pubkey not authorized
 - Get pubkey from `/api/info` endpoint

@@ -56,6 +56,7 @@ import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
+import { verifyAccessJwt } from './access-jwt';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -126,6 +127,12 @@ interface Env extends KeycastEnv, ConsentVideoEnv {
   SLACK_WEBHOOK_URL?: string;
   // Environment identifier for deep links (e.g., "production", "staging")
   ENVIRONMENT?: string;
+  // Cloudflare Access team domain (wrangler var) and the audience (AUD) tag of the
+  // Access application in front of this API (worker secret, kept out of this
+  // public repo). Both are required for verifyAdminAccess to accept a
+  // Cf-Access-Jwt-Assertion.
+  ACCESS_TEAM_DOMAIN?: string;
+  API_ACCESS_AUD?: string | SecretStoreSecret;
   // Blossom admin bypass (for proxying blocked media to moderators)
   BLOSSOM_WEBHOOK_SECRET?: string | SecretStoreSecret;
   CDN_DOMAIN?: string;
@@ -414,24 +421,24 @@ interface ApiResponse {
   tickets?: Array<{ ticket_id: number; status: string; url: string }>;
 }
 
+const UNAUTHORIZED_ADMIN = 'Unauthorized: admin access requires CF Access or X-Admin-Key header';
+
 // Verify that the request is authorized for admin API access.
 // Accepts any of:
-//   1. Cf-Access-Jwt-Assertion header (request came through CF Access on relay.admin.divine.video)
-//   2. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
-//   3. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY, only when allowModRelayAdminKey
+//   1. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
+//   2. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY, only when allowModRelayAdminKey
 //      is true for the divine-moderation-service -> /api/relay-rpc connection (#170)
+//   3. A Cf-Access-Jwt-Assertion that verifies (signature, issuer, audience, expiry) for the
+//      main API's Access application (API_ACCESS_AUD on ACCESS_TEAM_DOMAIN). The
+//      header alone proves nothing: service bindings reach this Worker without
+//      passing through Access, and so would workers.dev or preview URLs.
+// The keys are checked first so server-to-server calls never fetch Access certs.
 // Returns null if authorized, or an error string if not.
 async function verifyAdminAccess(
   request: Request,
   env: Env,
   options: { allowModRelayAdminKey?: boolean } = {}
 ): Promise<string | null> {
-  // CF Access validates the JWT at the edge before the request reaches the worker.
-  // Header presence here means the request passed CF Access authentication.
-  if (request.headers.get('Cf-Access-Jwt-Assertion')) {
-    return null;
-  }
-
   // Server-to-server callers use a shared API key.
   const adminKey = request.headers.get('X-Admin-Key');
   if (adminKey) {
@@ -448,7 +455,32 @@ async function verifyAdminAccess(
     }
   }
 
-  return 'Unauthorized: admin access requires CF Access or X-Admin-Key header';
+  const accessJwt = request.headers.get('Cf-Access-Jwt-Assertion');
+  if (accessJwt) {
+    let audience: string | null;
+    try {
+      audience = await resolveSecret(env.API_ACCESS_AUD);
+    } catch (error) {
+      console.error('[auth] Cf-Access-Jwt-Assertion refused: reading API_ACCESS_AUD failed', errorNameOnly(error));
+      return UNAUTHORIZED_ADMIN;
+    }
+    if (!env.ACCESS_TEAM_DOMAIN || !audience) {
+      // Fails closed: without both settings no Access token is accepted, so a
+      // deploy missing them locks moderators out. Say which one in the logs.
+      console.error(`[auth] Cf-Access-Jwt-Assertion refused: ${!env.ACCESS_TEAM_DOMAIN ? 'ACCESS_TEAM_DOMAIN' : 'API_ACCESS_AUD'} is not set`);
+    } else if (await verifyAccessJwt(accessJwt, {
+      teamDomain: env.ACCESS_TEAM_DOMAIN,
+      audience,
+      // A wrong API_ACCESS_AUD shows up here as "audience" on every request.
+      onReject: (reason) => console.warn(`[auth] Cf-Access-Jwt-Assertion refused: ${reason}`),
+    })) {
+      // The claims aren't kept: the admin UI reaches this API with a shared
+      // Access service token, so they name that token, not a moderator.
+      return null;
+    }
+  }
+
+  return UNAUTHORIZED_ADMIN;
 }
 
 export default {
@@ -526,7 +558,10 @@ export default {
         return handleConsentVideo(request, receiptId, env, corsHeaders);
       }
 
-      // All other /api/* endpoints require admin access (CF Access or API key)
+      // All other /api/* endpoints require admin access (CF Access or API key).
+      // Routes with their own Access application (consent-video above) must stay
+      // before this check: their tokens carry a different audience and would be
+      // refused here (admin-access.test.ts pins the consent route's order).
       const adminAuthError = await verifyAdminAccess(request, env, {
         allowModRelayAdminKey: path === '/api/relay-rpc' && request.method === 'POST',
       });
