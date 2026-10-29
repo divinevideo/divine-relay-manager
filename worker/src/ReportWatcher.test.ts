@@ -2882,6 +2882,31 @@ describe('ReportWatcher', () => {
       }, { timeout: 2000 });
     });
 
+    it('still creates the age review case when the report also carries a CSAM label', async () => {
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'underage_report_with_csam_label',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', 'reported_pubkey_abc'],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['l', 'csam', 'MOD'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+
+      await vi.waitFor(() => {
+        expect((ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.some(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
+        )).toBe(true);
+      }, { timeout: 2000 });
+    });
+
     // Identity capture (#213). A suspended account's content is hidden from relay
     // queries, so the readable name has to be recorded when the case opens; it
     // cannot be resolved on read afterwards.

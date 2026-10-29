@@ -21,6 +21,7 @@ import {
   defaultResolutionForBand,
 } from '../../shared/age-review';
 import { getReportedList } from '../../shared/list-report';
+import { ageReviewCategory } from '../../shared/report-classification';
 import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
 import { isLowerHex64 } from './hex';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
@@ -877,7 +878,8 @@ export class ReportWatcher implements DurableObject {
     const targetPubkeyTag = event.tags.find(t => t[0] === 'p');
 
     // Get category from first available source
-    // Priority: report tag > NIP-32 label > e/p tag third element
+    // Priority: a child-safety category in any of these sources, then
+    // report tag > NIP-32 label > e/p tag third element
     const category = reportCategory(event.tags);
 
     const targetType = targetEventTag ? 'event' : targetPubkeyTag ? 'pubkey' : 'unknown';
@@ -896,8 +898,11 @@ export class ReportWatcher implements DurableObject {
 
     // Create age review case for under-16 reports (pubkey-level).
     // Runs after auto-hide completes; both awaited so work survives DO eviction.
+    // Gated on the same reading the moderator UI uses, not the auto-hide
+    // category: a child-safety label elsewhere in the report must not
+    // suppress the age review.
     const reportedPubkey = targetPubkeyTag?.[1];
-    if (category === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
+    if (ageReviewCategory(event) === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
       try {
         await this.createAgeReviewCase(event, reportedPubkey);
