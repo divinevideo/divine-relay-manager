@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { finalizeEvent } from 'nostr-tools';
-import { replayAdultReports } from './sexual-report-replay';
+import { replayAdultReports, reportCategory } from './sexual-report-replay';
 import { queryRelay } from './relay-profile';
 vi.mock('./relay-profile', () => ({ queryRelay: vi.fn() }));
 const event = finalizeEvent({ kind: 1984, created_at: 100, content: '', tags: [['e', 'a'.repeat(64), 'NS-sexualContent']] }, new Uint8Array(32).fill(3));
@@ -8,6 +8,14 @@ function fixture() {
   const data = new Map();
   return { data, storage: { get: async (key: string) => data.get(key), put: async (key: string, value: unknown) => { data.set(key, value); }, delete: async (key: string) => data.delete(key) } as unknown as DurableObjectStorage };
 }
+describe('report category', () => {
+  it('lets every shared CSAM category win over an adult category, ignoring case', () => {
+    for (const child of ['sexual_minors', 'CSAM', 'NS-csam']) {
+      expect(reportCategory([['report', 'NS-sexualContent'], ['l', child, 'MOD']])).toBe(child);
+    }
+    expect(reportCategory([['report', 'NS-sexualContent'], ['l', 'NS-childSafety', 'social.nos.ontology']])).toBe('NS-sexualContent');
+  });
+});
 describe('adult report replay', () => {
   it('commits only confirmed and durably admitted report windows', async () => {
     const f = fixture(); const ingest = vi.fn(async () => {});

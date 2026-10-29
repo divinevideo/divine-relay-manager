@@ -2,9 +2,10 @@ import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { queryRelay } from './relay-profile';
 import { adultSexualCategory } from './sexual-quarantine';
 import type { ReportEvent } from './ReportWatcher';
+import { CSAM_CATEGORIES } from '../../shared/report-classification';
 
 const PAGE = 100;
-const CHILD_CATEGORIES = new Set(['sexual_minors', 'csam', 'ns-csam']);
+const CHILD_CATEGORIES = new Set(CSAM_CATEGORIES.map(c => c.toLowerCase()));
 
 export function reportCategory(tags: string[][]): string {
   const candidates = [...tags.filter(t => t[0] === 'report').map(t => t[1]),
