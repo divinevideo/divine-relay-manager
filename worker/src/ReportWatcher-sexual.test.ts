@@ -93,6 +93,20 @@ describe('sexual quarantine watcher integration', () => {
     expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
   });
 
+  it('does not pin replay on a report that can never be admitted', async () => {
+    const f = fixture();
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['NS-sexualContent'], threshold: 2, requireTrustedClient: false }],
+    }) }));
+    const oversized = finalizeEvent({ kind: 1984, created_at: 1, content: 'x'.repeat(70_000), tags: [['e', ID, 'NS-sexualContent']] }, new Uint8Array(32).fill(9));
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [oversized] });
+    await replay.replayAdultReports(f.durable, f.env.RELAY_URL,
+      (report, category, target) => (f.watcher as unknown as { processAutoHide(e: ReportEvent, c: string, t: string, advance: boolean): Promise<void> }).processAutoHide(report, category, target, false), 10);
+    expect(await f.durable.get('sexual-replay-through')).toBe(10);
+    expect(f.io.snapshot).not.toHaveBeenCalled();
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
+  });
+
   it('preserves exact-category legacy eligibility when the video tier rejects the client', async () => {
     const f = fixture();
     f.io.snapshot.mockRejectedValue(new OutsideVideoScope());

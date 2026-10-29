@@ -939,8 +939,6 @@ export class ReportWatcher implements DurableObject {
     const quarantineActivated = adultReport && (this.env.SEXUAL_QUARANTINE_ENABLED === 'true'
       || await this.state.storage.get('sexual-quarantine-activated'));
     if (quarantineActivated) {
-      const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
-      if (JSON.stringify(wire).length > 60_000 || wire.kind !== 1984 || !verifyEvent(wire)) throw new Error('Invalid sexual report signature');
       const legacyTier = config.tiers.find(t => t.categories.includes(category));
       // Preserve an explicitly configured category's trust and count policy.
       // Canonical adult fallback is only for an otherwise unconfigured alias.
@@ -951,6 +949,13 @@ export class ReportWatcher implements DurableObject {
       // An ignored/untrusted report must not pin replay behind an unavailable
       // target. The exact-category legacy tier can qualify independently.
       if (!qualifies(videoTier) && !qualifies(legacyTier)) return;
+      // Rejection is permanent for these bytes. Throwing would hold the replay
+      // window on this report forever, so alert and skip it instead.
+      const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
+      if (JSON.stringify(wire).length > 60_000 || wire.kind !== 1984 || !verifyEvent(wire)) {
+        console.error(`[ALERT] Sexual quarantine report ${event.id} not admitted: invalid signature or over the evidence bound`);
+        return;
+      }
       const legacyKey = `sexual-legacy-processed:${targetEventId}:${event.id}`;
       if (await this.state.storage.get(legacyKey)) return;
       const q = this.sexualQuarantine();
