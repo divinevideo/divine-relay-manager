@@ -53,7 +53,7 @@ Consumes Task 1 case interfaces and Blossom's POST /admin/api/quarantine
 Files: docs/sexual-quarantine-rollout.md; affected source/tests only as needed.
 
 - [x] Run worker regression suite and frontend checks; record baseline blockers.
-- [ ] Perform a fresh independent review and address substantive findings.
+- [x] Perform a fresh independent review and address substantive findings.
 - [x] Document activation, safe canary, rollback, metrics and remaining live gates.
 - [x] Commit with agent attribution, push an owned branch and open a focused PR.
 
