@@ -127,6 +127,14 @@ describe('quarantine service IO', () => {
     expect(() => snapshotVideo(comment.id, { ...comment, content: 'tampered' }, env)).not.toThrow(OutsideVideoScope);
   });
 
+  it('classifies a large verified non-video target instead of leaving it unclassifiable', () => {
+    const article = finalizeEvent({ kind: 30023, created_at: 1, tags: [['d', 'synthetic']], content: 'x'.repeat(70_000) }, new Uint8Array(32).fill(2));
+    expect(() => snapshotVideo(article.id, article, env)).toThrow(OutsideVideoScope);
+    const large = video([['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${HASH}`], ['alt', 'x'.repeat(70_000)]]);
+    expect(() => snapshotVideo(large.id, large, env)).toThrow();
+    expect(() => snapshotVideo(large.id, large, env)).not.toThrow(OutsideVideoScope);
+  });
+
   it('sends a versioned independent event hold, never global unban', async () => {
     const event = video();
     vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: { hold_id: `sexual:${event.id}`, version: 3, active: 0 } });

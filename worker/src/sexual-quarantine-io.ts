@@ -33,9 +33,11 @@ export function snapshotVideo(eventId: string, raw: unknown, env: MediaServerEnv
   // nostr-tools memoizes verification on a symbol. Copy only wire data so a
   // previously verified, subsequently changed object cannot reuse that result.
   const event = JSON.parse(JSON.stringify(raw ?? null)) as NostrEvent;
-  if (!event || event.id !== eventId || JSON.stringify(raw).length > 60_000
-    || !verifyEvent(event)) throw new Error('Unverified video event');
+  if (!event || event.id !== eventId || !verifyEvent(event)) throw new Error('Unverified video event');
   if (![21, 22, 34235, 34236].includes(event.kind)) throw new OutsideVideoScope();
+  // The bound protects stored evidence, so it applies only to videos this stream
+  // keeps. A large verified non-video target must still reach the legacy writer.
+  if (JSON.stringify(raw).length > 60_000) throw new Error('Video event exceeds the evidence bound');
   const assets = new Set<string>();
   const paths = new Set<string>();
   const unmapped = new Set<string>();
