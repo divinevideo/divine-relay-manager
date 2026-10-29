@@ -1,14 +1,13 @@
 # Synthetic reviewer UI captures
 
 Before source: `ddf6da544feab172bcb57a0f8d697cb1ba6e38f7` in an isolated detached worktree.
-After source: `93623731a92abf2234d403eb5b12120c8aeb5b8a`.
-The artifact commit adds only these captures and their provenance. Later worker-only policy fixes leave the captured UI source unchanged.
+After source: `c99ab190171f77634e15a741be976792ec0f6eb9` (refreshed 2026-10-30).
+The artifact commit adds only these captures and their provenance. The original before captures are preserved; all six after captures include priority paging, command acknowledgment and the separate base-ban guidance.
 
 Captured with Playwright and headless Google Chrome in a new browser context,
 light theme, 1440×1280 desktop and 390×1000 mobile viewports. Capture command:
-`node /tmp/sexual-quarantine-ui-capture.mjs` (preinstalled browser runtime, no
-repository dependency changes). Each revision ran in its own local Vite process
-and working directory so Tailwind compiled the correct source revision.
+`node /tmp/sexual-quarantine-ui-refresh.mjs` (preinstalled browser runtime, no
+repository dependency changes). The initial before revision ran in its own local Vite process and working directory. The refresh ran the current isolated worktree on loopback port 58181 with an empty env directory and synthetic API configuration.
 
 The old entry point is `/reports`; the new screen is `/sexual-quarantine`.
 Open the synthetic full-ID case to reach its detail view. The browser intercepts
