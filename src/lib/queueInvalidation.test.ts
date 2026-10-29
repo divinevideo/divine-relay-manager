@@ -54,10 +54,9 @@ const retryResolutionSources = () => {
     expect(hasDisallowedDirectCall(source, join('components', 'Reports.tsx'))).toBe(false);
   });
 
-  // What Important finding #1 in the review exists to prevent: a future
-  // handler added anywhere else in Reports.tsx that writes the raw call
-  // instead of using the helper. At b4cf4b8 this passed (ALLOWED exempted the
-  // whole file); it must fail now.
+  // The rule the scan exists for: a handler added anywhere else in Reports.tsx
+  // that writes the raw call instead of using the helper must be caught. An
+  // exemption covering the whole file would let this pass.
   it('still catches a direct call added elsewhere in Reports.tsx', () => {
     const source = `
 const retryResolutionSources = () => {
