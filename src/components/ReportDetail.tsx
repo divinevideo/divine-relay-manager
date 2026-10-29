@@ -383,7 +383,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     }) || hasCsamSignal(allReportsForTarget);
     if (sensitive) return true;
     // On purpose, a target that turns partial with nothing sensitive in hand
-    // keeps what is showing: nothing known about it is sensitive.
+    // keeps the post media and the account card that were showing: those take
+    // undefined as "no change", and nothing known about the target is
+    // sensitive. The thread, full-thread and repost avatars, which have no
+    // Show, read undefined as hidden and do hide.
     return targetReportsMayBePartial ? undefined : false;
   }, [allReportsForTarget, targetReportsMayBePartial]);
   // The report whose target has had reports in hand while the pane showed it.

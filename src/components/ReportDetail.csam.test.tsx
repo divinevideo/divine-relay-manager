@@ -238,6 +238,8 @@ describe('ReportDetail when not all of the target reports may be loaded', () => 
     expect(screen.getByTestId('profile-card').dataset.hide).toBe('null');
     // Not known yet, rather than false: see the null default in MediaPreview.
     expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'null')).toBe(true);
+    // The thread avatars have no Show, and read not known yet as hidden.
+    expect(screen.getByTestId('thread').dataset.hideAvatars).toBe('true');
   });
 
   it('shows them for the same reports once they are known to be complete (control)', () => {
