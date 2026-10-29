@@ -3323,7 +3323,7 @@ async function handleReportWatcherRoutes(
 
     return new Response(JSON.stringify(data), {
       status: response.status,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      headers: { 'Content-Type': 'application/json', ...corsHeaders, 'Cache-Control': 'private, no-store' },
     });
   } catch (error) {
     console.error('[handleReportWatcherRoutes] Error:', error);
