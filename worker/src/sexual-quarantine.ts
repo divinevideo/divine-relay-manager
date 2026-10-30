@@ -520,7 +520,7 @@ export class SexualQuarantine {
 
   // Upgrade older persisted cases incrementally without making the first alarm
   // scan the entire case history. New writes already maintain the current indices.
-  // TODO(#346): remove the compatibility reindex only after every environment's
+  // TODO(#350): remove the compatibility reindex only after every environment's
   // stored-case inventory proves the older index generations are retired.
   private async bootstrap(): Promise<void> {
     if (await this.storage.get('sexual-scheduler-v3-ready')) return;
