@@ -79,12 +79,15 @@ function CaseDetail({ eventId }: { eventId: string }) {
   useEffect(() => { active.current = true; return () => { active.current = false; }; }, []);
   const [reason, setReason] = useState('');
   const [notice, setNotice] = useState('');
+  // The revision on screen when the moderator started this decision. The 15s
+  // refetch must not quietly move the server's revision check past it.
+  const viewedRevision = useRef<number>();
   const key = ['sexual-quarantine', apiUrl, eventId];
   const item = useQuery({ queryKey: key, queryFn: () => api.getSexualQuarantineCase(eventId), refetchInterval: 15_000 });
   const history = useQuery({ queryKey: [...key, 'history'], queryFn: () => api.getSexualQuarantineHistory(eventId), refetchInterval: 15_000 });
   const decision = useMutation({
     mutationFn: async (choice: 'restore' | 'remove') => {
-      const revision = item.data!.revision;
+      const revision = viewedRevision.current ?? item.data!.revision;
       const explanation = reason.trim();
       const actor = await session.getModeratorPubkey();
       if (!active.current) throw new Error('Environment or case changed. Review again.');
@@ -98,6 +101,7 @@ function CaseDetail({ eventId }: { eventId: string }) {
       }
       await client.invalidateQueries({ queryKey: ['sexual-quarantine', apiUrl] });
     },
+    onSettled: () => { viewedRevision.current = undefined; },
     onError: async error => {
       if (active.current) setNotice(error instanceof ApiError && error.statusCode === 409
         ? 'Case changed. Check the latest revision and review the case again before deciding.'
@@ -146,7 +150,7 @@ function CaseDetail({ eventId }: { eventId: string }) {
       <div className="space-y-2">
         {session.identityUnavailable && <p role="alert">Moderator identity unavailable. Decisions will be attributed as unattributed.</p>}
         <label htmlFor="sexual-decision-reason" className="font-semibold">Decision reason</label>
-        <Textarea id="sexual-decision-reason" value={reason} maxLength={2000} disabled={decision.isPending || c.state === 'out_of_scope'} onChange={e => setReason(e.target.value)} />
+        <Textarea id="sexual-decision-reason" value={reason} maxLength={2000} disabled={decision.isPending || c.state === 'out_of_scope'} onChange={e => { viewedRevision.current ??= c.revision; setReason(e.target.value); }} />
         <p className="text-sm text-muted-foreground">Restore releases this case’s hold. Remove keeps the event and media unavailable within Divine. Other restrictions remain in force.</p>
         <div className="flex gap-2">{(['restore', 'remove'] as const).map(choice => <Button key={choice} variant={choice === 'remove' ? 'destructive' : 'default'}
           disabled={c.state === 'out_of_scope' || !reason.trim() || decision.isPending || item.isFetching || item.isError} onClick={() => { setNotice(''); decision.mutate(choice); }}>

@@ -111,6 +111,17 @@ describe('Sexual quarantine review', () => {
     expect(screen.queryByText('Restored')).not.toBeInTheDocument();
   });
 
+  it('keeps the revision the moderator began reviewing when a refetch loads a newer one', async () => {
+    renderQueue();
+    fireEvent.change(await screen.findByLabelText('Decision reason'), { target: { value: 'No explicit activity' } });
+    current = makeCase({ revision: 5 });
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh case' }));
+    expect(await screen.findByText('Revision 5')).toBeInTheDocument();
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore' })).toBeEnabled());
+    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
+    await waitFor(() => expect(lastDecision).toMatchObject({ revision: 3, decision: 'restore' }));
+  });
+
   it('reloads a stale case without automatically replaying the decision', async () => {
     postStatus = 409;
     renderQueue();
