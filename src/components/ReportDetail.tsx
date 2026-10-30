@@ -89,9 +89,10 @@ interface ReportDetailProps {
   // read for this target (a history page, or a fallback pool).
   targetReportsMayBePartial?: boolean;
   // The open report's target has left the list (handled elsewhere): none of its
-  // reports is in hand, and no read still in flight could bring it back, so no
-  // later report on it can reach the pane. The queue decides this, since only
-  // it knows both reads; a target that is only being re-read is not one.
+  // reports is in hand, and it went missing with no read in flight that could
+  // have brought it back. The queue decides this, since only it knows both
+  // reads; a target that is only being re-read is not one. Once true, it stays
+  // true through later reads until the target's reports are back in hand.
   targetLeftList?: boolean;
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
