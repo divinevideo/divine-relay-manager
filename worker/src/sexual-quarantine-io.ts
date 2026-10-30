@@ -260,7 +260,7 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
       await recordSexualQuarantineDecision(env.DB, c);
       // Resolves the human review ticket. Enforcement remains independently
       // pending/escalated until all public verification succeeds.
-      await syncZendeskAfterAction(env, `sexual_quarantine_${c.goal}`, 'event', c.eventId, c.actor!, AbortSignal.timeout(3000));
+      await syncZendeskAfterAction(env, `sexual_quarantine_${c.goal}`, 'event', c.eventId, c.actor!, 3000);
     },
     async review(c) {
       if (!env.COOP_URL || !env.COOP_API_KEY || !env.REVIEWER_BASE_URL) throw new Error('Review delivery not configured');

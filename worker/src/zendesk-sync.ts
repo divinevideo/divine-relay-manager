@@ -112,7 +112,7 @@ export async function addZendeskInternalNote(
   note: string,
   env: ZendeskSyncEnv,
   solve: boolean = false,
-  signal?: AbortSignal
+  timeoutMs?: number
 ): Promise<boolean> {
   const creds = await resolveZendeskCreds(env);
   if (!creds) {
@@ -156,7 +156,7 @@ export async function addZendeskInternalNote(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(payload),
-      ...(signal ? { signal } : {}),
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     });
 
     if (!response.ok) {
@@ -177,7 +177,9 @@ export async function syncZendeskAfterAction(
   targetType: 'event' | 'pubkey' | 'media',
   targetId: string,
   moderator: string,
-  signal?: AbortSignal
+  // Bounds each ticket update separately, so one slow ticket cannot use up
+  // the time of the tickets after it.
+  timeoutMs?: number
 ): Promise<void> {
   console.log('[syncZendeskAfterAction] Called with:', { action, targetType, targetId, moderator });
 
@@ -251,7 +253,7 @@ export async function syncZendeskAfterAction(
     ].join('\n');
 
     for (const { ticket_id } of linkedTickets) {
-      const posted = await addZendeskInternalNote(ticket_id, note, env, isResolution, signal);
+      const posted = await addZendeskInternalNote(ticket_id, note, env, isResolution, timeoutMs);
 
       // Record the D1 resolution ONLY when Zendesk actually confirmed the close.
       // The panel reads this status; marking a row resolved after a failed solve
