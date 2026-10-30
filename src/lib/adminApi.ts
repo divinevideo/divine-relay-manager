@@ -740,6 +740,13 @@ export function isBlockedMediaAction(action: MediaStatusAction | null | undefine
 // also refuses while that account has an open age review, or unless the media
 // server records it as the file's owner (409 age_review_active or
 // owner_mismatch; 503 when either cannot be checked).
+// Without `pubkey`, while the file's owner (as the media server records it)
+// has an open age review, a SAFE is refused, and so is an AGE_RESTRICTED over a
+// hidden, blocked or deleted file, or any AGE_RESTRICTED once the case has
+// restricted the account (409 age_review_active). Either is refused
+// when the owner cannot be checked (409 media_record_missing when the media
+// server has no record of the file; 503 otherwise), and an AGE_RESTRICTED when
+// the moderation record it then needs cannot be read (503 state_unreadable).
 export async function moderateMedia(
   apiUrl: string,
   sha256: string,

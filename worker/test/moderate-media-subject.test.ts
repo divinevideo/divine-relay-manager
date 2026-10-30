@@ -339,8 +339,29 @@ describe('/api/moderate-media account check', () => {
     expect(writes()).toHaveLength(1);
   });
 
-  it('checks no account, reads no owner and marks no notes when the request names no account', async () => {
+  // A SAFE that names no account still gets the lift guard (#335): one owner
+  // read, and the open-case lookup on the owner it names. It marks no notes.
+  it('marks no notes when a SAFE names no account, after the lift guard checks the owner', async () => {
     const res = await worker.fetch(post({ sha256: SHA, action: 'SAFE', from: 'QUARANTINE' }), env(), {} as ExecutionContext);
+    expect(res.status).toBe(200);
+    expect(writes()).toHaveLength(1);
+    expect(blobReads).toEqual([SHA]);
+    expect(caseLookups()).toHaveLength(1);
+    expect(caseLookups()[0].binds[0]).toBe(ACCOUNT);
+    expect(marks()).toHaveLength(0);
+  });
+
+  // #333's Restore-only-a-hidden-file rule is for a named account. An Unblock
+  // names none and is a SAFE over a blocked file.
+  it('lets a SAFE that names no account through over a file the media server has banned', async () => {
+    blobStatus = 'banned';
+    const res = await worker.fetch(post({ sha256: SHA, action: 'SAFE', from: 'QUARANTINE' }), env(), {} as ExecutionContext);
+    expect(res.status).toBe(200);
+    expect(writes()).toHaveLength(1);
+  });
+
+  it('checks no account and reads no owner for a Block that names no account', async () => {
+    const res = await worker.fetch(post({ sha256: SHA, action: 'PERMANENT_BAN', from: 'QUARANTINE' }), env(), {} as ExecutionContext);
     expect(res.status).toBe(200);
     expect(writes()).toHaveLength(1);
     expect(caseLookups()).toHaveLength(0);

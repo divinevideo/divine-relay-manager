@@ -2,9 +2,10 @@
 //
 // The account check reads age_review_cases, so a request that names an account
 // ensures the schema first. That step is part of the check: when it throws, the
-// open-review lookup fails the same way and refuses (503), as on relay-rpc. A
-// request that names no account (the per-post buttons, automated callers) never
-// waits on it, so it goes through with D1 down, as it did before the check.
+// open-review lookup fails the same way and refuses (503), as on relay-rpc. So
+// does a SAFE or AGE_RESTRICTED that names no account, through the lift guard
+// (#335). Any other request that names no account never waits on it, so it goes
+// through with D1 down, as it did before the check.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const SHA = '5'.repeat(64);
@@ -79,7 +80,7 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe('/api/moderate-media with D1 down on a cold isolate', () => {
-  it.each(['AGE_RESTRICTED', 'PERMANENT_BAN'])('a %s that names no account goes through and writes, as before the account check', async (action) => {
+  it.each(['QUARANTINE', 'PERMANENT_BAN'])('a %s that names no account goes through and writes, as before the account check', async (action) => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
     const worker = await coldWorker();
     const res = await worker.fetch(post({ sha256: SHA, action, reason: 'r' }), env(), {} as ExecutionContext);
@@ -89,6 +90,18 @@ describe('/api/moderate-media with D1 down on a cold isolate', () => {
     // It never waited on the schema step. (The Zendesk sync after the write
     // tries its own table, inside its own catch, as before the account check.)
     expect(statements.some(isSchemaStep)).toBe(false);
+  });
+
+  // The lift guard (#335) runs the same fail-closed lookup on the owner the
+  // media server names.
+  it.each(['SAFE', 'AGE_RESTRICTED'])('a %s that names no account tries the schema step, then refuses with 503 and writes nothing', async (action) => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const worker = await coldWorker();
+    const res = await worker.fetch(post({ sha256: SHA, action, reason: 'r' }), env(), {} as ExecutionContext);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ success: false, code: 'age_review_check_failed' });
+    expect(writes()).toHaveLength(0);
+    expect(statements.some(isSchemaStep)).toBe(true);
   });
 
   it('a Restore that names an account tries the schema step, then refuses with 503 and writes nothing', async () => {

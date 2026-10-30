@@ -42,7 +42,7 @@ import {
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
 import { handleBulkJobNotes, handleCaseBulkNotesJob, markStillHiddenRestored } from './bulk-notes';
-import { readMediaRecord, type BlossomBlob } from './media-server';
+import { MediaRecordMissing, readMediaRecord, type BlossomBlob } from './media-server';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -50,6 +50,7 @@ import { queryRelay, withTimeout, ENRICHMENT_TIMEOUT_MS } from './relay-profile'
 import { coordinateEventVisibility, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
+import { isAccountRestrictedAgeReviewState, type AgeReviewState } from '../../shared/age-review';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
@@ -410,6 +411,11 @@ interface ApiResponse {
   // server shows for the file (its own status name), when that is why the
   // request was refused.
   mediaServer?: string;
+  // An `age_review_active` refusal built here rather than by
+  // ageReviewActiveGuard (/api/moderate-media's lift guard): the case it names,
+  // as the guard's own refusal carries them.
+  caseId?: string;
+  state?: string;
   // /api/tickets: Zendesk tickets linked to a report target.
   tickets?: Array<{ ticket_id: number; status: string; url: string }>;
 }
@@ -2332,6 +2338,53 @@ async function markNotesRestored(env: Env, sha256: string): Promise<void> {
   }
 }
 
+// The open-review checks read age_review_cases, so the schema must exist first
+// (a fresh D1 has none). Bootstrapping is part of the check, as in
+// runRelayRpc: a DDL failure reaches the guard's fail-closed refusal (503),
+// and a request neither check covers never waits on it.
+async function ensureAgeReviewSchema(env: Env): Promise<void> {
+  if (!env.DB) return;
+  try {
+    await ensureSchemaOnce(env.DB);
+  } catch (err) {
+    console.error('[handleModerateMedia] age-review schema bootstrap failed:', err);
+  }
+}
+
+// moderation-service's recorded action for a file, uppercased: 'UNKNOWN' when
+// it has no record. Throws when it cannot be read. Read by the `from` check
+// and the lift guard in handleModerateMedia.
+async function readRecordedAction(sha256: string, env: Env, headers: Record<string, string>): Promise<string> {
+  // Built inside the caller's try on purpose: getModerationServiceUrl throws
+  // when the binding is missing, and a misconfiguration is the same "could not
+  // check" case as an upstream failure. Outside, it exited as a 500 naming an
+  // internal binding instead of the retryable 503 the callers commit to.
+  const checkRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${encodeURIComponent(sha256)}`, {
+    method: 'GET',
+    headers,
+  });
+  const checkResponse = env.MODERATION_API
+    ? await env.MODERATION_API.fetch(checkRequest)
+    : await fetch(checkRequest);
+  if (!checkResponse.ok) throw new Error(`check-result ${checkResponse.status}`);
+  const state = await checkResponse.json() as { status?: string; moderated?: boolean };
+  // `status` is the stored action lowercased, or the literal 'unknown' when
+  // there is no row -- handlePublicCheckResult emits one or the other on
+  // every 200 (src/index.mjs:1508, :1520). Its absence therefore does not
+  // mean the blob is in an unknown state; it means this is not a response
+  // this code understands, so the state is unreadable and belongs in the
+  // callers' 503 class.
+  //
+  // Defaulting it to 'unknown' instead would answer 409 "expected
+  // AGE_RESTRICTED, found UNKNOWN", asserting a fact about the blob that
+  // was never established. An explicit 'unknown' FROM the service is a real
+  // answer and still refuses; a missing field is not.
+  if (typeof state?.status !== 'string' || !state.status) {
+    throw new Error('check-result carried no status');
+  }
+  return state.status.toUpperCase();
+}
+
 async function handleModerateMedia(
   request: Request,
   env: Env,
@@ -2355,18 +2408,25 @@ async function handleModerateMedia(
     }
 
     // The hash used for the upstream write. Left exactly as sent unless the
-    // account check or the expected-state path below canonicalises it, so
-    // callers that send neither `pubkey` nor `from` see no change in what
-    // reaches moderation-service.
+    // account check, the lift guard or the expected-state path below
+    // canonicalises it, so a request none of them reads (a Block, Quarantine,
+    // Delete or REVIEW with no `pubkey` or `from`) sees no change in what reaches
+    // moderation-service.
     let sha256 = body.sha256;
 
     if (!body.action) {
       return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
     }
+    // The lift guard below reads only a string action. moderation-service
+    // rejects anything else today, but the guard must not rest on that.
+    if (typeof body.action !== 'string') {
+      return jsonResponse({ success: false, error: '`action` must be a string', code: 'invalid_action' }, 400, corsHeaders);
+    }
 
     // The account check (#299), opt-in like `from` below: a caller that names
     // the account the file belongs to gets these refusals before anything is
-    // written, and a caller that names none is unchanged. A bulk action's
+    // written, and a caller that names none skips them (its SAFE or
+    // AGE_RESTRICTED meets the lift guard below instead). A bulk action's
     // "still hidden" note sends it with its Restore, because `from` alone
     // cannot tell a stale note's file from one a newer age review now holds:
     // both read QUARANTINE.
@@ -2404,17 +2464,7 @@ async function handleModerateMedia(
         );
       }
       sha256 = body.sha256.toLowerCase();
-      // The open-review check reads age_review_cases, so the schema must exist
-      // first (a fresh D1 has none). Bootstrapping is part of the check, as in
-      // runRelayRpc: a DDL failure reaches the guard's fail-closed refusal
-      // (503), and a caller that names no account never waits on it.
-      if (env.DB) {
-        try {
-          await ensureSchemaOnce(env.DB);
-        } catch (err) {
-          console.error('[handleModerateMedia] age-review schema bootstrap failed:', err);
-        }
-      }
+      await ensureAgeReviewSchema(env);
       const held = await ageReviewActiveGuard(
         subject, env, corsHeaders,
         'This account has an open age review; restore its files through that case.',
@@ -2460,6 +2510,131 @@ async function handleModerateMedia(
       headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
     }
 
+    // The age-review lift guard (#335), mandatory where the account check
+    // above is opt-in. A file whose owner has an open age review is made more
+    // visible only through that case, whoever asks: an Unblock, Remove
+    // Restriction or Age Restrict on a single post, an automated caller, a
+    // stale screen.
+    //   - A SAFE is always a lift: it sets the file Active and clears the
+    //     relay's quarantine for its event, whatever the file was.
+    //   - An AGE_RESTRICTED is a lift over a file that is hidden, blocked or
+    //     deleted: the 18+ gate shows it to signed-in adults, and it clears the
+    //     relay's quarantine too. The 18+ gate is never the tool for a
+    //     suspected minor's file (see bulk-moderate.ts). Over a public or
+    //     already-gated file it only tightens, so it goes through even during
+    //     a case: a case hides nothing until it restricts the account, and
+    //     refusing would leave the file fully public (Osprey sends these for
+    //     confirmed adult content). Hidden is read from the media server and,
+    //     since that status is cached for up to 5 minutes and can still read
+    //     public right after the case's withhold, from moderation-service's
+    //     record too, which the withhold writes at once. Both reads happen only
+    //     while the owner has an open case. Once the case has restricted the
+    //     account (and so run the withhold), every AGE_RESTRICTED is refused.
+    //   - Block, Quarantine, Delete and REVIEW are not checked.
+    //   - The hash must be 64 hex: it becomes a path on the media server's
+    //     admin API, with its key attached.
+    //   - The owner is read from the media server, fail-closed: unreadable
+    //     refuses (503). No record of the file (404) refuses too, as a 409 that
+    //     says so: retrying will not help, and a misconfigured CDN_DOMAIN also
+    //     answers 404, so it can never mean "nothing to protect".
+    //   - The owner's open case refuses (409), and a lookup that cannot run
+    //     refuses (503), as the account check does. So does a record that
+    //     cannot be read when an AGE_RESTRICTED needs it (503).
+    // A request that names the account already had the same owner and case
+    // checks above, on that account, so they are not repeated (there a 404 is
+    // a 503 owner_unreadable, as #333 shipped it, and every AGE_RESTRICTED is
+    // refused during a case). Age review's own clearance does not come through
+    // here: the case writes to moderation-service through the bulk path
+    // (age-review.ts, triggerBulkModerate), after its transition.
+    // Check-then-act, like the account check: a case opened, or a file hidden,
+    // between the reads and the write is not seen.
+    // The action is compared as moderation-service reads it: it uppercases
+    // the action before it validates and writes it, so "safe" is a SAFE.
+    const upstreamAction = body.action.toUpperCase();
+    if (subject === undefined && (upstreamAction === 'SAFE' || upstreamAction === 'AGE_RESTRICTED')) {
+      if (typeof body.sha256 !== 'string' || !isHex64(body.sha256)) {
+        return jsonResponse(
+          { success: false, error: '`sha256` must be a 64-character hex hash to make a file more visible', code: 'invalid_sha256' },
+          400,
+          corsHeaders
+        );
+      }
+      // The hash checked is the hash written: the moderation record is keyed
+      // case-sensitively (see the `from` block below).
+      sha256 = body.sha256.toLowerCase();
+      let file: BlossomBlob;
+      try {
+        file = await readMediaRecord(sha256, env);
+      } catch (err) {
+        if (err instanceof MediaRecordMissing) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "The media server has no record of this file, so it can't be checked for an open age review; nothing was changed.",
+              code: 'media_record_missing',
+            },
+            409,
+            corsHeaders
+          );
+        }
+        console.error('[handleModerateMedia] owner read for the lift guard failed; refusing:', err);
+        return jsonResponse(
+          { success: false, error: 'Could not read who owns this file; refusing to act', code: 'owner_unreadable' },
+          503,
+          corsHeaders
+        );
+      }
+      await ensureAgeReviewSchema(env);
+      const held = await ageReviewActiveGuard(
+        file.owner, env, corsHeaders,
+        upstreamAction === 'SAFE'
+          ? 'The account that owns this file has an open age review, so its files can only be made public through that case.'
+          : "This file is withheld (hidden, blocked or deleted) and its owner has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
+        { failClosed: true },
+      );
+      // A 409 is an open case. Anything else the guard answers (a 503) means
+      // the lookup could not run, and refuses whatever the action.
+      if (held && (held.status !== 409 || upstreamAction === 'SAFE')) return held;
+      if (held) {
+        // Once the case restricts the account, its withhold has hidden the
+        // files, and for up to 5 minutes the media server can still read them
+        // public; a REVIEW (unchecked here) rewrites the record without hiding
+        // anything. Neither source can then be trusted to say "hidden", so
+        // every AGE_RESTRICTED is refused. The later states can be reached
+        // without a restriction, so whether the file is hidden decides there.
+        // ageReviewActiveGuard's one 409 always carries the case's state
+        // (age-review.ts); a 409 without it would fall through to the checks
+        // below, so keep that shape if the guard ever grows another 409.
+        const heldCase = await held.clone().json() as { caseId?: string; state?: string };
+        if (isAccountRestrictedAgeReviewState(heldCase.state as AgeReviewState)) {
+          return jsonResponse(
+            {
+              success: false,
+              error: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+              code: 'age_review_active',
+              caseId: heldCase.caseId,
+              state: heldCase.state,
+            },
+            409,
+            corsHeaders
+          );
+        }
+        if (file.level === 'hidden' || file.level === 'blocked' || file.level === 'deleted') return held;
+        let recorded: string;
+        try {
+          recorded = await readRecordedAction(sha256, env, headers);
+        } catch (err) {
+          console.error('[handleModerateMedia] record read for the lift guard failed; refusing:', err);
+          return jsonResponse(
+            { success: false, error: 'Could not read current media state; refusing to act', code: 'state_unreadable' },
+            503,
+            corsHeaders
+          );
+        }
+        if (recorded === 'QUARANTINE' || recorded === 'PERMANENT_BAN' || recorded === 'DELETE') return held;
+      }
+    }
+
     // The expected-state check, when the caller declares what it believes it is
     // changing.
     //
@@ -2472,9 +2647,11 @@ async function handleModerateMedia(
     //
     // ageReviewActiveGuard refuses that class of reversal for unbanpubkey and
     // unsuspendpubkey. It is pubkey-keyed and this endpoint is hash-keyed, so it
-    // runs here only for callers that name the account (the account check
-    // above). `from` closes the gap for callers that opt in, without a breaking
-    // change for the ones that do not.
+    // runs here on the account a request names (the account check above) or,
+    // for a SAFE or AGE_RESTRICTED, on the owner the media server names (the
+    // lift guard above).
+    // `from` adds the declared-state check for callers that opt in, without a
+    // breaking change for the ones that do not.
     //
     // The check and the write are two separate steps, not one. Reading the state
     // is a request to moderation-service and changing it is another, with no lock
@@ -2484,17 +2661,20 @@ async function handleModerateMedia(
     // needs the two to happen together.
     //
     // It is also a mistake-guard, not a security boundary. The caller supplies
-    // `from` and omitting it restores the old behaviour, so this protects a
-    // cooperating caller from its own bug -- which is the actual threat here,
-    // since the endpoint already sits behind admin auth.
+    // `from` and omitting it skips this check, so this protects a cooperating
+    // caller from its own bug -- which is the actual threat here, since the
+    // endpoint already sits behind admin auth. (The lift guard above is the
+    // check that does not depend on the caller.)
     //
-    // Omitting `from` means "no check" and is the supported default.
+    // Omitting `from` means "no state check" and is the supported default.
     // Sending it present-but-unusable means the caller tried to declare a state
     // and failed to -- an unmapped action name, a template that rendered empty,
     // the wrong type off a JSON payload. Treating that as "absent" would hand
     // back the old unguarded behaviour AND a 200, so the caller would believe it
     // asked for the check and was told it succeeded. Refuse instead, and
-    // refuse before the upstream read so a malformed request costs no call.
+    // refuse before this block's upstream read so a malformed request costs it
+    // no call. (A SAFE or AGE_RESTRICTED has met the lift guard first, which
+    // may already have refused it or read the media server and D1.)
     if (body.from !== undefined) {
       const declared = typeof body.from === 'string' ? body.from.trim() : '';
       if (!declared) {
@@ -2525,11 +2705,11 @@ async function handleModerateMedia(
       // (handlePublicCheckResult, src/index.mjs:1494), so nothing that survives
       // here is something the upstream would have rejected.
       //
-      // Scoped to the callers that opt in: this path and the account check
-      // above, which validates the same shape. Callers that send neither pass
-      // sha256 in a POST body, which moderation-service validates itself, so
-      // widening this would change behaviour for existing callers to no
-      // benefit and is left out of this change.
+      // Scoped to the paths that read upstream with the hash: this one, the
+      // account check and the lift guard above, which validate the same shape.
+      // Any other request passes sha256 in a POST body, which
+      // moderation-service validates itself, so widening this would change
+      // behaviour for existing callers to no benefit and is left out.
       if (typeof body.sha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(body.sha256)) {
         return jsonResponse(
           { success: false, error: '`sha256` must be a 64-character hex hash to use `from`', code: 'invalid_sha256' },
@@ -2546,8 +2726,9 @@ async function handleModerateMedia(
       // an uppercase hash a DIFFERENT key, so unnormalised this reads dd44... and
       // writes DD44... while reporting that it checked first.
       //
-      // Only this path and the account check above normalise, matching how the
-      // validation is scoped (for a caller that sent both, this repeats it). That
+      // Only this path, the account check and the lift guard above normalise,
+      // matching how the validation is scoped (where more than one ran, this
+      // repeats it). That
       // an uppercase hash can open a second row at all is a pre-existing hazard
       // of this endpoint, not something introduced here, and fixing it for every
       // caller belongs in its own change.
@@ -2569,34 +2750,7 @@ async function handleModerateMedia(
       // every way media gets restricted.
       let current: string;
       try {
-        // Built inside the try on purpose: getModerationServiceUrl throws when the
-        // binding is missing, and a misconfiguration is the same "could not check"
-        // case as an upstream failure. Outside, it exited as a 500 naming an
-        // internal binding instead of the retryable 503 this block commits to.
-        const checkRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${encodeURIComponent(sha256)}`, {
-          method: 'GET',
-          headers,
-        });
-        const checkResponse = env.MODERATION_API
-          ? await env.MODERATION_API.fetch(checkRequest)
-          : await fetch(checkRequest);
-        if (!checkResponse.ok) throw new Error(`check-result ${checkResponse.status}`);
-        const state = await checkResponse.json() as { status?: string; moderated?: boolean };
-        // `status` is the stored action lowercased, or the literal 'unknown' when
-        // there is no row -- handlePublicCheckResult emits one or the other on
-        // every 200 (src/index.mjs:1508, :1520). Its absence therefore does not
-        // mean the blob is in an unknown state; it means this is not a response
-        // this code understands, so the state is unreadable and belongs in the
-        // 503 class below.
-        //
-        // Defaulting it to 'unknown' instead would answer 409 "expected
-        // AGE_RESTRICTED, found UNKNOWN", asserting a fact about the blob that
-        // was never established. An explicit 'unknown' FROM the service is a real
-        // answer and still refuses; a missing field is not.
-        if (typeof state?.status !== 'string' || !state.status) {
-          throw new Error('check-result carried no status');
-        }
-        current = state.status.toUpperCase();
+        current = await readRecordedAction(sha256, env, headers);
       } catch (err) {
         // 503, not 409, and never success: "could not check" is a different answer
         // from "no conflict", and the retryable class is the honest one. Same
