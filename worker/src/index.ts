@@ -2527,8 +2527,10 @@ async function handleModerateMedia(
     //     confirmed adult content). Hidden is read from the media server and,
     //     since that status is cached for up to 5 minutes and can still read
     //     public right after the case's withhold, from moderation-service's
-    //     record too, which the withhold writes at once. Both reads happen only
-    //     while the owner has an open case. Once the case has restricted the
+    //     record too, which the withhold writes at once. Both are consulted
+    //     only while the owner has an open case: the record is read only then,
+    //     while the media server's status comes from the owner read every SAFE
+    //     and AGE_RESTRICTED makes. Once the case has restricted the
     //     account (and so run the withhold), every AGE_RESTRICTED is refused.
     //   - Block, Quarantine, Delete and REVIEW are not checked.
     //   - The hash must be 64 hex: it becomes a path on the media server's

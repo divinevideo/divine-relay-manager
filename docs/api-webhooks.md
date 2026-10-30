@@ -253,7 +253,9 @@ hidden, blocked or deleted: the 18+ gate would show it to signed-in adults. An
 `AGE_RESTRICTED` over a public or already-gated file only tightens and goes
 through. Hidden means the media server shows it so, or moderation-service's
 record does (the media server's status can be up to 5 minutes stale; the
-record is not); both are read only during an open case. Once the case has
+record is not). Both are consulted only during an open case, and the record is
+read only then; the media server is read on every `SAFE` and `AGE_RESTRICTED`,
+since that read names the owner. Once the case has
 restricted the account (a `restricted_pending_*` state), its withhold has
 hidden the files, and every `AGE_RESTRICTED` is refused. `PERMANENT_BAN`,
 `QUARANTINE`, `DELETE` and `REVIEW` are not checked. The worker reads the owner

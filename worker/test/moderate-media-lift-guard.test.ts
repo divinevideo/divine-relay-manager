@@ -262,9 +262,10 @@ describe('/api/moderate-media age-review lift guard: SAFE', () => {
 // restricted the account: such a case hides nothing yet, and refusing would
 // leave the file fully public. Hidden is read from the media server and,
 // because its status is cached for up to 5 minutes, from moderation-service's
-// record too, which the case's withhold writes at once. Both are read only
-// while the owner has an open case. Once the case has restricted the account,
-// every AGE_RESTRICTED is refused.
+// record too, which the case's withhold writes at once. Both are consulted
+// only while the owner has an open case, and the record is read only then (the
+// media server is read every time, for the owner). Once the case has restricted
+// the account, every AGE_RESTRICTED is refused.
 describe('/api/moderate-media age-review lift guard: AGE_RESTRICTED', () => {
   // A case that has not restricted the account: the withhold has not run, so
   // whether the file is hidden decides.
