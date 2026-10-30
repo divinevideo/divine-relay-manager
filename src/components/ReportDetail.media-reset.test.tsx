@@ -303,6 +303,41 @@ describe("the completeness rule under MediaPreview's null default", () => {
     rerender(treeWith(client, second, [first, second], false));
     expect(hasImg(IMG1)).toBe(false);
   });
+
+  // The account card's hook forgets a Show only when the account changes or the
+  // default turns sensitive. Neither happens between two CSAM-signal reports on
+  // posts by the same account, so the report key is what hides them again.
+  it("does not carry a Show of the account's avatar and recent-post media to another CSAM-signal report on the same account", () => {
+    const client = qc();
+    const first = CSAM(E1);
+    const { rerender } = render(treeWith(client, first, [first], false));
+    expect(hasImg(AVATAR)).toBe(false);
+    expect(hasImg(POST_IMG)).toBe(false);
+    fireEvent.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    fireEvent.click(screen.getByRole('button', { name: /show 1 media/i }));
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(POST_IMG)).toBe(true);
+
+    const second = CSAM(E2);
+    rerender(treeWith(client, second, [second], false));
+    expect(hasImg(AVATAR)).toBe(false);
+    expect(hasImg(POST_IMG)).toBe(false);
+  });
+
+  // Same for the repost original: its viewer starts again only for a new event,
+  // and a second report on the same repost brings the same event.
+  it('does not carry a Show of the repost original to another CSAM-signal report on the same repost', () => {
+    const client = qc();
+    const first = CSAM(E4);
+    const { rerender } = render(treeWith(client, first, [first], false));
+    expect(hasImg(ORIGINAL_IMG1)).toBe(false);
+    for (const button of mediaCard()) fireEvent.click(button);
+    expect(hasImg(ORIGINAL_IMG1)).toBe(true);
+
+    const second = CSAM(E4);
+    rerender(treeWith(client, second, [first, second], false));
+    expect(hasImg(ORIGINAL_IMG1)).toBe(false);
+  });
 });
 
 // The open report's target can leave the list (handled elsewhere), and with it
