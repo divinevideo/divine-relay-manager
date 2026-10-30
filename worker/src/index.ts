@@ -1265,8 +1265,8 @@ async function handleModerate(
           moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
-          // A case revision conflict or a verified scoped release with other
-          // restrictions is terminal for this request. Transient IO still retries.
+          // A quarantine case conflict is terminal for this request. Transient
+          // IO still retries.
           return jsonResponse(
             { ...result, success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
             result.conflict ? 409 : 500,
