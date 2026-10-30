@@ -66,10 +66,9 @@ interface UserProfileCardProps {
 export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
   const mediaShownByDefault = hideMediaByDefault === null ? null : !hideMediaByDefault;
-  // The pane is reused across reports, so, as with the post media below, a
-  // reveal is forgotten when the pane moves to another account, or when the
-  // default turns sensitive: coming back asks again. Another report on the
-  // same account, with the default unchanged, keeps it. Worked out during
+  // The hook forgets a reveal when the account changes or the default turns
+  // sensitive: coming back asks again. ReportDetail also mounts this card fresh
+  // for each report, so a reveal never outlives its report. Worked out during
   // render, so the avatar is never mounted meanwhile.
   const [showAvatar, toggleAvatar] = useMediaVisibility(mediaShownByDefault, pubkey ?? "");
   const apiUrl = useApiUrl();
