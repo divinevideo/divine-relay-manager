@@ -10,6 +10,7 @@ import { Labels } from "@/components/Labels";
 import { DebugPanel } from "@/components/DebugPanel";
 import { SettingsDashboard } from "@/components/SettingsDashboard";
 import { AgeReview } from "@/components/AgeReview";
+import { SexualQuarantine } from "@/components/SexualQuarantine";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -23,6 +24,7 @@ import { AttributionNotice } from "@/components/auth/AttributionNotice";
 const TAB_DEFINITIONS = [
   { id: 'reports', label: 'Reports', icon: Flag },
   { id: 'age-review', label: 'Age Review', icon: Clock },
+  { id: 'sexual-quarantine', label: 'Sexual Quarantine', icon: Flag },
   { id: 'events', label: 'Events', icon: FileText },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'labels', label: 'Labels', icon: Tag },
@@ -39,13 +41,12 @@ function loadTabOrder(): TabId[] {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as TabId[];
-      // Validate: must contain all tab IDs exactly once
-      if (
-        parsed.length === DEFAULT_TAB_ORDER.length &&
-        DEFAULT_TAB_ORDER.every(id => parsed.includes(id))
-      ) {
-        return parsed;
+      const parsed: unknown = JSON.parse(stored);
+      // Keep the saved order of known tabs, once each, and append tabs added
+      // since it was saved, so a new tab does not discard a custom order
+      if (Array.isArray(parsed)) {
+        const saved = [...new Set(parsed)].filter((id): id is TabId => DEFAULT_TAB_ORDER.includes(id as TabId));
+        return [...saved, ...DEFAULT_TAB_ORDER.filter(id => !saved.includes(id))];
       }
     }
   } catch {
@@ -68,6 +69,7 @@ function getTabFromPath(pathname: string): string {
   if (pathname.startsWith('/users')) return 'users';
   if (pathname.startsWith('/reports')) return 'reports';
   if (pathname.startsWith('/age-review')) return 'age-review';
+  if (pathname.startsWith('/sexual-quarantine')) return 'sexual-quarantine';
   if (pathname.startsWith('/labels')) return 'labels';
   if (pathname.startsWith('/settings')) return 'settings';
   if (pathname.startsWith('/debug')) return 'debug';
@@ -180,7 +182,7 @@ export function RelayManager() {
       <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4 flex flex-col">
         <AttributionNotice />
         <Tabs value={currentTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
-          <TabsList className="shrink-0 grid w-full grid-cols-7">
+          <TabsList className="shrink-0 grid w-full grid-cols-8">
             {orderedTabs.map((tab) => {
               const Icon = tab.icon;
               const isDragOver = dragOverTab === tab.id;
@@ -224,6 +226,10 @@ export function RelayManager() {
 
           <TabsContent value="age-review" className="flex-1 min-h-0 mt-4">
             <AgeReview />
+          </TabsContent>
+
+          <TabsContent value="sexual-quarantine" className="flex-1 min-h-0 mt-4">
+            <SexualQuarantine />
           </TabsContent>
 
           <TabsContent value="labels" className="flex-1 min-h-0 overflow-y-auto mt-4">

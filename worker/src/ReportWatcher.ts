@@ -1,9 +1,10 @@
 // ABOUTME: Durable Object for watching NIP-56 content reports (kind 1984)
 // ABOUTME: Maintains persistent WebSocket to relay for auto-hide functionality
 
+import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
-import type { EventVisibilityOperation, EventVisibilityResult } from './event-visibility';
+import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
   AUTO_HIDE_ACTION,
@@ -20,11 +21,15 @@ import {
   defaultResolutionForBand,
 } from '../../shared/age-review';
 import { getReportedList } from '../../shared/list-report';
+import { ageReviewCategory } from '../../shared/report-classification';
 import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
 import { isLowerHex64 } from './hex';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
+import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit, QuarantineConflict, adultSexualCategory, type QuarantineSnapshot } from './sexual-quarantine';
+import { createQuarantineIO, type SexualQuarantineEnv } from './sexual-quarantine-io';
+import { replayAdultReports, reportCategory } from './sexual-report-replay';
 
 const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
 const UNRESOLVED_HUMAN_HIDE_VISIBILITY = 'hide-unresolved';
@@ -32,7 +37,7 @@ const UNRESOLVED_HUMAN_HIDE_VISIBILITY = 'hide-unresolved';
 /**
  * Extended environment for ReportWatcher DO
  */
-export interface ReportWatcherEnv extends Nip86Env, KeycastEnv {
+export interface ReportWatcherEnv extends Nip86Env, KeycastEnv, SexualQuarantineEnv {
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
   TRUSTED_CLIENTS?: string;
@@ -113,6 +118,7 @@ export interface ReportEvent {
   content: string;
   tags: string[][];
   created_at: number;
+  sig?: string;
 }
 export type { AutoHideConfig, AutoHideTier } from '../../shared/autohide';
 
@@ -155,6 +161,8 @@ export class ReportWatcher implements DurableObject {
   private subscriptionId: string = 'auto-hide-reports';
   private autoHideConfig: AutoHideConfig | null = null;
   private pendingAgeReviewPubkeys = new Set<string>();
+  private sexualEngine?: SexualQuarantine;
+  private pendingLegacySexualReports = new Map<string, Promise<void>>();
 
   constructor(state: DurableObjectState, env: ReportWatcherEnv) {
     this.state = state;
@@ -162,6 +170,7 @@ export class ReportWatcher implements DurableObject {
 
     // Restore persisted state on construction
     this.state.blockConcurrencyWhile(async () => {
+      if (this.env.SEXUAL_QUARANTINE_ENABLED === 'true') await this.state.storage.put('sexual-quarantine-activated', true);
       const stored = await this.state.storage.get<{
         running: boolean;
         eventsProcessed: number;
@@ -227,6 +236,10 @@ export class ReportWatcher implements DurableObject {
 
       if (path === '/event-visibility' && request.method === 'POST') {
         return this.handleEventVisibility(request);
+      }
+
+      if (path === '/sexual-quarantine' || path.startsWith('/sexual-quarantine/')) {
+        return this.handleSexualQuarantine(request, path);
       }
 
       return new Response(JSON.stringify({ error: 'Not found' }), {
@@ -396,6 +409,19 @@ export class ReportWatcher implements DurableObject {
         if (this.env.DB && !this.schemaReady) {
           await ensureSchema(this.env.DB);
           this.schemaReady = true;
+        }
+
+        // Reports may have been loaded before this case's current revision.
+        // Only the versioned case view can decide this stream's holds. Once its
+        // scoped release is complete, Allow remains a separate base-ban action.
+        const sexual = this.sexualQuarantine();
+        const existingCase = await sexual.get(operation.eventId);
+        if (existingCase && existingCase.state !== 'out_of_scope' && ['allow', 'review'].includes(operation.relayAction)) {
+          if (!existingCase.actor || existingCase.goal !== 'restore' || !existingCase.decisionRecordedAt
+            || !['restored', 'restored_restricted'].includes(existingCase.state)) {
+            return { success: false, conflict: true,
+              error: `Review the current revision and provide a reason at /sexual-quarantine/${operation.eventId}` };
+          }
         }
 
         let relayFailure: EventVisibilityResult | undefined;
@@ -769,7 +795,12 @@ export class ReportWatcher implements DurableObject {
    * Schedule health check alarm
    */
   private async scheduleHealthCheck(): Promise<void> {
-    await this.state.storage.setAlarm(Date.now() + HEALTH_CHECK_INTERVAL_MS);
+    // Never postpone an earlier alarm. Every admitted report and case decision
+    // calls this, and a steady stream of them must not starve a pending
+    // reconnect or recovery pass. Inside alarm() getAlarm() reads null.
+    const next = Date.now() + HEALTH_CHECK_INTERVAL_MS;
+    const pending = await this.state.storage.getAlarm();
+    if (pending === null || pending > next) await this.state.storage.setAlarm(next);
   }
 
   /**
@@ -833,22 +864,14 @@ export class ReportWatcher implements DurableObject {
     // 2. ["l", "NS-<category>", "social.nos.ontology"] - Divine web app format (NIP-32)
     // 3. ["l", "<category>", "MOD"] - Generic NIP-32 MOD namespace
     // 4. ["e", "<id>", "<category>"] or ["p", "<id>", "<category>"] - category in target tag
-    const reportTag = event.tags.find(t => t[0] === 'report');
-    const labelTagNos = event.tags.find(t => t[0] === 'l' && t[2] === 'social.nos.ontology');
-    const labelTagMod = event.tags.find(t => t[0] === 'l' && t[2] === 'MOD');
-
     // Extract target (e tag for event, p tag for pubkey)
     const targetEventTag = event.tags.find(t => t[0] === 'e');
     const targetPubkeyTag = event.tags.find(t => t[0] === 'p');
 
     // Get category from first available source
-    // Priority: report tag > NIP-32 label > e/p tag third element
-    const category = reportTag?.[1]
-      || labelTagNos?.[1]
-      || labelTagMod?.[1]
-      || targetEventTag?.[2]
-      || targetPubkeyTag?.[2]
-      || 'unknown';
+    // Priority: a child-safety category in any of these sources, then
+    // report tag > NIP-32 label > e/p tag third element
+    const category = reportCategory(event.tags);
 
     const targetType = targetEventTag ? 'event' : targetPubkeyTag ? 'pubkey' : 'unknown';
     const targetId = targetEventTag?.[1] || targetPubkeyTag?.[1] || 'unknown';
@@ -866,8 +889,11 @@ export class ReportWatcher implements DurableObject {
 
     // Create age review case for under-16 reports (pubkey-level).
     // Runs after auto-hide completes; both awaited so work survives DO eviction.
+    // Gated on the same reading the moderator UI uses, not the auto-hide
+    // category: a child-safety label elsewhere in the report must not
+    // suppress the age review.
     const reportedPubkey = targetPubkeyTag?.[1];
-    if (category === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
+    if (ageReviewCategory(event) === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
       try {
         await this.createAgeReviewCase(event, reportedPubkey);
@@ -882,7 +908,8 @@ export class ReportWatcher implements DurableObject {
   private async processAutoHide(
     event: ReportEvent,
     category: string,
-    targetEventId: string
+    targetEventId: string,
+    advanceNow = true,
   ): Promise<void> {
     if (!this.schemaReady && this.env.DB) {
       try {
@@ -899,6 +926,102 @@ export class ReportWatcher implements DurableObject {
       return;
     }
 
+    const adultReport = adultSexualCategory(category) && !getReportedList(event);
+    const quarantineActivated = adultReport && (this.env.SEXUAL_QUARANTINE_ENABLED === 'true'
+      || await this.state.storage.get('sexual-quarantine-activated'));
+    if (quarantineActivated) {
+      const legacyTier = config.tiers.find(t => t.categories.includes(category));
+      // Preserve an explicitly configured category's trust and count policy.
+      // Canonical adult fallback is only for an otherwise unconfigured alias.
+      const videoTier = legacyTier || config.tiers.find(t => t.categories.some(c => adultSexualCategory(c)));
+      const client = event.tags.find(t => t[0] === 'client')?.[1]?.trim().toLowerCase();
+      const trusted = config.trustedClients.some(c => c.trim().toLowerCase() === client);
+      // An ignored/untrusted report must not pin replay behind an unavailable
+      // target. videoTier is the exact-category tier whenever one exists.
+      if (!videoTier || (videoTier.requireTrustedClient && !trusted)) return;
+      // Rejection is permanent for these bytes. Throwing would hold the replay
+      // window on this report forever, so alert and skip it instead.
+      const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
+      if (JSON.stringify(wire).length > 60_000 || wire.kind !== 1984 || !verifyEvent(wire)) {
+        console.error(`[ALERT] Sexual quarantine report ${event.id} not admitted: invalid signature or over the evidence bound`);
+        return;
+      }
+      if (!isLowerHex64(targetEventId)) {
+        console.error(`[ALERT] Sexual quarantine report ${wire.id} not admitted: invalid target identifier`);
+        return;
+      }
+      const legacyKey = `sexual-legacy-processed:${targetEventId}:${event.id}`;
+      if (await this.state.storage.get(legacyKey)) return;
+      const q = this.sexualQuarantine();
+      const existing = await q.get(targetEventId);
+      const absentKey = `sexual-absent:${targetEventId}:${event.id}`;
+      const boundKey = `sexual-target-bound:${targetEventId}:${event.id}`;
+      if (await this.state.storage.get(absentKey) || await this.state.storage.get(boundKey)) return;
+      let nonvideo = existing?.state === 'out_of_scope';
+      let snapshot: QuarantineSnapshot | undefined;
+      if (!nonvideo && !existing?.snapshot) {
+        // IO validates the target signature before throwing OutsideVideoScope.
+        // Transport uncertainty retains replay. A confirmed absent response is
+        // archived separately so one missing target cannot pin unrelated reports.
+        try { snapshot = await createQuarantineIO(this.env).snapshot(targetEventId); }
+        catch (error) {
+          if (error instanceof ConfirmedAbsentTarget || error instanceof TargetEvidenceLimit) {
+            const archiveKey = error instanceof TargetEvidenceLimit ? boundKey : absentKey;
+            const disposition = error instanceof TargetEvidenceLimit ? 'target evidence exceeds capture limit' : 'target absent';
+            const source = JSON.stringify(wire);
+            await this.state.storage.transaction(async tx => {
+              const parts = Math.ceil(source.length / 16000);
+              for (let part = 0; part < parts; part++) await tx.put(`${archiveKey}:part:${part}`, source.slice(part * 16000, (part + 1) * 16000));
+              await tx.put(archiveKey, { targetId: targetEventId, reportId: event.id, category, disposition, parts, receivedAt: Date.now() });
+            });
+            console.error(`[ALERT] Sexual quarantine ${disposition}: ${targetEventId}; archived report ${event.id} for backfill review`);
+            return;
+          }
+          if (!(error instanceof OutsideVideoScope)) throw error;
+          nonvideo = true;
+        }
+      }
+      if (nonvideo) {
+        await this.processLegacySexualReport(event, category, targetEventId, legacyKey);
+        return;
+      }
+
+      // Once activated, video admission rollback must not resume base bans:
+      // those cannot be released by this stream's named-hold Restore.
+      if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true') return;
+      const admitted = await this.state.blockConcurrencyWhile(async () => {
+        const human = await this.hasBlockingHumanResolution(targetEventId, false);
+        if (human !== false) return false;
+        await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
+          source: JSON.parse(JSON.stringify(wire)) as object }, // A legacy fractional threshold means the next whole reporter count.
+          Math.max(2, Math.ceil(videoTier.threshold)), snapshot);
+        return true;
+      });
+      if (!admitted) return;
+      await this.scheduleHealthCheck();
+      if (advanceNow) await q.advance(targetEventId);
+      return;
+    }
+    await this.processLegacyAutoHide(event, category, targetEventId);
+  }
+
+  private async processLegacySexualReport(event: ReportEvent, category: string, targetEventId: string, key: string): Promise<void> {
+    const pending = this.pendingLegacySexualReports.get(key);
+    if (pending) return pending;
+    const work = (async () => {
+      if (await this.state.storage.get(key)) return;
+      await this.processLegacyAutoHide(event, category, targetEventId);
+      // Records processing, not confirmed enforcement: the legacy writer keeps
+      // its existing skip/failure policy. Prevent duplicate replay decisions.
+      await this.state.storage.put(key, true);
+    })();
+    this.pendingLegacySexualReports.set(key, work);
+    try { await work; } finally { this.pendingLegacySexualReports.delete(key); }
+  }
+
+  private async processLegacyAutoHide(event: ReportEvent, category: string, targetEventId: string): Promise<void> {
+    const config = this.autoHideConfig;
+    if (!config?.enabled) return;
     // Find which tier this category belongs to
     const tier = config.tiers.find(t => t.categories.includes(category));
     if (!tier) {
@@ -1539,20 +1662,89 @@ export class ReportWatcher implements DurableObject {
   async alarm(): Promise<void> {
     console.log('[ReportWatcher] Alarm triggered');
 
+    // Reconnect first. Case recovery and replay below make slow network calls,
+    // and live auto-hide for every category waits on this socket.
+    if (this.running) {
+      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+        console.log('[ReportWatcher] Connection lost, reconnecting...');
+        this.connect();
+      } else {
+        console.log('[ReportWatcher] Connection healthy');
+      }
+    }
+
+    if (await this.state.storage.get('sexual-jobs-exist')) {
+      // Case recovery must not abort the watcher's next health check.
+      try {
+        await this.sexualQuarantine().tick();
+      } catch (error) {
+        console.error('[ALERT] Sexual quarantine recovery incomplete; retry scheduled:', error);
+      }
+      const sexualJobs = await this.state.storage.list({ prefix: 'sexual-job:', limit: 1 });
+      if (sexualJobs.size) await this.scheduleHealthCheck();
+    }
+
+    if (this.running && this.env.SEXUAL_QUARANTINE_ENABLED === 'true' && this.autoHideConfig?.enabled) {
+      try {
+        await replayAdultReports(this.state.storage, this.env.RELAY_URL, async (event, category, target) => {
+          if (await this.hasBlockingHumanResolution(target, false) === null) throw new Error('Review state unavailable');
+          await this.processAutoHide(event, category, target, false);
+        });
+      } catch {
+        console.error('[ALERT] Sexual report replay incomplete; cursor retained');
+      }
+      await this.scheduleHealthCheck();
+    }
+
     if (!this.running) {
       console.log('[ReportWatcher] Not running, skipping alarm');
       return;
     }
 
-    // Check if we need to reconnect
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
-      console.log('[ReportWatcher] Connection lost, reconnecting...');
-      this.connect();
-    } else {
-      console.log('[ReportWatcher] Connection healthy');
-    }
-
     // Schedule next health check
     await this.scheduleHealthCheck();
+  }
+
+  private sexualQuarantine(): SexualQuarantine {
+    return this.sexualEngine ??= new SexualQuarantine(this.state.storage, createQuarantineIO(this.env));
+  }
+
+  // Only reached through the Worker's authenticated report-watcher proxy.
+  private async handleSexualQuarantine(request: Request, path: string): Promise<Response> {
+    const [, , eventId, suffix] = path.split('/');
+    const headers = { 'Cache-Control': 'private, no-store' };
+    const q = this.sexualQuarantine();
+    if (!eventId && request.method === 'GET') {
+      const cursor = new URL(request.url).searchParams.get('cursor') ?? undefined;
+      if (cursor !== undefined && !/^sexual-review-v3:[01]:[0-9]{16}:[0-9a-f]{64}$/.test(cursor)) {
+        return Response.json({ error: 'Invalid review queue cursor' }, { status: 400, headers });
+      }
+      return Response.json(await q.listPage(cursor), { headers });
+    }
+    if (!isLowerHex64(eventId)) return Response.json({ error: 'Invalid event ID' }, { status: 400, headers });
+    if (request.method === 'GET') {
+      const c = await q.get(eventId);
+      return Response.json(suffix === 'history' ? await q.history(eventId) : c || { error: 'Case not found' }, { status: c ? 200 : 404, headers });
+    }
+    if (request.method !== 'POST' || suffix) return Response.json({ error: 'Method not allowed' }, { status: 405, headers });
+    let input: { revision?: unknown; decision?: unknown; actor?: unknown; reason?: unknown };
+    try { input = await request.json(); } catch { return Response.json({ error: 'Invalid JSON' }, { status: 400, headers }); }
+    if (!Number.isSafeInteger(input.revision) || (input.decision !== 'restore' && input.decision !== 'remove')
+      || typeof input.actor !== 'string' || !input.actor.trim() || input.actor.trim() === 'auto' || input.actor.length > 200
+      || typeof input.reason !== 'string' || !input.reason.trim() || input.reason.length > 2000) {
+      return Response.json({ error: 'Revision, decision, reviewer and reason are required' }, { status: 400, headers });
+    }
+    const { revision, decision, actor, reason } = input;
+    try {
+      await q.decide(eventId, revision as number, decision as 'restore' | 'remove', actor as string, reason as string);
+    } catch (error) {
+      return error instanceof QuarantineConflict
+        ? Response.json({ error: 'Case revision conflict' }, { status: 409, headers })
+        : Response.json({ error: 'Could not save the decision; retry' }, { status: 500, headers });
+    }
+    await this.scheduleHealthCheck();
+    await q.advance(eventId);
+    const c = await q.get(eventId);
+    return Response.json(c, { status: c?.state === 'pending' || (c?.actor && !c.decisionRecordedAt) ? 202 : 200, headers });
   }
 }

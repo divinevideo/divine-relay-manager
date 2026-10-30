@@ -100,10 +100,11 @@ export function classifyReport(event: { tags?: unknown; content?: unknown }): Re
   return { category: categoryOf(tags), csamSignal };
 }
 
-// Must match the worker's category extraction in ReportWatcher.handleReportEvent
-// (report > nos label > MOD label > e type > p type), including taking the
-// first Divine label rather than the high-priority one: age review is gated
-// on the same value the worker computes.
+// Precedence: report > nos label > MOD label > e type > p type, taking the
+// first Divine label rather than the high-priority one. ReportWatcher gates
+// age-review case creation on this function, so the UI and the worker read
+// the same value. Its auto-hide category is separate and prefers a CSAM
+// category found anywhere in the tags.
 // TODO(#322): move ReportWatcher onto classifyReport
 export function ageReviewCategory(event: { tags?: unknown }): string {
   const tags = tagList(event);

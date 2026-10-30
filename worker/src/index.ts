@@ -1107,20 +1107,26 @@ async function handlePublish(
           resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 
-        // Use waitUntil to ensure sync completes even after response is sent
-        const syncPromise = syncZendeskAfterAction(
-          env,
-          status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
-          targetType,
-          targetId,
-          getPublicKey(secretKey)
-        );
-        // Still await to catch errors, but also ensure completion via waitUntil pattern
-        try {
-          await syncPromise;
-          console.log('[handlePublish] Zendesk sync completed successfully');
-        } catch (err) {
-          console.error('[handlePublish] Zendesk sync error:', err);
+        // An open quarantine case refused this resolution. Its own decision
+        // resolves the linked tickets; closing them now would hide an undecided case.
+        if (resolutionVisibility?.conflict) {
+          console.log('[handlePublish] Resolution refused by the quarantine case; Zendesk tickets left open');
+        } else {
+          // Use waitUntil to ensure sync completes even after response is sent
+          const syncPromise = syncZendeskAfterAction(
+            env,
+            status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
+            targetType,
+            targetId,
+            getPublicKey(secretKey)
+          );
+          // Still await to catch errors, but also ensure completion via waitUntil pattern
+          try {
+            await syncPromise;
+            console.log('[handlePublish] Zendesk sync completed successfully');
+          } catch (err) {
+            console.error('[handlePublish] Zendesk sync error:', err);
+          }
         }
       } else {
         console.log('[handlePublish] Missing required fields for sync:', { status, targetType, targetId });
@@ -1259,15 +1265,11 @@ async function handleModerate(
           moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
-          // Flatten to 500, matching delete_event, and ban_pubkey for anything but an
-          // outright refusal. Neither banevent nor allowevent is age-review guarded
-          // (that guard covers only suspendpubkey, unsuspendpubkey and unbanpubkey),
-          // so there is no 409/503 whose code a caller would need preserved -- and
-          // forwarding would relabel a transient relay 502 as a terminal 400, which
-          // retrying clients read as "do not retry".
+          // A quarantine case conflict is terminal for this request. Transient
+          // IO still retries.
           return jsonResponse(
-            { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
-            500,
+            { ...result, success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            result.conflict ? 409 : 500,
             corsHeaders,
           );
         }
@@ -3312,7 +3314,7 @@ async function handleReportWatcherRoutes(
 
   try {
     // Forward the request to the DO
-    const doRequest = new Request(`https://do${subPath}`, {
+    const doRequest = new Request(`https://do${subPath}${new URL(request.url).search}`, {
       method: request.method,
       headers: request.headers,
       body: request.body,
@@ -3323,7 +3325,7 @@ async function handleReportWatcherRoutes(
 
     return new Response(JSON.stringify(data), {
       status: response.status,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      headers: { 'Content-Type': 'application/json', ...corsHeaders, 'Cache-Control': 'private, no-store' },
     });
   } catch (error) {
     console.error('[handleReportWatcherRoutes] Error:', error);

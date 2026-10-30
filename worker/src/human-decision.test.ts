@@ -533,6 +533,37 @@ describe('human decision persistence', () => {
       });
     });
 
+    it('leaves linked Zendesk tickets open when a quarantine case refuses the dismissal', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      env.REPORT_WATCHER.get = () => ({
+        fetch: async () => Response.json({ success: false, conflict: true, error: 'Review the current revision' }),
+      });
+      mockFetch.mockResolvedValue({
+        ok: true,
+        json: async () => ['OK', 'event_id', true, ''],
+        text: async () => JSON.stringify(['OK', 'event_id', true, '']),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Dismissed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'dismissed', 'moderation/resolution'],
+            ['e', 'cd'.repeat(32)],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ success: true, reconciled: false });
+      expect(sqlLog.some(entry => entry.sql.includes('zendesk_tickets'))).toBe(false);
+    });
+
     it('returns explicit recording status for a pubkey dismissal', async () => {
       const { db } = createMockDB();
       const env = createEnv(db);
