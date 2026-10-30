@@ -208,7 +208,8 @@ export async function handleGetAgeReviewCase(
 /**
  * Refuse-and-route guard shared by the interactive enforcement endpoints
  * (relay-rpc suspend/unsuspend/unban, bulk-moderate enqueue, and
- * moderate-media when the request names the account): if the pubkey has
+ * moderate-media on the account a request names or, for a SAFE or
+ * AGE_RESTRICTED, on the file's owner): if the pubkey has
  * an open (non-terminal) age-review case, returns a structured 409
  * (`age_review_active` + caseId/state) that the frontend turns into a redirect
  * to the case; returns null when nothing blocks the action.
@@ -237,11 +238,13 @@ export async function handleGetAgeReviewCase(
  * its hold, while for an enforcing caller matching it would keep no hold and
  * only refuse enforcement.
  *
- * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Three call
+ * `failClosed` is opt-in PER CALL SITE, not a property of the guard. Four call
  * sites pass it today: relay-rpc's reversals, bulk-moderate's loosening
- * actions (age-gate-all, un-age-restrict-all), and moderate-media's account
- * check (a note's Restore). The rest of bulk deliberately fails open; see
- * LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
+ * actions (age-gate-all, un-age-restrict-all), moderate-media's account
+ * check (a note's Restore), and moderate-media's lift guard (a SAFE or
+ * AGE_RESTRICTED, on the owner the media server names, #335). The rest of
+ * bulk deliberately fails open; see LOOSENS_AGE_REVIEW_HOLD in
+ * bulk-moderate.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,

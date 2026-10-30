@@ -174,6 +174,9 @@ describe('relay manager cors', () => {
   });
 });
 
+// A QUARANTINE: it reaches the upstream call with nothing read first, so only
+// the token resolution is under test. (A SAFE or AGE_RESTRICTED meets the
+// age-review lift guard first, #335.)
 describe('SERVICE_API_TOKEN secrets store resolution', () => {
   it('resolves plain string token', async () => {
     const testEnv = makeModerateMediaEnv('my-secret-token');
@@ -185,7 +188,7 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
           'X-Admin-Key': 'test-admin-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({ sha256: 'abc123', action: 'QUARANTINE' }),
       }),
       testEnv,
       ctx,
@@ -208,7 +211,7 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
           'X-Admin-Key': 'test-admin-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({ sha256: 'abc123', action: 'QUARANTINE' }),
       }),
       testEnv,
       ctx,
@@ -232,7 +235,7 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
           'X-Admin-Key': 'test-admin-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({ sha256: 'abc123', action: 'QUARANTINE' }),
       }),
       testEnv,
       ctx,
