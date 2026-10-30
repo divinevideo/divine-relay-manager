@@ -343,6 +343,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
+  // The report whose target the queue has called "left", held until its
+  // reports are back in hand (see selectedTargetLeftList).
+  const [leftListFor, setLeftListFor] = useState<string | null>(null);
   const detailBoundaryRef = useRef<ErrorBoundary | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
@@ -1728,12 +1731,25 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // history re-read together after a resolve or Refresh, and in the history
   // view the target moves from one to the other (or back, on a reopen); while
   // either is still reading, a target missing from both is only between them.
-  // A report is only ever selected from reports in hand, so one missing from
-  // them with nothing in flight had them and lost them.
-  const selectedTargetLeftList = !!selectedReport
+  // A report with a target is only ever selected from reports in hand, so one
+  // missing from them with nothing in flight had them and lost them. (A report
+  // with no target is never grouped with a target's reports, so it reads as
+  // left as well; with no target, the pane has no target media to hide.)
+  //
+  // Once called, the call holds until the report's reports are back in hand. A
+  // read in flight only stops a target being called "left"; it does not undo
+  // the call. Otherwise every later poll, Refresh or Load more would send the
+  // pane's default back to "not known" and then to hidden again, which drops a
+  // moderator's Show each time. A target that is only between two reads is
+  // never called, so it is never held.
+  const leftNow = !!selectedReport
     && !selectedPaneReports
     && !isFetching
     && !(historyView && history.isFetching);
+  if (leftNow && leftListFor !== selectedReport.id) setLeftListFor(selectedReport.id);
+  if (selectedPaneReports && leftListFor !== null) setLeftListFor(null);
+  const selectedTargetLeftList = leftNow
+    || (!!selectedReport && !selectedPaneReports && leftListFor === selectedReport.id);
 
   // The open report's side of the switch, so the pane carries the row's label.
   const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;

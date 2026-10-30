@@ -1,5 +1,6 @@
 // ABOUTME: A poll that adds a CSAM-signal report to the open target and marks the feed stopped early, or that
-// ABOUTME: drops the open target from the feed, hides its post media, avatar and recent-post media in the real pane.
+// ABOUTME: drops the open target from the feed, hides its post media, avatar and recent-post media in the real pane,
+// ABOUTME: and keeps a moderator's Show on a target that has left across later polls.
 
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -183,8 +184,9 @@ describe('a poll on which the open target has left the feed', () => {
     expect(hasImg(RECENT_IMG)).toBe(false);
   });
 
-  // While a later poll is in flight the queue can no longer say the target has
-  // left, so the pane's default goes back to "not known", which changes nothing.
+  // A later poll in flight does not undo the queue's call that the target has
+  // left (a read in flight only stops a target being called left in the first
+  // place), so the media stays hidden while it reads and after it answers.
   it('keeps them hidden while a later poll is in flight and after it answers', async () => {
     let feedReads = 0;
     let openThird = () => {};
@@ -230,6 +232,84 @@ describe('a poll on which the open target has left the feed', () => {
     await act(async () => { openThird(); await poll; await new Promise(r => setTimeout(r, 50)); });
     expect(queryClient.isFetching({ queryKey: ['reports', RELAY_URL] })).toBe(0);
     expect(hidden()).toEqual([false, false, false]);
+  });
+
+  // The feed's first read holds `firstEvents`; every later one is empty, so the
+  // target leaves on the second. Each later read is a poll held in flight for a
+  // moment before it answers, as a real one is, so the screen renders mid-read.
+  function stubLeavingFeed(firstEvents: unknown[]) {
+    let feedReads = 0;
+    let answer: Promise<void> = Promise.resolve();
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports?needs_attention=1')) {
+        feedReads += 1;
+        if (feedReads === 1) return jsonResponse({ success: true, events: firstEvents, truncated: false });
+        await answer;
+        return jsonResponse({ success: true, events: [], truncated: false });
+      }
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={queryClient}><TooltipProvider><Reports relayUrl={RELAY_URL} /></TooltipProvider></TestApp>);
+    const poll = async () => {
+      let open = () => {};
+      answer = new Promise<void>(r => { open = r; });
+      let read: Promise<unknown> = Promise.resolve();
+      await act(async () => {
+        read = queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] });
+        await new Promise(r => setTimeout(r, 50));
+      });
+      await act(async () => { open(); await read; await new Promise(r => setTimeout(r, 50)); });
+    };
+    return { user, poll };
+  }
+  const showing = () => [hasImg(POST_IMG), hasImg(AVATAR), hasImg(RECENT_IMG)];
+  async function showAll(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getAllByRole('button', { name: /^Show$/ })[0]);
+    await user.click(screen.getByRole('button', { name: 'Show profile picture' }));
+    await user.click(screen.getByRole('button', { name: /show 1 media/i }));
+  }
+
+  it('keeps a Show made after the target left across a later poll', async () => {
+    const { user, poll } = stubLeavingFeed([SPAM_REPORT]);
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    await waitFor(() => expect(hasImg(POST_IMG)).toBe(true));
+
+    await poll(); // the target leaves, and its media hides
+    expect(screen.queryByText(nip19.noteEncode(EVENT))).not.toBeInTheDocument();
+    expect(showing()).toEqual([false, false, false]);
+
+    await showAll(user);
+    expect(showing()).toEqual([true, true, true]);
+
+    await poll(); // an ordinary later poll; the target is still gone
+    expect(showing()).toEqual([true, true, true]);
+  });
+
+  it('keeps a Show on a sensitive target across the poll it leaves on and a later one', async () => {
+    const { user, poll } = stubLeavingFeed([
+      report('9'.repeat(64), 1751000100, [['e', EVENT, 'terrorism_extremism'], ['p', AUTHOR]]),
+    ]);
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    await screen.findByText('Media Content');
+    expect(showing()).toEqual([false, false, false]);
+
+    await showAll(user);
+    expect(showing()).toEqual([true, true, true]);
+
+    await poll(); // the target leaves; a Show on a sensitive target is kept
+    expect(screen.queryByText(nip19.noteEncode(EVENT))).not.toBeInTheDocument();
+    expect(showing()).toEqual([true, true, true]);
+
+    await poll(); // an ordinary later poll
+    expect(showing()).toEqual([true, true, true]);
   });
 });
 
@@ -314,6 +394,70 @@ describe('in the history view, the open target moving into resolved history', ()
     expect(screen.queryByText(nip19.noteEncode(EVENT))).not.toBeInTheDocument();
     expect(screen.getByText('Media Content')).toBeInTheDocument();
     expect(allShowing()).toEqual([false, false, false]);
+  });
+
+  // A target that left and then came back is in hand again, so the call that it
+  // had left no longer holds: the next time it is only between two reads, it
+  // keeps showing like any other.
+  it("keeps showing a target that left and came back, when the queue's re-read lands before history's", async () => {
+    let phase: 'start' | 'gone' | 'back' | 'resolved' = 'start';
+    const gate = () => {
+      let open = () => {};
+      const opened = new Promise<void>(r => { open = r; });
+      return { opened, open: () => open() };
+    };
+    const gates = { feed: gate(), history: gate() };
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports?needs_attention=1')) {
+        if (phase === 'resolved') await gates.feed.opened;
+        const inFeed = phase === 'start' || phase === 'back';
+        return jsonResponse({ success: true, events: inFeed ? [SPAM_REPORT] : [], truncated: false });
+      }
+      if (url.includes('/api/reports/resolved')) {
+        if (phase === 'resolved') await gates.history.opened;
+        return jsonResponse(resolvedPage(phase === 'resolved' ? [SPAM_REPORT] : [], { nextCursor: null, done: true }));
+      }
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={queryClient}><TooltipProvider><Reports relayUrl={RELAY_URL} /></TooltipProvider></TestApp>);
+    await user.click(await screen.findByRole('switch', { name: /hide resolved/i }));
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    await waitFor(() => expect(hasImg(POST_IMG)).toBe(true));
+    const rereadBoth = () => act(async () => {
+      await Promise.all([
+        queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] }),
+        queryClient.refetchQueries({ queryKey: ['reports-resolved'] }),
+      ]);
+      await new Promise(r => setTimeout(r, 50));
+    });
+
+    phase = 'gone'; // handled elsewhere: in neither read
+    await rereadBoth();
+    expect(screen.queryByText(nip19.noteEncode(EVENT))).not.toBeInTheDocument();
+    expect(allShowing()).toEqual([false, false, false]);
+
+    phase = 'back'; // reported again: back in the feed
+    await rereadBoth();
+    expect(screen.getByText(nip19.noteEncode(EVENT))).toBeInTheDocument();
+    expect(allShowing()).toEqual([true, true, true]);
+
+    phase = 'resolved'; // resolved here: from the feed into history
+    const feed = queryClient.refetchQueries({ queryKey: ['reports', RELAY_URL] });
+    const history = queryClient.refetchQueries({ queryKey: ['reports-resolved'] });
+    await land(gates.feed, feed);
+    expect(allShowing()).toEqual([true, true, true]);
+
+    await land(gates.history, history);
+    expect(screen.getByText(nip19.noteEncode(EVENT))).toBeInTheDocument();
+    expect(allShowing()).toEqual([true, true, true]);
   });
 
   // The other way: reopening a history-only target moves it from resolved
