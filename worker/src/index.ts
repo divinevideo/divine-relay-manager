@@ -1107,20 +1107,26 @@ async function handlePublish(
           resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 
-        // Use waitUntil to ensure sync completes even after response is sent
-        const syncPromise = syncZendeskAfterAction(
-          env,
-          status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
-          targetType,
-          targetId,
-          getPublicKey(secretKey)
-        );
-        // Still await to catch errors, but also ensure completion via waitUntil pattern
-        try {
-          await syncPromise;
-          console.log('[handlePublish] Zendesk sync completed successfully');
-        } catch (err) {
-          console.error('[handlePublish] Zendesk sync error:', err);
+        // An open quarantine case refused this resolution. Its own decision
+        // resolves the linked tickets; closing them now would hide an undecided case.
+        if (resolutionVisibility?.conflict) {
+          console.log('[handlePublish] Resolution refused by the quarantine case; Zendesk tickets left open');
+        } else {
+          // Use waitUntil to ensure sync completes even after response is sent
+          const syncPromise = syncZendeskAfterAction(
+            env,
+            status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
+            targetType,
+            targetId,
+            getPublicKey(secretKey)
+          );
+          // Still await to catch errors, but also ensure completion via waitUntil pattern
+          try {
+            await syncPromise;
+            console.log('[handlePublish] Zendesk sync completed successfully');
+          } catch (err) {
+            console.error('[handlePublish] Zendesk sync error:', err);
+          }
         }
       } else {
         console.log('[handlePublish] Missing required fields for sync:', { status, targetType, targetId });
