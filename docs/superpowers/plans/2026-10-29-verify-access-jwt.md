@@ -94,7 +94,7 @@
 - Modify: `DEPLOYMENT.md` (the new var and secret, set-before-deploy, troubleshooting an all-401 deploy)
 
 - [ ] Step 1: At rollout, an Access admin stores each AUD tag in the team password manager and pipes it into `wrangler secret put API_ACCESS_AUD`. Do this before deploying the build.
-- [ ] Step 1b: In the Cloudflare dashboard, confirm that no other Access application covers `api-relay-*` hostnames or paths. If one does, accept its AUD too, or route it before the check, as consent-video already is (pinned by a test in `admin-access.test.ts`).
+- [ ] Step 1b: In the Cloudflare dashboard, list the Access applications that cover `api-relay-*` hostnames or paths. Besides the main API application, two are expected: consent-video, and the protected-minor application at `/api/internal/protected-minors/*` (`docs/protected-minor-edge-auth.md`). Both routes run before the check (pinned by tests in `admin-access.test.ts`). If any other application covers these hosts, accept its AUD too, or route it before the check.
 - [ ] Step 2: Before any deploy, decode (don't log) the claims of one real staging JWT, and confirm its `aud` matches and which identity claim it carries (email vs `common_name`).
 - [ ] Step 3: Rollout plan for the PR:
   1. Deploy to staging.
