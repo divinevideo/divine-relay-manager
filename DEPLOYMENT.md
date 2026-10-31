@@ -204,6 +204,13 @@ curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
 - `issuer`: `ACCESS_TEAM_DOMAIN` isn't the team that signs this host's tokens (bare hostname, no `https://`, no trailing slash)
 - `reading API_ACCESS_AUD failed`: the secret binding couldn't be read
 - `certs-unavailable`: the worker can't fetch `https://<team>/cdn-cgi/access/certs`
+- `unknown-key`: the token's key ID isn't in the certs the worker holds. Right after a signing-key rotation this clears within a minute. If it persists, check that the certs URL above answers: a failed refetch also reports `unknown-key`
+- `signature`: the token doesn't verify against the published key with its key ID
+- `expired`: the token is past its `exp`, or has no numeric `exp`
+- `algorithm`: the token's `alg` isn't `RS256`
+- `malformed`: the token isn't a well-formed JWT with a key ID, or a published key can't be imported
+
+`malformed`, `algorithm`, `issuer`, `audience` and `expired` are decided before the signature is checked, so a crafted token can produce any of them. A stray line is not evidence of a wrong setting. Treat one as configuration evidence only when your own requests produce it.
 
 ### Admin pubkey not authorized
 - Get pubkey from `/api/info` endpoint
