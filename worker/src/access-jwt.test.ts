@@ -166,6 +166,12 @@ describe('certs cache', () => {
     expect(signer.fetchFn).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses a non-2xx certs response even when its body lists the key', async () => {
+    const signer = await makeAccessJwtSigner();
+    const fetchFn = vi.fn(async () => ({ ok: false, json: async () => signer.certs }));
+    expect(await verifyAccessJwt(await signer.sign(), config, fetchFn)).toBeNull();
+  });
+
   it('does not cache an empty key set', async () => {
     const signer = await makeAccessJwtSigner();
     const token = await signer.sign();
