@@ -210,7 +210,7 @@ curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
 - `algorithm`: the token's `alg` isn't `RS256`
 - `malformed`: the token isn't a well-formed JWT with a key ID, or a published key can't be imported
 
-`malformed`, `algorithm`, `issuer`, `audience` and `expired` are decided before the signature is checked, so a crafted token can produce any of them. A stray line is not evidence of a wrong setting. Treat one as configuration evidence only when your own requests produce it.
+`certs-unavailable` and the lines naming a setting report real failures. A crafted token can produce every other reason, so a stray line is not evidence of a wrong setting. Treat one as configuration evidence only when your own requests produce it.
 
 ### Admin pubkey not authorized
 - Get pubkey from `/api/info` endpoint
