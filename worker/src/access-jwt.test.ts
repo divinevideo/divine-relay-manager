@@ -247,6 +247,13 @@ describe('certs cache', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
+  it('does not refetch for an unknown kid straight after fetching the certs', async () => {
+    const signer = await makeAccessJwtSigner('real');
+    const token = await signer.sign({ header: { kid: 'random' } });
+    expect(await verifyAccessJwt(token, config, signer.fetchFn)).toBeNull();
+    expect(signer.fetchFn).toHaveBeenCalledTimes(1);
+  });
+
   it('refetches for unknown kids at most once a minute', async () => {
     const signer = await makeAccessJwtSigner('real');
     let clock = Date.now();
