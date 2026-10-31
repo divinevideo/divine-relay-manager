@@ -207,8 +207,11 @@ curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
 - `unknown-key`: the token's key ID isn't in the certs the worker holds. Right after a signing-key rotation this clears within a minute. If it persists, check that the certs URL above answers: a failed refetch also reports `unknown-key`
 - `signature`: the token doesn't verify against the published key with its key ID
 - `expired`: the token is past its `exp`, or has no numeric `exp`
+- `not-yet-valid`: the optional `nbf` is non-numeric or more than 30 seconds ahead
 - `algorithm`: the token's `alg` isn't `RS256`
-- `malformed`: the token isn't a well-formed JWT with a key ID, or a published key can't be imported
+- `malformed`: the token isn't a well-formed JWT with a key ID
+
+On a cold or expired cache, an invalid certs document or an unimportable signing key reports `certs-unavailable` and is not cached. A failed `MOD_RELAY_ADMIN_KEY` binding read logs only the error name and still allows an independently valid Access token; without one the request is refused.
 
 `certs-unavailable` and the lines naming a setting report real failures. A crafted token can produce every other reason, so a stray line is not evidence of a wrong setting. Treat one as configuration evidence only when your own requests produce it.
 

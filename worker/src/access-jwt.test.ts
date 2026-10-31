@@ -88,6 +88,20 @@ describe('verifyAccessJwt', () => {
     }
   });
 
+  it('honors a signed not-before claim with 30 seconds of clock leeway', async () => {
+    const signer = await makeAccessJwtSigner();
+    const clock = Date.now();
+    const seconds = Math.floor(clock / 1000);
+    for (const nbf of [seconds + 31, String(seconds), null]) {
+      const onReject = vi.fn();
+      expect(await verifyAccessJwt(await signer.sign({ payload: { nbf } }), { ...config, onReject }, signer.fetchFn, () => clock)).toBeNull();
+      expect(onReject).toHaveBeenCalledWith('not-yet-valid');
+    }
+    for (const nbf of [seconds - 1, seconds, seconds + 30]) {
+      expect(await verifyAccessJwt(await signer.sign({ payload: { nbf } }), config, signer.fetchFn, () => clock)).not.toBeNull();
+    }
+  });
+
   it('rejects a token without a kid even when a certs key has none', async () => {
     const signer = await makeAccessJwtSigner();
     const kidless = { keys: signer.certs.keys.map(({ kid: _kid, ...k }) => k) };
@@ -155,6 +169,36 @@ describe('verifyAccessJwt', () => {
 });
 
 describe('certs cache', () => {
+  it('does not let an older in-flight fetch replace newer certs at the same clock tick', async () => {
+    const oldSigner = await makeAccessJwtSigner('old');
+    const newSigner = await makeAccessJwtSigner('new');
+    const clock = Date.now();
+    let release!: (response: { ok: boolean; json: () => Promise<typeof oldSigner.certs> }) => void;
+    const oldResponse = new Promise<{ ok: boolean; json: () => Promise<typeof oldSigner.certs> }>((resolve) => { release = resolve; });
+    const fetchFn = vi.fn().mockImplementationOnce(() => oldResponse)
+      .mockImplementation(async () => ({ ok: true, json: async () => newSigner.certs }));
+    const oldToken = await oldSigner.sign();
+    const newToken = await newSigner.sign();
+    const slow = verifyAccessJwt(oldToken, config, fetchFn, () => clock);
+    expect(await verifyAccessJwt(newToken, config, fetchFn, () => clock)).not.toBeNull();
+    release({ ok: true, json: async () => oldSigner.certs });
+    await slow;
+    expect(await verifyAccessJwt(newToken, config, fetchFn, () => clock)).not.toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not publish a certs document containing a malformed or unimportable entry', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign();
+    for (const badKey of [null, { kid: 'bad', kty: 'RSA' }]) {
+      const malformed = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [...signer.certs.keys, badKey] }) }));
+      const onReject = vi.fn();
+      expect(await verifyAccessJwt(token, { ...config, onReject }, malformed)).toBeNull();
+      expect(onReject).toHaveBeenCalledWith('certs-unavailable');
+    }
+    expect(await verifyAccessJwt(token, config, signer.fetchFn)).not.toBeNull();
+    expect(signer.fetchFn).toHaveBeenCalledTimes(1);
+  });
   it('refuses when the certs fetch fails, and does not cache the failure', async () => {
     const signer = await makeAccessJwtSigner();
     const token = await signer.sign();

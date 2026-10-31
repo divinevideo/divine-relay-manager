@@ -27,13 +27,15 @@ export interface AccessClaims {
 // Why a token was refused, for logs. Never includes the token or its claims.
 export type AccessJwtRejection =
   | 'not-configured' | 'malformed' | 'algorithm' | 'issuer' | 'audience'
-  | 'expired' | 'certs-unavailable' | 'unknown-key' | 'signature';
+  | 'expired' | 'not-yet-valid' | 'certs-unavailable' | 'unknown-key' | 'signature';
 
 type Jwk = JsonWebKey & { kid?: string };
+type AccessKey = { kid: string; key: CryptoKey };
 
 interface CertsEntry {
-  keys: Jwk[];
+  keys: AccessKey[];
   fetchedAt: number;
+  generation: number;
 }
 
 // Cloudflare rotates Access signing keys every six weeks and publishes the new
@@ -54,11 +56,13 @@ const CERTS_FETCH_TIMEOUT_MS = 5 * 1000;
 
 const certsCache = new Map<string, CertsEntry>();
 const unknownKidRefetchAt = new Map<string, number>();
+let fetchGeneration = 0;
 
 // Test-only: module state persists across tests in one worker.
 export function __resetAccessCertsCacheForTests(): void {
   certsCache.clear();
   unknownKidRefetchAt.clear();
+  fetchGeneration = 0;
 }
 
 const B64URL = /^[A-Za-z0-9_-]+$/;
@@ -72,6 +76,7 @@ function b64UrlDecode(value: string): Uint8Array {
 // A failed fetch, or one that lists no keys, is not cached: the next request
 // tries again.
 async function fetchCerts(teamDomain: string, fetchFn: FetchFn, nowMs: number): Promise<CertsEntry | null> {
+  const generation = ++fetchGeneration;
   try {
     const res = await fetchFn(`https://${teamDomain}/cdn-cgi/access/certs`, {
       signal: AbortSignal.timeout(CERTS_FETCH_TIMEOUT_MS),
@@ -79,7 +84,19 @@ async function fetchCerts(teamDomain: string, fetchFn: FetchFn, nowMs: number): 
     if (!res.ok) return null;
     const body = (await res.json()) as { keys?: Jwk[] };
     if (!Array.isArray(body.keys) || body.keys.length === 0) return null;
-    const entry = { keys: body.keys, fetchedAt: nowMs };
+    const keys: AccessKey[] = [];
+    for (const jwk of body.keys) {
+      if (!jwk || typeof jwk.kid !== 'string' || !jwk.kid || jwk.kty !== 'RSA') return null;
+      const key = await crypto.subtle.importKey(
+        'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
+      );
+      keys.push({ kid: jwk.kid, key });
+    }
+    // A later-started fetch can finish first, including within one clock tick.
+    // Publish only complete, importable key sets and never roll a newer one back.
+    const cached = certsCache.get(teamDomain);
+    if (cached && cached.generation > generation) return cached;
+    const entry = { keys, fetchedAt: nowMs, generation };
     certsCache.set(teamDomain, entry);
     return entry;
   } catch {
@@ -89,7 +106,7 @@ async function fetchCerts(teamDomain: string, fetchFn: FetchFn, nowMs: number): 
 
 async function findKey(
   kid: string, teamDomain: string, fetchFn: FetchFn, nowMs: number,
-): Promise<Jwk | 'certs-unavailable' | 'unknown-key'> {
+): Promise<AccessKey | 'certs-unavailable' | 'unknown-key'> {
   let entry = certsCache.get(teamDomain);
   if (!entry || nowMs - entry.fetchedAt >= CERTS_TTL_MS) {
     entry = (await fetchCerts(teamDomain, fetchFn, nowMs)) ?? undefined;
@@ -125,7 +142,7 @@ export async function verifyAccessJwt(
   try {
     const header = JSON.parse(new TextDecoder().decode(b64UrlDecode(headerPart))) as { kid?: unknown; alg?: unknown };
     const payload = JSON.parse(new TextDecoder().decode(b64UrlDecode(payloadPart))) as {
-      iss?: unknown; aud?: unknown; exp?: unknown; sub?: unknown; email?: unknown; common_name?: unknown;
+      iss?: unknown; aud?: unknown; exp?: unknown; nbf?: unknown; sub?: unknown; email?: unknown; common_name?: unknown;
     };
     if (header.alg !== 'RS256') return reject('algorithm');
     if (typeof header.kid !== 'string' || !header.kid) return reject('malformed');
@@ -134,14 +151,14 @@ export async function verifyAccessJwt(
     if (!audiences.includes(audience)) return reject('audience');
     const nowMs = now();
     if (typeof payload.exp !== 'number' || payload.exp <= Math.floor(nowMs / 1000)) return reject('expired');
+    // RFC 7519 permits small clock-skew leeway for an optional NumericDate nbf.
+    if (payload.nbf !== undefined && (typeof payload.nbf !== 'number' || !Number.isFinite(payload.nbf)
+      || payload.nbf > Math.floor(nowMs / 1000) + 30)) return reject('not-yet-valid');
 
     const jwk = await findKey(header.kid, teamDomain, fetchFn, nowMs);
     if (typeof jwk === 'string') return reject(jwk);
-    const key = await crypto.subtle.importKey(
-      'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
-    );
     const valid = await crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5', key,
+      'RSASSA-PKCS1-v1_5', jwk.key,
       b64UrlDecode(signaturePart) as Uint8Array<ArrayBuffer>,
       new TextEncoder().encode(`${headerPart}.${payloadPart}`),
     );
@@ -155,7 +172,7 @@ export async function verifyAccessJwt(
       ...(typeof payload.common_name === 'string' ? { common_name: payload.common_name } : {}),
     };
   } catch {
-    // Undecodable header or payload, or a published key WebCrypto won't import.
+    // Undecodable header, payload or signature.
     return reject('malformed');
   }
 }
