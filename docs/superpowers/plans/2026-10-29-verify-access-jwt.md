@@ -32,7 +32,7 @@
 
 - `ACCESS_TEAM_DOMAIN` is a toml var (`divinevideo.cloudflareaccess.com`). `API_ACCESS_AUD` is a worker secret, string or Secrets Store binding, set per environment, staging first. It's never in toml, because the repo is public. The verifier returns the verified claims (option A). On the UI path these are a service token's, so they carry no moderator identity. The suspended-content audit will use a verified Divine login (#178 phase 2) instead. `CONSENT_ACCESS_*` is left as is.
 - Certs cache TTL is 1 hour. A refetch on an unknown kid happens at most once per 60 seconds per isolate. A failed fetch is not cached and refuses: no stale-key fallback.
-- `X-Admin-Key` is checked before the JWT. That's cheaper (no certs fetch for server callers), and either credential alone is still sufficient. One result differs from the old order: on `POST /api/relay-rpc`, a valid JWT sent with a non-matching key now reads `MOD_RELAY_ADMIN_KEY` first, so if that read throws the request answers 500 (#347), where the old order authorized it.
+- `X-Admin-Key` is checked before the JWT. That's cheaper (no certs fetch for server callers), and either credential alone is still sufficient. If the `MOD_RELAY_ADMIN_KEY` read fails on `POST /api/relay-rpc`, the gate continues to independent JWT verification; without a valid JWT the request is refused.
 - A JWT that fails verification gets the same 401 text as today. When the audience setting is missing, the worker logs a `console.error` naming the setting, so a misconfigured deploy is diagnosable from the logs.
 
 ---

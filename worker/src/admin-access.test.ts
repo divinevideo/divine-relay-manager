@@ -175,5 +175,22 @@ describe('verifyAdminAccess: X-Admin-Key paths unchanged', () => {
     expect(await status({ 'X-Admin-Key': 'wrong' })).toBe(401);
   });
 
+  it('still checks the Access token when the relay key binding is unavailable', async () => {
+    const signer = await makeAccessJwtSigner();
+    vi.stubGlobal('fetch', signer.fetchFn);
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const env = { ...baseEnv, MOD_RELAY_ADMIN_KEY: { get: async () => { throw new Error('binding unavailable'); } } };
+    const probe = async (token?: string) => worker.fetch(new Request('https://api.test/api/relay-rpc', {
+      method: 'POST',
+      headers: { 'X-Admin-Key': 'wrong', ...(token ? { 'Cf-Access-Jwt-Assertion': token } : {}) },
+      body: '{}',
+    }), env as never, ctx);
+    // An authorized empty RPC payload reaches route validation (400), not 500.
+    expect((await probe(await signer.sign())).status).toBe(400);
+    expect((await probe()).status).toBe(401);
+    expect((await probe('test')).status).toBe(401);
+    expect(error).toHaveBeenCalledWith('[auth] reading MOD_RELAY_ADMIN_KEY failed', 'Error');
+  });
+
   // MOD_RELAY_ADMIN_KEY on /api/relay-rpc is covered in index.test.ts.
 });

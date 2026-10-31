@@ -448,9 +448,14 @@ async function verifyAdminAccess(
     if (options.allowModRelayAdminKey) {
       // Dedicated moderation-service key (Secrets Store), accepted in addition to
       // ADMIN_API_KEY for relay-rpc so it can be rotated without disrupting other callers.
-      const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
-      if (modRelayKey && adminKey === modRelayKey) {
-        return null;
+      try {
+        const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
+        if (modRelayKey && adminKey === modRelayKey) {
+          return null;
+        }
+      } catch (error) {
+        // This credential failed; a separately valid Access token can still authorize.
+        console.error('[auth] reading MOD_RELAY_ADMIN_KEY failed', errorNameOnly(error));
       }
     }
   }
@@ -559,7 +564,7 @@ export default {
       }
 
       // All other /api/* endpoints require admin access (CF Access or API key).
-      // Routes with their own Access application (consent-video above) must stay
+      // Routes with their own Access application (consent-video and protected-minors above) must stay
       // before this check: their tokens carry a different audience and would be
       // refused here (admin-access.test.ts pins the consent route's order).
       const adminAuthError = await verifyAdminAccess(request, env, {
