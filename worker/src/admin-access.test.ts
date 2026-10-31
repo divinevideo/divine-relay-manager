@@ -128,6 +128,27 @@ describe('consent-video route sits before the admin gate', () => {
   });
 });
 
+describe('protected-minor route sits before the admin gate', () => {
+  it('answers a path-application token in the service handler, never with the gate\'s 401', async () => {
+    // Funnelcake comes through this route's own path-scoped Access application
+    // (docs/protected-minor-edge-auth.md), so its tokens would fail the API audience
+    // check. With no D1 bound the handler answers 503 once the bearer token passes;
+    // a 401 here means the gate ran first.
+    const signer = await makeAccessJwtSigner();
+    vi.stubGlobal('fetch', signer.fetchFn);
+    const token = await signer.sign({ payload: { aud: ['aud-protected-minors'] } });
+    const env = { ...baseEnv, PROTECTED_MINOR_SERVICE_TOKEN: 'service-token' };
+    const res = await worker.fetch(
+      new Request('https://api.test/api/internal/protected-minors/resolve', {
+        method: 'POST',
+        headers: { 'Cf-Access-Jwt-Assertion': token, Authorization: 'Bearer service-token' },
+      }),
+      env as never, ctx,
+    );
+    expect(res.status).toBe(503);
+  });
+});
+
 describe('verifyAdminAccess: X-Admin-Key paths unchanged', () => {
   it('authorizes ADMIN_API_KEY without fetching certs', async () => {
     const fetchSpy = vi.fn();
