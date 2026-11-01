@@ -62,6 +62,7 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 | `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation-api.divine.video` |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated allowed CORS origins | `https://relay.admin.divine.video,*.pages.dev` |
 | `ACCESS_TEAM_DOMAIN` | Yes (staging, prod) | Cloudflare Access team domain whose certs sign the `Cf-Access-Jwt-Assertion` | `divinevideo.cloudflareaccess.com` |
+| `API_ACCESS_AUD` | Yes (staging, prod) | Audience (AUD) tag of the Access application in front of the API. It identifies the application rather than granting anything, so it ships in `[vars]`. Without it, or without `ACCESS_TEAM_DOMAIN`, the worker refuses every Access login (401) and moderators are locked out. `X-Admin-Key` callers are unaffected. `worker/test/deployed-config-access-gate.test.ts` fails if either is missing (issue #338). | 64 hex characters, from the application's Overview tab |
 
 ### Secrets (must be set via CLI or Dashboard)
 
@@ -75,7 +76,6 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 | `CF_ACCESS_CLIENT_SECRET` | Cloudflare Access service token secret |
 | `ZENDESK_JWT_SECRET` | Shared secret for Zendesk JWT verification |
 | `ZENDESK_WEBHOOK_SECRET` | Shared secret for Zendesk webhook signatures |
-| `API_ACCESS_AUD` | Audience (AUD) tag of the Access application in front of the API. Without it, the worker refuses every Access login (401) and moderators are locked out. `X-Admin-Key` callers are unaffected. Set it **before** deploying a build that checks it (issue #338). |
 
 Set secrets via CLI:
 ```bash
@@ -197,23 +197,22 @@ curl -X POST https://api-relay-prod.divine.video/api/relay-rpc \
 - Ensure `NOSTR_NSEC` is set via `wrangler secret put`
 - Secrets don't appear in dashboard after setting (security feature)
 
-### Every admin UI request returns 401 after a deploy
-- The worker logs `[auth] Cf-Access-Jwt-Assertion refused: <reason>`
-- `API_ACCESS_AUD is not set` or `ACCESS_TEAM_DOMAIN is not set`: set it (secret / `[vars]`)
+### Every admin UI request returns 401 (or 503) after a deploy
+- The worker logs `[auth] Cf-Access-Jwt-Assertion refused: <reason>`. Every reason answers 401 except `certs-unavailable`, which answers 503
+- `API_ACCESS_AUD is not set`, `ACCESS_TEAM_DOMAIN is not set`, or both named together: set what it names in `[vars]`
 - `audience`: `API_ACCESS_AUD` doesn't match the Access application in front of this host or path
-- `issuer`: `ACCESS_TEAM_DOMAIN` isn't the team that signs this host's tokens (bare hostname, no `https://`, no trailing slash)
-- `reading API_ACCESS_AUD failed`: the secret binding couldn't be read
-- `certs-unavailable`: the worker can't fetch `https://<team>/cdn-cgi/access/certs`
-- `unknown-key`: the token's key ID isn't in the certs the worker holds. Right after a signing-key rotation this clears within a minute. If it persists, check that the certs URL above answers: a failed refetch also reports `unknown-key`
+- `issuer`: the token verified against this team's keys but its `iss` isn't `https://` plus `ACCESS_TEAM_DOMAIN` exactly. Check the setting's spelling and capitalisation against the team hostname Access uses
+- `certs-unavailable` (503): the worker can't fetch `https://<team>/cdn-cgi/access/certs`, or the document has an invalid or unimportable key. A preceding `[auth] Access certs fetch failed: <detail>` line gives the HTTP status, `no keys`, `invalid key entry` or an error name. If it never clears, check that `ACCESS_TEAM_DOMAIN` is a bare hostname: an `https://` prefix lands here. After a failed fetch the worker refuses without fetching for 10 seconds, then lets one request retry, so this reason can outlast a brief outage by about that long. A failed refetch for a new key ID also reports this
+- `unknown-key`: the certs were fetched, but the token's key ID isn't among them. Right after a signing-key rotation this clears within a minute: each isolate refetches for an unknown key ID at most once a minute, and requests that arrive while that refetch is in flight are refused rather than waiting on it. If your own requests keep getting it, `ACCESS_TEAM_DOMAIN` most likely names the wrong team: the worker fetched that team's keys, which never signed this token
 - `signature`: the token doesn't verify against the published key with its key ID
 - `expired`: the token is past its `exp`, or has no numeric `exp`
 - `not-yet-valid`: the optional `nbf` is non-numeric or more than 30 seconds ahead
 - `algorithm`: the token's `alg` isn't `RS256`
 - `malformed`: the token isn't a well-formed JWT with a key ID
 
-On a cold or expired cache, an invalid certs document or an unimportable signing key reports `certs-unavailable` and is not cached. A failed `MOD_RELAY_ADMIN_KEY` binding read logs only the error name and still allows an independently valid Access token; without one the request is refused.
+An invalid certs document or an unimportable signing key is never cached. A key Cloudflare withdraws from the certs stays trusted until the isolate's copy is an hour old. The consent-video route shares this cache. A failed `MOD_RELAY_ADMIN_KEY` binding read logs only the error name and still allows an independently valid Access token; without one the request is refused.
 
-`certs-unavailable` and the lines naming a setting report real failures. A crafted token can produce every other reason, so a stray line is not evidence of a wrong setting. Treat one as configuration evidence only when your own requests produce it.
+`certs-unavailable` and the lines naming a setting report real failures. The claim reasons (`issuer`, `audience`, `expired`, `not-yet-valid`) are checked only after the signature verifies, so each describes a token Access really signed (though anyone holding an old token, or one for another Access application on the same team, can still trigger `expired` or `audience`). A crafted token can produce only `malformed`, `algorithm`, `unknown-key` and `signature`, so a stray line with one of those is not evidence of a wrong setting. Treat one as configuration evidence only when your own requests produce it.
 
 ### Admin pubkey not authorized
 - Get pubkey from `/api/info` endpoint

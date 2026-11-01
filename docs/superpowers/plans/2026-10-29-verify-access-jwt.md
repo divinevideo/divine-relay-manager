@@ -30,10 +30,13 @@
 
 - After review round 1: keep a single audience. Add list support only if the rollout dashboard check finds another Access app on `api-relay-*`. When the certs can't be refetched after the cache expires, refuse, with no stale-key fallback. Two pre-existing gaps are tracked separately: #347 (a failed MOD_RELAY_ADMIN_KEY read answers 500) and #348 (constant-time key comparison).
 
-- `ACCESS_TEAM_DOMAIN` is a toml var (`divinevideo.cloudflareaccess.com`). `API_ACCESS_AUD` is a worker secret, string or Secrets Store binding, set per environment, staging first. It's never in toml, because the repo is public. The verifier returns the verified claims (option A). On the UI path these are a service token's, so they carry no moderator identity. The suspended-content audit will use a verified Divine login (#178 phase 2) instead. `CONSENT_ACCESS_*` is left as is.
-- Certs cache TTL is 1 hour. A refetch on an unknown kid happens at most once per 60 seconds per isolate. A failed fetch is not cached and refuses: no stale-key fallback.
+- `ACCESS_TEAM_DOMAIN` is a toml var (`divinevideo.cloudflareaccess.com`). `API_ACCESS_AUD` started as a worker secret because the repo is public. After Meylis's review it moved to `[vars]`: the tag identifies the Access application rather than granting anything (every token Access issues for it carries the tag), and as a secret it had to be set before the deploy or moderators were locked out. A config test now fails if either setting is missing. The verifier returns the verified claims (option A). On the UI path these are a service token's, so they carry no moderator identity. The suspended-content audit will use a verified Divine login (#178 phase 2) instead. `CONSENT_ACCESS_*` is left as is.
+- Certs cache TTL is 1 hour. A refetch on an unknown kid happens at most once per 60 seconds per isolate. A failed fetch is not cached and refuses: no stale-key fallback. After a failed fetch, a cold or expired cache refuses without fetching for 10 seconds, then one request at a time retries.
+- The verifier checks format, header (`alg`, `kid`), key lookup and signature before any claim, then `iss`, `aud`, `exp` and `nbf`. So a logged claim reason always describes a token Access signed, and only `malformed`, `algorithm`, `unknown-key` and `signature` can come from a crafted token.
 - `X-Admin-Key` is checked before the JWT. That's cheaper (no certs fetch for server callers), and either credential alone is still sufficient. If the `MOD_RELAY_ADMIN_KEY` read fails on `POST /api/relay-rpc`, the gate continues to independent JWT verification; without a valid JWT the request is refused.
-- A JWT that fails verification gets the same 401 text as today. When the audience setting is missing, the worker logs a `console.error` naming the setting, so a misconfigured deploy is diagnosable from the logs.
+- A JWT that fails verification gets the same 401 text as today, except when the certs can't be fetched: that is an outage, not a refusal, so it answers 503 (still with no stale-key fallback). The consent-video route does the same.
+- After Meylis's review: a rotated key's tokens can be refused for up to a minute (the one-refetch-a-minute floor), and a withdrawn key stays trusted for up to the hour on both routes, consent-video included. Both are accepted and documented.
+- When the audience setting is missing, the worker logs a `console.error` naming the setting, so a misconfigured deploy is diagnosable from the logs.
 
 ---
 
@@ -79,21 +82,21 @@
   - `API_ACCESS_AUD` unset: a valid-looking JWT gets 401, and `console.error` names `API_ACCESS_AUD`
   - forged header plus correct `X-Admin-Key` is authorized
   - `/api/relay-rpc` POST with `MOD_RELAY_ADMIN_KEY` still authorized; the same key on another route still 401
-  - certs fetch failing gets 401
+  - certs fetch failing gets 401 (503 after Meylis's review)
 - [ ] Step 2: Run the file. Expected: the forged-header and unset-audience cases FAIL against main's presence check.
-- [ ] Step 3: Implement it: key checks first (unchanged). Then read `API_ACCESS_AUD` via `resolveSecret` inside a try/catch that refuses on error, and call `verifyAccessJwt(header, { teamDomain: env.ACCESS_TEAM_DOMAIN, audience, onReject })`. Update the function's comment to describe what is actually checked.
+- [ ] Step 3: Implement it: key checks first (unchanged). Then read `API_ACCESS_AUD` via `resolveSecret` inside a try/catch that refuses on error (superseded after Meylis's review: a plain var read), and call `verifyAccessJwt(header, { teamDomain: env.ACCESS_TEAM_DOMAIN, audience, onReject })`. Update the function's comment to describe what is actually checked.
 - [ ] Step 4: Update the two existing test files. Run `cd worker && npx vitest run`. Expected: all pass.
 - [ ] Step 5: Mutation-check one at a time: the presence-only check restored; the audience argument swapped for the consent audience; the missing-config log removed; key paths removed. Each turns exactly its test red.
 
 ### Task 3: Config and rollout notes
 
 **Files:**
-- Modify: `worker/wrangler.staging.toml`, `worker/wrangler.prod.toml` (`ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"`, plus a comment on the `API_ACCESS_AUD` secret: how to set it, and that without it Access logins are locked out)
+- Modify: `worker/wrangler.staging.toml`, `worker/wrangler.prod.toml` (`ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"`, and `API_ACCESS_AUD`, with a comment that without either Access logins are locked out; `worker/test/deployed-config-access-gate.test.ts` pins both)
 - Modify: `worker/wrangler.local.toml` (comment only: unset locally, so use `X-Admin-Key`)
 - Modify: `AGENTS.md` Security Model, item 1-2 (the worker now verifies the JWT)
 - Modify: `DEPLOYMENT.md` (the new var and secret, set-before-deploy, troubleshooting an all-401 deploy)
 
-- [ ] Step 1: At rollout, an Access admin stores each AUD tag in the team password manager and pipes it into `wrangler secret put API_ACCESS_AUD`. Do this before deploying the build.
+- [ ] Step 1: Copy each environment's AUD tag from its Access application's Overview tab into that environment's `API_ACCESS_AUD` var.
 - [ ] Step 1b: In the Cloudflare dashboard, list the Access applications that cover `api-relay-*` hostnames or paths. Besides the main API application, two are expected: consent-video, and the protected-minor application at `/api/internal/protected-minors/*` (`docs/protected-minor-edge-auth.md`). Both routes run before the check (pinned by tests in `admin-access.test.ts`). If any other application covers these hosts, accept its AUD too, or route it before the check.
 - [ ] Step 2: Before any deploy, decode (don't log) the claims of one real staging JWT, and confirm its `aud` matches and which identity claim it carries (email vs `common_name`).
 - [ ] Step 3: Rollout plan for the PR:
