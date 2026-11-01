@@ -389,8 +389,11 @@ export async function banPubkey(apiUrl: string, pubkey: string, reason?: string)
     if (data.contentRemovalUnconfirmed !== true) return { unconfirmed: null };
     return { unconfirmed: data.relayTimedOut === true ? 'removal_running' : 'removal_error' };
   } catch (error) {
+    // access_unavailable is the worker's gate failing to check the login (a 503),
+    // so the request never reached the ban either.
     const refused = error instanceof ApiError
-      && error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500;
+      && ((error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500)
+        || error.code === 'access_unavailable');
     if (refused) throw error;
     if (await isPubkeyOnBanList(apiUrl, pubkey)) {
       const workerSkippedFollowUps = error instanceof ApiError && error.code === 'ban_unconfirmed';

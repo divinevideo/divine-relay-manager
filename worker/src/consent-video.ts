@@ -329,24 +329,31 @@ export class R2MultipartVideoWriter {
 // Reviewer access: verify the Cloudflare Access JWT ourselves (signature,
 // issuer, audience). The Access application in front of this path restricts
 // who can obtain one; the Worker does not trust mere header presence and
-// never accepts X-Admin-Key here.
+// never accepts X-Admin-Key here. The keys come from the verifier's shared
+// one-hour cache, so a key Cloudflare withdraws can still verify a reviewer's
+// token for up to that hour (accepted in #352's review).
 // ---------------------------------------------------------------------------
 
 export async function verifyConsentAccessJwt(
   token: string,
   env: { CONSENT_ACCESS_TEAM_DOMAIN?: string; CONSENT_ACCESS_AUD?: string },
   fetchFn?: FetchFn,
-): Promise<boolean> {
+): Promise<'ok' | 'refused' | 'unavailable'> {
+  let unavailable = false;
   const claims = await verifyAccessJwt(
     token,
     {
       teamDomain: env.CONSENT_ACCESS_TEAM_DOMAIN,
       audience: env.CONSENT_ACCESS_AUD,
-      onReject: (reason) => console.warn(`[consent-video] Cf-Access-Jwt-Assertion refused: ${reason}`),
+      onReject: (reason) => {
+        unavailable = reason === 'certs-unavailable';
+        console.warn(`[consent-video] Cf-Access-Jwt-Assertion refused: ${reason}`);
+      },
     },
     fetchFn,
   );
-  return claims !== null;
+  if (claims) return 'ok';
+  return unavailable ? 'unavailable' : 'refused';
 }
 
 interface ConsentSubmissionRow {
@@ -366,7 +373,12 @@ export async function handleConsentVideo(
     return json({ success: false, error: 'Consent video viewer not configured' }, 503, corsHeaders);
   }
   const token = request.headers.get('Cf-Access-Jwt-Assertion');
-  if (!token || !(await verifyConsentAccessJwt(token, env))) {
+  const access = token ? await verifyConsentAccessJwt(token, env) : 'refused';
+  if (access === 'unavailable') {
+    // Cloudflare's signing keys couldn't be fetched: an outage, not a refusal.
+    return json({ success: false, error: 'Access verification is temporarily unavailable; try again shortly' }, 503, corsHeaders);
+  }
+  if (access !== 'ok') {
     return json({ success: false, error: 'Unauthorized' }, 401, corsHeaders);
   }
   const row = await env.DB.prepare(

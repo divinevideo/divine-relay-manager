@@ -1,8 +1,8 @@
-// ABOUTME: Tests for the shared Cloudflare Access JWT verifier: signature, issuer,
-// ABOUTME: audience, expiry and algorithm checks, plus the per-isolate certs cache.
+// ABOUTME: Tests for the shared Cloudflare Access JWT verifier: format, algorithm, signature,
+// ABOUTME: then issuer, audience, exp and nbf; plus the certs cache, key import and failure backoff.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { verifyAccessJwt, __resetAccessCertsCacheForTests } from './access-jwt';
+import { verifyAccessJwt, __resetAccessCertsCacheForTests, type FetchFn } from './access-jwt';
 import { makeAccessJwtSigner, TEAM_DOMAIN, AUDIENCE } from './test-helpers/access-jwt';
 
 const config = { teamDomain: TEAM_DOMAIN, audience: AUDIENCE };
@@ -102,6 +102,17 @@ describe('verifyAccessJwt', () => {
     }
   });
 
+  it('checks the signature before the claims, so a forged token never reports a claim reason', async () => {
+    const signer = await makeAccessJwtSigner();
+    const forger = await makeAccessJwtSigner(); // same kid, different key
+    const now = Math.floor(Date.now() / 1000);
+    for (const payload of [{ aud: ['aud-other'] }, { iss: 'https://other.example.com' }, { exp: now - 1 }, { nbf: now + 3600 }]) {
+      const onReject = vi.fn();
+      await verifyAccessJwt(await forger.sign({ payload }), { ...config, onReject }, signer.fetchFn);
+      expect(onReject.mock.calls).toEqual([['signature']]);
+    }
+  });
+
   it('rejects a token without a kid even when a certs key has none', async () => {
     const signer = await makeAccessJwtSigner();
     const kidless = { keys: signer.certs.keys.map(({ kid: _kid, ...k }) => k) };
@@ -188,25 +199,251 @@ describe('certs cache', () => {
   });
 
   it('does not publish a certs document containing a malformed or unimportable entry', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
     const signer = await makeAccessJwtSigner();
     const token = await signer.sign();
+    let clock = Date.now();
+    const now = () => clock;
     for (const badKey of [null, { kid: 'bad', kty: 'RSA' }]) {
       const malformed = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [...signer.certs.keys, badKey] }) }));
       const onReject = vi.fn();
-      expect(await verifyAccessJwt(token, { ...config, onReject }, malformed)).toBeNull();
+      expect(await verifyAccessJwt(token, { ...config, onReject }, malformed, now)).toBeNull();
       expect(onReject).toHaveBeenCalledWith('certs-unavailable');
+      expect(malformed).toHaveBeenCalledTimes(1);
+      clock += 10 * 1000;
     }
-    expect(await verifyAccessJwt(token, config, signer.fetchFn)).not.toBeNull();
+    expect(await verifyAccessJwt(token, config, signer.fetchFn, now)).not.toBeNull();
     expect(signer.fetchFn).toHaveBeenCalledTimes(1);
   });
-  it('refuses when the certs fetch fails, and does not cache the failure', async () => {
+
+  it('refuses a certs document with an entry lacking a usable kid or RSA type, naming it in the log', async () => {
+    const signer = await makeAccessJwtSigner();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const { kid: _kid, ...kidless } = signer.certs.keys[0];
+    for (const bad of [kidless, { ...kidless, kid: '' }, { ...kidless, kid: 123 }, { ...signer.certs.keys[0], kid: 'ec', kty: 'EC' }]) {
+      __resetAccessCertsCacheForTests();
+      warn.mockClear();
+      const fetchFn = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [...signer.certs.keys, bad] }) }));
+      const onReject = vi.fn();
+      expect(await verifyAccessJwt(await signer.sign(), { ...config, onReject }, fetchFn)).toBeNull();
+      expect(onReject).toHaveBeenCalledWith('certs-unavailable');
+      expect(warn).toHaveBeenCalledWith('[auth] Access certs fetch failed: invalid key entry');
+    }
+  });
+
+  it('refuses once the hour is up and the refetch fails, rather than trusting the old keys', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign({ payload: { exp: Math.floor(Date.now() / 1000) + 3 * 3600 } });
+    let clock = Date.now();
+    const now = () => clock;
+    let up = true;
+    const fetchFn = vi.fn(async () => (up ? { ok: true, json: async () => signer.certs } : { ok: false, json: async () => ({}) }));
+    const onReject = vi.fn();
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).not.toBeNull();
+    up = false;
+    clock += 61 * 60 * 1000;
+    expect(await verifyAccessJwt(token, { ...config, onReject }, fetchFn, now)).toBeNull();
+    expect(onReject).toHaveBeenCalledWith('certs-unavailable');
+  });
+
+  it('backs off for 10 seconds after a failed certs fetch, then tries again', async () => {
     const signer = await makeAccessJwtSigner();
     const token = await signer.sign();
+    let clock = Date.now();
+    const now = () => clock;
+    let up = false;
+    const fetchFn = vi.fn(async () => (up ? { ok: true, json: async () => signer.certs } : { ok: false, status: 503, json: async () => ({}) }));
+    for (let i = 0; i < 25; i++) {
+      const onReject = vi.fn();
+      expect(await verifyAccessJwt(token, { ...config, onReject }, fetchFn, now)).toBeNull();
+      expect(onReject).toHaveBeenCalledWith('certs-unavailable');
+      clock += 300;
+    }
+    expect(fetchFn).toHaveBeenCalledTimes(1);
+    clock += 10 * 1000;
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    up = true;
+    clock += 10 * 1000;
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).not.toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('allows one retry per backoff window while the certs endpoint hangs', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign();
+    let clock = Date.now();
+    const now = () => clock;
+    let settle: (res: { ok: boolean; status?: number; json: () => Promise<unknown> }) => void = () => {};
+    const fetchFn = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
+      .mockImplementationOnce(() => new Promise((resolve) => { settle = resolve; }));
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).toBeNull();
+    clock += 10 * 1000;
+    const retry = verifyAccessJwt(token, config, fetchFn, now);
+    for (let i = 0; i < 10; i++) {
+      clock += 300;
+      expect(await verifyAccessJwt(token, config, fetchFn, now)).toBeNull();
+    }
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    settle({ ok: true, json: async () => signer.certs });
+    expect(await retry).not.toBeNull();
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).not.toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears the backoff once a fetch succeeds, so a later hourly refresh refuses no one', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign({ payload: { exp: Math.floor(Date.now() / 1000) + 3 * 3600 } });
+    let clock = Date.now();
+    const now = () => clock;
+    let settle: () => void = () => {};
+    // Concurrent requests on an expired cache each fetch, so every later call answers healthily.
+    const fetchFn = vi.fn<FetchFn>(async () => ({ ok: true, json: async () => signer.certs }))
+      .mockResolvedValueOnce({ ok: false, status: 503, json: async () => ({}) })
+      .mockResolvedValueOnce({ ok: true, json: async () => signer.certs })
+      .mockImplementationOnce(() => new Promise((resolve) => { settle = () => resolve({ ok: true, json: async () => signer.certs }); }));
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).toBeNull();
+    clock += 10 * 1000;
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).not.toBeNull();
+    clock += 61 * 60 * 1000;
+    const refresh = verifyAccessJwt(token, config, fetchFn, now);
+    const concurrent = [1, 2, 3].map(() => verifyAccessJwt(token, config, fetchFn, now));
+    settle();
+    expect(await refresh).not.toBeNull();
+    for (const result of await Promise.all(concurrent)) expect(result).not.toBeNull();
+  });
+
+  it('ignores a failure from before the cache expired at the next hourly refresh', async () => {
+    const signer = await makeAccessJwtSigner('real');
+    const token = await signer.sign({ payload: { exp: Math.floor(Date.now() / 1000) + 3 * 3600 } });
+    let clock = Date.now();
+    const now = () => clock;
+    const expiredRefresh = async (fetchFn: FetchFn) => {
+      clock += 61 * 60 * 1000;
+      const results = await Promise.all([1, 2, 3, 4].map(() => verifyAccessJwt(token, config, fetchFn, now)));
+      for (const result of results) expect(result).not.toBeNull();
+    };
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+
+    // An unknown-kid refetch fails while the cache is fresh.
+    let up = true;
+    const blip = vi.fn<FetchFn>(async () => (up ? { ok: true, json: async () => signer.certs } : { ok: false, status: 503, json: async () => ({}) }));
+    expect(await verifyAccessJwt(token, config, blip, now)).not.toBeNull();
+    clock += 30 * 60 * 1000;
+    up = false;
+    expect(await verifyAccessJwt(await signer.sign({ header: { kid: 'forged' } }), config, blip, now)).toBeNull();
+    up = true;
+    await expiredRefresh(blip);
+
+    // On a cold cache, one concurrent fetch fails after another has succeeded.
+    __resetAccessCertsCacheForTests();
+    let failLate: () => void = () => {};
+    const race = vi.fn<FetchFn>(async () => ({ ok: true, json: async () => signer.certs }))
+      .mockImplementationOnce(() => new Promise((resolve) => { failLate = () => resolve({ ok: false, status: 503, json: async () => ({}) }); }));
+    const late = verifyAccessJwt(token, config, race, now);
+    expect(await verifyAccessJwt(token, config, race, now)).not.toBeNull();
+    failLate();
+    await late;
+    await expiredRefresh(race);
+  });
+
+  it('backs off after the hourly refresh fails, as on a cold cache', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign({ payload: { exp: Math.floor(Date.now() / 1000) + 3 * 3600 } });
+    let clock = Date.now();
+    const now = () => clock;
+    let up = true;
+    const fetchFn = vi.fn<FetchFn>(async () => (up ? { ok: true, json: async () => signer.certs } : { ok: false, status: 503, json: async () => ({}) }));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).not.toBeNull();
+    up = false;
+    clock += 61 * 60 * 1000;
+    for (let i = 0; i < 5; i++) {
+      expect(await verifyAccessJwt(token, config, fetchFn, now)).toBeNull();
+      clock += 1000;
+    }
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    up = true;
+    clock += 10 * 1000;
+    expect(await verifyAccessJwt(token, config, fetchFn, now)).not.toBeNull();
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+  });
+
+  it('starts the backoff only once a fetch has failed, so requests during the first fetch are not refused', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign();
+    const pending: Array<() => void> = [];
+    const fetchFn = vi.fn(() => new Promise<{ ok: boolean; json: () => Promise<unknown> }>((resolve) => {
+      pending.push(() => resolve({ ok: true, json: async () => signer.certs }));
+    }));
+    const results = Array.from({ length: 3 }, () => verifyAccessJwt(token, config, fetchFn));
+    expect(fetchFn).toHaveBeenCalledTimes(3);
+    pending.forEach((release) => release());
+    expect((await Promise.all(results)).every((claims) => claims !== null)).toBe(true);
+  });
+
+  it('logs why a certs fetch failed, never the token', async () => {
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign();
+    let clock = Date.now();
+    const now = () => clock;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    await verifyAccessJwt(token, config, vi.fn(async () => ({ ok: false, status: 503, json: async () => ({}) })), now);
+    expect(warn).toHaveBeenCalledWith('[auth] Access certs fetch failed: HTTP 503');
+    clock += 10 * 1000;
+    await verifyAccessJwt(token, config, vi.fn(async () => { throw new TypeError('network'); }), now);
+    expect(warn).toHaveBeenCalledWith('[auth] Access certs fetch failed: TypeError');
+    expect(warn.mock.calls.flat().join(' ')).not.toContain(token.split('.')[2]);
+  });
+
+  it('reports a failed unknown-kid refetch as certs-unavailable, and the rate-limited case as unknown-key', async () => {
+    const signer = await makeAccessJwtSigner('real');
+    let clock = Date.now();
+    const now = () => clock;
+    let up = true;
+    const fetchFn = vi.fn(async () => (up ? { ok: true, json: async () => signer.certs } : { ok: false, json: async () => ({}) }));
+    expect(await verifyAccessJwt(await signer.sign(), config, fetchFn, now)).not.toBeNull();
+    up = false;
+    clock += 61 * 1000;
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const refetched = vi.fn();
+    await verifyAccessJwt(await signer.sign({ header: { kid: 'rotated' } }), { ...config, onReject: refetched }, fetchFn, now);
+    expect(refetched).toHaveBeenCalledWith('certs-unavailable');
+    const limited = vi.fn();
+    await verifyAccessJwt(await signer.sign({ header: { kid: 'rotated' } }), { ...config, onReject: limited }, fetchFn, now);
+    expect(limited).toHaveBeenCalledWith('unknown-key');
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+  });
+
+  it('imports each key once per fetch, not on every request', async () => {
+    const signer = await makeAccessJwtSigner();
+    const importKey = vi.spyOn(crypto.subtle, 'importKey');
+    let clock = Date.now();
+    const now = () => clock;
+    const token = await signer.sign({ payload: { exp: Math.floor(Date.now() / 1000) + 3 * 3600 } });
+    for (let i = 0; i < 20; i++) {
+      expect(await verifyAccessJwt(token, config, signer.fetchFn, now)).not.toBeNull();
+      clock += 2 * 60 * 1000;
+    }
+    expect(signer.fetchFn).toHaveBeenCalledTimes(1);
+    expect(importKey).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses when the certs fetch fails, and does not cache the failure', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const signer = await makeAccessJwtSigner();
+    const token = await signer.sign();
+    let clock = Date.now();
+    const now = () => clock;
     const failing = vi.fn(async () => ({ ok: false, json: async () => ({}) }));
-    expect(await verifyAccessJwt(token, config, failing)).toBeNull();
+    expect(await verifyAccessJwt(token, config, failing, now)).toBeNull();
+    clock += 10 * 1000;
     const throwing = vi.fn(async () => { throw new Error('network'); });
-    expect(await verifyAccessJwt(token, config, throwing)).toBeNull();
-    expect(await verifyAccessJwt(token, config, signer.fetchFn)).not.toBeNull();
+    expect(await verifyAccessJwt(token, config, throwing, now)).toBeNull();
+    expect(throwing).toHaveBeenCalledTimes(1);
+    clock += 10 * 1000;
+    expect(await verifyAccessJwt(token, config, signer.fetchFn, now)).not.toBeNull();
     expect(signer.fetchFn).toHaveBeenCalledTimes(1);
   });
 
@@ -219,11 +456,14 @@ describe('certs cache', () => {
   it('does not cache an empty key set', async () => {
     const signer = await makeAccessJwtSigner();
     const token = await signer.sign();
+    let clock = Date.now();
+    const now = () => clock;
     const onReject = vi.fn();
     const empty = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [] }) }));
-    expect(await verifyAccessJwt(token, { ...config, onReject }, empty)).toBeNull();
+    expect(await verifyAccessJwt(token, { ...config, onReject }, empty, now)).toBeNull();
     expect(onReject).toHaveBeenCalledWith('certs-unavailable');
-    expect(await verifyAccessJwt(token, config, signer.fetchFn)).not.toBeNull();
+    clock += 10 * 1000;
+    expect(await verifyAccessJwt(token, config, signer.fetchFn, now)).not.toBeNull();
   });
 
   it('names an unreachable certs endpoint as the reason', async () => {

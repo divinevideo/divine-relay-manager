@@ -797,6 +797,20 @@ describe('adminApi', () => {
         expect(error).toBeInstanceOf(BanNotConfirmedError);
       });
 
+      // The worker's gate answers 503 when it can't check the login at all.
+      // The request never reached the ban, so it is a plain failure, not a
+      // ban that may have landed.
+      it('rethrows an access_unavailable 503 unchanged without reading the ban list', async () => {
+        mockFetch.mockResolvedValueOnce(workerError(503, {
+          success: false, code: 'access_unavailable', error: 'Access verification is temporarily unavailable; try again shortly',
+        }));
+
+        const { error } = await ban() as { error: unknown };
+        expect(error).toBeInstanceOf(ApiError);
+        expect(error).not.toBeInstanceOf(BanNotConfirmedError);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
+      });
+
       // A 4xx is a refusal before anything ran (bad input, expired access), so
       // it stays a plain failure and costs no ban-list read.
       it('rethrows a 4xx refusal unchanged without reading the ban list', async () => {

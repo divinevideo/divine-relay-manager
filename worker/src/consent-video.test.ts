@@ -211,15 +211,31 @@ describe('verifyConsentAccessJwt + handleConsentVideo', () => {
   it('accepts a valid Access JWT and rejects a tampered one', async () => {
     const { token, fetchFn } = await makeJwt();
     const env = { CONSENT_ACCESS_TEAM_DOMAIN: 'team.example.com', CONSENT_ACCESS_AUD: 'aud-1' };
-    expect(await verifyConsentAccessJwt(token, env, fetchFn as never)).toBe(true);
-    expect(await verifyConsentAccessJwt(`${token}x`, env, fetchFn as never)).toBe(false);
+    expect(await verifyConsentAccessJwt(token, env, fetchFn as never)).toBe('ok');
+    expect(await verifyConsentAccessJwt(`${token}x`, env, fetchFn as never)).toBe('refused');
+  });
+
+  it('answers 503, not 401, when the certs cannot be fetched', async () => {
+    const { token } = await makeJwt();
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) })));
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const db = { prepare: vi.fn() };
+    const env = {
+      DB: db, CONSENT_VIDEO_BUCKET: {}, CONSENT_ACCESS_TEAM_DOMAIN: 'team.example.com', CONSENT_ACCESS_AUD: 'aud-1',
+    } as unknown as ConsentVideoEnv;
+    const res = await handleConsentVideo(
+      new Request('https://w/api/age-review/consent-video/r1', { headers: { 'Cf-Access-Jwt-Assertion': token } }), 'r1', env, cors,
+    );
+    expect(res.status).toBe(503);
+    expect(db.prepare).not.toHaveBeenCalled();
+    warn.mockRestore();
   });
 
   it('logs why a reviewer token was refused, without the token', async () => {
     const { token, fetchFn } = await makeJwt();
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const env = { CONSENT_ACCESS_TEAM_DOMAIN: 'team.example.com', CONSENT_ACCESS_AUD: 'aud-other' };
-    expect(await verifyConsentAccessJwt(token, env, fetchFn as never)).toBe(false);
+    expect(await verifyConsentAccessJwt(token, env, fetchFn as never)).toBe('refused');
     expect(warn).toHaveBeenCalledWith('[consent-video] Cf-Access-Jwt-Assertion refused: audience');
     warn.mockRestore();
   });

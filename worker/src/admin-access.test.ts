@@ -75,23 +75,16 @@ describe('verifyAdminAccess: Cloudflare Access JWT', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('ACCESS_TEAM_DOMAIN'));
   });
 
-  it('reads API_ACCESS_AUD from a Secrets Store binding', async () => {
-    const signer = await makeAccessJwtSigner();
-    vi.stubGlobal('fetch', signer.fetchFn);
-    const env = { ...baseEnv, API_ACCESS_AUD: { get: async () => AUDIENCE } };
-    expect(await status({ 'Cf-Access-Jwt-Assertion': await signer.sign() }, env)).toBe(404);
-  });
-
-  it('refuses, rather than failing the request, when reading API_ACCESS_AUD throws', async () => {
+  it('names both settings when both are unset', async () => {
     const signer = await makeAccessJwtSigner();
     vi.stubGlobal('fetch', signer.fetchFn);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const env = { ...baseEnv, API_ACCESS_AUD: { get: async () => { throw new Error('secrets store down'); } } };
+    const { ACCESS_TEAM_DOMAIN: _team, API_ACCESS_AUD: _aud, ...env } = baseEnv;
     expect(await status({ 'Cf-Access-Jwt-Assertion': await signer.sign() }, env)).toBe(401);
-    expect(error).toHaveBeenCalledWith(expect.stringContaining('API_ACCESS_AUD'), expect.anything());
+    expect(error).toHaveBeenCalledWith(expect.stringMatching(/ACCESS_TEAM_DOMAIN.*API_ACCESS_AUD/));
   });
 
-  it('treats an empty API_ACCESS_AUD secret as unset', async () => {
+  it('treats an empty API_ACCESS_AUD as unset', async () => {
     const signer = await makeAccessJwtSigner();
     vi.stubGlobal('fetch', signer.fetchFn);
     const error = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -100,10 +93,21 @@ describe('verifyAdminAccess: Cloudflare Access JWT', () => {
     expect(error).toHaveBeenCalledWith(expect.stringContaining('API_ACCESS_AUD'));
   });
 
-  it('refuses when the certs cannot be fetched', async () => {
+  it('answers 503, not 401, when the certs cannot be fetched', async () => {
+    // An outage, not a refused login: moderators and the health check should
+    // read it as "try again", not "check your credentials".
     const signer = await makeAccessJwtSigner();
-    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, json: async () => ({}) })));
-    expect(await status({ 'Cf-Access-Jwt-Assertion': await signer.sign() })).toBe(401);
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 500, json: async () => ({}) })));
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await worker.fetch(
+      new Request(PROBE, { headers: { 'Cf-Access-Jwt-Assertion': await signer.sign() } }), baseEnv as never, ctx,
+    );
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as { error: string; code: string };
+    expect(body.error).toMatch(/try again/i);
+    // The admin UI's ban flow branches on this code: the request never got past
+    // the gate, so it must not be reported as a ban that may have applied.
+    expect(body.code).toBe('access_unavailable');
   });
 
   it('refuses a request with no credentials', async () => {

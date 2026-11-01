@@ -1,5 +1,5 @@
 // ABOUTME: Verifies a Cloudflare Access JWT (RS256 signature against the team's
-// ABOUTME: certs, issuer, audience, expiry) and returns its claims; caches the certs.
+// ABOUTME: certs, then issuer, audience, exp, nbf) and returns its claims; caches the keys.
 
 // The Worker checks the token itself rather than trusting that the header is
 // present: the header only proves Access saw the request if every way into the
@@ -11,7 +11,9 @@
 // path the claims carry the token's client id (common_name), not a moderator's
 // email. Per-moderator identity needs a verified Divine login (issue #178).
 
-export type FetchFn = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
+import { errorNameOnly } from './error-name';
+
+export type FetchFn = (url: string, init?: { signal?: AbortSignal }) => Promise<{ ok: boolean; status?: number; json: () => Promise<unknown> }>;
 
 export interface AccessClaims {
   iss: string;
@@ -25,6 +27,8 @@ export interface AccessClaims {
 }
 
 // Why a token was refused, for logs. Never includes the token or its claims.
+// Only malformed, algorithm, unknown-key and signature can come from a crafted
+// token: the claim reasons are checked after the signature.
 export type AccessJwtRejection =
   | 'not-configured' | 'malformed' | 'algorithm' | 'issuer' | 'audience'
   | 'expired' | 'not-yet-valid' | 'certs-unavailable' | 'unknown-key' | 'signature';
@@ -43,25 +47,38 @@ interface CertsEntry {
 // the copy triggers one early refetch, at most once a minute whether or not it
 // succeeds, so a stream of forged kids can't turn every request into a certs
 // fetch. The slot is claimed before the fetch is awaited, so concurrent forged
-// requests don't each refetch.
+// requests don't each refetch. The cost, accepted: right after Cloudflare starts
+// signing with a new key, requests that arrive while that refetch is in flight,
+// or within a minute of the last fetch, are refused as unknown-key until the
+// next refetch. Cloudflare publishes the new key well before it signs with it,
+// so the hourly refresh usually has it first.
+//
+// The other side of the hour, also accepted: a key Cloudflare withdraws stays
+// trusted until this copy expires. The consent-video route shares this cache.
 //
 // Concurrent requests on a cold or expired cache each fetch the certs rather
 // than sharing one in-flight promise: Workers can stall a request that awaits
 // a promise another request's I/O resolves. That costs a few duplicate fetches
-// per isolate per hour.
+// per isolate per hour. Once a fetch has failed, requests on a cold or expired
+// cache refuse without fetching for a short backoff, and then one request at a
+// time retries, so a down or hanging certs endpoint costs one fetch per window
+// rather than one per request.
 const CERTS_TTL_MS = 60 * 60 * 1000;
 const UNKNOWN_KID_REFETCH_MS = 60 * 1000;
+const CERTS_FAILURE_BACKOFF_MS = 10 * 1000;
 // A hung certs endpoint would otherwise hold every moderator request open.
 const CERTS_FETCH_TIMEOUT_MS = 5 * 1000;
 
 const certsCache = new Map<string, CertsEntry>();
 const unknownKidRefetchAt = new Map<string, number>();
+const certsFailedAt = new Map<string, number>();
 let fetchGeneration = 0;
 
 // Test-only: module state persists across tests in one worker.
 export function __resetAccessCertsCacheForTests(): void {
   certsCache.clear();
   unknownKidRefetchAt.clear();
+  certsFailedAt.clear();
   fetchGeneration = 0;
 }
 
@@ -74,19 +91,25 @@ function b64UrlDecode(value: string): Uint8Array {
 }
 
 // A failed fetch, or one that lists no keys, is not cached: the next request
-// tries again.
-async function fetchCerts(teamDomain: string, fetchFn: FetchFn, nowMs: number): Promise<CertsEntry | null> {
+// after the backoff tries again.
+async function fetchCerts(teamDomain: string, fetchFn: FetchFn, now: () => number): Promise<CertsEntry | null> {
   const generation = ++fetchGeneration;
+  const fetchedAt = now();
+  const fail = (detail: string) => {
+    console.warn(`[auth] Access certs fetch failed: ${detail}`);
+    certsFailedAt.set(teamDomain, now());
+    return null;
+  };
   try {
     const res = await fetchFn(`https://${teamDomain}/cdn-cgi/access/certs`, {
       signal: AbortSignal.timeout(CERTS_FETCH_TIMEOUT_MS),
     });
-    if (!res.ok) return null;
+    if (!res.ok) return fail(`HTTP ${res.status}`);
     const body = (await res.json()) as { keys?: Jwk[] };
-    if (!Array.isArray(body.keys) || body.keys.length === 0) return null;
+    if (!Array.isArray(body.keys) || body.keys.length === 0) return fail('no keys');
     const keys: AccessKey[] = [];
     for (const jwk of body.keys) {
-      if (!jwk || typeof jwk.kid !== 'string' || !jwk.kid || jwk.kty !== 'RSA') return null;
+      if (!jwk || typeof jwk.kid !== 'string' || !jwk.kid || jwk.kty !== 'RSA') return fail('invalid key entry');
       const key = await crypto.subtle.importKey(
         'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
       );
@@ -96,20 +119,31 @@ async function fetchCerts(teamDomain: string, fetchFn: FetchFn, nowMs: number): 
     // Publish only complete, importable key sets and never roll a newer one back.
     const cached = certsCache.get(teamDomain);
     if (cached && cached.generation > generation) return cached;
-    const entry = { keys, fetchedAt: nowMs, generation };
+    const entry = { keys, fetchedAt, generation };
     certsCache.set(teamDomain, entry);
     return entry;
-  } catch {
-    return null;
+  } catch (error) {
+    return fail(errorNameOnly(error));
   }
 }
 
 async function findKey(
-  kid: string, teamDomain: string, fetchFn: FetchFn, nowMs: number,
+  kid: string, teamDomain: string, fetchFn: FetchFn, now: () => number,
 ): Promise<AccessKey | 'certs-unavailable' | 'unknown-key'> {
+  const nowMs = now();
   let entry = certsCache.get(teamDomain);
   if (!entry || nowMs - entry.fetchedAt >= CERTS_TTL_MS) {
-    entry = (await fetchCerts(teamDomain, fetchFn, nowMs)) ?? undefined;
+    // Only a failure since this copy expired counts: an earlier one (an
+    // unknown-kid refetch blip, or a losing concurrent fetch) says nothing
+    // about the endpoint now.
+    const failedAt = certsFailedAt.get(teamDomain);
+    if (failedAt !== undefined && (!entry || failedAt >= entry.fetchedAt + CERTS_TTL_MS)) {
+      if (nowMs - failedAt < CERTS_FAILURE_BACKOFF_MS) return 'certs-unavailable';
+      // Claim the retry before awaiting it, so a hanging endpoint costs one
+      // fetch per window rather than one per request until the timeout.
+      certsFailedAt.set(teamDomain, nowMs);
+    }
+    entry = (await fetchCerts(teamDomain, fetchFn, now)) ?? undefined;
     if (!entry) return 'certs-unavailable';
   }
   const jwk = entry.keys.find((k) => k.kid === kid);
@@ -117,8 +151,10 @@ async function findKey(
   const lastRefetch = Math.max(entry.fetchedAt, unknownKidRefetchAt.get(teamDomain) ?? 0);
   if (nowMs - lastRefetch < UNKNOWN_KID_REFETCH_MS) return 'unknown-key';
   unknownKidRefetchAt.set(teamDomain, nowMs);
-  const refreshed = await fetchCerts(teamDomain, fetchFn, nowMs);
-  return refreshed?.keys.find((k) => k.kid === kid) ?? 'unknown-key';
+  const refreshed = await fetchCerts(teamDomain, fetchFn, now);
+  // A failed refetch is an unreachable endpoint, not evidence the kid is bogus.
+  if (!refreshed) return 'certs-unavailable';
+  return refreshed.keys.find((k) => k.kid === kid) ?? 'unknown-key';
 }
 
 // Returns the token's claims when it verifies against `audience`, otherwise null
@@ -146,16 +182,10 @@ export async function verifyAccessJwt(
     };
     if (header.alg !== 'RS256') return reject('algorithm');
     if (typeof header.kid !== 'string' || !header.kid) return reject('malformed');
-    if (payload.iss !== `https://${teamDomain}`) return reject('issuer');
-    const audiences = (Array.isArray(payload.aud) ? payload.aud : [payload.aud]).filter((a): a is string => typeof a === 'string');
-    if (!audiences.includes(audience)) return reject('audience');
-    const nowMs = now();
-    if (typeof payload.exp !== 'number' || payload.exp <= Math.floor(nowMs / 1000)) return reject('expired');
-    // RFC 7519 permits small clock-skew leeway for an optional NumericDate nbf.
-    if (payload.nbf !== undefined && (typeof payload.nbf !== 'number' || !Number.isFinite(payload.nbf)
-      || payload.nbf > Math.floor(nowMs / 1000) + 30)) return reject('not-yet-valid');
 
-    const jwk = await findKey(header.kid, teamDomain, fetchFn, nowMs);
+    // The signature is checked before any claim, so a refusal for issuer,
+    // audience, exp or nbf always describes a token Access signed.
+    const jwk = await findKey(header.kid, teamDomain, fetchFn, now);
     if (typeof jwk === 'string') return reject(jwk);
     const valid = await crypto.subtle.verify(
       'RSASSA-PKCS1-v1_5', jwk.key,
@@ -163,6 +193,15 @@ export async function verifyAccessJwt(
       new TextEncoder().encode(`${headerPart}.${payloadPart}`),
     );
     if (!valid) return reject('signature');
+
+    if (payload.iss !== `https://${teamDomain}`) return reject('issuer');
+    const audiences = (Array.isArray(payload.aud) ? payload.aud : [payload.aud]).filter((a): a is string => typeof a === 'string');
+    if (!audiences.includes(audience)) return reject('audience');
+    const nowS = Math.floor(now() / 1000);
+    if (typeof payload.exp !== 'number' || payload.exp <= nowS) return reject('expired');
+    // RFC 7519 permits small clock-skew leeway for an optional NumericDate nbf.
+    if (payload.nbf !== undefined && (typeof payload.nbf !== 'number' || !Number.isFinite(payload.nbf)
+      || payload.nbf > nowS + 30)) return reject('not-yet-valid');
     return {
       iss: payload.iss,
       aud: audiences,
