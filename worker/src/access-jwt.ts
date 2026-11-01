@@ -90,7 +90,7 @@ function b64UrlDecode(value: string): Uint8Array {
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
 
-// A failed fetch, or one that lists no keys, is not cached: the next request
+// A failed fetch, or one with no usable key, is not cached: the next request
 // after the backoff tries again.
 async function fetchCerts(teamDomain: string, fetchFn: FetchFn, now: () => number): Promise<CertsEntry | null> {
   const generation = ++fetchGeneration;
@@ -107,16 +107,28 @@ async function fetchCerts(teamDomain: string, fetchFn: FetchFn, now: () => numbe
     if (!res.ok) return fail(`HTTP ${res.status}`);
     const body = (await res.json()) as { keys?: Jwk[] };
     if (!Array.isArray(body.keys) || body.keys.length === 0) return fail('no keys');
+    // An entry we can't use is skipped rather than refusing the document, so
+    // one unsupported key published beside the RSA keys can't lock everyone
+    // out. A skipped key never enters the cache, so a token it signed is still
+    // refused (unknown-key). The log names only the reason, never the entry.
     const keys: AccessKey[] = [];
     for (const jwk of body.keys) {
-      if (!jwk || typeof jwk.kid !== 'string' || !jwk.kid || jwk.kty !== 'RSA') return fail('invalid key entry');
-      const key = await crypto.subtle.importKey(
-        'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
-      );
-      keys.push({ kid: jwk.kid, key });
+      if (!jwk || typeof jwk.kid !== 'string' || !jwk.kid || jwk.kty !== 'RSA') {
+        console.warn('[auth] Access certs: skipped a key entry: invalid key entry');
+        continue;
+      }
+      try {
+        const key = await crypto.subtle.importKey(
+          'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
+        );
+        keys.push({ kid: jwk.kid, key });
+      } catch {
+        console.warn('[auth] Access certs: skipped a key entry: unimportable key');
+      }
     }
+    if (keys.length === 0) return fail('no usable keys');
     // A later-started fetch can finish first, including within one clock tick.
-    // Publish only complete, importable key sets and never roll a newer one back.
+    // Publish only imported key sets and never roll a newer one back.
     const cached = certsCache.get(teamDomain);
     if (cached && cached.generation > generation) return cached;
     const entry = { keys, fetchedAt, generation };

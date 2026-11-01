@@ -198,37 +198,58 @@ describe('certs cache', () => {
     expect(fetchFn).toHaveBeenCalledTimes(2);
   });
 
-  it('does not publish a certs document containing a malformed or unimportable entry', async () => {
+  it('skips an unusable entry, keeps the good keys, and logs only a reason', async () => {
+    const signer = await makeAccessJwtSigner();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const good = signer.certs.keys[0];
+    const { kid: _kid, ...kidless } = good;
+    const cases: Array<[unknown, string]> = [
+      [null, 'invalid key entry'],
+      [kidless, 'invalid key entry'],
+      [{ ...kidless, kid: '' }, 'invalid key entry'],
+      [{ ...kidless, kid: 123 }, 'invalid key entry'],
+      [{ ...good, kid: 'bad', kty: 'EC' }, 'invalid key entry'],
+      [{ kid: 'bad', kty: 'RSA' }, 'unimportable key'],
+    ];
+    for (const [bad, reason] of cases) {
+      __resetAccessCertsCacheForTests();
+      warn.mockClear();
+      const fetchFn = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [bad, ...signer.certs.keys] }) }));
+      expect(await verifyAccessJwt(await signer.sign(), config, fetchFn)).not.toBeNull();
+      expect(fetchFn).toHaveBeenCalledTimes(1);
+      expect(warn.mock.calls).toEqual([[`[auth] Access certs: skipped a key entry: ${reason}`]]);
+    }
+  });
+
+  it('never caches a skipped key, so a token it signed is still refused', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const signer = await makeAccessJwtSigner();
+    const other = await makeAccessJwtSigner('bad');
+    // The skipped entry carries the other signer's real key, under an
+    // unsupported type: skipping must not fall back to importing it anyway.
+    const fetchFn = vi.fn(async () => ({
+      ok: true, json: async () => ({ keys: [...signer.certs.keys, { ...other.certs.keys[0], kty: 'EC' }] }),
+    }));
+    const onReject = vi.fn();
+    expect(await verifyAccessJwt(await signer.sign(), config, fetchFn)).not.toBeNull();
+    expect(await verifyAccessJwt(await other.sign(), { ...config, onReject }, fetchFn)).toBeNull();
+    expect(onReject).toHaveBeenCalledWith('unknown-key');
+  });
+
+  it('refuses, and does not cache, a certs document with no usable key', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const signer = await makeAccessJwtSigner();
     const token = await signer.sign();
     let clock = Date.now();
     const now = () => clock;
-    for (const badKey of [null, { kid: 'bad', kty: 'RSA' }]) {
-      const malformed = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [...signer.certs.keys, badKey] }) }));
-      const onReject = vi.fn();
-      expect(await verifyAccessJwt(token, { ...config, onReject }, malformed, now)).toBeNull();
-      expect(onReject).toHaveBeenCalledWith('certs-unavailable');
-      expect(malformed).toHaveBeenCalledTimes(1);
-      clock += 10 * 1000;
-    }
+    const unusable = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [null, { kid: 'bad', kty: 'RSA' }] }) }));
+    const onReject = vi.fn();
+    expect(await verifyAccessJwt(token, { ...config, onReject }, unusable, now)).toBeNull();
+    expect(onReject).toHaveBeenCalledWith('certs-unavailable');
+    expect(warn).toHaveBeenCalledWith('[auth] Access certs fetch failed: no usable keys');
+    clock += 10 * 1000;
     expect(await verifyAccessJwt(token, config, signer.fetchFn, now)).not.toBeNull();
     expect(signer.fetchFn).toHaveBeenCalledTimes(1);
-  });
-
-  it('refuses a certs document with an entry lacking a usable kid or RSA type, naming it in the log', async () => {
-    const signer = await makeAccessJwtSigner();
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { kid: _kid, ...kidless } = signer.certs.keys[0];
-    for (const bad of [kidless, { ...kidless, kid: '' }, { ...kidless, kid: 123 }, { ...signer.certs.keys[0], kid: 'ec', kty: 'EC' }]) {
-      __resetAccessCertsCacheForTests();
-      warn.mockClear();
-      const fetchFn = vi.fn(async () => ({ ok: true, json: async () => ({ keys: [...signer.certs.keys, bad] }) }));
-      const onReject = vi.fn();
-      expect(await verifyAccessJwt(await signer.sign(), { ...config, onReject }, fetchFn)).toBeNull();
-      expect(onReject).toHaveBeenCalledWith('certs-unavailable');
-      expect(warn).toHaveBeenCalledWith('[auth] Access certs fetch failed: invalid key entry');
-    }
   });
 
   it('refuses once the hour is up and the refetch fails, rather than trusting the old keys', async () => {

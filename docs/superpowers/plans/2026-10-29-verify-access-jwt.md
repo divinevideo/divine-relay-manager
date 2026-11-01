@@ -36,6 +36,7 @@
 - `X-Admin-Key` is checked before the JWT. That's cheaper (no certs fetch for server callers), and either credential alone is still sufficient. If the `MOD_RELAY_ADMIN_KEY` read fails on `POST /api/relay-rpc`, the gate continues to independent JWT verification; without a valid JWT the request is refused.
 - A JWT that fails verification gets the same 401 text as today, except when the certs can't be fetched: that is an outage, not a refusal, so it answers 503 (still with no stale-key fallback). The consent-video route does the same.
 - After Meylis's review: a rotated key's tokens can be refused for up to a minute (the one-refetch-a-minute floor), and a withdrawn key stays trusted for up to the hour on both routes, consent-video included. Both are accepted and documented.
+- After Daniel's review at `b48ed47`: a certs entry with no key ID, a type other than RSA, or a key that won't import is skipped and logged by reason, rather than refusing the whole document. Only imported keys are cached, and a document with no usable key refuses (503) and isn't cached.
 - When the audience setting is missing, the worker logs a `console.error` naming the setting, so a misconfigured deploy is diagnosable from the logs.
 
 ---
