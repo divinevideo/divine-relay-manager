@@ -5,8 +5,11 @@ import { Miniflare } from 'miniflare';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
-import { hasActiveAutoHide, hasLatestHumanRestore } from '../src/ReportWatcher';
-import { markHumanAction } from '../src/human-decision';
+import { ReportWatcher, hasActiveAutoHide, hasLatestHumanRestore, type ReportEvent, type ReportWatcherEnv } from '../src/ReportWatcher';
+import { finalizeEvent } from 'nostr-tools';
+import { SexualQuarantine } from '../src/sexual-quarantine';
+import { createQuarantineIO } from '../src/sexual-quarantine-io';
+import { markHumanAction, markHumanReviewed } from '../src/human-decision';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
@@ -145,6 +148,57 @@ describe('recorded content decisions on real D1', () => {
     expect(await hasActiveAutoHide(DB, eventId)).toBe(false);
   });
 
+  it('refuses generic event review before mutation and preserves threshold admission for an open case', async () => {
+    const eventId = 'f2'.repeat(32);
+    const data = new Map<string, unknown>();
+    const store = {
+      get: async (key: string) => structuredClone(data.get(key)),
+      put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
+      delete: async (key: string) => data.delete(key),
+      list: async ({ prefix = '' } = {}) => new Map([...data].filter(([key]) => key.startsWith(prefix))),
+      getAlarm: async () => null,
+      setAlarm: async () => {},
+    };
+    const storage = { ...store, transaction: async (fn: (tx: unknown) => unknown) => fn(store) } as unknown as DurableObjectStorage;
+    const state = { storage, blockConcurrencyWhile: async (fn: () => unknown) => fn() } as unknown as DurableObjectState;
+    const env = { NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.example.test', ALLOWED_ORIGINS: '',
+      ADMIN_API_KEY: 'test-admin-key', DB, SEXUAL_QUARANTINE_ENABLED: 'true', AUTO_HIDE_ENABLED: 'true' };
+    const watcher = new ReportWatcher(state, env as ReportWatcherEnv);
+    await watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true,
+      trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['nudity'], threshold: 2, requireTrustedClient: false }],
+    }) }));
+    const q = new SexualQuarantine(storage, createQuarantineIO(env));
+    await q.admit(eventId, { id: 'a'.repeat(64), pubkey: 'b'.repeat(64), reason: 'nudity' }, 2,
+      { event: { id: eventId }, assets: [] });
+    const response = await worker.fetch(new Request('https://api.example.test/api/decisions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key' },
+      body: JSON.stringify({ targetType: 'event', targetId: eventId, action: 'reviewed' }),
+    }), { ...env, REPORT_WATCHER: { idFromName: () => 'singleton', get: () => watcher } } as never,
+    { waitUntil: vi.fn() } as unknown as ExecutionContext);
+    expect(response.status).toBe(409);
+    expect(await DB.prepare('SELECT * FROM moderation_decisions WHERE target_id = ?').bind(eventId).all())
+      .toMatchObject({ results: [] });
+    expect(await DB.prepare('SELECT * FROM moderation_targets WHERE target_id = ?').bind(eventId).first()).toBeNull();
+    const later = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', eventId, 'nudity']] }, new Uint8Array(32).fill(3));
+    await (watcher as unknown as { processAutoHide(e: ReportEvent, category: string, target: string, advance: boolean): Promise<void> })
+      .processAutoHide(later as ReportEvent, 'nudity', eventId, false);
+    expect(await q.get(eventId)).toMatchObject({ reporters: 2, goal: 'hide', state: 'pending' });
+  });
+
+  it('keeps generic pubkey review independent of event case coordination', async () => {
+    const targetId = 'f3'.repeat(32);
+    const response = await worker.fetch(new Request('https://api.example.test/api/decisions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key' },
+      body: JSON.stringify({ targetType: 'pubkey', targetId, action: 'reviewed' }),
+    }), { NOSTR_NSEC: TEST_NSEC, ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never,
+    { waitUntil: vi.fn() } as unknown as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect(await DB.prepare('SELECT action FROM moderation_decisions WHERE target_id = ?').bind(targetId).first())
+      .toMatchObject({ action: 'reviewed' });
+    expect(await DB.prepare('SELECT ever_human_reviewed FROM moderation_targets WHERE target_id = ?').bind(targetId).first())
+      .toMatchObject({ ever_human_reviewed: 1 });
+  });
+
   it('does not let a delayed audit write overwrite authoritative visibility intent', async () => {
     const eventId = 'ef'.repeat(32);
     await DB.prepare(`
@@ -170,6 +224,9 @@ describe('recorded content decisions on real D1', () => {
         ALLOWED_ORIGINS: '',
         ADMIN_API_KEY: 'test-admin-key',
         DB,
+        REPORT_WATCHER: { idFromName: () => 'singleton', get: () => ({
+          fetch: async () => Response.json({ success: true, recorded: await markHumanReviewed(DB, 'event', eventId) }),
+        }) },
       } as never,
       { waitUntil: vi.fn() } as unknown as ExecutionContext,
     );

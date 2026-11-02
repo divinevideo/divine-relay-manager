@@ -1911,6 +1911,21 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
     }
 
+    if (body.targetType === 'event') {
+      // Generic audit writes mark review without changing visibility direction.
+      // Serialize that mark before the append so an open versioned case cannot
+      // be bypassed by posting the same review through a different endpoint.
+      const review = await coordinateEventVisibility(env, {
+        eventId: body.targetId.toLowerCase(), relayAction: 'review', humanAction: 'reviewed',
+        moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+      });
+      if (!review.success || !review.recorded) {
+        return jsonResponse({ success: false, recorded: review.recorded === true,
+          error: review.error || 'Human-review state was not recorded',
+        }, review.conflict ? 409 : 502, corsHeaders);
+      }
+    }
+
     await ensureSchemaOnce(env.DB);
 
     await env.DB.prepare(`
@@ -1927,7 +1942,7 @@ async function handleLogDecision(
 
     // This endpoint is an append-only audit write. Detached clients can deliver it
     // after a newer enforcement action, so it must not redefine visibility intent.
-    await markHumanReviewed(env.DB, body.targetType, body.targetId);
+    if (body.targetType !== 'event') await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
