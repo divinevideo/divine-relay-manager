@@ -40,9 +40,14 @@ describe('requireAccessToken', () => {
     expect(() => requireAccessToken('build', 'development', {})).not.toThrow();
   });
 
-  it('leaves the dev server and the test runner alone', () => {
+  it('leaves the dev server, vite preview and the test runner alone', () => {
     expect(() => requireAccessToken('serve', 'development', {})).not.toThrow();
+    expect(() => requireAccessToken('serve', 'production', {})).not.toThrow();
     expect(() => requireAccessToken('serve', 'test', {})).not.toThrow();
+  });
+
+  it('checks only the production mode, which is the one that gets deployed', () => {
+    expect(() => requireAccessToken('build', 'staging', {})).not.toThrow();
   });
 });
 
