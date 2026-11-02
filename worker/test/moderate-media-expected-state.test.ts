@@ -11,8 +11,11 @@
 // AGE_RESTRICTED must NOT be used for a minor because it serves full bytes to any
 // signed-in viewer. COOP's Un-Restrict-Media button also sends SAFE. relay-manager
 // refuses this class of reversal elsewhere -- ageReviewActiveGuard returns 409
-// age_review_active for unbanpubkey/unsuspendpubkey -- but that guard is
-// pubkey-keyed and this endpoint is hash-keyed, so it was never wired here.
+// age_review_active for unbanpubkey/unsuspendpubkey. That guard is pubkey-keyed
+// and this endpoint is hash-keyed; it runs here for a request that names the
+// account (#333) and, for a SAFE or AGE_RESTRICTED, on the owner the media
+// server names (#335,
+// moderate-media-lift-guard.test.ts).
 //
 // `from` lets a caller declare what it believes it is undoing. A mismatch is
 // refused, so the button can only reverse the thing it is named for.
@@ -20,7 +23,7 @@
 // Status codes follow the convention age-review.ts already sets: 409 when there IS
 // a conflicting state, 503 when we could not determine one, because "could not
 // check" is a different answer from "no conflict" and must not read as success.
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import worker from '../src/index';
 
 const SHA = 'dd44' + '0'.repeat(59) + '4';
@@ -101,8 +104,27 @@ function env(api: ReturnType<typeof moderationApi>) {
     MODERATION_API: api,
     MODERATION_SERVICE_URL: 'https://moderation.example',
     MODERATION_ADMIN_URL: 'https://moderation.example',
+    // A SAFE also passes the age-review lift guard (#335) before this check:
+    // the media server names the file's owner, and that owner has no open
+    // case. Its own tests are in moderate-media-lift-guard.test.ts.
+    BLOSSOM_WEBHOOK_SECRET: 'blossom-secret',
+    CDN_DOMAIN: 'media.example',
+    DB: noOpenCase,
   } as unknown as Parameters<typeof worker.fetch>[1];
 }
+
+const noOpenCase = {
+  prepare() {
+    const stmt = {
+      bind() { return stmt; },
+      async first() { return null; },
+      async all() { return { results: [] }; },
+      async run() { return { meta: { changes: 0 } }; },
+    };
+    return stmt;
+  },
+  async batch() { return []; },
+};
 
 function post(body: Record<string, unknown>) {
   return new Request('https://relay.example/api/moderate-media', {
@@ -116,7 +138,16 @@ const moderateCalls = () => calls.filter((c) => c.url === '/api/v1/moderate');
 
 beforeEach(() => {
   calls = [];
+  vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL) => {
+    const url = new URL(String(input instanceof Request ? input.url : input));
+    if (url.host === 'media.example' && url.pathname.startsWith('/admin/api/blob/')) {
+      return Response.json({ type: 'video/mp4', owner: 'a1'.repeat(32), status: 'restricted' });
+    }
+    return new Response('not found', { status: 404 });
+  }) as typeof fetch);
 });
+
+afterEach(() => vi.restoreAllMocks());
 
 describe('/api/moderate-media expected-state check', () => {
   it('refuses to clear a state the caller did not expect, and does not act', async () => {
@@ -284,10 +315,10 @@ describe('/api/moderate-media expected-state check', () => {
     // omits it. The cost is the credentialed GET, and a caller being told it
     // verified state when it read something unrelated.
     //
-    // Checked only on this path. The POST body's sha256 is forwarded to
-    // moderation-service, which validates it itself (handlePublicCheckResult and
-    // its siblings), so callers that send no `from` keep working exactly as
-    // before and nothing here narrows what they may send.
+    // Checked on this path, and for a SAFE by the lift guard (#335) before it,
+    // which answers with the same code. So each shape is sent as a PERMANENT_BAN
+    // too, which only this path checks. A Block with no `from` is forwarded to
+    // moderation-service, which validates the hash itself.
     const traversals = [
       '../../api/v1/decisions',
       '..%2F..%2Fapi%2Fv1%2Fdecisions',
@@ -300,10 +331,10 @@ describe('/api/moderate-media expected-state check', () => {
       [SHA],
       123,
     ];
-    for (const sha256 of traversals) {
+    for (const [sha256, action] of traversals.flatMap((t) => [[t, 'SAFE'], [t, 'PERMANENT_BAN']] as const)) {
       calls = [];
       const res = await worker.fetch(
-        post({ sha256, action: 'SAFE', from: 'AGE_RESTRICTED' }),
+        post({ sha256, action, from: 'AGE_RESTRICTED' }),
         env(moderationApi('age_restricted')),
         {} as ExecutionContext,
       );
@@ -332,7 +363,9 @@ describe('/api/moderate-media expected-state check', () => {
     expect(reads[0].url).toBe(`/check-result/${SHA}`);
   });
 
-  it('verifies and writes the same row when the hash arrives uppercased', async () => {
+  // Also a PERMANENT_BAN: for a SAFE the lift guard (#335) lowercases the hash
+  // first, which would hide this block's own lowercasing going missing.
+  it.each(['SAFE', 'PERMANENT_BAN'])('verifies and writes the same row when the hash arrives uppercased, for a %s', async (action) => {
     // moderation-service lowercases before its SELECT (src/index.mjs:1497) but
     // /api/v1/moderate binds sha256 RAW into `INSERT ... ON CONFLICT(sha256)`,
     // and the column is `sha256 TEXT PRIMARY KEY` with no COLLATE NOCASE, so
@@ -345,7 +378,7 @@ describe('/api/moderate-media expected-state check', () => {
     // stale row and clears the restriction anyway. That is the reversal this
     // whole change exists to refuse.
     const res = await worker.fetch(
-      post({ sha256: SHA.toUpperCase(), action: 'SAFE', from: 'AGE_RESTRICTED' }),
+      post({ sha256: SHA.toUpperCase(), action, from: 'AGE_RESTRICTED' }),
       env(moderationApi('age_restricted')),
       {} as ExecutionContext,
     );
@@ -402,9 +435,9 @@ describe('/api/moderate-media expected-state check', () => {
     expect(moderateCalls()).toHaveLength(0);
   });
 
-  it('is backwards compatible: no `from` means no check and no behaviour change', async () => {
+  it('is backwards compatible: no `from` means no state check', async () => {
     // Every existing caller omits it. They must keep working, and must not pay for
-    // a read they did not ask for.
+    // a state read they did not ask for. (A SAFE still meets the lift guard.)
     const res = await worker.fetch(
       post({ sha256: SHA, action: 'SAFE' }),
       env(moderationApi('quarantine')),

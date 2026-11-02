@@ -59,6 +59,21 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     if (!String(error).includes('duplicate column name')) throw error;
   }
 
+  // Latest versioned projection of this stream's human decisions. The log
+  // watermark makes an ambiguous D1 retry atomic and idempotent.
+  await db.prepare(`
+    CREATE TABLE IF NOT EXISTS sexual_quarantine_reviews (
+      event_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL,
+      logged_revision INTEGER NOT NULL DEFAULT 0,
+      action TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      moderator_pubkey TEXT NOT NULL,
+      report_id TEXT NOT NULL,
+      reporter_pubkey TEXT NOT NULL
+    )
+  `).run();
+
   await db.prepare(`
     CREATE TABLE IF NOT EXISTS age_review_cases (
       id TEXT PRIMARY KEY,

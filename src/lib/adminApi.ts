@@ -17,6 +17,18 @@ import {
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
+import type { SexualCase } from "../../shared/sexual-quarantine";
+
+export interface SexualQuarantineAudit { at: number; action: string; revision?: number; actor?: string; reason?: string; id?: string; pubkey?: string }
+const SEXUAL_QUARANTINE = '/api/report-watcher/sexual-quarantine';
+export const getSexualQuarantineCases = (apiUrl: string, cursor?: string) =>
+  apiRequest<{ cases: SexualCase[]; nextCursor?: string }>(apiUrl, SEXUAL_QUARANTINE + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''), 'GET');
+export const getSexualQuarantineCase = (apiUrl: string, eventId: string) =>
+  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'GET');
+export const getSexualQuarantineHistory = (apiUrl: string, eventId: string) =>
+  apiRequest<SexualQuarantineAudit[]>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}/history`, 'GET');
+export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { revision: number; decision: 'restore' | 'remove'; actor: string; reason: string }) =>
+  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'POST', body);
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
@@ -743,6 +755,13 @@ export function isBlockedMediaAction(action: MediaStatusAction | null | undefine
 // also refuses while that account has an open age review, or unless the media
 // server records it as the file's owner (409 age_review_active or
 // owner_mismatch; 503 when either cannot be checked).
+// Without `pubkey`, while the file's owner (as the media server records it)
+// has an open age review, a SAFE is refused, and so is an AGE_RESTRICTED over a
+// hidden, blocked or deleted file, or any AGE_RESTRICTED once the case has
+// restricted the account (409 age_review_active). Either is refused
+// when the owner cannot be checked (409 media_record_missing when the media
+// server has no record of the file; 503 otherwise), and an AGE_RESTRICTED when
+// the moderation record it then needs cannot be read (503 state_unreadable).
 export async function moderateMedia(
   apiUrl: string,
   sha256: string,
