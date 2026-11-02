@@ -6,7 +6,7 @@ single-report policy. No production deployment is established by local tests.
 
 ## Dependency and activation order
 
-1. Apply Funnelcake migration 295 through its normal schema workflow. Retain both
+1. Apply Funnelcake migration 297 through its normal schema workflow. Retain both
    active rows and release tombstones. Deploy the compatible API and relay builds;
    check every serving pod supports `seteventhold` and `geteventholds` and loads
    independent holds. Run real ClickHouse integration coverage before production.
