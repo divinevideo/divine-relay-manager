@@ -213,6 +213,41 @@ describe('quarantine service IO', () => {
       REVIEWER_BASE_URL: 'https://review.example.test' }).review(item)).resolves.toBeUndefined();
   });
 
+  it.each(['external', 'hash-only'])('restores an unheld %s candidate absent from the media server', async kind => {
+    const event = video(kind === 'external'
+      ? [['imeta', `url https://external.example.test/${HASH}.mp4`, `x ${HASH}`]] : [['x', HASH]]);
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [] });
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    const requested: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => {
+      requested.push(String(url));
+      return String(url).includes('/admin/api/quarantine/')
+        ? Response.json({ sha256: HASH, base_status: null, effective_status: 'not_found', quarantined: false, hold_ids: [], holds: [] })
+        : new Response(null, { status: 404 });
+    }));
+    expect(await createQuarantineIO(env).restorationStatus(snapshotVideo(event.id, event, env), [])).toBe('visible');
+    expect(requested).toEqual([`https://media.example.test/admin/api/quarantine/${HASH}`]);
+  });
+
+  it('checks restrictions without requiring playback of an unheld unadvertised candidate', async () => {
+    const event = video([['x', HASH]]);
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [] });
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    vi.stubGlobal('fetch', vi.fn(async (url: string | URL | Request) => String(url).includes('/admin/api/quarantine/')
+      ? Response.json({ quarantined: false, holds: [] }) : new Response(null, { status: 404 })));
+    expect(await createQuarantineIO(env).restorationStatus(snapshotVideo(event.id, event, env), [])).toBe('visible');
+    vi.stubGlobal('fetch', vi.fn(async () => Response.json({ quarantined: true, holds: [{ hold_id: 'other-case', version: 1, active: true }] })));
+    expect(await createQuarantineIO(env).restorationStatus(snapshotVideo(event.id, event, env), [])).toBe('restricted');
+  });
+
+  it.each([401, 404, 500])('does not treat an uncertain candidate read (%s) as absence', async status => {
+    const event = video([['x', HASH]]);
+    vi.mocked(callNip86Rpc).mockResolvedValue({ success: true, result: [] });
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [event] });
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status })));
+    await expect(createQuarantineIO(env).restorationStatus(snapshotVideo(event.id, event, env), [])).rejects.toThrow();
+  });
+
   it('keeps restore pending when the advertised HLS URL is still unavailable', async () => {
     const event = video([['url', `https://media.example.test/${HASH}/hls/master.m3u8`]]);
     const hold = `sexual:${event.id}`;

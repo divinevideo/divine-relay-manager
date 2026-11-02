@@ -232,7 +232,7 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
       }
       return !held || !await visible(snapshot);
     },
-    async restorationStatus(snapshot) {
+    async restorationStatus(snapshot, heldAssets = snapshot.assets) {
       const id = (snapshot.event as NostrEvent).id;
       if ((await eventHolds(id)).some(h => h.hold_id !== `sexual:${id}` && h.active === 1)) return 'restricted';
       const publicVisible = await visible(snapshot);
@@ -240,8 +240,12 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
       for (const sha of snapshot.assets) {
         const state = await media(sha);
         if (state.quarantined || ['banned', 'deleted', 'restricted', 'age_restricted'].includes(state.base_status || '')) return 'restricted';
-        const status = await publicStatus(`/${sha}.mp4`);
-        if (status !== 200 && status !== 206) return 'pending';
+        // Inspect every signed candidate for independent restrictions. A bare
+        // hash or external URL does not promise playback on our media server.
+        if (heldAssets.includes(sha)) {
+          const status = await publicStatus(`/${sha}.mp4`);
+          if (status !== 200 && status !== 206) return 'pending';
+        }
       }
       const advertised = await Promise.all((snapshot.mediaPaths || []).map(path => publicStatus(path)));
       if (advertised.some(status => status !== 200 && status !== 206)) return 'pending';

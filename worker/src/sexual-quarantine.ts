@@ -33,7 +33,7 @@ export interface QuarantineIO {
   resolveAssets?(snapshot: QuarantineSnapshot): Promise<{ assets: string[]; incomplete: boolean }>;
   mediaHold(sha256: string, holdId: string, held: boolean, version: number): Promise<void>;
   verify(snapshot: QuarantineSnapshot, holdId: string, held: boolean): Promise<boolean>;
-  restorationStatus(snapshot: QuarantineSnapshot): Promise<'visible' | 'restricted' | 'pending'>;
+  restorationStatus(snapshot: QuarantineSnapshot, heldAssets?: string[]): Promise<'visible' | 'restricted' | 'pending'>;
   review(item: SexualCase): Promise<void>;
   recordDecision?(item: SexualCase): Promise<void>;
 }
@@ -384,7 +384,7 @@ export class SexualQuarantine {
         if (held) c.state = c.goal === 'remove' ? 'removed' : 'hidden';
         else {
           stage = 'restore_visibility';
-          const status = await this.io.restorationStatus(c.snapshot);
+          const status = await this.io.restorationStatus(c.snapshot, verificationSnapshot.assets);
           if (status === 'pending') throw new Error('Restoration visibility has not converged');
           c.state = status === 'visible' ? 'restored' : 'restored_restricted';
         }

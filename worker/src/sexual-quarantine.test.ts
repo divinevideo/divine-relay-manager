@@ -221,7 +221,7 @@ describe('adult sexual report quarantine', () => {
     await f.engine().advance(EVENT);
     expect(commands.filter(command => !command.held)).toEqual([{ sha: HASH, held: false, version: 3 }]);
     expect(f.io.verify).toHaveBeenLastCalledWith({ ...snapshot, assets: [HASH] }, `sexual:${EVENT}`, false);
-    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot);
+    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot, [HASH]);
     finishOldWrite();
     expect(heldVersions.get(HASH)).toEqual({ held: false, version: 3 });
     expect(heldVersions.has(ineligible)).toBe(false);
@@ -261,7 +261,7 @@ describe('adult sexual report quarantine', () => {
     await q.advance(EVENT);
     expect(f.io.mediaHold).not.toHaveBeenCalled();
     expect(f.io.verify).toHaveBeenLastCalledWith({ ...snapshot, assets: [] }, `sexual:${EVENT}`, false);
-    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot);
+    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot, []);
     expect((await q.get(EVENT))?.state).toBe('restored');
     expect((await f.engine().get(EVENT))?.snapshot).toEqual(snapshot);
   });
@@ -277,7 +277,7 @@ describe('adult sexual report quarantine', () => {
     expect(f.io.mediaHold).not.toHaveBeenCalled();
     expect(f.io.verify).toHaveBeenLastCalledWith({ ...snapshot, assets: [] }, `sexual:${EVENT}`, false);
     expect((await q.get(EVENT))?.state).toBe('restored_restricted');
-    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot);
+    expect(f.io.restorationStatus).toHaveBeenLastCalledWith(snapshot, []);
   });
 
   it('conservatively releases every signed candidate for a legacy case without an attempt journal', async () => {
