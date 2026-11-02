@@ -385,6 +385,7 @@ interface ApiResponse {
   // hide_event / allow_event: whether the decision was recorded as human-reviewed, not
   // merely applied at the relay. False means ReportWatcher is still free to undo it.
   recorded?: boolean;
+  reconciled?: boolean;
   deleted?: number;
   labelsDeleted?: number;
   // Reopen could not clear every relay-side resolution label, so the report
@@ -1052,11 +1053,37 @@ async function handlePublish(
     secretKey
   );
 
+  // Persist the serialized human-review fence before publishing an immutable
+  // resolution label. A read-only preflight would allow a new case admission
+  // between the check and publication. Failed publication leaves this recorded
+  // intent intact and can be retried without undoing another stream's holds.
+  if (body.kind === 1985 && body.tags?.some(tag => tag[0] === 'L' && tag[1] === 'moderation/resolution')) {
+    const status = body.tags.find(tag => tag[0] === 'l' && tag[2] === 'moderation/resolution')?.[1];
+    const targetId = body.tags.find(tag => tag[0] === 'e')?.[1];
+    if (targetId && status && ['reviewed', 'dismissed', 'no-action', 'false-positive'].includes(status)) {
+      resolutionVisibility = env.DB
+        ? await coordinateEventVisibility(env, {
+          eventId: targetId, relayAction: 'review', humanAction: status,
+          reason: body.moderationReason, moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+        })
+        : { success: false, recorded: false, error: 'Moderation database is not configured' };
+      if (!resolutionVisibility.success || !resolutionVisibility.recorded) {
+        return jsonResponse({ success: false,
+          error: resolutionVisibility.error || 'Human-review state was not recorded',
+          recorded: resolutionVisibility.recorded === true,
+          reconciled: false,
+        }, resolutionVisibility.conflict ? 409 : 502, corsHeaders);
+      }
+    }
+  }
+
   // Publish to relay
   const publishResult = await publishToRelay(event, env.RELAY_URL);
 
   if (!publishResult.success) {
-    return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
+    return jsonResponse({ success: false, error: publishResult.error,
+      ...(resolutionVisibility ? { recorded: resolutionVisibility.recorded, reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true } : {}),
+    }, 500, corsHeaders);
   }
 
   // If this is a moderation/resolution label (kind 1985), sync to Zendesk
@@ -1084,23 +1111,7 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
-        if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
-          const result = env.DB
-            ? await coordinateEventVisibility(env, {
-              eventId: targetId,
-              relayAction: 'review',
-              humanAction: status,
-              reason: body.moderationReason,
-              moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
-            })
-            : { success: false, recorded: false, error: 'Moderation database is not configured' };
-          resolutionVisibility = !result.recorded && !result.error
-            ? { ...result, error: 'Human-review state was not recorded' }
-            : result;
-          if (!result.success || !result.recorded) {
-            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', resolutionVisibility.error);
-          }
-        } else if (env.DB) {
+        if (!resolutionVisibility && env.DB) {
           const recorded = status === 'reviewed'
             ? await markHumanReviewed(env.DB, targetType, targetId)
             : await markHumanAction(env.DB, targetType, targetId, status);
@@ -1109,24 +1120,30 @@ async function handlePublish(
             recorded,
             ...(!recorded ? { error: 'Human-review state was not recorded' } : {}),
           };
-        } else {
+        } else if (!resolutionVisibility) {
           resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 
-        // Use waitUntil to ensure sync completes even after response is sent
-        const syncPromise = syncZendeskAfterAction(
-          env,
-          status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
-          targetType,
-          targetId,
-          getPublicKey(secretKey)
-        );
-        // Still await to catch errors, but also ensure completion via waitUntil pattern
-        try {
-          await syncPromise;
-          console.log('[handlePublish] Zendesk sync completed successfully');
-        } catch (err) {
-          console.error('[handlePublish] Zendesk sync error:', err);
+        // An open quarantine case refused this resolution. Its own decision
+        // resolves the linked tickets; closing them now would hide an undecided case.
+        if (resolutionVisibility?.conflict) {
+          console.log('[handlePublish] Resolution refused by the quarantine case; Zendesk tickets left open');
+        } else {
+          // Use waitUntil to ensure sync completes even after response is sent
+          const syncPromise = syncZendeskAfterAction(
+            env,
+            status, // 'reviewed', 'dismissed', 'no-action', 'false-positive'
+            targetType,
+            targetId,
+            getPublicKey(secretKey)
+          );
+          // Still await to catch errors, but also ensure completion via waitUntil pattern
+          try {
+            await syncPromise;
+            console.log('[handlePublish] Zendesk sync completed successfully');
+          } catch (err) {
+            console.error('[handlePublish] Zendesk sync error:', err);
+          }
         }
       } else {
         console.log('[handlePublish] Missing required fields for sync:', { status, targetType, targetId });
@@ -1265,15 +1282,11 @@ async function handleModerate(
           moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
         });
         if (!result.success) {
-          // Flatten to 500, matching delete_event, and ban_pubkey for anything but an
-          // outright refusal. Neither banevent nor allowevent is age-review guarded
-          // (that guard covers only suspendpubkey, unsuspendpubkey and unbanpubkey),
-          // so there is no 409/503 whose code a caller would need preserved -- and
-          // forwarding would relabel a transient relay 502 as a terminal 400, which
-          // retrying clients read as "do not retry".
+          // A quarantine case conflict is terminal for this request. Transient
+          // IO still retries.
           return jsonResponse(
-            { success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
-            500,
+            { ...result, success: false, error: result.error || `${isHide ? 'banevent' : 'allowevent'} RPC failed` },
+            result.conflict ? 409 : 500,
             corsHeaders,
           );
         }
@@ -1904,6 +1917,21 @@ async function handleLogDecision(
       return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
     }
 
+    if (body.targetType === 'event') {
+      // Generic audit writes mark review without changing visibility direction.
+      // Serialize that mark before the append so an open versioned case cannot
+      // be bypassed by posting the same review through a different endpoint.
+      const review = await coordinateEventVisibility(env, {
+        eventId: body.targetId.toLowerCase(), relayAction: 'review', humanAction: 'reviewed',
+        moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+      });
+      if (!review.success || !review.recorded) {
+        return jsonResponse({ success: false, recorded: review.recorded === true,
+          error: review.error || 'Human-review state was not recorded',
+        }, review.conflict ? 409 : 502, corsHeaders);
+      }
+    }
+
     await ensureSchemaOnce(env.DB);
 
     await env.DB.prepare(`
@@ -1920,7 +1948,7 @@ async function handleLogDecision(
 
     // This endpoint is an append-only audit write. Detached clients can deliver it
     // after a newer enforcement action, so it must not redefine visibility intent.
-    await markHumanReviewed(env.DB, body.targetType, body.targetId);
+    if (body.targetType !== 'event') await markHumanReviewed(env.DB, body.targetType, body.targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -3468,7 +3496,7 @@ async function handleReportWatcherRoutes(
 
   try {
     // Forward the request to the DO
-    const doRequest = new Request(`https://do${subPath}`, {
+    const doRequest = new Request(`https://do${subPath}${new URL(request.url).search}`, {
       method: request.method,
       headers: request.headers,
       body: request.body,
@@ -3479,7 +3507,7 @@ async function handleReportWatcherRoutes(
 
     return new Response(JSON.stringify(data), {
       status: response.status,
-      headers: { 'Content-Type': 'application/json', ...corsHeaders },
+      headers: { 'Content-Type': 'application/json', ...corsHeaders, 'Cache-Control': 'private, no-store' },
     });
   } catch (error) {
     console.error('[handleReportWatcherRoutes] Error:', error);

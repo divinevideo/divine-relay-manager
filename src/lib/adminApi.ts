@@ -17,6 +17,18 @@ import {
 } from "../../shared/bulk-moderation";
 import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
+import type { SexualCase } from "../../shared/sexual-quarantine";
+
+export interface SexualQuarantineAudit { at: number; action: string; revision?: number; actor?: string; reason?: string; id?: string; pubkey?: string }
+const SEXUAL_QUARANTINE = '/api/report-watcher/sexual-quarantine';
+export const getSexualQuarantineCases = (apiUrl: string, cursor?: string) =>
+  apiRequest<{ cases: SexualCase[]; nextCursor?: string }>(apiUrl, SEXUAL_QUARANTINE + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''), 'GET');
+export const getSexualQuarantineCase = (apiUrl: string, eventId: string) =>
+  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'GET');
+export const getSexualQuarantineHistory = (apiUrl: string, eventId: string) =>
+  apiRequest<SexualQuarantineAudit[]>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}/history`, 'GET');
+export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { revision: number; decision: 'restore' | 'remove'; actor: string; reason: string }) =>
+  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'POST', body);
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
