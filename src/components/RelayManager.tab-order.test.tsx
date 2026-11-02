@@ -3,6 +3,7 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { RelayManager } from './RelayManager';
 
@@ -27,12 +28,16 @@ const STORAGE_KEY = 'divine-relay-manager:tab-order';
 // src/test/setup.ts replaces localStorage with stubs whose getItem returns null.
 function renderedTabs(saved: string[]): string[] {
   vi.mocked(localStorage.getItem).mockImplementation(key => key === STORAGE_KEY ? JSON.stringify(saved) : null);
+  // RelayManager reads the query client: it clears the cache when the
+  // environment changes.
   render(
-    <MemoryRouter initialEntries={['/reports']}>
-      <Routes>
-        <Route path="/reports" element={<RelayManager />} />
-      </Routes>
-    </MemoryRouter>,
+    <QueryClientProvider client={new QueryClient()}>
+      <MemoryRouter initialEntries={['/reports']}>
+        <Routes>
+          <Route path="/reports" element={<RelayManager />} />
+        </Routes>
+      </MemoryRouter>
+    </QueryClientProvider>,
   );
   return screen.getAllByRole('tab').map(tab => tab.textContent?.trim() ?? '');
 }
