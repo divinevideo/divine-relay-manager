@@ -939,7 +939,13 @@ export class ReportWatcher implements DurableObject {
       const trusted = config.trustedClients.some(c => c.trim().toLowerCase() === client);
       // An ignored/untrusted report must not pin replay behind an unavailable
       // target. videoTier is the exact-category tier whenever one exists.
-      if (!videoTier || (videoTier.requireTrustedClient && !trusted)) return;
+      if (!videoTier || (videoTier.requireTrustedClient && !trusted)) {
+        // Preserve the existing skipped-report audit without forcing a target
+        // read. This marker deduplicates replay but never fences later admission
+        // if the configured client policy changes.
+        await this.processLegacySexualReport(event, category, targetEventId, `sexual-ignored-logged:${targetEventId}:${event.id}`);
+        return;
+      }
       // Rejection is permanent for these bytes. Throwing would hold the replay
       // window on this report forever, so alert and skip it instead.
       const wire = JSON.parse(JSON.stringify(event)) as NostrEvent;
@@ -1691,7 +1697,13 @@ export class ReportWatcher implements DurableObject {
       if (sexualJobs.size) await this.scheduleHealthCheck();
     }
 
-    if (this.running && this.env.SEXUAL_QUARANTINE_ENABLED === 'true' && this.autoHideConfig?.enabled) {
+    // Classification recovery remains necessary after admission rollback: a
+    // failed target lookup may still belong to the unchanged non-video writer.
+    // processAutoHide keeps new video holds disabled while replay retains its
+    // durable cursor on uncertainty.
+    const replayActivated = this.env.SEXUAL_QUARANTINE_ENABLED === 'true'
+      || await this.state.storage.get('sexual-quarantine-activated');
+    if (this.running && replayActivated && this.autoHideConfig?.enabled) {
       try {
         await replayAdultReports(this.state.storage, this.env.RELAY_URL, async (event, category, target) => {
           if (await this.hasBlockingHumanResolution(target, false) === null) throw new Error('Review state unavailable');

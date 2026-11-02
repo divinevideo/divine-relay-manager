@@ -194,6 +194,45 @@ describe('sexual quarantine watcher integration', () => {
     expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
   });
 
+  it('preserves one skipped audit for an untrusted adult report without target lookup', async () => {
+    const f = fixture();
+    const audit = vi.spyOn(f.watcher as unknown as { logDecision(d: object): Promise<boolean> }, 'logDecision').mockResolvedValue(true);
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
+      enabled: true, trustedClients: ['Divine'], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['nudity'], threshold: 2, requireTrustedClient: true }],
+    }) }));
+    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', ID, 'nudity'], ['client', 'Untrusted']] }, new Uint8Array(32).fill(9));
+    const ingest = () => (f.watcher as unknown as { processAutoHide(e: ReportEvent, c: string, t: string): Promise<void> }).processAutoHide(event as ReportEvent, 'nudity', ID);
+    await ingest(); await ingest();
+    expect(audit).toHaveBeenCalledTimes(1);
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_skipped', reportId: event.id, targetId: ID }));
+    expect(f.io.snapshot).not.toHaveBeenCalled();
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+  });
+
+  it('recovers uncertain non-video reports from durable replay after admission is disabled', async () => {
+    const f = fixture();
+    f.env.SEXUAL_QUARANTINE_ENABLED = 'false';
+    f.io.snapshot.mockRejectedValue(new Error('Target read unavailable'));
+    const event = await f.send(1, 'NS-sexualContent');
+    const actualReplay = replay.replayAdultReports;
+    vi.spyOn(replay, 'replayAdultReports').mockImplementation((storage, url, ingest) => actualReplay(storage, url, ingest, 10));
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [event] });
+    vi.spyOn(f.watcher as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+    (f.watcher as unknown as { running: boolean }).running = true;
+    await f.watcher.alarm();
+    expect(await f.durable.get('sexual-replay-window')).toBeDefined();
+    expect(await f.durable.get('sexual-replay-through')).toBeUndefined();
+    f.io.snapshot.mockRejectedValue(new OutsideVideoScope());
+    vi.spyOn(f.watcher as unknown as { countUniqueReporters(): Promise<number> }, 'countUniqueReporters').mockResolvedValue(2);
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    await f.watcher.alarm(); await f.watcher.alarm();
+    expect(await f.durable.get('sexual-replay-through')).toBe(10);
+    expect(rpc).toHaveBeenCalledTimes(1);
+    expect(rpc).toHaveBeenCalledWith('banevent', [ID, expect.stringContaining('Auto-hidden: NS-sexualContent')], f.env);
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
+  });
+
   it('does not pin replay on a report that can never be admitted', async () => {
     const f = fixture();
     await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
