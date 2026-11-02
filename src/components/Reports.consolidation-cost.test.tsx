@@ -1,13 +1,14 @@
 // ABOUTME: The needs-attention feed is grouped once per read, not once per consumer.
 // ABOUTME: A feed can hold tens of thousands of reports, so each extra grouping is a visible stall on every poll.
 
-import { render, screen } from '@testing-library/react';
+import { act, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { consolidateReports } from '@/lib/consolidateReports';
+import { isConsolidatedReportResolved } from '@/lib/reportResolution';
 import { Reports } from './Reports';
 
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
@@ -15,6 +16,10 @@ vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
 vi.mock('@/lib/consolidateReports', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/consolidateReports')>();
   return { ...actual, consolidateReports: vi.fn(actual.consolidateReports) };
+});
+vi.mock('@/lib/reportResolution', async importOriginal => {
+  const actual = await importOriginal<typeof import('@/lib/reportResolution')>();
+  return { ...actual, isConsolidatedReportResolved: vi.fn(actual.isConsolidatedReportResolved) };
 });
 
 function report(id: string, createdAt: number, targetTag: string[]) {
@@ -59,6 +64,7 @@ beforeEach(() => {
   }));
 });
 afterEach(() => {
+  vi.useRealTimers();
   vi.unstubAllGlobals();
   consoleError.mockRestore();
 });
@@ -81,5 +87,21 @@ describe('grouping the needs-attention feed', () => {
     const feedGroupings = vi.mocked(consolidateReports).mock.calls
       .filter(([events]) => FEED_IDS.every(id => events.some(event => event.id === id)));
     expect(feedGroupings).toHaveLength(1);
+  });
+
+  it('does not scan the rows again when only the freshness text changes', async () => {
+    // The "updated Ns ago" text ticks every five seconds and re-renders the whole
+    // screen. Faking the clock and the interval lets the test make it tick.
+    vi.useFakeTimers({ toFake: ['Date', 'setInterval', 'clearInterval'] });
+    renderQueue();
+    expect(await screen.findByText(nip19.noteEncode(FIRST_EVENT))).toBeInTheDocument();
+    expect(screen.getByText('just now')).toBeInTheDocument();
+    expect(vi.mocked(isConsolidatedReportResolved)).toHaveBeenCalled();
+
+    vi.mocked(isConsolidatedReportResolved).mockClear();
+    await act(async () => { vi.advanceTimersByTime(5000); });
+
+    expect(screen.getByText('5s ago')).toBeInTheDocument();
+    expect(vi.mocked(isConsolidatedReportResolved)).not.toHaveBeenCalled();
   });
 });

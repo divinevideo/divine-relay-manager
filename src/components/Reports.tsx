@@ -1122,6 +1122,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
   ), [allConsolidated]);
 
+  // The reports of the open report's target. From every grouped report, not the
+  // filtered list: a filter that drops the open row must not empty the pane's
+  // report set. With the queue failed cold there is no list to draw the target's
+  // reports from; the deep link's own lookup holds them. Searches every group,
+  // so it is memoized (and sits above the early returns, as a hook must): it
+  // would otherwise rescan the whole feed on every render, including the
+  // freshness text's tick every few seconds.
+  const selectedPaneReports = useMemo(() => {
+    if (!selectedReport) return undefined;
+    const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
+    return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id))?.reports;
+  }, [selectedReport, listReports, allConsolidated, deepLinkedConsolidated]);
+
   // Filter individual reports when hideResolved is on
   const filteredReports = useMemo(() => {
     if (!listReports) return [];
@@ -1215,7 +1228,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // entering clears the category and type filters; a filter chosen inside
   // the view narrows the list and its Grouped count, not this badge, which
   // keeps saying how many targets are waiting.
-  const pendingReviewRows = feedConsolidated.filter(c => switchMembership.has(reportTargetKey(c.target)));
+  const pendingReviewRows = useMemo(
+    () => feedConsolidated.filter(c => switchMembership.has(reportTargetKey(c.target))),
+    [feedConsolidated, switchMembership],
+  );
   const pendingReviewCount = pendingReviewRows.length;
 
   // Whether a listed target is resolved, from both halves of the history view.
@@ -1225,18 +1241,22 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // including a banned author's posts, or a decision or label (which is how a
   // deep-linked resolved target counts), or only the worker's own decisions
   // (the feed keeps those; see resolvedTargets).
-  const isListedTargetResolved = (target: ReportTarget, authorPubkey: string | undefined) =>
-    !feedTargetKeys.has(reportTargetKey(target))
-    || isConsolidatedReportResolved({ target, authorPubkey }, resolvedTargets, bannedPubkeySet);
+  const isListedTargetResolved = useCallback(
+    (target: ReportTarget, authorPubkey: string | undefined) =>
+      !feedTargetKeys.has(reportTargetKey(target))
+      || isConsolidatedReportResolved({ target, authorPubkey }, resolvedTargets, bannedPubkeySet),
+    [feedTargetKeys, resolvedTargets, bannedPubkeySet],
+  );
 
   // Counted from the rows on screen in the current view (spec: every count
   // beside a list comes from the rows it renders).
-  const resolvedRowsShown = viewMode === 'consolidated'
+  const resolvedRowsShown = useMemo(() => viewMode === 'consolidated'
     ? consolidated.filter(c => isListedTargetResolved(c.target, c.authorPubkey)).length
     : filteredReports.filter(report => {
         const target = getReportTarget(report);
         return !!target && isListedTargetResolved(target, authorByTarget.get(reportTargetKey(target)));
-      }).length;
+      }).length,
+  [viewMode, consolidated, filteredReports, authorByTarget, isListedTargetResolved]);
 
   // The failure a failed Load more left (see refreshFailed), remembered against
   // the cached query's own error: src/lib/loadMoreFailure.ts says why it is not
@@ -1721,15 +1741,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       />
     );
   }
-
-  // From every grouped report, not the filtered list: a filter that drops the
-  // open row must not empty the pane's report set. With the queue failed cold
-  // there is no list to draw the target's reports from; the deep link's own
-  // lookup holds them.
-  const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
-  const selectedPaneReports = selectedReport
-    ? paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id))?.reports
-    : undefined;
 
   // Whether the open report's target has left the list: none of its reports is
   // in hand, and no read in flight could bring it back. The feed and resolved
