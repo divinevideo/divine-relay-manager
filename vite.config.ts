@@ -2,10 +2,15 @@ import fs from "node:fs";
 import path from "node:path";
 
 import react from "@vitejs/plugin-react-swc";
+import { loadEnv } from "vite";
 import { configDefaults, defineConfig } from "vitest/config";
 
+import { requireAccessToken } from "./scripts/require-access-token";
+
 // https://vitejs.dev/config/
-export default defineConfig(() => {
+export default defineConfig(({ command, mode }) => {
+  requireAccessToken(command, mode, loadEnv(mode, __dirname, "VITE_"));
+
   // Enable HTTPS if local mkcert certs exist (dev only)
   const certPath = path.resolve(__dirname, ".certs/localhost+2.pem");
   const keyPath = path.resolve(__dirname, ".certs/localhost+2-key.pem");
