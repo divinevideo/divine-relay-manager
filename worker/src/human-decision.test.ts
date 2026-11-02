@@ -428,7 +428,7 @@ describe('human decision persistence', () => {
       const env = createEnv(db);
       let reviewedAtPublication = false;
       const originalSend = MockWebSocket.prototype.send;
-      vi.spyOn(MockWebSocket.prototype, 'send').mockImplementation(function (data) {
+      vi.spyOn(MockWebSocket.prototype, 'send').mockImplementation(function (this: MockWebSocket, data: string) {
         if (JSON.parse(data)[0] === 'EVENT') {
           reviewedAtPublication = sqlLog.some(entry => entry.sql.includes('INSERT INTO moderation_targets'));
         }
