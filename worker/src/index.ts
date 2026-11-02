@@ -384,6 +384,7 @@ interface ApiResponse {
   // hide_event / allow_event: whether the decision was recorded as human-reviewed, not
   // merely applied at the relay. False means ReportWatcher is still free to undo it.
   recorded?: boolean;
+  reconciled?: boolean;
   deleted?: number;
   labelsDeleted?: number;
   // Reopen could not clear every relay-side resolution label, so the report
@@ -1046,11 +1047,37 @@ async function handlePublish(
     secretKey
   );
 
+  // Persist the serialized human-review fence before publishing an immutable
+  // resolution label. A read-only preflight would allow a new case admission
+  // between the check and publication. Failed publication leaves this recorded
+  // intent intact and can be retried without undoing another stream's holds.
+  if (body.kind === 1985 && body.tags?.some(tag => tag[0] === 'L' && tag[1] === 'moderation/resolution')) {
+    const status = body.tags.find(tag => tag[0] === 'l' && tag[2] === 'moderation/resolution')?.[1];
+    const targetId = body.tags.find(tag => tag[0] === 'e')?.[1];
+    if (targetId && status && ['reviewed', 'dismissed', 'no-action', 'false-positive'].includes(status)) {
+      resolutionVisibility = env.DB
+        ? await coordinateEventVisibility(env, {
+          eventId: targetId, relayAction: 'review', humanAction: status,
+          reason: body.moderationReason, moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+        })
+        : { success: false, recorded: false, error: 'Moderation database is not configured' };
+      if (!resolutionVisibility.success || !resolutionVisibility.recorded) {
+        return jsonResponse({ success: false,
+          error: resolutionVisibility.error || 'Human-review state was not recorded',
+          recorded: resolutionVisibility.recorded === true,
+          reconciled: false,
+        }, resolutionVisibility.conflict ? 409 : 502, corsHeaders);
+      }
+    }
+  }
+
   // Publish to relay
   const publishResult = await publishToRelay(event, env.RELAY_URL);
 
   if (!publishResult.success) {
-    return jsonResponse({ success: false, error: publishResult.error }, 500, corsHeaders);
+    return jsonResponse({ success: false, error: publishResult.error,
+      ...(resolutionVisibility ? { recorded: resolutionVisibility.recorded, reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true } : {}),
+    }, 500, corsHeaders);
   }
 
   // If this is a moderation/resolution label (kind 1985), sync to Zendesk
@@ -1078,23 +1105,7 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
-        if (targetType === 'event' && ['reviewed', 'dismissed', 'no-action', 'false-positive'].includes(status)) {
-          const result = env.DB
-            ? await coordinateEventVisibility(env, {
-              eventId: targetId,
-              relayAction: 'review',
-              humanAction: status,
-              reason: body.moderationReason,
-              moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
-            })
-            : { success: false, recorded: false, error: 'Moderation database is not configured' };
-          resolutionVisibility = !result.recorded && !result.error
-            ? { ...result, error: 'Human-review state was not recorded' }
-            : result;
-          if (!result.success || !result.recorded) {
-            console.error('[handlePublish] Resolution label was published but visibility reconciliation failed:', resolutionVisibility.error);
-          }
-        } else if (env.DB) {
+        if (!resolutionVisibility && env.DB) {
           const recorded = status === 'reviewed'
             ? await markHumanReviewed(env.DB, targetType, targetId)
             : await markHumanAction(env.DB, targetType, targetId, status);
@@ -1103,7 +1114,7 @@ async function handlePublish(
             recorded,
             ...(!recorded ? { error: 'Human-review state was not recorded' } : {}),
           };
-        } else {
+        } else if (!resolutionVisibility) {
           resolutionVisibility = { success: false, recorded: false, error: 'Moderation database is not configured' };
         }
 

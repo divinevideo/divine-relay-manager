@@ -423,6 +423,42 @@ describe('human decision persistence', () => {
       expect(targetInserts.length).toBe(0);
     });
 
+    it('persists the admission fence before publishing an event resolution label', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      let reviewedAtPublication = false;
+      const originalSend = MockWebSocket.prototype.send;
+      vi.spyOn(MockWebSocket.prototype, 'send').mockImplementation(function (data) {
+        if (JSON.parse(data)[0] === 'EVENT') {
+          reviewedAtPublication = sqlLog.some(entry => entry.sql.includes('INSERT INTO moderation_targets'));
+        }
+        originalSend.call(this, data);
+      });
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
+          ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
+        ] }),
+      }), env as never, mockCtx);
+      expect(response.status).toBe(200);
+      expect(reviewedAtPublication).toBe(true);
+    });
+
+    it('reports saved human review when the later label publication fails', async () => {
+      const { db, sqlLog } = createMockDB();
+      vi.stubGlobal('WebSocket', class { constructor() { throw new Error('Synthetic relay unavailable'); } });
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
+          ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
+        ] }),
+      }), createEnv(db) as never, mockCtx);
+      expect(response.status).toBe(500);
+      expect(await response.json()).toMatchObject({ success: false, recorded: true, reconciled: true });
+      expect(sqlLog.some(entry => entry.sql.includes('INSERT INTO moderation_targets'))).toBe(true);
+      expect(sqlLog.some(entry => entry.sql.includes('zendesk_tickets'))).toBe(false);
+    });
+
     it('serializes a dismissal mark without allowing the event or replacing hide direction', async () => {
       const { db, sqlLog } = createMockDB();
       const operations: unknown[] = [];
@@ -487,15 +523,15 @@ describe('human decision persistence', () => {
         }),
       }), env as never, mockCtx);
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(502);
       const body = await response.json() as Record<string, unknown>;
       expect(body).toMatchObject({
-        success: true,
+        success: false,
         recorded: false,
         reconciled: false,
-        reconciliationError: 'Moderation database is not configured',
+        error: 'Moderation database is not configured',
       });
-      expect(body).not.toHaveProperty('error');
+      expect(body).not.toHaveProperty('event');
     });
 
     it('reports reconciliation false when restore succeeds but the human mark fails', async () => {
@@ -524,12 +560,12 @@ describe('human decision persistence', () => {
         }),
       }), env as never, mockCtx);
 
-      expect(response.status).toBe(200);
+      expect(response.status).toBe(502);
       expect(await response.json()).toMatchObject({
-        success: true,
+        success: false,
         recorded: false,
         reconciled: false,
-        reconciliationError: 'Human-review state was not recorded',
+        error: 'Human-review state was not recorded',
       });
     });
 
@@ -545,14 +581,16 @@ describe('human decision persistence', () => {
           ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
         ] }),
       }), env as never, mockCtx);
-      expect(await response.json()).toMatchObject({ reconciled: false });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ success: false, reconciled: false });
       expect(sqlLog.some(entry => entry.sql.includes('INSERT INTO moderation_targets'))).toBe(false);
       expect(sqlLog.some(entry => entry.sql.includes('zendesk_tickets'))).toBe(false);
     });
 
-    it('leaves linked Zendesk tickets open when a quarantine case refuses the dismissal', async () => {
+    it.each(['dismissed', 'no-action', 'false-positive'])('does not publish or close tickets when a case refuses %s', async status => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);
+      const published = vi.spyOn(MockWebSocket.prototype, 'send');
       env.REPORT_WATCHER.get = () => ({
         fetch: async () => Response.json({ success: false, conflict: true, error: 'Review the current revision' }),
       });
@@ -570,15 +608,16 @@ describe('human decision persistence', () => {
           content: 'Dismissed',
           tags: [
             ['L', 'moderation/resolution'],
-            ['l', 'dismissed', 'moderation/resolution'],
+            ['l', status, 'moderation/resolution'],
             ['e', 'cd'.repeat(32)],
           ],
         }),
       }), env as never, mockCtx);
 
-      expect(response.status).toBe(200);
-      expect(await response.json()).toMatchObject({ success: true, reconciled: false });
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ success: false, recorded: false, reconciled: false });
       expect(sqlLog.some(entry => entry.sql.includes('zendesk_tickets'))).toBe(false);
+      expect(published).not.toHaveBeenCalled();
     });
 
     it('returns explicit recording status for a pubkey dismissal', async () => {
