@@ -153,6 +153,27 @@ describe('protected-minor route sits before the admin gate', () => {
   });
 });
 
+describe('sexual-quarantine routes sit behind the admin gate', () => {
+  it.each([
+    ['GET', '/api/report-watcher/sexual-quarantine'],
+    ['POST', `/api/report-watcher/sexual-quarantine/${'a'.repeat(64)}`],
+  ])('refuses %s %s with a merely present header, before the report watcher sees it', async (method, path) => {
+    // The POST restores or removes a held event, so the gate must run before
+    // the request is forwarded to the Durable Object.
+    const signer = await makeAccessJwtSigner();
+    vi.stubGlobal('fetch', signer.fetchFn);
+    const watcherFetch = vi.fn(async () => Response.json({ success: true }));
+    const env = { ...baseEnv, REPORT_WATCHER: { idFromName: () => 'singleton', get: () => ({ fetch: watcherFetch }) } };
+    const res = await worker.fetch(new Request(`https://api.test${path}`, {
+      method,
+      headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+      ...(method === 'POST' ? { body: JSON.stringify({ action: 'restore' }) } : {}),
+    }), env as never, ctx);
+    expect(res.status).toBe(401);
+    expect(watcherFetch).not.toHaveBeenCalled();
+  });
+});
+
 describe('verifyAdminAccess: X-Admin-Key paths unchanged', () => {
   it('authorizes ADMIN_API_KEY without fetching certs', async () => {
     const fetchSpy = vi.fn();
