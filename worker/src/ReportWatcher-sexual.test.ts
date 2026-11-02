@@ -419,14 +419,18 @@ describe('sexual quarantine watcher integration', () => {
     expect(response.status).toBe(409);
   });
 
-  it('reports failed human-decision projection instead of a successful restore', async () => {
+  it('retains failed human-decision projection for retry after acknowledging saved intent', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent'); await f.send(2, 'NS-sexualContent');
     f.io.recordDecision.mockRejectedValue(new Error('Projection unavailable'));
     const response = await f.watcher.fetch(new Request(`https://do/sexual-quarantine/${ID}`, {
       method: 'POST', body: JSON.stringify({ revision: 2, decision: 'restore', actor: 'reviewer', reason: 'approved' }),
     }));
     expect(response.status).toBe(202);
-    expect((await new SexualQuarantine(f.durable, f.io).get(ID))?.decisionRecordedAt).toBeUndefined();
+    expect(f.io.recordDecision).not.toHaveBeenCalled();
+    const q = new SexualQuarantine(f.durable, f.io);
+    await q.advance(ID);
+    expect(f.io.recordDecision).toHaveBeenCalled();
+    expect((await q.get(ID))?.decisionRecordedAt).toBeUndefined();
   });
 
   it.each(['auto', ' auto ', '   '])('rejects automated or blank actor %j on the human case-decision endpoint', async actor => {
@@ -438,12 +442,27 @@ describe('sexual quarantine watcher integration', () => {
     expect((await new SexualQuarantine(f.durable, f.io).get(ID))?.actor).toBeUndefined();
   });
 
+  it('returns saved intent and an awaited alarm before slow enforcement starts', async () => {
+    const f = fixture(); await f.send(1, 'NS-sexualContent');
+    f.io.eventHold.mockImplementation(async () => { throw new Error('Slow enforcement must run on the alarm'); });
+    const response = await f.watcher.fetch(new Request(`https://do/sexual-quarantine/${ID}`, {
+      method: 'POST', body: JSON.stringify({ revision: 1, decision: 'restore', actor: 'reviewer', reason: 'approved' }),
+    }));
+    expect(response.status).toBe(202);
+    expect(await response.json()).toMatchObject({ actor: 'reviewer', goal: 'restore', state: 'pending', revision: 2 });
+    expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toMatchObject({ goal: 'restore', revision: 2 });
+    expect(await f.storage.getAlarm()).not.toBeNull();
+    expect(f.io.eventHold).not.toHaveBeenCalled();
+    expect(f.state.waitUntil).not.toHaveBeenCalled();
+  });
+
   it('versioned human restore coordinates the independent holds', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent'); await f.send(2, 'NS-sexualContent');
     const response = await f.watcher.fetch(new Request(`https://do/sexual-quarantine/${ID}`, {
       method: 'POST', body: JSON.stringify({ revision: 2, decision: 'restore', actor: 'reviewer', reason: 'approved' }),
     }));
-    expect(response.status).toBe(200);
+    expect(response.status).toBe(202);
+    await new SexualQuarantine(f.durable, f.io).tick();
     expect(f.io.eventHold).toHaveBeenLastCalledWith(ID, false, 3);
   });
 });

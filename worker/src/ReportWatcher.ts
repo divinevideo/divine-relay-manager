@@ -1749,9 +1749,10 @@ export class ReportWatcher implements DurableObject {
         ? Response.json({ error: 'Case revision conflict' }, { status: 409, headers })
         : Response.json({ error: 'Could not save the decision; retry' }, { status: 500, headers });
     }
+    // decide() durably saved intent and its due-work index. Await the alarm
+    // before acknowledging it; enforcement and delivery run on that alarm,
+    // outside the HTTP client's timeout and without unawaited background work.
     await this.scheduleHealthCheck();
-    await q.advance(eventId);
-    const c = await q.get(eventId);
-    return Response.json(c, { status: c?.state === 'pending' || (c?.actor && !c.decisionRecordedAt) ? 202 : 200, headers });
+    return Response.json(await q.get(eventId), { status: 202, headers });
   }
 }
