@@ -79,11 +79,14 @@ function createMockDB() {
   return { db, sqlLog };
 }
 
+const TEST_ADMIN_KEY = 'test-admin-key';
+
 function createEnv(db: unknown, operations: unknown[] = []) {
   return {
     NOSTR_NSEC: TEST_NSEC,
     RELAY_URL: 'wss://relay.test.com',
     ALLOWED_ORIGINS: 'http://localhost:5173',
+    ADMIN_API_KEY: TEST_ADMIN_KEY,
     DB: db,
     REPORT_WATCHER: {
       idFromName: () => 'singleton',
@@ -126,7 +129,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/decisions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           targetType: 'event',
           targetId: 'event_abc123',
@@ -160,7 +163,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/decisions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({ targetType: 'event', targetId: 'event_abc123', action }),
       }), env as never, mockCtx);
 
@@ -178,7 +181,7 @@ describe('human decision persistence', () => {
 
         const response = await worker.fetch(new Request('http://localhost/api/decisions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
           body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
         }), env as never, mockCtx);
 
@@ -195,7 +198,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/decisions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey: ['e'.repeat(64)],
         }),
@@ -212,7 +215,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/decisions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
       }), env as never, mockCtx);
 
@@ -228,7 +231,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/decisions', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({ targetType: 'event', targetId: 'c'.repeat(64), action: 'dismiss', reason: 'Test: dismiss' }),
       }), env as never, mockCtx);
 
@@ -252,7 +255,7 @@ describe('human decision persistence', () => {
 
         const request = new Request('http://localhost/api/decisions', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
           body: JSON.stringify({
             targetType: 'event',
             targetId: `target_${action}`,
@@ -281,7 +284,7 @@ describe('human decision persistence', () => {
 
         const response = await worker.fetch(new Request('http://localhost/api/moderate', {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+          headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
           body: JSON.stringify({ action, eventId: 'ab'.repeat(32), moderatorPubkey: ['e'.repeat(64)] }),
         }), env as never, mockCtx);
 
@@ -305,7 +308,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/decisions/event_abc123', {
         method: 'DELETE',
-        headers: { 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'X-Admin-Key': TEST_ADMIN_KEY },
       });
 
       const response = await worker.fetch(request, env as never, mockCtx);
@@ -334,7 +337,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Reviewed',
@@ -365,7 +368,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Reviewed',
@@ -401,7 +404,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Some label',
@@ -435,7 +438,7 @@ describe('human decision persistence', () => {
         originalSend.call(this, data);
       });
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
           ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
         ] }),
@@ -448,7 +451,7 @@ describe('human decision persistence', () => {
       const { db, sqlLog } = createMockDB();
       vi.stubGlobal('WebSocket', class { constructor() { throw new Error('Synthetic relay unavailable'); } });
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
           ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
         ] }),
@@ -472,7 +475,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Dismissed',
@@ -511,7 +514,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Dismissed',
@@ -548,7 +551,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Dismissed',
@@ -576,7 +579,7 @@ describe('human decision persistence', () => {
         fetch: async () => Response.json({ success: false, conflict: true, error: 'Review the current revision' }),
       });
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
           ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
         ] }),
@@ -602,7 +605,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Dismissed',
@@ -631,7 +634,7 @@ describe('human decision persistence', () => {
 
       const response = await worker.fetch(new Request('http://localhost/api/publish', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           kind: 1985,
           content: 'Dismissed',
@@ -656,7 +659,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/relay-rpc', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           method: 'banpubkey',
           params: ['abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234', 'spam'],
@@ -679,7 +682,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/moderate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           action: 'ban_pubkey',
           pubkey: 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234',
@@ -702,7 +705,7 @@ describe('human decision persistence', () => {
 
       const request = new Request('http://localhost/api/moderate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
         body: JSON.stringify({
           action: 'delete_event',
           eventId: 'ab'.repeat(32),

@@ -130,6 +130,16 @@ PROTECTED_MINOR_REPLACEMENT_ENABLED = "false"
 # application exists (see PR rollout steps); while unset, playback fails
 # closed (503) and no real clip should be accepted.
 CONSENT_ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
+# Admin API gate (verifyAdminAccess): a Cf-Access-Jwt-Assertion is accepted only
+# if it verifies against this team's certs and the main API Access application's
+# audience (AUD) tag, API_ACCESS_AUD. The tag identifies the application rather
+# than granting anything (every token Access issues for it carries the tag), so
+# it ships with the build. Without either setting every Access login is refused
+# and moderators are locked out; X-Admin-Key callers are unaffected.
+# test/deployed-config-access-gate.test.ts fails if either is missing.
+ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
+# The "Relay Admin API (Staging)" Access application.
+API_ACCESS_AUD = "6c95c40fc09819dfda2435b5dc4b096500bdd3da497b67ea06bb344c9d265c0a"
 
 # D1 Database for moderation decision log (staging)
 [[d1_databases]]

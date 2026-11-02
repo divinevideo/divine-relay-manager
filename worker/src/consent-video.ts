@@ -3,6 +3,7 @@
 
 import { sha256 } from '@noble/hashes/sha256';
 import { RETENTION_DAYS } from '../../shared/retention';
+import { verifyAccessJwt, type FetchFn } from './access-jwt';
 
 export const CONSENT_VIDEO_LIMIT = 80_000_000;
 export const CONSENT_BODY_LIMIT = 82_000_000;
@@ -328,54 +329,31 @@ export class R2MultipartVideoWriter {
 // Reviewer access: verify the Cloudflare Access JWT ourselves (signature,
 // issuer, audience). The Access application in front of this path restricts
 // who can obtain one; the Worker does not trust mere header presence and
-// never accepts X-Admin-Key here.
+// never accepts X-Admin-Key here. The keys come from the verifier's shared
+// one-hour cache, so a key Cloudflare withdraws can still verify a reviewer's
+// token for up to that hour (accepted in #352's review).
 // ---------------------------------------------------------------------------
-
-type FetchFn = (url: string) => Promise<{ ok: boolean; json: () => Promise<unknown> }>;
-
-function b64UrlDecode(value: string): Uint8Array {
-  const padded = value.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(value.length / 4) * 4, '=');
-  const binary = atob(padded);
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
-}
 
 export async function verifyConsentAccessJwt(
   token: string,
   env: { CONSENT_ACCESS_TEAM_DOMAIN?: string; CONSENT_ACCESS_AUD?: string },
-  fetchFn: FetchFn = fetch as FetchFn,
-): Promise<boolean> {
-  const teamDomain = env.CONSENT_ACCESS_TEAM_DOMAIN;
-  const audience = env.CONSENT_ACCESS_AUD;
-  if (!teamDomain || !audience || !token) return false;
-  try {
-    const [headerPart, payloadPart, signaturePart] = token.split('.');
-    if (!headerPart || !payloadPart || !signaturePart) return false;
-    const header = JSON.parse(new TextDecoder().decode(b64UrlDecode(headerPart))) as { kid?: string; alg?: string };
-    const payload = JSON.parse(new TextDecoder().decode(b64UrlDecode(payloadPart))) as {
-      iss?: string; aud?: string | string[]; exp?: number;
-    };
-    if (header.alg !== 'RS256' || !header.kid) return false;
-    if (payload.iss !== `https://${teamDomain}`) return false;
-    const audiences = Array.isArray(payload.aud) ? payload.aud : [payload.aud];
-    if (!audiences.includes(audience)) return false;
-    if (!payload.exp || payload.exp <= Math.floor(Date.now() / 1000)) return false;
-
-    const certsRes = await fetchFn(`https://${teamDomain}/cdn-cgi/access/certs`);
-    if (!certsRes.ok) return false;
-    const certs = (await certsRes.json()) as { keys?: Array<JsonWebKey & { kid?: string }> };
-    const jwk = certs.keys?.find((k) => k.kid === header.kid);
-    if (!jwk) return false;
-    const key = await crypto.subtle.importKey(
-      'jwk', jwk, { name: 'RSASSA-PKCS1-v1_5', hash: 'SHA-256' }, false, ['verify'],
-    );
-    return await crypto.subtle.verify(
-      'RSASSA-PKCS1-v1_5', key,
-      b64UrlDecode(signaturePart) as Uint8Array<ArrayBuffer>,
-      new TextEncoder().encode(`${headerPart}.${payloadPart}`),
-    );
-  } catch {
-    return false;
-  }
+  fetchFn?: FetchFn,
+): Promise<'ok' | 'refused' | 'unavailable'> {
+  let unavailable = false;
+  const claims = await verifyAccessJwt(
+    token,
+    {
+      teamDomain: env.CONSENT_ACCESS_TEAM_DOMAIN,
+      audience: env.CONSENT_ACCESS_AUD,
+      onReject: (reason) => {
+        unavailable = reason === 'certs-unavailable';
+        console.warn(`[consent-video] Cf-Access-Jwt-Assertion refused: ${reason}`);
+      },
+    },
+    fetchFn,
+  );
+  if (claims) return 'ok';
+  return unavailable ? 'unavailable' : 'refused';
 }
 
 interface ConsentSubmissionRow {
@@ -395,7 +373,12 @@ export async function handleConsentVideo(
     return json({ success: false, error: 'Consent video viewer not configured' }, 503, corsHeaders);
   }
   const token = request.headers.get('Cf-Access-Jwt-Assertion');
-  if (!token || !(await verifyConsentAccessJwt(token, env))) {
+  const access = token ? await verifyConsentAccessJwt(token, env) : 'refused';
+  if (access === 'unavailable') {
+    // Cloudflare's signing keys couldn't be fetched: an outage, not a refusal.
+    return json({ success: false, error: 'Access verification is temporarily unavailable; try again shortly' }, 503, corsHeaders);
+  }
+  if (access !== 'ok') {
     return json({ success: false, error: 'Unauthorized' }, 401, corsHeaders);
   }
   const row = await env.DB.prepare(
