@@ -61,8 +61,9 @@ threshold captured at its creation.
 
 Each alarm escalates up to 100 overdue deadlines before network IO, independently
 of network IO. Three due cases take priority, one stable hidden/removed case retains
-reconciliation capacity, and a separate one-case lane handles COOP/decision delivery.
-Delivery retries back off from 30 seconds to five minutes and do not consume urgent
+reconciliation capacity, and a separate COOP/decision delivery batch runs up to
+ten initial attempts plus one due retry concurrently. Failed first attempts move
+to the retry slot rather than reducing initial-handoff capacity. Delivery retries back off from 30 seconds to five minutes and do not consume urgent
 enforcement slots. Repeated failures update a separate counter while retaining the
 first append-only audit event, so an outage cannot displace provenance from history.
 Stable cases do not sit ahead of urgent retries. This still bounds throughput:
