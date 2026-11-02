@@ -137,6 +137,8 @@ CONSENT_ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
 # and moderators are locked out; X-Admin-Key callers are unaffected.
 # test/deployed-config-access-gate.test.ts fails if either is missing.
 ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"
+# The "Relay Admin API (Production)" Access application.
+API_ACCESS_AUD = "cf3c51bfe55ececec3d55129fad9a66b4e00b9fccb31834c241ffbdfbe082fc4"
 
 # D1 Database for moderation decision log (production)
 [[d1_databases]]
