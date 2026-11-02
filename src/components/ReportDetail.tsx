@@ -379,8 +379,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // undefined while loading, then true/false once reports are available. A
   // sensitive report in hand is true even when the reports may not be all of
   // them: what is missing can only add to it. Otherwise partial reports are
-  // undefined. undefined and true both start media and avatars hidden until
-  // clicked, and only false shows them.
+  // undefined. undefined and true both start media hidden until clicked. The
+  // thread, full-thread and repost avatars have no Show: for them undefined and
+  // true both hide, and only false shows them.
   const hasHighPriorityReports = useMemo(() => {
     if (!allReportsForTarget) return undefined;
     const sensitive = allReportsForTarget.some(r => {
