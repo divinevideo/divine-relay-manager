@@ -526,10 +526,7 @@ describe('addZendeskInternalNote solve payload', () => {
     vi.stubGlobal('fetch', mockFetch);
 
     await syncZendeskAfterAction(
-      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687', REPORT_WATCHER: {
-        idFromName: () => 'singleton',
-        get: () => ({ fetch: async () => Response.json({ success: true, recorded: true }) }),
-      } }),
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
       action,
       'event',
       'ab13eb2c66bea4cd8f538798054d23a02d5dca879401be5045b8482590e2482c',
@@ -548,10 +545,7 @@ describe('addZendeskInternalNote solve payload', () => {
     vi.stubGlobal('fetch', mockFetch);
 
     await syncZendeskAfterAction(
-      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687', REPORT_WATCHER: {
-        idFromName: () => 'singleton',
-        get: () => ({ fetch: async () => Response.json({ success: true, recorded: true }) }),
-      } }),
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
       'ban_pubkey',
       'pubkey',
       'a'.repeat(64),
