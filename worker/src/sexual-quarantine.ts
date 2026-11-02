@@ -560,12 +560,19 @@ export class SexualQuarantine {
     const results = await Promise.allSettled([...new Set([...due.values(), ...slow.values()])].map(eventId => this.advance(eventId, false)));
     // Select after enforcement, so a newly archived snapshot can be handed off
     // immediately. Unavailable snapshots never occupy the delivery lane.
-    const delivery = await this.storage.list<string>({
-      prefix: DELIVERY, end: this.timedKey(DELIVERY, this.now() + 1), limit: 1,
-    });
-    // COOP and decision-log retries have their own single slow lane. They never
-    // consume one of the three enforcement slots, including after an outage.
-    const deliveryResults = await Promise.allSettled([...delivery.values()].map(eventId => this.deliver(eventId)));
+    // Zero retry time identifies first delivery in the existing ordered index.
+    // A replay page can contain 100 ready snapshots; ten parallel first attempts
+    // per alarm drain that page in ten alarms instead of fifty minutes. Failed
+    // attempts move to a nonzero retry time and keep their separate single slot.
+    const [initial, retries] = await Promise.all([
+      this.storage.list<string>({ prefix: this.timedKey(DELIVERY, 0), limit: 10 }),
+      this.storage.list<string>({ prefix: DELIVERY,
+        startAfter: this.timedKey(DELIVERY, 0, 'f'.repeat(64)),
+        end: this.timedKey(DELIVERY, this.now() + 1), limit: 1 }),
+    ]);
+    // Delivery never consumes one of the three enforcement slots.
+    const deliveryResults = await Promise.allSettled([...new Set([...initial.values(), ...retries.values()])]
+      .map(eventId => this.deliver(eventId)));
     const failed = [...results, ...deliveryResults].find((r): r is PromiseRejectedResult => r.status === 'rejected');
     if (failed) throw failed.reason;
   }

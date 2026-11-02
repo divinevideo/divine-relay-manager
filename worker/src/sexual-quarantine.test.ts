@@ -54,6 +54,33 @@ function removedBacklog(f: ReturnType<typeof fixture>, count: number) {
 }
 
 describe('adult sexual report quarantine', () => {
+  it('hands off a replay page of 100 ready cases within the review deadline', async () => {
+    const f = fixture(); const q = f.engine();
+    for (let n = 1; n <= 100; n++) {
+      const id = n.toString(16).padStart(64, '0');
+      await q.admit(id, report(n), 2, { event: { id }, assets: [] });
+    }
+    for (let alarm = 0; alarm < 10; alarm++) { await q.tick(); f.later(); }
+    expect(vi.mocked(f.io.review).mock.calls).toHaveLength(100);
+    expect(new Set(vi.mocked(f.io.review).mock.calls.map(([c]) => c.eventId)).size).toBe(100);
+    expect(f.now()).toBeLessThan(901_000);
+  });
+
+  it('retains a due retry slot alongside the first-handoff batch', async () => {
+    const f = fixture(); const q = f.engine();
+    await q.admit(EVENT, report(200), 2, { event: { id: EVENT }, assets: [] });
+    vi.mocked(f.io.review).mockRejectedValueOnce(new Error('COOP unavailable'));
+    await q.advance(EVENT); f.later();
+    vi.mocked(f.io.review).mockClear();
+    for (let n = 1; n <= 10; n++) {
+      const id = n.toString(16).padStart(64, '0');
+      await q.admit(id, report(n), 2, { event: { id }, assets: [] });
+    }
+    await q.tick();
+    expect(vi.mocked(f.io.review).mock.calls).toHaveLength(11);
+    expect((await q.get(EVENT))?.reviewAcceptedAt).toBeDefined();
+  });
+
   it('keeps COOP delivery outages out of the three urgent enforcement slots', async () => {
     const f = fixture(); const q = f.engine();
     vi.mocked(f.io.review).mockRejectedValue(new Error('COOP unavailable'));
