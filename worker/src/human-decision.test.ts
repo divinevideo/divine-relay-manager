@@ -533,6 +533,23 @@ describe('human decision persistence', () => {
       });
     });
 
+    it('routes Reports reviewed through the case guard before recording human review', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      env.REPORT_WATCHER.get = () => ({
+        fetch: async () => Response.json({ success: false, conflict: true, error: 'Review the current revision' }),
+      });
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Cf-Access-Jwt-Assertion': 'test' },
+        body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
+          ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', 'cd'.repeat(32)],
+        ] }),
+      }), env as never, mockCtx);
+      expect(await response.json()).toMatchObject({ reconciled: false });
+      expect(sqlLog.some(entry => entry.sql.includes('INSERT INTO moderation_targets'))).toBe(false);
+      expect(sqlLog.some(entry => entry.sql.includes('zendesk_tickets'))).toBe(false);
+    });
+
     it('leaves linked Zendesk tickets open when a quarantine case refuses the dismissal', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);

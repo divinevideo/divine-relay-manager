@@ -87,6 +87,17 @@ describe('sexual quarantine watcher integration', () => {
     expect(f.io.eventHold).not.toHaveBeenCalledWith(ID, false, expect.anything());
   });
 
+  it('records generic reviewed without restoring unrelated legacy auto-hides', async () => {
+    const f = fixture();
+    await f.durable.put(`event-visibility:${ID}`, 'unresolved-hide');
+    const rpc = vi.spyOn(nip86, 'callNip86Rpc').mockResolvedValue({ success: true });
+    const response = await f.watcher.fetch(new Request('https://do/event-visibility', {
+      method: 'POST', body: JSON.stringify({ eventId: ID, relayAction: 'review', humanAction: 'reviewed' }),
+    }));
+    expect(response.status).toBe(200);
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
   it('allows a separate base-ban release after the scoped restore is verified and recorded', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent'); await f.send(2, 'NS-sexualContent');
     const q = new SexualQuarantine(f.durable, f.io);

@@ -452,7 +452,7 @@ export class ReportWatcher implements DurableObject {
           const recorded = await this.recordAutoHideHumanDecision(operation, AUTO_HIDE_ACTION.confirmed);
           if (!recorded) return { success: false, recorded: false, error: 'Failed to record auto-hide confirmation' };
           return { success: true, recorded: true };
-        } else if (operation.relayAction === 'review') {
+        } else if (operation.relayAction === 'review' && operation.humanAction !== 'reviewed') {
           let shouldRestoreAutoHide = false;
           const visibilityKey = this.visibilityStorageKey(operation.eventId);
           const visibility = await this.state.storage.get<string>(visibilityKey);
@@ -488,7 +488,7 @@ export class ReportWatcher implements DurableObject {
               relayFailure = relayResult;
             }
           }
-        } else {
+        } else if (operation.relayAction === 'hide' || operation.relayAction === 'allow') {
           const visibilityKey = this.visibilityStorageKey(operation.eventId);
           const previousVisibility = await this.state.storage.get<string>(visibilityKey);
           let recordsAutoHideRestore = false;

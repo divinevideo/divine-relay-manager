@@ -1078,7 +1078,7 @@ async function handlePublish(
       console.log('[handlePublish] Resolution label details:', { status, targetType, targetId });
 
       if (status && targetType && targetId) {
-        if (targetType === 'event' && ['dismissed', 'no-action', 'false-positive'].includes(status)) {
+        if (targetType === 'event' && ['reviewed', 'dismissed', 'no-action', 'false-positive'].includes(status)) {
           const result = env.DB
             ? await coordinateEventVisibility(env, {
               eventId: targetId,
