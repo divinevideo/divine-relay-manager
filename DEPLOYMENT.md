@@ -296,8 +296,35 @@ negotiation, so order matters and the gap should be minimized:
   the file's notes restored when the restore lands, or when the record is already
   public and the media server serves the file too; a public record over a file the
   media server still hides is refused and named on the row. Callers that send no
-  pubkey (COOP, the per-post buttons) are unchanged. An older worker ignores the
+  pubkey (COOP, the per-post buttons) skip these checks, but their SAFE or
+  AGE_RESTRICTED meets the lift guard below. An older worker ignores the
   pubkey, so the `from` check is the only one it applies.
+- **Age-review lift guard (#335).** While a file's owner has an open age
+  review, `/api/moderate-media` refuses a SAFE, and an AGE_RESTRICTED over a
+  file that is hidden, blocked or deleted, whoever sends it: 409
+  `age_review_active`, naming the case. (A request that names the account gets
+  the account check instead, which refuses every action during a case.) An
+  AGE_RESTRICTED over a public file only tightens and goes through, so Osprey's
+  automatic 18+ gate still lands on an account whose case has not hidden its
+  files yet. "Hidden" is read from the media server and from
+  moderation-service's record, since the media server's status can be up to 5
+  minutes stale right after a case hides a file. Once the case has restricted
+  the account (a `restricted_pending_*` state), every AGE_RESTRICTED is
+  refused, since its withhold has hidden the files and in the minutes after it
+  neither source can be trusted to say so. The worker reads the owner
+  from the media server and fails closed: an unreadable owner, case lookup or
+  record answers 503 (`owner_unreadable`, `age_review_check_failed`,
+  `state_unreadable`), which a retry can clear, and a file the media server
+  has no record of answers 409 `media_record_missing`, which retrying will not
+  change. So an Unblock, Remove Restriction or Age Restrict now needs the media
+  server and D1 to answer; Block, Quarantine and Delete do not. Age review's
+  own clearance goes through the bulk path, not this endpoint, and is
+  unaffected. To check after deploy, on throwaway accounts: with a case in a
+  restricted state, Unblock one of its hidden videos from a report and see it
+  refused with the case named, and Age Restrict one of its posts and see it
+  refused; then close the case and see the same Unblock go through. With a case
+  still in `open_reported`, Age Restrict one of its public posts and see it
+  gated.
 - **Known limits (#299), not fixed by it:**
   - Some files the media server holds are outside the videos-only filter and are
     not changed. Tracked privately.

@@ -218,16 +218,18 @@ send the identical request.
 
 `from` lets a caller declare the state it believes it is changing. The current
 state is read first and the action is refused unless it matches, so a button can
-only reverse the thing it is named for. Omit `from` and nothing changes: no
-extra read, no new failure mode.
+only reverse the thing it is named for. Omit `from` and the state check does
+not run: no state read, no new failure mode from it.
 
 It guards a cooperating caller against its own bug. It is not a security
-boundary, since the caller supplies the value and omitting it restores the
-unguarded path.
+boundary, since the caller supplies the value and omitting it skips the check.
+The age-review lift guard below is the one that does not depend on the caller.
 
 Sending `from` also requires `sha256` to be 64 hex characters, because it becomes
 part of an upstream URL. Without `from`, `sha256` is forwarded as-is and
-validated upstream.
+validated upstream, except for a `SAFE` or `AGE_RESTRICTED`, which the
+age-review lift guard below validates and lowercases, and a request that sends
+`pubkey`, which the account check validates and lowercases.
 
 **Refusals when `from` is present:**
 
@@ -244,6 +246,34 @@ different answer from "no conflict".
 
 What is compared is moderation-service's recorded result. Actions taken directly
 through Blossom's own admin UI do not write there, so they are not reflected.
+
+**Age-review lift guard (#335).** While the file's owner has an open age
+review, a `SAFE` is refused, and so is an `AGE_RESTRICTED` over a file that is
+hidden, blocked or deleted: the 18+ gate would show it to signed-in adults. An
+`AGE_RESTRICTED` over a public or already-gated file only tightens and goes
+through. Hidden means the media server shows it so, or moderation-service's
+record does (the media server's status can be up to 5 minutes stale; the
+record is not). Both are consulted only during an open case, and the record is
+read only then; the media server is read on every `SAFE` and `AGE_RESTRICTED`,
+since that read names the owner. Once the case has
+restricted the account (a `restricted_pending_*` state), its withhold has
+hidden the files, and every `AGE_RESTRICTED` is refused. `PERMANENT_BAN`,
+`QUARANTINE`, `DELETE` and `REVIEW` are not checked. The worker reads the owner
+from the media server itself, so the caller does not need to name the
+account; a request that sends `pubkey` gets the account check instead, on
+that account (a bulk note's Restore), which refuses every action during a
+case. It runs before the `from` check. The action is compared
+in any case here (`"safe"` is a `SAFE`, as moderation-service reads it), and
+an action that is not a string is refused (400 `invalid_action`).
+
+| Status | `code` | Meaning |
+|--------|--------|---------|
+| 400 | `invalid_sha256` | `sha256` is not 64 hex characters. |
+| 409 | `age_review_active` | The owner has an open age review. The body carries `caseId` and `state`. |
+| 409 | `media_record_missing` | The media server has no record of the file, so the owner cannot be checked. Not retryable. |
+| 503 | `owner_unreadable` | The media server could not be read for the owner. Retryable. |
+| 503 | `age_review_check_failed` | The open-case lookup could not run. Retryable. |
+| 503 | `state_unreadable` | An `AGE_RESTRICTED` during an open case, and moderation-service's record could not be read. Retryable. |
 
 **Response:**
 ```json

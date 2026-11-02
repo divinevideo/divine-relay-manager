@@ -46,11 +46,24 @@ export async function readBlossomSecret(env: MediaServerEnv): Promise<string | E
 export interface MediaStatus { raw: string; level: MediaLevel }
 export interface BlossomBlob extends MediaStatus { owner: string }
 
+// The media server answered 404 for the file: it has no record of it. A class
+// of its own so a caller can say so instead of "try again"; the message is the
+// one any other failed answer gets, so callers that only report it (the bulk
+// walks) are unchanged. A misconfigured CDN_DOMAIN can also answer 404, so a
+// caller must still refuse on it, never read it as "nothing to protect".
+export class MediaRecordMissing extends Error {
+  constructor() {
+    super('blossom returned 404');
+    this.name = 'MediaRecordMissing';
+  }
+}
+
 // What the media server records for a file: its owner (lowercase hex) and its
 // status, as served to viewers. For /api/moderate-media's account check, which
-// needs the owner, and for its already-public refusal, which needs the status.
+// needs the owner, its already-public refusal, which needs the status, and its
+// age-review lift guard (#335), which needs both.
 // Throws when it cannot be read: no key, a failed request, or no usable owner
-// or status.
+// or status. A 404 throws MediaRecordMissing.
 export async function readMediaRecord(sha256: string, env: MediaServerEnv): Promise<BlossomBlob> {
   const secret = await readBlossomSecret(env);
   if (secret instanceof Error) throw secret;
@@ -62,6 +75,7 @@ export async function readBlossomStatus(sha256: string, env: MediaServerEnv, sec
     headers: { Authorization: `Bearer ${secret}` },
     signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
   });
+  if (response.status === 404) throw new MediaRecordMissing();
   if (!response.ok) throw new Error(`blossom returned ${response.status}`);
   const { status, owner } = await response.json() as { status?: unknown; owner?: unknown };
   const level = typeof status === 'string' ? BLOSSOM_LEVEL.get(status) : undefined;

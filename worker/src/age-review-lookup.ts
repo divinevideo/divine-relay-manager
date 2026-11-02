@@ -16,8 +16,9 @@ import { type AgeReviewCase, TERMINAL_STATES } from '../../shared/age-review';
  * hex. Callers pass it only where missing such a case would lift a hold the
  * case keeps:
  * - ageReviewActiveGuard when it fails closed: relay-RPC unsuspend and unban,
- *   the loosening bulk enqueue (age-gate-all, un-age-restrict-all) and a
- *   note's Restore (moderate-media);
+ *   the loosening bulk enqueue (age-gate-all, un-age-restrict-all), a
+ *   note's Restore and any SAFE or AGE_RESTRICTED (moderate-media's account
+ *   check and lift guard);
  * - the bulk queue consumer's per-chunk check, which only loosening jobs run;
  * - the active-case route (the case hand-off, the Ban warning and the results
  *   panel's pause).
