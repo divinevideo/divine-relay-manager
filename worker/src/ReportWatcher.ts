@@ -51,7 +51,8 @@ export async function hasLatestHumanRestore(db: D1Database, targetEventId: strin
       AND last_human_action IN (
         'allow_event',
         'restore_event',
-        'auto_hide_restored'
+        'auto_hide_restored',
+        'sexual_quarantine_restore'
       )
   `).bind(targetEventId).first();
   return row !== null;
