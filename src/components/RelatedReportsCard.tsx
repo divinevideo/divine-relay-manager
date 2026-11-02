@@ -8,7 +8,7 @@ import { CopyableId } from "@/components/CopyableId";
 import { useRelatedReports } from "@/hooks/useRelatedReports";
 import { historyCount } from "@/lib/historyCount";
 import { overflowLine } from "@/lib/overflowLine";
-import { getCategoryLabel, getReportCategory } from "@/lib/constants";
+import { getCategoryLabel, getReportCategory, isHex64 } from "@/lib/constants";
 import { Link2, User, FileText, Loader2 } from "lucide-react";
 import { getReportTarget, type ReportTarget } from "../../shared/report-target";
 
@@ -23,7 +23,9 @@ const TITLE_CLASS = "text-sm flex items-center gap-2 text-orange-700 dark:text-o
 export function RelatedReportsCard({ pubkey, currentTarget }: RelatedReportsCardProps) {
   const related = useRelatedReports(pubkey, currentTarget);
 
-  if (!pubkey) return null;
+  // Not an account the read can name (none, or a p tag that is not 64 hex): there
+  // is nothing to look up, and a failure here could never be retried away.
+  if (!isHex64(pubkey)) return null;
 
   if (related.status === 'loading') {
     return (

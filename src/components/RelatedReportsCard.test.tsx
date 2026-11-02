@@ -217,6 +217,19 @@ describe('RelatedReportsCard', () => {
     expect(screen.queryByText(/Related Reports/)).not.toBeInTheDocument();
   });
 
+  it('does not read, and shows no failure, for a pubkey the endpoint would refuse', async () => {
+    // A report's p tag is the reporter's to write, and the pane falls back to it
+    // when no thread names the author. The endpoint answers anything but 64 hex
+    // with a 400, which would sit on screen as a failure Try again cannot fix.
+    fetchReportsByTarget.mockRejectedValue(new Error('`pubkey` must be the account\'s 64-character lowercase hex pubkey'));
+    renderCard('not-a-pubkey');
+
+    await act(async () => {});
+    expect(fetchReportsByTarget).not.toHaveBeenCalled();
+    expect(screen.queryByText(/Related reports could not be loaded/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Related Reports/)).not.toBeInTheDocument();
+  });
+
   it('asks for one retry and a five-minute cache lifetime', async () => {
     fetchReportsByTarget.mockResolvedValue({ events: [userReport(1)], truncated: false });
     const { client } = renderCard();

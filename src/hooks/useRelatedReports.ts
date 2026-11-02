@@ -5,6 +5,7 @@ import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
+import { isHex64 } from "@/lib/constants";
 import { splitRelatedReports, type RelatedReports } from "@/lib/relatedReports";
 import { reportTargetKey, type ReportTarget } from "../../shared/report-target";
 
@@ -29,7 +30,9 @@ export function useRelatedReports(
     // must never be served from this one's cache.
     queryKey: ['account-reports', config.apiUrl, key],
     queryFn: () => fetchReportsByTarget({ pubkey: key }),
-    enabled: !!key,
+    // Only for a key the endpoint accepts. It answers anything but 64 hex with a
+    // 400, and the key can come from a report's p tag, which the reporter wrote.
+    enabled: isHex64(key),
     staleTime: 60_000,
     // One retry, as the queue's resolution reads (labels, decisions, ban
     // lists). The default of three would keep the card on "checking" through
