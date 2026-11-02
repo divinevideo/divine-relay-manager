@@ -53,7 +53,7 @@ import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailur
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
-import { consolidateReports, type ConsolidatedReport } from "@/lib/consolidateReports";
+import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
@@ -979,23 +979,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return Array.from(categories).sort();
   }, [listReports]);
 
-  const allConsolidated = useMemo(() => {
-    if (!listReports) return [];
-    return consolidateReports(listReports);
-  }, [listReports]);
-
   // The needs-attention feed plus deep-linked reports (`reports`), grouped,
   // without loaded history. The pending-review view lists from `reports`, so
   // its badge counts from here; and a listed target this does not carry came
   // from resolved history.
   const feedConsolidated = useMemo(() => (reports ? consolidateReports(reports) : []), [reports]);
+
+  // Outside the history view the list is the feed itself (listReports is
+  // `reports`), so its grouping is feedConsolidated. Group again only for the
+  // feed merged with loaded history. The feed can hold tens of thousands of
+  // reports, and this runs on every poll.
+  const allConsolidated = useMemo(() => {
+    if (!listReports) return [];
+    return listReports === reports ? feedConsolidated : consolidateReports(listReports);
+  }, [listReports, reports, feedConsolidated]);
+
   // Targets the needs-attention feed itself holds, apart from deep-linked
   // reports merged into `reports`, and whose reports the feed read in full: it
   // carries every report on them only when it did not stop early. A feed that
   // did (the red "stopped reading" banner) is missing reports older than its
   // cut-off for every target in it, so none of them counts as fully read.
   const queueFeedTargetKeys = useMemo(
-    () => new Set(consolidateReports(queueFeed?.events ?? []).map(c => reportTargetKey(c.target))),
+    () => reportTargetKeys(queueFeed?.events ?? []),
     [queueFeed],
   );
   const needsAttentionTargetKeys = useMemo(

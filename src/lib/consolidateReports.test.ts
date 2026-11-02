@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
-import { consolidateReports } from './consolidateReports';
+import { consolidateReports, reportTargetKeys } from './consolidateReports';
+import { reportTargetKey } from '../../shared/report-target';
 
 const hex = (n: number, fill = '0') => n.toString(16).padStart(64, fill);
 const EVENT_A = hex(0xa);
@@ -100,5 +101,26 @@ describe('consolidateReports', () => {
       expect(group.reporters).toEqual(reporters);
       expect(searched.has(group.reporters)).toBe(false);
     });
+  });
+});
+
+describe('reportTargetKeys', () => {
+  it('names the same targets consolidateReports groups, and skips a report that names none', () => {
+    const noTarget: NostrEvent = { ...report(EVENT_A, R1, 1), tags: [['report', 'spam']] };
+    const reports = [
+      report(EVENT_A, R1, 10),
+      report(EVENT_A, R2, 20),
+      report(EVENT_B, R3, 30),
+      noTarget,
+    ];
+
+    expect(reportTargetKeys(reports)).toEqual(
+      new Set(consolidateReports(reports).map(group => reportTargetKey(group.target))),
+    );
+    expect(reportTargetKeys(reports).size).toBe(2);
+  });
+
+  it('is empty for no reports', () => {
+    expect(reportTargetKeys([])).toEqual(new Set());
   });
 });

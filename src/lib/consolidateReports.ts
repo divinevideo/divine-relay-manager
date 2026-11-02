@@ -90,3 +90,15 @@ export function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] 
     return b.latestReport.created_at - a.latestReport.created_at;
   });
 }
+
+// The target keys consolidateReports would return, without grouping, sorting or
+// deriving an author for each. For a caller that needs only which targets a
+// read holds.
+export function reportTargetKeys(reports: NostrEvent[]): Set<string> {
+  const keys = new Set<string>();
+  for (const report of reports) {
+    const target = getReportTarget(report);
+    if (target) keys.add(reportTargetKey(target));
+  }
+  return keys;
+}
