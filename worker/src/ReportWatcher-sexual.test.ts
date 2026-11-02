@@ -111,6 +111,24 @@ describe('sexual quarantine watcher integration', () => {
     expect(rpc).toHaveBeenCalledWith('allowevent', [ID], f.env);
   });
 
+  it.each(['restore', 'remove'] as const)('audits later reports without reversing a recorded %s', async decision => {
+    const f = fixture(); await f.send(1, 'NS-sexualContent');
+    const q = new SexualQuarantine(f.durable, f.io);
+    await q.decide(ID, (await q.get(ID))!.revision, decision, 'reviewer', 'Synthetic decision');
+    await q.advance(ID);
+    const before = (await q.get(ID))!;
+    expect(before.decisionRecordedAt).toBeDefined();
+    const holdCalls = f.io.eventHold.mock.calls.length;
+    vi.spyOn(f.watcher as unknown as { hasBlockingHumanResolution(id: string, raw: boolean): Promise<boolean> }, 'hasBlockingHumanResolution').mockResolvedValue(true);
+    const later = await f.send(2, 'NS-sexualContent');
+    await f.send(2, 'NS-sexualContent');
+    expect(await q.get(ID)).toMatchObject({ goal: decision, revision: before.revision, state: before.state, reporters: 2 });
+    expect(f.io.eventHold).toHaveBeenCalledTimes(holdCalls);
+    const reports = (await q.history(ID)).filter(entry => (entry as { action?: string }).action === 'report');
+    expect(reports).toHaveLength(2);
+    expect(reports).toContainEqual(expect.objectContaining({ id: later.id, source: JSON.parse(JSON.stringify(later)) }));
+  });
+
   it('returns a retryable server error for case-storage failures', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent');
     vi.spyOn(SexualQuarantine.prototype, 'decide').mockRejectedValue(new Error('storage unavailable'));

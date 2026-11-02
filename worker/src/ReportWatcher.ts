@@ -990,8 +990,14 @@ export class ReportWatcher implements DurableObject {
       // those cannot be released by this stream's named-hold Restore.
       if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true') return;
       const admitted = await this.state.blockConcurrencyWhile(async () => {
-        const human = await this.hasBlockingHumanResolution(targetEventId, false);
-        if (human !== false) return false;
+        // Decided cases still retain incoming evidence. admit() keeps their
+        // human intent final, so this cannot re-hide a restored event. Other
+        // human resolutions continue to fence new/undecided case admission.
+        const currentCase = await q.get(targetEventId);
+        if (!currentCase?.actor) {
+          const human = await this.hasBlockingHumanResolution(targetEventId, false);
+          if (human !== false) return false;
+        }
         await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
           source: JSON.parse(JSON.stringify(wire)) as object }, // A legacy fractional threshold means the next whole reporter count.
           Math.max(2, Math.ceil(videoTier.threshold)), snapshot);
