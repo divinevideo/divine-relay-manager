@@ -148,8 +148,8 @@ describe('recorded content decisions on real D1', () => {
     expect(await hasActiveAutoHide(DB, eventId)).toBe(false);
   });
 
-  it('refuses generic event review before mutation and preserves threshold admission for an open case', async () => {
-    const eventId = 'f2'.repeat(32);
+  it.each(['review', 'confirm'])('refuses legacy %s before mutation and preserves threshold admission for an open case', async action => {
+    const eventId = (action === 'confirm' ? 'f4' : 'f2').repeat(32);
     const data = new Map<string, unknown>();
     const store = {
       get: async (key: string) => structuredClone(data.get(key)),
@@ -167,22 +167,42 @@ describe('recorded content decisions on real D1', () => {
     await watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true,
       trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['nudity'], threshold: 2, requireTrustedClient: false }],
     }) }));
+    if (action === 'confirm') {
+      await DB.prepare("INSERT INTO moderation_decisions (target_type, target_id, action) VALUES ('event', ?, 'auto_hidden')").bind(eventId).run();
+    }
     const q = new SexualQuarantine(storage, createQuarantineIO(env));
     await q.admit(eventId, { id: 'a'.repeat(64), pubkey: 'b'.repeat(64), reason: 'nudity' }, 2,
       { event: { id: eventId }, assets: [] });
-    const response = await worker.fetch(new Request('https://api.example.test/api/decisions', {
+    const response = await worker.fetch(new Request(`https://api.example.test/api/${action === 'confirm' ? 'confirm-auto-hide' : 'decisions'}`, {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key' },
-      body: JSON.stringify({ targetType: 'event', targetId: eventId, action: 'reviewed' }),
+      body: JSON.stringify(action === 'confirm' ? { eventId } : { targetType: 'event', targetId: eventId, action: 'reviewed' }),
     }), { ...env, REPORT_WATCHER: { idFromName: () => 'singleton', get: () => watcher } } as never,
     { waitUntil: vi.fn() } as unknown as ExecutionContext);
     expect(response.status).toBe(409);
-    expect(await DB.prepare('SELECT * FROM moderation_decisions WHERE target_id = ?').bind(eventId).all())
-      .toMatchObject({ results: [] });
+    expect(await DB.prepare('SELECT action FROM moderation_decisions WHERE target_id = ?').bind(eventId).all())
+      .toMatchObject({ results: action === 'confirm' ? [{ action: 'auto_hidden' }] : [] });
     expect(await DB.prepare('SELECT * FROM moderation_targets WHERE target_id = ?').bind(eventId).first()).toBeNull();
     const later = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', eventId, 'nudity']] }, new Uint8Array(32).fill(3));
     await (watcher as unknown as { processAutoHide(e: ReportEvent, category: string, target: string, advance: boolean): Promise<void> })
       .processAutoHide(later as ReportEvent, 'nudity', eventId, false);
     expect(await q.get(eventId)).toMatchObject({ reporters: 2, goal: 'hide', state: 'pending' });
+  });
+
+  it('continues to confirm legacy auto-hides without a quarantine case', async () => {
+    const eventId = 'f5'.repeat(32);
+    await DB.prepare("INSERT INTO moderation_decisions (target_type, target_id, action) VALUES ('event', ?, 'auto_hidden')").bind(eventId).run();
+    const storage = { get: async () => undefined, put: async () => {}, delete: async () => true } as unknown as DurableObjectStorage;
+    const state = { storage, blockConcurrencyWhile: async (fn: () => unknown) => fn() } as unknown as DurableObjectState;
+    const watcher = new ReportWatcher(state, { DB, NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.example.test' });
+    const response = await watcher.fetch(new Request('https://do/event-visibility', {
+      method: 'POST', body: JSON.stringify({ eventId, relayAction: 'confirm' }),
+    }));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ success: true, recorded: true });
+    expect(await DB.prepare('SELECT ever_human_reviewed FROM moderation_targets WHERE target_id = ?').bind(eventId).first())
+      .toMatchObject({ ever_human_reviewed: 1 });
+    expect((await DB.prepare('SELECT action FROM moderation_decisions WHERE target_id = ? ORDER BY id').bind(eventId).all()).results)
+      .toEqual([{ action: 'auto_hidden' }, { action: 'auto_hide_confirmed' }]);
   });
 
   it('keeps generic pubkey review independent of event case coordination', async () => {

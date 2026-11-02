@@ -417,7 +417,7 @@ export class ReportWatcher implements DurableObject {
         // scoped release is complete, Allow remains a separate base-ban action.
         const sexual = this.sexualQuarantine();
         const existingCase = await sexual.get(operation.eventId);
-        if (existingCase && existingCase.state !== 'out_of_scope' && ['allow', 'review'].includes(operation.relayAction)) {
+        if (existingCase && existingCase.state !== 'out_of_scope' && ['allow', 'review', 'confirm'].includes(operation.relayAction)) {
           if (!existingCase.actor || existingCase.goal !== 'restore' || !existingCase.decisionRecordedAt
             || !['restored', 'restored_restricted'].includes(existingCase.state)) {
             return { success: false, conflict: true,
