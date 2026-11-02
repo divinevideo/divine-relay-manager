@@ -54,7 +54,7 @@
   - `export interface AccessClaims { iss: string; aud: string[]; exp: number; sub?: string; email?: string; common_name?: string }`
   - `export async function verifyAccessJwt(token: string, config: { teamDomain?: string; audience?: string; onReject?: (reason: AccessJwtRejection) => void }, fetchFn?: FetchFn, now?: () => number): Promise<AccessClaims | null>`
   - `export function __resetAccessCertsCacheForTests(): void`
-- `verifyConsentAccessJwt(token, env, fetchFn)` keeps its signature and boolean result.
+- `verifyConsentAccessJwt(token, env, fetchFn)` keeps its signature and boolean result. (Superseded after Meylis's review: it returns `'ok' | 'refused' | 'unavailable'`, so a certs outage answers 503.)
 
 - [ ] Step 1: Write failing tests in `access-jwt.test.ts`, using a shared signer helper (`worker/src/test-helpers/access-jwt.ts`, `makeAccessJwtSigner`) that `consent-video.test.ts` also uses:
   - valid token returns claims including `email` when present and `common_name` for a service-token-shaped payload
@@ -65,7 +65,7 @@
   - unknown kid triggers one refetch; a second unknown kid within 60s does not fetch again
 - [ ] Step 2: Run `cd worker && npx vitest run src/access-jwt.test.ts`. Expected: FAIL (module missing).
 - [ ] Step 3: Implement `access-jwt.ts`, moving the existing decode/verify logic and adding module-level `certsCache` (`Map<teamDomain, { keys, fetchedAt }>`) and `unknownKidRefetchAt` (`Map<teamDomain, number>`), the latter claimed before the refetch is awaited.
-- [ ] Step 4: Re-point `verifyConsentAccessJwt` at it: `claims !== null`, with an `onReject` that logs the reason.
+- [ ] Step 4: Re-point `verifyConsentAccessJwt` at it: `claims !== null`, with an `onReject` that logs the reason. (Superseded: the three-way result above, from the same `onReject`.)
 - [ ] Step 5: Run `npx vitest run src/access-jwt.test.ts src/consent-video.test.ts`. Expected: PASS. `consent-video.test.ts` needs `__resetAccessCertsCacheForTests` in `afterEach` if the cache bleeds between tests.
 - [ ] Step 6: Mutation-check each guard one at a time (iss, aud, exp, alg, kid, signature, cache TTL, miss-refetch limit, failure-not-cached). Each should turn exactly its test red. Restore from a `cp` backup.
 
@@ -95,7 +95,7 @@
 - Modify: `worker/wrangler.staging.toml`, `worker/wrangler.prod.toml` (`ACCESS_TEAM_DOMAIN = "divinevideo.cloudflareaccess.com"`, and `API_ACCESS_AUD`, with a comment that without either Access logins are locked out; `worker/test/deployed-config-access-gate.test.ts` pins both)
 - Modify: `worker/wrangler.local.toml` (comment only: unset locally, so use `X-Admin-Key`)
 - Modify: `AGENTS.md` Security Model, item 1-2 (the worker now verifies the JWT)
-- Modify: `DEPLOYMENT.md` (the new var and secret, set-before-deploy, troubleshooting an all-401 deploy)
+- Modify: `DEPLOYMENT.md` (the new var and secret, set-before-deploy, troubleshooting an all-401 deploy) (Superseded after Meylis's review: both settings are `[vars]` that ship with the build, and the troubleshooting covers 401 or 503.)
 
 - [ ] Step 1: Copy each environment's AUD tag from its Access application's Overview tab into that environment's `API_ACCESS_AUD` var.
 - [ ] Step 1b: In the Cloudflare dashboard, list the Access applications that cover `api-relay-*` hostnames or paths. Besides the main API application, two are expected: consent-video, and the protected-minor application at `/api/internal/protected-minors/*` (`docs/protected-minor-edge-auth.md`). Both routes run before the check (pinned by tests in `admin-access.test.ts`). If any other application covers these hosts, accept its AUD too, or route it before the check.

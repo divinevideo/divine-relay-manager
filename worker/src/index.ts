@@ -579,10 +579,11 @@ export default {
       }
 
       // All other /api/* endpoints require admin access (CF Access or API key).
-      // Routes with their own Access application (protected-minors and
-      // consent-video above) must stay before this check: their tokens carry a
-      // different audience and would be refused here (admin-access.test.ts pins
-      // both routes' order).
+      // Routes with their own Access application (consent-video above, and
+      // protected-minors once its path application exists, per
+      // docs/protected-minor-edge-auth.md) must stay before this check: their
+      // tokens carry a different audience and would be refused here
+      // (admin-access.test.ts pins both routes' order).
       const adminAuthError = await verifyAdminAccess(request, env, {
         allowModRelayAdminKey: path === '/api/relay-rpc' && request.method === 'POST',
       });
