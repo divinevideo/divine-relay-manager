@@ -10,6 +10,10 @@ vi.mock('../src/relay-profile', async (importOriginal) => ({
   fetchAccountIdentity: vi.fn(),
 }));
 
+// ReportWatcher's constructor looks for unfinished quarantine jobs in a storage
+// transaction. These cases have none.
+const noQuarantineJobs = { transaction: async (fn: (tx: unknown) => unknown) => fn({ getAlarm: async () => null, list: async () => new Map() }) };
+
 let mf: Miniflare;
 let DB: D1Database;
 beforeAll(async () => {
@@ -23,7 +27,7 @@ describe('a Greenlight start racing an incoming age report', () => {
   it.each(['open_reported', 'submitted_for_review'])('attaches an incoming report to a %s family case without replacing an earlier reporter', async (caseState) => {
     await DB.prepare('DELETE FROM age_review_cases').run();
     vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: true, profile: null });
-    const state = { storage: { get: async () => undefined, put: async () => {} }, blockConcurrencyWhile: async (callback: () => Promise<void>) => callback() } as unknown as DurableObjectState;
+    const state = { storage: { get: async () => undefined, put: async () => {}, ...noQuarantineJobs }, blockConcurrencyWhile: async (callback: () => Promise<void>) => callback() } as unknown as DurableObjectState;
     const watcher = new ReportWatcher(state, { DB });
     const owner = 'd'.repeat(64);
     await handleStartGreenlight(owner, { DB }, {});
@@ -48,7 +52,7 @@ describe('a Greenlight start racing an incoming age report', () => {
       return { completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } };
     });
     const state = {
-      storage: { get: async () => undefined, put: async () => {} },
+      storage: { get: async () => undefined, put: async () => {}, ...noQuarantineJobs },
       blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
     } as unknown as DurableObjectState;
     const watcher = new ReportWatcher(state, { DB });
@@ -82,7 +86,7 @@ describe('a Greenlight start racing an incoming age report', () => {
       return { completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } };
     });
     const state = {
-      storage: { get: async () => undefined, put: async () => {} },
+      storage: { get: async () => undefined, put: async () => {}, ...noQuarantineJobs },
       blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
     } as unknown as DurableObjectState;
     const watcher = new ReportWatcher(state, { DB });
@@ -127,7 +131,7 @@ describe('a Greenlight start racing an incoming age report', () => {
       return { completed: true, profile: { name: 'Synthetic name', nip05: null, vineUsername: 'synthetic' } };
     });
     const state = {
-      storage: { get: async () => undefined, put: async () => {} },
+      storage: { get: async () => undefined, put: async () => {}, ...noQuarantineJobs },
       blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
     } as unknown as DurableObjectState;
     const watcher = new ReportWatcher(state, { DB });
@@ -161,7 +165,7 @@ describe('a Greenlight start racing an incoming age report', () => {
       return { completed: true, profile: { name: 'Loser name', nip05: null, vineUsername: 'loser' } };
     });
     const state = {
-      storage: { get: async () => undefined, put: async () => {} },
+      storage: { get: async () => undefined, put: async () => {}, ...noQuarantineJobs },
       blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
     } as unknown as DurableObjectState;
     const watcher = new ReportWatcher(state, { DB });

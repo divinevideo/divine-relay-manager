@@ -361,7 +361,9 @@ describe('resolved targets only automation has touched, against real D1', () => 
   // own row, so the writer and this read cannot drift apart unnoticed.
   it('flags the decision the worker writes when it opens an age-review case', async () => {
     const state = {
-      storage: { get: async () => undefined, put: async () => {} },
+      // The constructor looks for unfinished quarantine jobs in a transaction.
+      storage: { get: async () => undefined, put: async () => {},
+        transaction: async (fn: (tx: unknown) => unknown) => fn({ getAlarm: async () => null, list: async () => new Map() }) },
       blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
     } as unknown as DurableObjectState;
     // Only DB is read on this path: the relay lookup is mocked above, and

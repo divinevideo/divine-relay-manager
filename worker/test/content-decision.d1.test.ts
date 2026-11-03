@@ -191,7 +191,9 @@ describe('recorded content decisions on real D1', () => {
   it('continues to confirm legacy auto-hides without a quarantine case', async () => {
     const eventId = 'f5'.repeat(32);
     await DB.prepare("INSERT INTO moderation_decisions (target_type, target_id, action) VALUES ('event', ?, 'auto_hidden')").bind(eventId).run();
-    const storage = { get: async () => undefined, put: async () => {}, delete: async () => true } as unknown as DurableObjectStorage;
+    // The constructor looks for unfinished quarantine jobs in a transaction.
+    const storage = { get: async () => undefined, put: async () => {}, delete: async () => true,
+      transaction: async (fn: (tx: unknown) => unknown) => fn({ getAlarm: async () => null, list: async () => new Map() }) } as unknown as DurableObjectStorage;
     const state = { storage, blockConcurrencyWhile: async (fn: () => unknown) => fn() } as unknown as DurableObjectState;
     const watcher = new ReportWatcher(state, { DB, NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.example.test' });
     const response = await watcher.fetch(new Request('https://do/event-visibility', {
