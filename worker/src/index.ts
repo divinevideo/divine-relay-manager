@@ -941,8 +941,10 @@ export default {
     }
   },
 
-  // Cron repairs a missing case-recovery alarm every five minutes, including
-  // on an already-resident DO with watching and new admission disabled.
+  // Cron wakes the ReportWatcher DO every five minutes, so an evicted instance
+  // restores its relay connection on construction, and repairs a missing
+  // case-recovery alarm, including on an already-resident DO with watching and
+  // new admission disabled.
   async scheduled(event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     if (env.REPORT_WATCHER) {
       try {
