@@ -205,12 +205,7 @@ export class ReportWatcher implements DurableObject {
         }
       }
 
-      // A cron status read wakes this constructor after a broken alarm chain.
-      // Existing cases still need recovery when watching or admission is off.
-      const sexualJobs = await this.state.storage.list({ prefix: 'sexual-job:', limit: 1 });
-      if (sexualJobs.size && await this.state.storage.getAlarm() === null) {
-        await this.scheduleHealthCheck();
-      }
+      await this.ensureSexualRecoveryAlarm();
     });
   }
 
@@ -231,6 +226,13 @@ export class ReportWatcher implements DurableObject {
       }
 
       if (path === '/status' && request.method === 'GET') {
+        return this.handleStatus();
+      }
+
+      // Only the Worker's scheduled handler calls this through the DO binding.
+      // Its public report-watcher proxy refuses the /internal/ namespace.
+      if (path === '/internal/sexual-quarantine-maintenance' && request.method === 'POST') {
+        await this.ensureSexualRecoveryAlarm();
         return this.handleStatus();
       }
 
@@ -797,6 +799,17 @@ export class ReportWatcher implements DurableObject {
       this.reconnectDelay * RECONNECT_BACKOFF_MULTIPLIER,
       MAX_RECONNECT_DELAY_MS
     );
+  }
+
+  private async ensureSexualRecoveryAlarm(): Promise<void> {
+    // Startup and cron repair a missing alarm even while admission/watching is
+    // off. Keep the job check and alarm write atomic, and preserve every
+    // existing alarm regardless of whether it is earlier or later.
+    await this.state.storage.transaction(async tx => {
+      if (await tx.getAlarm() !== null) return;
+      const jobs = await tx.list({ prefix: 'sexual-job:', limit: 1 });
+      if (jobs.size) await tx.setAlarm(Date.now() + HEALTH_CHECK_INTERVAL_MS);
+    });
   }
 
   /**

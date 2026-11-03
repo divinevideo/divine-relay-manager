@@ -89,7 +89,7 @@ function createMockState() {
   let alarmTime: number | null = null;
   let concurrencyGate: Promise<unknown> = Promise.resolve();
 
-  return {
+  const state = {
     id: { toString: () => 'test-id' },
     storage: {
       get: vi.fn(async <T>(key: string) => storage.get(key) as T | undefined),
@@ -112,7 +112,9 @@ function createMockState() {
       return result;
     }),
     waitUntil: vi.fn(),
-  } as unknown as DurableObjectState;
+  };
+  Object.assign(state.storage, { transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(state.storage) });
+  return state as unknown as DurableObjectState;
 }
 
 // Mock environment

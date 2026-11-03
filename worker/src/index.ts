@@ -941,14 +941,15 @@ export default {
     }
   },
 
-  // Cron keep-alive: wake the ReportWatcher DO every 5 minutes so the alarm
-  // chain can't break permanently after a Cloudflare-initiated eviction.
+  // Cron repairs a missing case-recovery alarm every five minutes, including
+  // on an already-resident DO with watching and new admission disabled.
   async scheduled(event: ScheduledEvent, env: Env, _ctx: ExecutionContext): Promise<void> {
     if (env.REPORT_WATCHER) {
       try {
         const id = env.REPORT_WATCHER.idFromName('singleton');
         const stub = env.REPORT_WATCHER.get(id);
-        const response = await stub.fetch(new Request('https://do/status'));
+        const response = await stub.fetch(new Request('https://do/internal/sexual-quarantine-maintenance', { method: 'POST' }));
+        if (!response.ok) throw new Error(`ReportWatcher maintenance failed (${response.status})`);
         const status = await response.json() as { status?: { running: boolean } };
         console.log(`[scheduled] ReportWatcher status: running=${status?.status?.running}`);
       } catch (error) {
@@ -3540,6 +3541,12 @@ async function handleReportWatcherRoutes(
   }
 
   const subPath = path.replace('/api/report-watcher', '');
+  const doUrl = new URL(`https://do${subPath}${new URL(request.url).search}`);
+  // Check the normalized URL that would reach the DO, so dot segments and
+  // special-scheme slash normalization cannot expose its private cron path.
+  if (doUrl.pathname === '/internal' || doUrl.pathname.startsWith('/internal/')) {
+    return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
+  }
 
   // Get the singleton DO instance (using a fixed ID)
   const id = env.REPORT_WATCHER.idFromName('singleton');
@@ -3547,7 +3554,7 @@ async function handleReportWatcherRoutes(
 
   try {
     // Forward the request to the DO
-    const doRequest = new Request(`https://do${subPath}${new URL(request.url).search}`, {
+    const doRequest = new Request(doUrl, {
       method: request.method,
       headers: request.headers,
       body: request.body,

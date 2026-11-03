@@ -6,6 +6,7 @@ import * as nip86 from './nip86';
 import * as replay from './sexual-report-replay';
 import * as relayProfile from './relay-profile';
 import { finalizeEvent } from 'nostr-tools';
+import worker from './index';
 
 vi.mock('./sexual-quarantine-io', () => ({ createQuarantineIO: vi.fn() }));
 const ID = '1'.repeat(64);
@@ -18,6 +19,7 @@ function fixture(enabled = 'true', data = new Map<string, unknown>(), initialAla
     list: async ({ prefix = '', limit = 1000, startAfter = '' } = {}) => new Map([...data].filter(([k]) => k.startsWith(prefix) && k > startAfter).sort(([a], [b]) => a.localeCompare(b)).slice(0, limit)),
     setAlarm: vi.fn(async (time: number) => { alarm = time; }),
     getAlarm: vi.fn(async () => alarm),
+    deleteAlarm: async () => { alarm = null; },
   };
   const durable = { ...storage, transaction: async (fn: (tx: unknown) => unknown) => fn(storage) } as unknown as DurableObjectStorage;
   let ready: Promise<unknown> = Promise.resolve();
@@ -37,11 +39,71 @@ function fixture(enabled = 'true', data = new Map<string, unknown>(), initialAla
     await (watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
     return event as ReportEvent;
   };
-  return { watcher, io, send, durable, storage, state, env, data, ready };
+  const workerEnv = { ...env, ADMIN_API_KEY: 'synthetic-admin-key',
+    REPORT_WATCHER: { idFromName: () => 'singleton', get: () => ({ fetch: (request: Request) => watcher.fetch(request) }) } } as never;
+  const cron = () => worker.scheduled({ scheduledTime: Date.now() } as ScheduledEvent, workerEnv, {} as ExecutionContext);
+  return { watcher, io, send, durable, storage, state, env, data, ready, cron, workerEnv };
 }
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('sexual quarantine watcher integration', () => {
+  it('repairs a lost alarm through cron on the same stopped, admission-disabled object and converges pending holds', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const f = fixture('false'); await f.ready;
+    const q = new SexualQuarantine(f.durable, f.io);
+    await q.admit(ID, { id: '2'.repeat(64), pubkey: '3'.repeat(64), reason: 'nudity' }, 2);
+    await q.admit(ID, { id: '4'.repeat(64), pubkey: '5'.repeat(64), reason: 'nudity' }, 2);
+    f.io.eventHold.mockRejectedValueOnce(new Error('Unconfirmed event hold'));
+    await q.advance(ID);
+    await f.storage.setAlarm(1_030_000);
+    await f.storage.deleteAlarm();
+    const response = await f.watcher.fetch(new Request('https://do/status'));
+    expect(await response.json()).toMatchObject({ status: { running: false } });
+    expect(await f.storage.getAlarm()).toBeNull();
+
+    await f.cron();
+    expect(await f.storage.getAlarm()).toBe(1_030_000);
+    expect((await q.get(ID))?.state).toBe('pending');
+    expect(f.io.eventHold).toHaveBeenCalledTimes(1);
+    expect(await (await f.watcher.fetch(new Request('https://do/status'))).json()).toMatchObject({ status: { running: false } });
+    vi.setSystemTime(1_030_000);
+    await f.watcher.alarm();
+    expect((await q.get(ID))?.state).toBe('hidden');
+  });
+
+  it('keeps cron recovery idle when no durable jobs remain', async () => {
+    const f = fixture('false', new Map([['sexual-jobs-exist', true]])); await f.ready;
+    await f.cron();
+    expect(await f.storage.getAlarm()).toBeNull();
+  });
+
+  it.each([1_001_000, 1_100_000])('preserves an existing alarm at %i through cron maintenance', async alarm => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const data = new Map<string, unknown>([['sexual-jobs-exist', true], [`sexual-job:${ID}`, true]]);
+    const f = fixture('false', data, alarm); await f.ready;
+    await f.cron();
+    expect(await f.storage.getAlarm()).toBe(alarm);
+  });
+
+  it.each([
+    '/api/report-watcher/internal/sexual-quarantine-maintenance',
+    '/api/report-watcher/unused/../internal/sexual-quarantine-maintenance',
+    '/api/report-watcher/unused/%2e%2e/internal/sexual-quarantine-maintenance',
+    '/api/report-watcher\\internal\\sexual-quarantine-maintenance',
+    '/api/report-watcher/%69nternal/sexual-quarantine-maintenance',
+    '/api/report-watcher/%2finternal%2fsexual-quarantine-maintenance',
+  ])('does not expose private maintenance through the authenticated Worker proxy at %s', async path => {
+    const f = fixture('false'); await f.ready;
+    await f.durable.put(`sexual-job:${ID}`, true);
+    const response = await worker.fetch(new Request(`https://worker.test${path}`, {
+      method: 'POST', headers: { 'X-Admin-Key': 'synthetic-admin-key' },
+    }), f.workerEnv, {} as ExecutionContext);
+    expect(response.status).toBe(404);
+    expect(await f.storage.getAlarm()).toBeNull();
+  });
+
   it('rearms a lost alarm on construction and retries pending holds with admission and watching disabled', async () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_000_000);
