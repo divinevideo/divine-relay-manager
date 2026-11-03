@@ -38,9 +38,16 @@ export function EnvironmentSelector({ className }: EnvironmentSelectorProps) {
       relayUrl: env.relayUrl,
       apiUrl: env.apiUrl,
     }));
-    // Clear and refetch all queries to force fresh data for new environment
-    queryClient.clear();
-    queryClient.refetchQueries();
+    // A real change clears the cache in RelayManager, wherever the change is
+    // seen (this switch, or another tab's). Re-selecting the environment already
+    // in use changes nothing there, so it refreshes in place: clearing under a
+    // mounted screen would drop its data and strand a lookup in progress. It
+    // invalidates rather than refetches: the queries on screen re-read now, and
+    // the many inactive ones the app keeps (gcTime is Infinity) re-read when
+    // next used instead of all at once.
+    if (currentEnvironment?.relayUrl === env.relayUrl && currentEnvironment?.apiUrl === env.apiUrl) {
+      queryClient.invalidateQueries();
+    }
     setOpen(false);
   };
 

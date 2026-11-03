@@ -11,6 +11,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
+import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 
 import { RelayManager } from './RelayManager';
 
@@ -33,12 +34,16 @@ vi.mock('@/components/auth/AttributionNotice', () => ({ AttributionNotice: () =>
 
 describe('RelayManager natural-height tab panels', () => {
   it.each(['users', 'labels', 'debug'])('renders the %s tab inside a bounded, vertically scrollable panel', (tab) => {
+    // RelayManager reads the query client: it clears the cache when the
+    // environment changes.
     render(
-      <MemoryRouter initialEntries={[`/${tab}`]}>
-        <Routes>
-          <Route path={`/${tab}`} element={<RelayManager />} />
-        </Routes>
-      </MemoryRouter>,
+      <QueryClientProvider client={new QueryClient()}>
+        <MemoryRouter initialEntries={[`/${tab}`]}>
+          <Routes>
+            <Route path={`/${tab}`} element={<RelayManager />} />
+          </Routes>
+        </MemoryRouter>
+      </QueryClientProvider>,
     );
 
     const panel = screen.getByTestId(`tab-body-${tab}`).closest('[role="tabpanel"]');

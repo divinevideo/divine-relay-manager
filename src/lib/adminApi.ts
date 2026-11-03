@@ -521,15 +521,13 @@ function sanitizeRelayEvents(events: unknown): NostrEvent[] {
     }));
 }
 
-// Fetch reports via server-side relay query (replaces browser WebSocket)
-export async function fetchReports(apiUrl: string): Promise<NostrEvent[]> {
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[] }>(apiUrl, '/api/reports', 'GET');
-  return sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at);
-}
-
-// Fetch reports scoped to a single target (reported event id or pubkey) via the
-// worker's /api/reports filter. Used to resolve a deep-link whose target isn't in
-// the bulk window, so we can tell "aged out / vanished" apart from "still loading".
+// Fetch every report scoped to a single target (reported event id or pubkey)
+// via the worker's /api/reports filter, resolved or not, paged to the end or to
+// the worker's page bound (`truncated`).
+// Two callers: the queue's deep link, when its target isn't in the
+// needs-attention feed (a resolved report, or one that is gone), so the screen
+// can tell those apart from "still loading"; and the report pane's Related
+// Reports card, which counts the reported account's reports by pubkey.
 export async function fetchReportsByTarget(
   apiUrl: string,
   target: { event: string } | { pubkey: string }
@@ -543,6 +541,114 @@ export async function fetchReportsByTarget(
     'GET'
   );
   return { events: sanitizeRelayEvents(data.events), truncated: data.truncated === true };
+}
+
+// The queue's read: every report whose target still needs a moderator, at any
+// age, from GET /api/reports?needs_attention=1. The worker has already removed
+// targets resolved by a person's decision or a resolution label. Targets
+// resolved by a relay ban are still here, and the queue filters those itself so
+// each ban list keeps its own failure handling (#221). So are targets only the
+// worker's own decisions resolved: no person has handled them, so the
+// sensitive switch must be able to take them. `automatedTargets` holds their
+// keys, which the queue's Hide resolved still counts as resolved (#332). A
+// worker from before this field sends none and leaves those targets out.
+//
+// `truncated` means the worker's walk over the relay's reports stopped at its
+// page bound, so older reports may be missing. The response's `counts` are
+// deliberately not read: every number the queue shows is counted from the
+// rows it renders. Nor is `resolution_truncated`: the queue's own label read
+// (/api/resolution-label-targets) walks the same labels with the same pager
+// and cap, so it is truncated exactly when this is, and already says so.
+export interface ReportsNeedingAttention {
+  events: NostrEvent[];
+  truncated: boolean;
+  // Epoch milliseconds, via parseOldestCovered.
+  oldestCovered: number | null;
+  // Target keys ("pubkey:<hex>", "event:<hex>") from `automated_targets`. A
+  // plain array, not a Set: TanStack Query keeps the previous data only for
+  // plain values, so a Set here rebuilt the whole queue on every unchanged poll.
+  automatedTargets: readonly string[];
+}
+
+export async function fetchReportsNeedingAttention(apiUrl: string): Promise<ReportsNeedingAttention> {
+  const data = await apiRequest<{
+    success: boolean;
+    events?: unknown;
+    truncated?: boolean;
+    oldest_covered?: number | null;
+    automated_targets?: unknown;
+    error?: string;
+  }>(apiUrl, '/api/reports?needs_attention=1', 'GET');
+
+  if (!data.success) {
+    throw new ApiError(data.error || 'Failed to load reports');
+  }
+
+  return {
+    events: sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at),
+    truncated: data.truncated === true,
+    oldestCovered: parseOldestCovered(data.oldest_covered),
+    // Only strings: anything else in the list names no target.
+    automatedTargets: Array.isArray(data.automated_targets)
+      ? data.automated_targets.filter((key): key is string => typeof key === 'string')
+      : [],
+  };
+}
+
+// One page of resolved report history, from GET /api/reports/resolved. Pages
+// walk back in time from `cursor`, the previous page's next_cursor.
+//
+// `done` is the only statement that history has ended. A page with no events
+// is not the end -- the relay page it was read from may have held no resolved
+// reports -- and a page with no next cursor is not the end unless `done` says
+// so: the worker found no point to continue from. A response without a boolean
+// `done` is refused rather than read as the end.
+export interface ResolvedReportsPage {
+  events: NostrEvent[];
+  nextCursor: number | null;
+  done: boolean;
+  // The page filled within one second, so the walk stepped past the rest of it.
+  skippedWithinSecond: boolean;
+  // The worker's walk over resolution labels stopped early, so some
+  // label-resolved reports may be missing from this page.
+  resolutionTruncated: boolean;
+}
+
+export async function fetchResolvedReportsPage(
+  apiUrl: string,
+  params: { cursor?: number; limit?: number },
+): Promise<ResolvedReportsPage> {
+  const qs = new URLSearchParams();
+  if (params.cursor !== undefined) qs.set('cursor', String(params.cursor));
+  if (params.limit !== undefined) qs.set('limit', String(params.limit));
+  const query = qs.toString();
+  const data = await apiRequest<{
+    success: boolean;
+    events?: unknown;
+    next_cursor?: unknown;
+    done?: unknown;
+    skipped_within_second?: unknown;
+    resolution_truncated?: unknown;
+    error?: string;
+  }>(apiUrl, `/api/reports/resolved${query ? `?${query}` : ''}`, 'GET');
+
+  if (!data.success) {
+    throw new ApiError(data.error || 'Failed to load resolved reports');
+  }
+  if (typeof data.done !== 'boolean') {
+    throw new ApiError('Resolved history response did not say whether it had ended');
+  }
+
+  const cursor = data.next_cursor;
+  return {
+    events: sanitizeRelayEvents(data.events).sort((a, b) => b.created_at - a.created_at),
+    // The worker sends only whole, non-negative seconds. Anything else could
+    // not be sent back as a cursor, so it ends paging instead of failing it.
+    nextCursor: typeof cursor === 'number' && Number.isInteger(cursor) && cursor >= 0 ? cursor : null,
+    done: data.done,
+    skippedWithinSecond: data.skipped_within_second === true,
+    resolutionTruncated: data.resolution_truncated === true,
+  };
 }
 
 // A capped resolution read that does not say it was capped un-hides handled

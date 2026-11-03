@@ -105,7 +105,7 @@ vi.mock('@/components/ThreadContext', () => ({
   ),
 }));
 vi.mock('@/components/UserProfileCard', () => ({
-  UserProfileCard: ({ hideMediaByDefault }: { hideMediaByDefault?: boolean }) => (
+  UserProfileCard: ({ hideMediaByDefault }: { hideMediaByDefault?: boolean | null }) => (
     <div data-testid="profile-card" data-hide={String(hideMediaByDefault)} />
   ),
 }));
@@ -114,7 +114,7 @@ vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
 // Stand-in that exposes showByDefault, so no media is ever loaded or fetched.
 vi.mock('@/components/MediaPreview', () => ({
-  MediaPreview: ({ showByDefault }: { showByDefault?: boolean }) => (
+  MediaPreview: ({ showByDefault }: { showByDefault?: boolean | null }) => (
     <div data-testid="media" data-show={String(showByDefault)} />
   ),
 }));
@@ -191,7 +191,7 @@ describe('ReportDetail for an old-build CSAM report', () => {
 
   it('hides the reported account images while the report set is still loading', () => {
     renderDetail(PLAIN_ILLEGAL, null);
-    expect(screen.getByTestId('profile-card').dataset.hide).toBe('true');
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('null');
   });
 
   it('shows media by default for a bare illegal report (control)', () => {
@@ -216,6 +216,36 @@ describe('ReportDetail for an old-build CSAM report', () => {
     );
     renderDetail(report);
     expect(screen.getByTestId('user-actions')).toHaveAttribute('data-report-category', 'NS-spam');
+  });
+});
+
+describe('ReportDetail when not all of the target reports may be loaded', () => {
+  // A target opened from resolved history pages holds only the reports on the
+  // pages loaded so far; a CSAM-signal one may sit on a page that is not.
+  function renderIncomplete(incomplete: boolean) {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    return render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <ReportDetail report={PLAIN_ILLEGAL} allReportsForTarget={[PLAIN_ILLEGAL]} targetReportsMayBePartial={incomplete} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  it('hides the reported account images and media by default', () => {
+    renderIncomplete(true);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('null');
+    // Not known yet, rather than false: see the null default in MediaPreview.
+    expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'null')).toBe(true);
+    // The thread avatars have no Show, and read not known yet as hidden.
+    expect(screen.getByTestId('thread').dataset.hideAvatars).toBe('true');
+  });
+
+  it('shows them for the same reports once they are known to be complete (control)', () => {
+    renderIncomplete(false);
+    expect(screen.getByTestId('profile-card').dataset.hide).toBe('false');
+    expect(screen.getAllByTestId('media').every(m => m.dataset.show === 'true')).toBe(true);
   });
 });
 

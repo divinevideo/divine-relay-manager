@@ -12,7 +12,8 @@ describe('resolvedKeysFrom', () => {
       [{ target_type: 'event', target_id: E1 }, { target_type: 'pubkey', target_id: P1 }, { target_type: 'media', target_id: 'x' }],
       [{ type: 'event', value: E2 }],
     );
-    expect([...keys].sort()).toEqual([`event:${E1}`, `event:${E2}`, `pubkey:${P1}`]);
+    expect([...keys.resolved].sort()).toEqual([`event:${E1}`, `event:${E2}`, `pubkey:${P1}`]);
+    expect(keys.automated.size).toBe(0);
   });
 
   it('does not change the case of a key', () => {
@@ -20,7 +21,20 @@ describe('resolvedKeysFrom', () => {
     // as the client does, or a mixed-case pubkey/id resolves on one side and
     // not the other.
     const keys = resolvedKeysFrom([{ target_type: 'pubkey', target_id: 'AbC' }], []);
-    expect(keys.has('pubkey:AbC')).toBe(true);
+    expect(keys.resolved.has('pubkey:AbC')).toBe(true);
+  });
+
+  it('keeps a target only the worker decided on out of resolved, unless a label also resolves it', () => {
+    const keys = resolvedKeysFrom(
+      [
+        { target_type: 'pubkey', target_id: P1, automated: true },  // the worker's age-review case only
+        { target_type: 'event', target_id: E1, automated: true },   // the worker's row, and a label
+        { target_type: 'event', target_id: E2 },                    // a person's decision
+      ],
+      [{ type: 'event', value: E1 }],
+    );
+    expect([...keys.resolved].sort()).toEqual([`event:${E1}`, `event:${E2}`]);
+    expect([...keys.automated]).toEqual([`pubkey:${P1}`]);
   });
 });
 
@@ -70,6 +84,20 @@ describe('selectReportsNeedingAttention', () => {
     );
     expect(result.events.map(r => r.id)).toEqual(['r1', 'r2']);
     expect(result.counts.targets).toBe(0);
+  });
+
+  it('keeps a target only the worker resolved, and marks it among the targets it kept', () => {
+    const result = selectReportsNeedingAttention(
+      [report('r1', [['p', P1]]), report('r2', [['p', P1]]), report('r3', [['e', E1]]), report('r4', [['e', E2]])],
+      new Set([`event:${E2}`]),
+      new Set(),
+      // P1 is automation-only. E1 is kept too, but unresolved, so not marked.
+      new Set([`pubkey:${P1}`, `event:${'9'.repeat(64)}`]),
+    );
+    expect(result.events.map(r => r.id)).toEqual(['r1', 'r2', 'r3']);
+    // Only kept targets are marked: the second automated key names no report here.
+    expect(result.automatedTargets).toEqual([`pubkey:${P1}`]);
+    expect(result.counts).toEqual({ targets: 2, resolved: 1 });
   });
 
   it('treats a valueless e tag as the event:undefined key, exactly as the client does', () => {

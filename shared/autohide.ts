@@ -69,17 +69,18 @@ export interface AutoHideStateRowLike {
   action: string;
 }
 
-// Targets auto-hidden and still waiting for a human: the newest auto-hide state
-// is hidden, unresolved, or a restore that failed. Rows must arrive newest
-// first -- the order getAutoHideStates returns -- because getLatestAutoHideState
-// takes the first state transition per target as authoritative.
+// Targets auto-hidden and still waiting for a human, each keyed to its latest
+// auto-hide state: hidden, unresolved, or a restore that failed. Rows must
+// arrive newest first -- the order getAutoHideStates returns -- because
+// getLatestAutoHideState takes the first state transition per target as
+// authoritative. The state is kept because the queue labels a target whose hide
+// or restore may not have landed differently from one that is hidden.
 //
-// The worker uses this now, to keep these targets in the queue payload. The
-// client adopts it in the queue-screen change, to split them into the
-// pending-review view; until then it still computes the same set inline
-// (Reports.tsx). Two copies would let the badge and the list it filters
-// disagree again.
-export function pendingReviewTargetKeys(rows: readonly AutoHideStateRowLike[]): Set<string> {
+// The worker uses the keys to keep these targets in the needs-attention
+// payload, and the queue uses the whole map to split them into the pending-
+// review view. One definition, so the badge and the list it labels cannot
+// disagree about which targets are waiting.
+export function pendingReviewTargetStates(rows: readonly AutoHideStateRowLike[]): Map<string, string> {
   const actionsByTarget = new Map<string, string[]>();
   for (const row of rows) {
     const key = `${row.target_type}:${row.target_id}`;
@@ -88,7 +89,7 @@ export function pendingReviewTargetKeys(rows: readonly AutoHideStateRowLike[]): 
     else actionsByTarget.set(key, [row.action]);
   }
 
-  const pending = new Set<string>();
+  const pending = new Map<string, string>();
   for (const [key, actions] of actionsByTarget) {
     const latest = getLatestAutoHideState(actions);
     if (
@@ -96,8 +97,12 @@ export function pendingReviewTargetKeys(rows: readonly AutoHideStateRowLike[]): 
       || latest === AUTO_HIDE_ACTION.unresolved
       || latest === AUTO_HIDE_ACTION.restoreFailed
     ) {
-      pending.add(key);
+      pending.set(key, latest);
     }
   }
   return pending;
+}
+
+export function pendingReviewTargetKeys(rows: readonly AutoHideStateRowLike[]): Set<string> {
+  return new Set(pendingReviewTargetStates(rows).keys());
 }

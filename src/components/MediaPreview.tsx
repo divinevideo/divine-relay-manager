@@ -396,7 +396,8 @@ export function InlineMediaPreview({
   content: string;
   tags: string[][];
   className?: string;
-  showByDefault?: boolean;
+  // As MediaPreview's: null while not known yet.
+  showByDefault?: boolean | null;
 }) {
   const [showMedia, toggleShowMedia] = useMediaVisibility(showByDefault);
   const [failedUrls, setFailedUrls] = useState<Map<string, 'unavailable' | 'error'>>(new Map());

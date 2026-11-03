@@ -40,6 +40,8 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
+import { overflowLine } from "@/lib/overflowLine";
+import { invalidateResolutionState } from "@/lib/queueInvalidation";
 import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -55,8 +57,9 @@ import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamS
 import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
-import { Flag, CheckCircle, History, Ban, ShieldX, Link2, User, FileText, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
+import { Flag, CheckCircle, History, Ban, ShieldX, User, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
+import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -78,7 +81,19 @@ interface ReportDetailProps {
   report: NostrEvent | null;
   allReportsForTarget?: NostrEvent[];
   allReportsForTargetTruncated?: boolean;
-  allReports?: NostrEvent[];
+  // allReportsForTarget may not be all of this target's reports, so a report on
+  // it that signals CSAM may be missing. Media and avatars then start hidden
+  // whatever the loaded reports say, until clicked. Not the same as
+  // allReportsForTargetTruncated, which only drives the "N+" floor mark: a read
+  // that stopped early is partial, but a partial set is also one that was never
+  // read for this target (a history page, or a fallback pool).
+  targetReportsMayBePartial?: boolean;
+  // The open report's target has left the list (handled elsewhere): none of its
+  // reports is in hand, and it went missing with no read in flight that could
+  // have brought it back. The queue decides this, since only it knows both
+  // reads; a target that is only being re-read is not one. Once true, it stays
+  // true through later reads until the target's reports are back in hand.
+  targetLeftList?: boolean;
   onDismiss?: () => void;
   // Which side of the queue's Pending review switch this report's target is
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
@@ -86,17 +101,7 @@ interface ReportDetailProps {
   switchState?: SwitchState;
 }
 
-// Helper to extract report target
-function getReportTarget(event: NostrEvent): { type: 'event' | 'pubkey'; value: string } | null {
-  const eTag = event.tags.find(t => t[0] === 'e');
-  if (eTag) return { type: 'event', value: eTag[1] };
-  const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return { type: 'pubkey', value: pTag[1] };
-  return null;
-}
-
-
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, allReports = [], onDismiss, switchState }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const {
@@ -122,9 +127,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
         .then(() => {
           queryClient.invalidateQueries({ queryKey: ['decisions'] });
           // The queue reads its resolved set from the resolution-state
-          // projection, not the decision log, so it needs its own invalidation
+          // projection, not the decision log, and the worker filters both
+          // report feeds by the same decisions, so all of them need refreshing
           // or the target stays listed until the next poll.
-          queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+          invalidateResolutionState(queryClient);
         })
         .catch((e) => {
           console.warn('[ReportDetail] audit log failed', e);
@@ -201,38 +207,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
 
-  // Find related reports: reports on this user AND reports on their events
-  const relatedReports = useMemo(() => {
-    if (!context.reportedUser.pubkey || !allReports.length) return { userReports: [], eventReports: [] };
-
-    const userPubkey = context.reportedUser.pubkey;
-    const currentTargetKey = context.target ? `${context.target.type}:${context.target.value}` : '';
-
-    // Reports directly on this user
-    const userReports = allReports.filter(r => {
-      const target = getReportTarget(r);
-      if (!target) return false;
-      // Don't include current report's target
-      if (`${target.type}:${target.value}` === currentTargetKey) return false;
-      return target.type === 'pubkey' && target.value === userPubkey;
-    });
-
-    // Reports on events by this user (we need to check if event author matches)
-    // For now, we use any 'e' reports where the report references this user via 'p' tag
-    // OR we check if the thread/event was authored by this user
-    const eventReports = allReports.filter(r => {
-      const target = getReportTarget(r);
-      if (!target || target.type !== 'event') return false;
-      // Don't include current report's target
-      if (`${target.type}:${target.value}` === currentTargetKey) return false;
-      // Check if report has a 'p' tag referencing this user
-      const pTag = r.tags.find(t => t[0] === 'p' && t[1] === userPubkey);
-      return !!pTag;
-    });
-
-    return { userReports, eventReports };
-  }, [allReports, context.reportedUser.pubkey, context.target]);
-
   const reviewMutation = useMutation({
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
@@ -256,12 +230,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return result;
     },
     onSuccess: (result, variables) => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['labels'] });
       // The queue filters on the worker-side projections of labels and
-      // decisions, not on the raw reads, so those are the keys to refresh.
+      // decisions, not on the raw reads, so those are the keys to refresh,
+      // along with both report feeds, which the worker filters the same way.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       decisionLog.refetch();
       if (result.recorded !== true || result.reconciled === false) {
@@ -313,10 +287,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     },
     onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
       // Resolution labels also gate whether the report reappears, so a reopen
       // that does not refresh them can leave the target hidden for a poll cycle
-      // -- a full minute on the label source.
+      // -- a full minute on the label source. The helper above refreshes the
+      // report feeds: a reopen moves the target out of resolved history and
+      // back into the needs-attention feed.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
@@ -366,7 +342,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // the action reports failure. Refresh it rather than leaving the panel
       // showing decisions the server no longer has.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
@@ -400,14 +376,34 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Check media status from moderation service
   const mediaStatus = useMediaStatus(mediaHashes);
 
-  // undefined while loading, then true/false once reports are available
+  // undefined while loading, then true/false once reports are available. A
+  // sensitive report in hand is true even when the reports may not be all of
+  // them: what is missing can only add to it. Otherwise partial reports are
+  // undefined. undefined and true both start media hidden until clicked. The
+  // thread, full-thread and repost avatars have no Show: for them undefined and
+  // true both hide, and only false shows them.
   const hasHighPriorityReports = useMemo(() => {
     if (!allReportsForTarget) return undefined;
-    return allReportsForTarget.some(r => {
+    const sensitive = allReportsForTarget.some(r => {
       const cat = getReportCategory(r);
       return HIGH_PRIORITY_CATEGORIES.includes(cat);
     }) || hasCsamSignal(allReportsForTarget);
-  }, [allReportsForTarget]);
+    if (sensitive) return true;
+    // On purpose, a target that turns partial with nothing sensitive in hand
+    // keeps the post media and the account card that were showing: those take
+    // undefined as "no change", and nothing known about the target is
+    // sensitive. The thread, full-thread and repost avatars, which have no
+    // Show, read undefined as hidden and do hide.
+    return targetReportsMayBePartial ? undefined : false;
+  }, [allReportsForTarget, targetReportsMayBePartial]);
+  // The pane's media viewers take "not known yet" as null rather than false:
+  // both start hidden, but only under null does a later false (the reports turn
+  // out sensitive) forget a Show the moderator made meanwhile. A target that
+  // left the list (see targetLeftList) is treated as sensitive, as main does:
+  // what showed by default hides, a Show on a target not known to be sensitive
+  // is forgotten, and a Show on a sensitive one is kept.
+  const mediaShownByDefault = targetLeftList ? false
+    : hasHighPriorityReports === undefined ? null : !hasHighPriorityReports;
 
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({
@@ -437,7 +433,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       // The pending-review view is built from the resolution-state projection's
       // auto-hide states, so a confirm has to refresh it to leave that view.
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
 
       decisionLog.refetch();
       toast({ title: "Auto-hide confirmed", description: "Content will remain hidden" });
@@ -458,10 +454,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return restoreEvent(eventId, moderatorPubkey, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
-      queryClient.invalidateQueries({ queryKey: ['reports'] });
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
-      queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+      invalidateResolutionState(queryClient);
 
       moderationStatus.recheck();
       decisionLog.refetch();
@@ -488,11 +483,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // media and bulk content actions, through EventActions, BulkDeleteByKind,
   // UserActions' bulk jobs and the delete below) call it with no change.
   const handleActionComplete = (change?: { accountStatusChanged: boolean }) => {
-    queryClient.invalidateQueries({ queryKey: ['reports'] });
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
-    queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+    invalidateResolutionState(queryClient);
     queryClient.invalidateQueries({ queryKey: ['media-status'] });
     queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
     // Reflect any ticket the action auto-closed so the panel flips to "Closed ✓".
@@ -819,7 +813,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   );
                 })}
                 {allReportsForTarget.length > 5 && (
-                  <p className="text-xs text-muted-foreground">+{allReportsForTarget.length - 5} more reports</p>
+                  <p className="text-xs text-muted-foreground">{overflowLine(allReportsForTarget.length - 5, allReportsForTargetTruncated)}</p>
                 )}
               </CardContent>
             </Card>
@@ -966,10 +960,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         <span>{new Date(context.thread.repostedEvent.created_at * 1000).toLocaleString()}</span>
                       </div>
                     </div>
-                    {/* Media in original post */}
+                    {/* Media in original post. Keyed by report, like the other
+                        viewers: a revealed one must not carry over to the next
+                        report. */}
                     <MediaPreview
+                      key={report.id}
                       event={context.thread.repostedEvent}
-                      showByDefault={hasHighPriorityReports === false}
+                      showByDefault={mediaShownByDefault}
                       maxItems={6}
                     />
                   </div>
@@ -983,10 +980,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           )}
 
           {/* Media Preview - show the actual content being reported */}
+          {/* Keyed by report: the thread of the next report is often cached, so
+              this stays mounted. MediaPreview itself starts again for a new
+              event, and hides when its default turns false, but another report
+              on the same event with the same default would keep a Show the
+              moderator made on this one. A fresh mount starts from
+              showByDefault. */}
           {displayEvent && (
             <MediaPreview
+              key={report.id}
               event={displayEvent}
-              showByDefault={hasHighPriorityReports === false}
+              showByDefault={mediaShownByDefault}
               maxItems={6}
             />
           )}
@@ -1070,12 +1074,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           <>
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported User</h4>
           <UserProfileCard
+            key={report.id}
             profile={context.reportedUser.profile}
             pubkey={context.reportedUser.pubkey}
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
-            hideMediaByDefault={hasHighPriorityReports !== false}
+            hideMediaByDefault={mediaShownByDefault === null ? null : !mediaShownByDefault}
             onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this
               // user (#156). Encoded: the p tag comes from an attacker-authored
@@ -1167,83 +1172,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
           <Separator />
 
-          {/* Related Reports - show reports on this user AND their events */}
-          {(relatedReports.userReports.length > 0 || relatedReports.eventReports.length > 0) && (
-            <Card className="border-orange-200 bg-orange-50/50 dark:bg-orange-950/20">
-              <CardHeader className="py-3">
-                <CardTitle className="text-sm flex items-center gap-2 text-orange-700 dark:text-orange-400">
-                  <Link2 className="h-4 w-4" />
-                  Related Reports ({relatedReports.userReports.length + relatedReports.eventReports.length} on same user)
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="py-0 pb-3">
-                <div className="space-y-2">
-                  {relatedReports.userReports.length > 0 && (
-                    <div>
-                      <p className="text-xs font-medium flex items-center gap-1 mb-1.5 text-muted-foreground">
-                        <User className="h-3 w-3" />
-                        Reports on this User ({relatedReports.userReports.length})
-                      </p>
-                      <div className="space-y-1">
-                        {relatedReports.userReports.slice(0, 3).map((r) => {
-                          const cat = getReportCategory(r);
-                          const catLabel = getCategoryLabel(cat);
-                          return (
-                            <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
-                              <Badge variant="outline" className="text-xs">{catLabel}</Badge>
-                              <span className="text-muted-foreground truncate flex-1">
-                                {r.content?.slice(0, 40) || 'No description'}
-                                {(r.content?.length || 0) > 40 && '...'}
-                              </span>
-                            </div>
-                          );
-                        })}
-                        {relatedReports.userReports.length > 3 && (
-                          <p className="text-xs text-muted-foreground pl-1">
-                            +{relatedReports.userReports.length - 3} more user reports
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                  {relatedReports.eventReports.length > 0 && (
-                    <div>
-                      <p className="text-xs font-medium flex items-center gap-1 mb-1.5 text-muted-foreground">
-                        <FileText className="h-3 w-3" />
-                        Reports on their Events ({relatedReports.eventReports.length})
-                      </p>
-                      <div className="space-y-1">
-                        {relatedReports.eventReports.slice(0, 3).map((r) => {
-                          const cat = getReportCategory(r);
-                          const catLabel = getCategoryLabel(cat);
-                          const target = getReportTarget(r);
-                          return (
-                            <div key={r.id} className="flex items-center gap-2 text-xs p-1.5 bg-background rounded">
-                              <Badge variant="outline" className="text-xs">{catLabel}</Badge>
-                              {target?.value && (
-                                <CopyableId
-                                  value={target.value}
-                                  type="note"
-                                  truncateStart={10}
-                                  truncateEnd={4}
-                                  size="xs"
-                                />
-                              )}
-                            </div>
-                          );
-                        })}
-                        {relatedReports.eventReports.length > 3 && (
-                          <p className="text-xs text-muted-foreground pl-1">
-                            +{relatedReports.eventReports.length - 3} more event reports
-                          </p>
-                        )}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              </CardContent>
-            </Card>
-          )}
+          {/* Related Reports: every report naming this account, read in full,
+              not just the loaded queue */}
+          <RelatedReportsCard pubkey={context.reportedUser.pubkey ?? ''} currentTarget={context.target} />
 
           {/* Section: Technical Details */}
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Technical Details</h4>
