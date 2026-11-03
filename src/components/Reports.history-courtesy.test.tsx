@@ -89,3 +89,73 @@ describe('a /reports/<id> link found only in resolved history', () => {
     expect(hideResolved()).toBeChecked();
   });
 });
+
+// A cached feed old enough that the visit re-reads it, and a re-read held
+// until the test releases it, answering with `reread`.
+function holdFeedReRead(reread: unknown[]) {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const reads = { feed: 0, history: 0 };
+  vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports?needs_attention=1')) {
+      reads.feed += 1;
+      await gate;
+      return jsonResponse({ success: true, events: reread, truncated: false });
+    }
+    if (url.includes('/api/reports/resolved')) {
+      reads.history += 1;
+      return jsonResponse(resolvedPage([HANDLED_REPORT], { nextCursor: null, done: true }));
+    }
+    if (url.includes('/api/resolution-label-targets')) {
+      return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+    }
+    if (url.includes('/api/resolution-state')) {
+      return jsonResponse({ success: true, resolved: [{ target_type: 'event', target_id: HANDLED_EVENT }], states: [] });
+    }
+    if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+    return jsonResponse({ success: true });
+  }));
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+  queryClient.setQueryData(['reports', RELAY_URL], {
+    events: [SPAM_REPORT], truncated: false, oldestCovered: null, automatedTargets: [],
+  }, { updatedAt: Date.now() - 120_000 });
+  return { queryClient, reads, release };
+}
+
+describe('a /reports/<id> link while the cached feed is re-read', () => {
+  const hideResolved = () => screen.getByRole('switch', { name: /hide resolved/i });
+
+  it('selects a report filed since the cached read without looking in history', async () => {
+    // Still unhandled, so only the re-read the visit starts holds it.
+    const NEW_REPORT = report('d'.repeat(64), 1751000900, [['e', '4'.repeat(64), 'spam'], ['p', '7'.repeat(64)]]);
+    const { queryClient, reads, release } = holdFeedReRead([NEW_REPORT, SPAM_REPORT]);
+    window.history.pushState({}, '', `/reports/${NEW_REPORT.id}`);
+    render(<TestApp queryClient={queryClient}><RoutedReports /></TestApp>);
+
+    await waitFor(() => expect(reads.feed).toBe(1));
+    expect(await screen.findByRole('switch', { name: /hide resolved/i })).toBeChecked();
+    expect(reads.history).toBe(0);
+
+    await act(async () => { release(); });
+    await waitFor(() => expect(screen.getByTestId('detail').dataset.reportId).toBe(NEW_REPORT.id));
+    expect(hideResolved()).toBeChecked();
+    expect(reads.history).toBe(0);
+  });
+
+  it('still looks in history once a re-read that changes nothing settles', async () => {
+    // The re-read answers with the cached events, so the feed keeps its
+    // identity: only the settling fetch can re-run the check.
+    const { queryClient, reads, release } = holdFeedReRead([SPAM_REPORT]);
+    window.history.pushState({}, '', `/reports/${HANDLED_REPORT.id}`);
+    render(<TestApp queryClient={queryClient}><RoutedReports /></TestApp>);
+
+    await waitFor(() => expect(reads.feed).toBe(1));
+    expect(await screen.findByRole('switch', { name: /hide resolved/i })).toBeChecked();
+    expect(reads.history).toBe(0);
+
+    await act(async () => { release(); });
+    await waitFor(() => expect(screen.getByTestId('detail').dataset.reportId).toBe(HANDLED_REPORT.id));
+    expect(hideResolved()).not.toBeChecked();
+  });
+});

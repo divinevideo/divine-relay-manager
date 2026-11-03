@@ -1312,8 +1312,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // this cannot re-select behind a dismissal.
         deepLinkSelectedRef.current = true;
         setSelectedReport(report);
-      } else if (hideResolved && !showPendingReview && urlHistoryTriedRef.current !== `${relayUrl}|${selectedReportId}`) {
+      } else if (hideResolved && !showPendingReview && !isFetching && urlHistoryTriedRef.current !== `${relayUrl}|${selectedReportId}`) {
         // The feed has answered and does not hold it: most likely resolved.
+        // Not while it is re-reading: a cached feed from before the report was
+        // filed lacks it, and the re-read may bring it. A visit re-reads a
+        // cache older than the app's one-minute staleTime; a fresher cache is
+        // not re-read, so a report filed within that minute still looks here.
         // Look in resolved history, as the old single read did for its newest
         // 200; this branch selects it once page 1 lands. An id older than
         // page 1 stays unselected, as it did then. A courtesy like the deep
@@ -1324,7 +1328,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setHideResolved(false);
       }
     }
-  }, [selectedReportId, listReports, selectedReport, hideResolved, showPendingReview, relayUrl]);
+  }, [selectedReportId, listReports, selectedReport, hideResolved, showPendingReview, isFetching, relayUrl]);
 
   // A deep link can select a report before ban/label/decision queries finish.
   // Re-check the selected target as resolution data arrives so it cannot stay
