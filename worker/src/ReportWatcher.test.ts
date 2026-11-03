@@ -97,7 +97,8 @@ function createMockState() {
         storage.set(key, value);
       }),
       delete: vi.fn(async (key: string) => storage.delete(key)),
-      list: vi.fn(async () => storage),
+      list: vi.fn(async ({ prefix = '', limit = Infinity }: { prefix?: string; limit?: number } = {}) =>
+        new Map([...storage].filter(([key]) => key.startsWith(prefix)).slice(0, limit))),
       setAlarm: vi.fn(async (time: number) => {
         alarmTime = time;
       }),
