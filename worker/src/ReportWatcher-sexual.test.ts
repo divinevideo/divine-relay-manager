@@ -9,8 +9,8 @@ import { finalizeEvent } from 'nostr-tools';
 
 vi.mock('./sexual-quarantine-io', () => ({ createQuarantineIO: vi.fn() }));
 const ID = '1'.repeat(64);
-function fixture(enabled = 'true', data = new Map<string, unknown>()) {
-  let alarm: number | null = null;
+function fixture(enabled = 'true', data = new Map<string, unknown>(), initialAlarm: number | null = null) {
+  let alarm = initialAlarm;
   const storage = {
     get: async (key: string) => structuredClone(data.get(key)),
     put: async (key: string, value: unknown) => { data.set(key, structuredClone(value)); },
@@ -20,7 +20,11 @@ function fixture(enabled = 'true', data = new Map<string, unknown>()) {
     getAlarm: vi.fn(async () => alarm),
   };
   const durable = { ...storage, transaction: async (fn: (tx: unknown) => unknown) => fn(storage) } as unknown as DurableObjectStorage;
-  const state = { storage: durable, blockConcurrencyWhile: async (fn: () => unknown) => fn(), waitUntil: vi.fn() } as unknown as DurableObjectState;
+  let ready: Promise<unknown> = Promise.resolve();
+  const state = { storage: durable, blockConcurrencyWhile: (fn: () => unknown) => {
+    ready = Promise.resolve(fn());
+    return ready;
+  }, waitUntil: vi.fn() } as unknown as DurableObjectState;
   const io = { snapshot: vi.fn(async () => ({ event: { id: ID }, assets: [] })), eventHold: vi.fn(async () => {}),
     mediaHold: vi.fn(async () => {}), verify: vi.fn(async () => true), restorationStatus: vi.fn(async () => 'visible' as const), review: vi.fn(async () => {}), recordDecision: vi.fn(async () => {}) };
   vi.mocked(createQuarantineIO).mockReturnValue(io);
@@ -33,11 +37,44 @@ function fixture(enabled = 'true', data = new Map<string, unknown>()) {
     await (watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
     return event as ReportEvent;
   };
-  return { watcher, io, send, durable, storage, state, env, data };
+  return { watcher, io, send, durable, storage, state, env, data, ready };
 }
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe('sexual quarantine watcher integration', () => {
+  it('rearms a lost alarm on construction and retries pending holds with admission and watching disabled', async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const f = fixture(); await f.ready;
+    const q = new SexualQuarantine(f.durable, f.io);
+    await q.admit(ID, { id: '2'.repeat(64), pubkey: '3'.repeat(64), reason: 'nudity' }, 2);
+    await q.admit(ID, { id: '4'.repeat(64), pubkey: '5'.repeat(64), reason: 'nudity' }, 2);
+    f.io.eventHold.mockRejectedValueOnce(new Error('Unconfirmed event hold'));
+    await q.advance(ID);
+    expect((await q.get(ID))?.state).toBe('pending');
+
+    const restarted = fixture('false', f.data); await restarted.ready;
+    const response = await restarted.watcher.fetch(new Request('https://do/status'));
+    expect(await response.json()).toMatchObject({ status: { running: false } });
+    expect(await restarted.storage.getAlarm()).toBe(1_030_000);
+    vi.setSystemTime(1_030_000);
+    await restarted.watcher.alarm();
+    expect((await new SexualQuarantine(restarted.durable, restarted.io).get(ID))?.state).toBe('hidden');
+  });
+
+  it('leaves the alarm absent on construction when only the sticky job-history marker remains', async () => {
+    const f = fixture('false', new Map([['sexual-jobs-exist', true]])); await f.ready;
+    expect(await f.storage.getAlarm()).toBeNull();
+  });
+
+  it.each([1_001_000, 1_100_000])('preserves an existing alarm at %i on construction with durable jobs', async alarm => {
+    vi.useFakeTimers();
+    vi.setSystemTime(1_000_000);
+    const data = new Map<string, unknown>([['sexual-jobs-exist', true], [`sexual-job:${ID}`, true]]);
+    const f = fixture('false', data, alarm); await f.ready;
+    expect(await f.storage.getAlarm()).toBe(alarm);
+  });
+
   it('accepts the engine queue cursor format on the authenticated proxy route', async () => {
     const f = fixture();
     const cursor = `sexual-review-v3:0:0000000000001000:${ID}`;

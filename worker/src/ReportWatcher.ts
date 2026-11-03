@@ -204,6 +204,13 @@ export class ReportWatcher implements DurableObject {
           console.log('[ReportWatcher] Migrated stored auto-hide config');
         }
       }
+
+      // A cron status read wakes this constructor after a broken alarm chain.
+      // Existing cases still need recovery when watching or admission is off.
+      const sexualJobs = await this.state.storage.list({ prefix: 'sexual-job:', limit: 1 });
+      if (sexualJobs.size && await this.state.storage.getAlarm() === null) {
+        await this.scheduleHealthCheck();
+      }
     });
   }
 
