@@ -1783,16 +1783,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const selectedTargetReportsPartial = !!selectedTarget
     && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
     && !targetedReadComplete;
-  // The "N+" floor mark: a targeted read that stopped early, or a feed target
-  // when the feed did, unless a targeted read of that target read it in full
-  // (an uppercase link misses the listed row, so the read runs; or the queue
-  // was down when the link landed and recovered after). A history-only
-  // selection stays plain "N": its reports were never read for this target,
-  // which is partial but not a read that stopped early.
-  const selectedTargetCountTruncated = targetedHistoryTruncated
-    || (!!queueFeed?.truncated && !!selectedTarget
-      && queueFeedTargetKeys.has(reportTargetKey(selectedTarget))
-      && !targetedReadComplete);
+  // Older history pages can contain more reports on an already listed target.
+  // Its count is a floor until the walk ends without gaps, unless the feed or
+  // an exact targeted read already read that target in full. Use the same rule
+  // for the row and pane; the footer counts loaded rows, not reports per target.
+  const historyReadComplete = footerState.kind === 'ended'
+    && !footerState.notes.length;
+  const targetCountTruncated = (key: string) => {
+    if (needsAttentionTargetKeys.has(key)) return false;
+    if (key === selectedSwitchKey && targetedReadComplete) return false;
+    return !(historyReadComplete && !feedTargetKeys.has(key));
+  };
+  const selectedTargetCountTruncated = !!selectedSwitchKey
+    && (targetedHistoryTruncated || (!!selectedPaneReports && targetCountTruncated(selectedSwitchKey)));
 
   // Built once and rendered in both the desktop pane and the mobile sheet so
   // the two views cannot drift. Reports render attacker-authored event data:
@@ -2129,7 +2132,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                         switchState={switchMembership.get(key)}
                         countTruncated={key === selectedSwitchKey
                           ? selectedTargetCountTruncated
-                          : !!queueFeed?.truncated && queueFeedTargetKeys.has(key)}
+                          : targetCountTruncated(key)}
                       />
                     );
                   })

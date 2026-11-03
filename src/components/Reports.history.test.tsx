@@ -10,7 +10,10 @@ import TestApp from '@/test/TestApp';
 import { resolvedPage } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
-vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
+vi.mock('@/components/ReportDetail', () => ({
+  ReportDetail: ({ allReportsForTargetTruncated }: { allReportsForTargetTruncated?: boolean }) =>
+    <div data-testid="detail" data-count-truncated={String(allReportsForTargetTruncated === true)} />,
+}));
 
 const RELAY_URL = 'wss://relay.example';
 const hex = (c: string) => c.repeat(64);
@@ -176,6 +179,40 @@ describe('resolved history is read on demand', () => {
 });
 
 describe('the history footer counts the rows on screen', () => {
+  it('marks a history target count as a floor until every page has been read, in its row and pane', async () => {
+    const olderReport = eventReport(hex('3'), hex('7'), 1751000500);
+    stubWorker({
+      pages: {
+        first: ok(resolvedPage([H1], { nextCursor: PAGE_ONE_CURSOR, done: false })),
+        [PAGE_ONE_CURSOR]: ok(resolvedPage([olderReport], { nextCursor: null, done: true })),
+      },
+    });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText(note(hex('3')));
+
+    expect(within(rowFor(hex('3'))!).getByText('1+ reports')).toBeInTheDocument();
+    // A complete needs-attention read already knows its target's report count.
+    expect(within(rowFor(hex('1'))!).getByText('1 report')).toBeInTheDocument();
+    await user.click(rowFor(hex('3'))!);
+    expect(screen.getByTestId('detail')).toHaveAttribute('data-count-truncated', 'true');
+
+    await user.click(screen.getByRole('button', { name: /load more/i }));
+    await screen.findByText('Showing 2 resolved. End of resolved history.');
+    expect(within(rowFor(hex('3'))!).getByText('2 reports')).toBeInTheDocument();
+    expect(screen.getByTestId('detail')).toHaveAttribute('data-count-truncated', 'false');
+  });
+
+  it.each(['skippedWithinSecond', 'resolutionTruncated'] as const)('keeps history target counts as floors when an ended walk has a %s gap', async (gap) => {
+    stubWorker({ pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true, [gap]: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText(note(hex('3')));
+    expect(within(rowFor(hex('3'))!).getByText('1+ reports')).toBeInTheDocument();
+  });
+
   it('counts resolved rows from both the feed and loaded history, and follows the filters', async () => {
     stubWorker({ pages: { first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })) } });
     const user = userEvent.setup();
