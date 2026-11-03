@@ -47,6 +47,8 @@ const PAGE_ONE_CURSOR = 1751000800;
 type Reply = () => Response | Promise<Response>;
 interface WorkerStub {
   feed?: unknown[];
+  // The needs-attention read stopped early (the red "stopped reading" banner).
+  feedTruncated?: boolean;
   bannedEvents?: string[];
   // The banned-posts read, when it should not answer with the list above.
   bannedEventsReply?: Reply;
@@ -76,7 +78,7 @@ function stubWorker(stub: WorkerStub) {
     }
     if (url.pathname === '/api/reports') {
       calls.feed += 1;
-      return jsonResponse({ success: true, events: stub.feed ?? [OPEN, BANNED], truncated: false });
+      return jsonResponse({ success: true, events: stub.feed ?? [OPEN, BANNED], truncated: stub.feedTruncated ?? false });
     }
     if (url.pathname === '/api/resolution-label-targets') {
       if (stub.labelsReply) return stub.labelsReply();
@@ -211,6 +213,18 @@ describe('the history footer counts the rows on screen', () => {
     await openHistory(user);
     await screen.findByText(note(hex('3')));
     expect(within(rowFor(hex('3'))!).getByText('1+ reports')).toBeInTheDocument();
+  });
+
+  it('keeps a feed target count as a floor after history ends, when the feed stopped early', async () => {
+    stubWorker({ feedTruncated: true, pages: { first: ok(resolvedPage([H1], { nextCursor: null, done: true })) } });
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText('Showing 2 resolved. End of resolved history.');
+    // The ended walk read every report on the history-only target, but not the
+    // reports older than the feed's cut-off on a target the feed holds.
+    expect(within(rowFor(hex('3'))!).getByText('1 report')).toBeInTheDocument();
+    expect(within(rowFor(hex('1'))!).getByText('1+ reports')).toBeInTheDocument();
   });
 
   it('counts resolved rows from both the feed and loaded history, and follows the filters', async () => {
