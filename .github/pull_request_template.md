@@ -14,7 +14,7 @@
 
 - [ ] `npm run test`
 - [ ] `npx tsc -p tsconfig.app.json --noEmit`
-- [ ] `npx vite build`
+- [ ] `npx vite build --mode development`
 - [ ] `cd worker && npx vitest run` if worker code changed
 - [ ] I could not run some validation locally, and I explained why below
 
