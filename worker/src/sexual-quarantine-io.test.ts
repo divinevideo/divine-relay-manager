@@ -239,6 +239,26 @@ describe('quarantine service IO', () => {
     expect(fetcher).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ['missing', { CF_ACCESS_CLIENT_SECRET: 'test-only-access-secret' }],
+    ['empty', { CF_ACCESS_CLIENT_ID: '', CF_ACCESS_CLIENT_SECRET: 'test-only-access-secret' }],
+  ])('rejects an Access client id that is %s before sending review data', async (_case, access) => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
+    await expect(createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test', ...access,
+    }).review(reviewItem())).rejects.toThrow('Review access credentials unavailable');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('sends only the ingestion key, over any scheme, when no Access pair is bound', async () => {
+    const fetcher = vi.fn(async (_url: string, _init: RequestInit) => new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', fetcher);
+    await createQuarantineIO({ ...env, COOP_URL: 'http://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test' }).review(reviewItem());
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0][1].headers).toEqual({ 'Content-Type': 'application/json', 'x-api-key': 'test-only-ingestion-key' });
+  });
+
   it('does not send Access credentials over an insecure COOP connection', async () => {
     const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
     await expect(createQuarantineIO({ ...env, COOP_URL: 'http://coop.example.test',
