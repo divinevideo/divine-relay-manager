@@ -16,11 +16,15 @@ single-report policy. No production deployment is established by local tests.
    addressable storage origin is a release blocker; cache purge alone is inadequate.
 3. Deploy Relay Manager with admission disabled (the default). Configure
    `COOP_URL`, secret `COOP_API_KEY`, and `REVIEWER_BASE_URL` for the same environment.
-   When COOP is behind Cloudflare Access, bind `CF_ACCESS_CLIENT_ID` and
-   `CF_ACCESS_CLIENT_SECRET` to a service token explicitly allowed by COOP's
+   When COOP is behind Cloudflare Access, bind dedicated `COOP_ACCESS_CLIENT_ID`
+   and `COOP_ACCESS_CLIENT_SECRET` to a service token explicitly allowed by COOP's
    Access application. Handoff forwards both headers over HTTPS and rejects
    incomplete credentials or redirects. A token accepted by another admin app
-   does not establish COOP access. Preserve the existing Osprey ingestion key;
+   does not establish COOP access. The dedicated pair can use Worker secrets or
+   Secrets Store bindings. Keep the shared `CF_ACCESS_CLIENT_ID` and
+   `CF_ACCESS_CLIENT_SECRET` unchanged for moderation-service and realness. COOP
+   never reads or falls back to that shared pair; with no dedicated pair bound,
+   handoff sends only the COOP ingestion key. Preserve the existing Osprey ingestion key;
    COOP key rotation can deactivate its current key.
    COOP links carry the source relay; the UI blocks reads/actions while a different
    environment is selected, and can switch only to configured environment pairs.

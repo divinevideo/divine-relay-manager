@@ -13,8 +13,8 @@ export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv, ZendeskSy
   COOP_URL?: string;
   COOP_API_KEY?: string | SecretStoreSecret;
   REVIEWER_BASE_URL?: string;
-  CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
-  CF_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
+  COOP_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
+  COOP_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
 }
 type Hold = { hold_id: string; version: number; active: boolean | number };
 type MediaHolds = { quarantined: boolean; base_status?: string; holds: Hold[] };
@@ -273,9 +273,9 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
       const key = typeof env.COOP_API_KEY === 'string' ? env.COOP_API_KEY : await env.COOP_API_KEY.get();
       if (!key) throw new Error('Review credentials unavailable');
       const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-api-key': key };
-      if (env.CF_ACCESS_CLIENT_ID !== undefined || env.CF_ACCESS_CLIENT_SECRET !== undefined) {
+      if (env.COOP_ACCESS_CLIENT_ID !== undefined || env.COOP_ACCESS_CLIENT_SECRET !== undefined) {
         const [clientId, clientSecret] = await Promise.all(
-          [env.CF_ACCESS_CLIENT_ID, env.CF_ACCESS_CLIENT_SECRET].map(binding =>
+          [env.COOP_ACCESS_CLIENT_ID, env.COOP_ACCESS_CLIENT_SECRET].map(binding =>
             typeof binding === 'string' ? binding : binding?.get()),
         );
         if (!clientId || !clientSecret) throw new Error('Review access credentials unavailable');
