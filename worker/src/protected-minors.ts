@@ -4,6 +4,7 @@
 import { createMinorAccount, type KeycastEnv } from './keycast-client';
 import { classifyClearReason } from '../../shared/retention';
 import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
+import { secretsMatch } from './secret-compare';
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const PUBKEY_RE = /^[0-9a-f]{64}$/;
@@ -29,22 +30,12 @@ async function resolveSecret(secret: string | SecretStoreSecret | undefined): Pr
   return secret?.get();
 }
 
-function constantTimeEqual(left: string, right: string): boolean {
-  const encoder = new TextEncoder();
-  const a = encoder.encode(left);
-  const b = encoder.encode(right);
-  let difference = a.length ^ b.length;
-  const length = Math.max(a.length, b.length);
-  for (let i = 0; i < length; i += 1) difference |= (a[i % Math.max(a.length, 1)] ?? 0) ^ (b[i % Math.max(b.length, 1)] ?? 0);
-  return difference === 0;
-}
-
 export async function verifyProtectedMinorService(request: Request, env: ProtectedMinorEnv): Promise<boolean> {
   const authorization = request.headers.get('Authorization');
   if (!authorization?.startsWith('Bearer ')) return false;
   const supplied = authorization.slice('Bearer '.length);
   const expected = await resolveSecret(env.PROTECTED_MINOR_SERVICE_TOKEN);
-  return Boolean(expected && supplied && constantTimeEqual(supplied, expected));
+  return Boolean(expected && supplied && secretsMatch(supplied, expected));
 }
 
 export async function createSubjectWithBinding(

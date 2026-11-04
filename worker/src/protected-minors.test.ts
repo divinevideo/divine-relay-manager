@@ -1,5 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
 import { handleProtectedMinorServiceRoute, UUID_RE } from './protected-minors';
+import { secretsMatch } from './secret-compare';
+
+// The real comparison, wrapped so a test can see the bearer check goes through it.
+vi.mock('./secret-compare', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./secret-compare')>();
+  return { ...actual, secretsMatch: vi.fn(actual.secretsMatch) };
+});
 
 const path = '/api/internal/protected-minors/resolve';
 const cors = {};
@@ -31,6 +38,14 @@ describe('protected-minor service authentication', () => {
       { PROTECTED_MINOR_SERVICE_TOKEN: { get: async () => 'service-token' } }, cors);
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: 'service_unavailable' });
+  });
+
+  it('routes the bearer check through secretsMatch', async () => {
+    vi.mocked(secretsMatch).mockClear();
+    const response = await handleProtectedMinorServiceRoute(request({ Authorization: 'Bearer service-token' }), path,
+      { PROTECTED_MINOR_SERVICE_TOKEN: 'service-token' }, cors);
+    expect(response.status).toBe(503);
+    expect(secretsMatch).toHaveBeenCalledWith('service-token', 'service-token');
   });
 
   it('rejects unauthorized requests before preparing D1', async () => {

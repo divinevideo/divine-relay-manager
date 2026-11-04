@@ -58,6 +58,7 @@ import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { verifyAccessJwt } from './access-jwt';
+import { secretsMatch } from './secret-compare';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -455,10 +456,10 @@ async function verifyAdminAccess(
   env: Env,
   options: { allowModRelayAdminKey?: boolean } = {}
 ): Promise<{ status: 401 | 503; error: string; code?: string } | null> {
-  // Server-to-server callers use a shared API key.
+  // Server-to-server callers use a shared API key, compared in constant time.
   const adminKey = request.headers.get('X-Admin-Key');
   if (adminKey) {
-    if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
+    if (env.ADMIN_API_KEY && secretsMatch(adminKey, env.ADMIN_API_KEY)) {
       return null;
     }
     if (options.allowModRelayAdminKey) {
@@ -466,7 +467,7 @@ async function verifyAdminAccess(
       // ADMIN_API_KEY for relay-rpc so it can be rotated without disrupting other callers.
       try {
         const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
-        if (modRelayKey && adminKey === modRelayKey) {
+        if (modRelayKey && secretsMatch(adminKey, modRelayKey)) {
           return null;
         }
       } catch (error) {
