@@ -13,6 +13,8 @@ export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv, ZendeskSy
   COOP_URL?: string;
   COOP_API_KEY?: string | SecretStoreSecret;
   REVIEWER_BASE_URL?: string;
+  CF_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
+  CF_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
 }
 type Hold = { hold_id: string; version: number; active: boolean | number };
 type MediaHolds = { quarantined: boolean; base_status?: string; holds: Hold[] };
@@ -270,9 +272,20 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
       if (!env.COOP_URL || !env.COOP_API_KEY || !env.REVIEWER_BASE_URL) throw new Error('Review delivery not configured');
       const key = typeof env.COOP_API_KEY === 'string' ? env.COOP_API_KEY : await env.COOP_API_KEY.get();
       if (!key) throw new Error('Review credentials unavailable');
+      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-api-key': key };
+      if (env.CF_ACCESS_CLIENT_ID !== undefined || env.CF_ACCESS_CLIENT_SECRET !== undefined) {
+        const [clientId, clientSecret] = await Promise.all(
+          [env.CF_ACCESS_CLIENT_ID, env.CF_ACCESS_CLIENT_SECRET].map(binding =>
+            typeof binding === 'string' ? binding : binding?.get()),
+        );
+        if (!clientId || !clientSecret) throw new Error('Review access credentials unavailable');
+        if (new URL(env.COOP_URL).protocol !== 'https:') throw new Error('Review access requires HTTPS');
+        headers['CF-Access-Client-Id'] = clientId;
+        headers['CF-Access-Client-Secret'] = clientSecret;
+      }
       const event = c.snapshot?.event as NostrEvent | undefined;
       const response = await serviceRequest(`${env.COOP_URL.replace(/\/$/, '')}/api/v1/content`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json', 'x-api-key': key },
+        method: 'POST', headers,
         body: JSON.stringify({ contentId: c.eventId, contentType: 'nostr_event', userId: event?.pubkey, sync: false,
           content: { event_id: c.eventId, pubkey: event?.pubkey, kind: event?.kind, content: event?.content,
             report_reason: 'nudity', verdict: c.goal === 'review' ? 'flag_for_review' : 'auto_hide',
