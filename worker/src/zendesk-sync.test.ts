@@ -822,7 +822,7 @@ describe('Zendesk webhook authentication compares in constant time', () => {
     });
   }
 
-  async function zendeskSignature(timestamp: string): Promise<string> {
+  async function existingWorkerSignature(timestamp: string): Promise<string> {
     const key = await crypto.subtle.importKey(
       'raw', new TextEncoder().encode(WEBHOOK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
     );
@@ -844,10 +844,10 @@ describe('Zendesk webhook authentication compares in constant time', () => {
     expect(secretsMatch).toHaveBeenCalledWith('short', WEBHOOK_SECRET);
   });
 
-  it('accepts a valid Zendesk webhook signature', async () => {
+  it('preserves acceptance of the existing worker signature format', async () => {
     const timestamp = '2026-11-04T12:00:00Z';
     const response = await worker.fetch(webhookRequest({
-      'X-Zendesk-Webhook-Signature': await zendeskSignature(timestamp),
+      'X-Zendesk-Webhook-Signature': await existingWorkerSignature(timestamp),
       'X-Zendesk-Webhook-Signature-Timestamp': timestamp,
     }), makeEnv(), ctx);
     expect(response.status).toBe(400);
@@ -860,7 +860,7 @@ describe('Zendesk webhook authentication compares in constant time', () => {
       'X-Zendesk-Webhook-Signature-Timestamp': timestamp,
     }), makeEnv(), ctx);
     expect(response.status).toBe(401);
-    expect(secretsMatch).toHaveBeenCalledWith('not-the-signature', await zendeskSignature(timestamp));
+    expect(secretsMatch).toHaveBeenCalledWith('not-the-signature', await existingWorkerSignature(timestamp));
   });
 });
 
