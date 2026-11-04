@@ -40,4 +40,17 @@ describe('secretsMatch', () => {
     expect(secretsMatch('', '')).toBe(false);
     expect(secretsMatch('anything', '')).toBe(false);
   });
+
+  it.each([
+    // An unresolved Secrets Store binding stringifies to '[object Object]'.
+    ['a Secrets Store binding', '[object Object]', { get: async () => 'admin-key-123' }],
+    ['null', 'null', null],
+    ['undefined', 'undefined', undefined],
+  ])('never matches when the expected secret is %s rather than a string', (_label, supplied, expected) => {
+    expect(secretsMatch(supplied, expected as unknown as string)).toBe(false);
+  });
+
+  it('never matches when the supplied value is not a string', () => {
+    expect(secretsMatch(null as unknown as string, 'null')).toBe(false);
+  });
 });

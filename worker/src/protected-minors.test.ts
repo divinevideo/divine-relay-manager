@@ -48,6 +48,14 @@ describe('protected-minor service authentication', () => {
     expect(secretsMatch).toHaveBeenCalledWith('service-token', 'service-token');
   });
 
+  it('passes the supplied bearer first, so timing follows the caller and not the token', async () => {
+    vi.mocked(secretsMatch).mockClear();
+    const response = await handleProtectedMinorServiceRoute(request({ Authorization: 'Bearer wrong' }), path,
+      { PROTECTED_MINOR_SERVICE_TOKEN: 'service-token' }, cors);
+    expect(response.status).toBe(401);
+    expect(secretsMatch).toHaveBeenCalledWith('wrong', 'service-token');
+  });
+
   it('rejects unauthorized requests before preparing D1', async () => {
     const prepareDb = vi.fn();
     const response = await handleProtectedMinorServiceRoute(request(), path,
