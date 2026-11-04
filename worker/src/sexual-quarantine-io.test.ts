@@ -11,6 +11,10 @@ const HASH = 'a'.repeat(64);
 const env = { NOSTR_NSEC: 'test', RELAY_URL: 'wss://relay.example.test', CDN_DOMAIN: 'media.example.test', BLOSSOM_WEBHOOK_SECRET: 'test-only-secret' };
 const video = (tags = [['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${HASH}`, 'm video/mp4']]) =>
   finalizeEvent({ kind: 34236, created_at: 1, tags, content: '' }, new Uint8Array(32).fill(2));
+type ReviewItem = Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
+const reviewItem = (event = video()) => ({ eventId: event.id, goal: 'review', state: 'review', reporters: 1,
+  firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
+  snapshot: snapshotVideo(event.id, event, env) }) as ReviewItem;
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('quarantine service IO', () => {
@@ -204,27 +208,19 @@ describe('quarantine service IO', () => {
   });
 
   it('accepts the real empty 202 COOP async submission response', async () => {
-    const event = video();
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 202 })));
-    const item = { eventId: event.id, goal: 'review', state: 'review', reporters: 1,
-      firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
-      snapshot: snapshotVideo(event.id, event, env) } as Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
     await expect(createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test', COOP_API_KEY: 'test',
-      REVIEWER_BASE_URL: 'https://review.example.test' }).review(item)).resolves.toBeUndefined();
+      REVIEWER_BASE_URL: 'https://review.example.test' }).review(reviewItem())).resolves.toBeUndefined();
   });
 
   it.each(['plain', 'store'])('authenticates COOP through Access with %s bindings', async source => {
-    const event = video();
     const fetcher = vi.fn(async () => new Response(null, { status: 202 }));
     vi.stubGlobal('fetch', fetcher);
     const binding = (value: string) => source === 'store' ? { get: async () => value } : value;
-    const item = { eventId: event.id, goal: 'review', state: 'review', reporters: 1,
-      firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
-      snapshot: snapshotVideo(event.id, event, env) } as Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
     await createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test',
       COOP_API_KEY: binding('test-only-ingestion-key'), REVIEWER_BASE_URL: 'https://review.example.test',
       CF_ACCESS_CLIENT_ID: binding('test-only-access-id'),
-      CF_ACCESS_CLIENT_SECRET: binding('test-only-access-secret') }).review(item);
+      CF_ACCESS_CLIENT_SECRET: binding('test-only-access-secret') }).review(reviewItem());
     expect(fetcher).toHaveBeenCalledWith('https://coop.example.test/api/v1/content', expect.objectContaining({
       redirect: 'manual', headers: expect.objectContaining({
         'x-api-key': 'test-only-ingestion-key', 'CF-Access-Client-Id': 'test-only-access-id',
@@ -234,29 +230,21 @@ describe('quarantine service IO', () => {
   });
 
   it.each(['missing', 'empty'])('rejects %s Access credentials before sending review data', async source => {
-    const event = video();
     const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
-    const item = { eventId: event.id, goal: 'review', state: 'review', reporters: 1,
-      firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
-      snapshot: snapshotVideo(event.id, event, env) } as Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
     await expect(createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test',
       COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test',
       CF_ACCESS_CLIENT_ID: 'test-only-access-id',
       ...(source === 'empty' ? { CF_ACCESS_CLIENT_SECRET: { get: async () => '' } } : {}),
-    }).review(item)).rejects.toThrow('Review access credentials unavailable');
+    }).review(reviewItem())).rejects.toThrow('Review access credentials unavailable');
     expect(fetcher).not.toHaveBeenCalled();
   });
 
   it('does not send Access credentials over an insecure COOP connection', async () => {
-    const event = video();
     const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
-    const item = { eventId: event.id, goal: 'review', state: 'review', reporters: 1,
-      firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
-      snapshot: snapshotVideo(event.id, event, env) } as Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
     await expect(createQuarantineIO({ ...env, COOP_URL: 'http://coop.example.test',
       COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test',
       CF_ACCESS_CLIENT_ID: 'test-only-access-id', CF_ACCESS_CLIENT_SECRET: 'test-only-access-secret',
-    }).review(item)).rejects.toThrow('Review access requires HTTPS');
+    }).review(reviewItem())).rejects.toThrow('Review access requires HTTPS');
     expect(fetcher).not.toHaveBeenCalled();
   });
 
