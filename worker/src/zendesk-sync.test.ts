@@ -863,3 +863,35 @@ describe('Zendesk webhook authentication compares in constant time', () => {
     expect(secretsMatch).toHaveBeenCalledWith('not-the-signature', await zendeskSignature(timestamp));
   });
 });
+
+describe('Zendesk age-review webhook authentication', () => {
+  // age-review-reply is the one webhook route whose secret is a Secrets Store
+  // binding, which the route resolves before comparing. A body with no
+  // ticket_id is refused after the gate (400), so 400 means authorized and 401
+  // means refused.
+  const AGE_REVIEW_SECRET = 'test-age-review-secret';
+
+  function ageReviewRequest(webhookKey: string) {
+    return new Request('https://api-relay-prod.divine.video/api/zendesk/age-review-reply', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Webhook-Key': webhookKey },
+      body: JSON.stringify({}),
+    });
+  }
+
+  const env = () => makeEnv({ ZENDESK_AGE_REVIEW_WEBHOOK_SECRET: { get: async () => AGE_REVIEW_SECRET } });
+
+  beforeEach(() => vi.mocked(secretsMatch).mockClear());
+
+  it('compares the key with the resolved secret, not the binding', async () => {
+    const response = await worker.fetch(ageReviewRequest(AGE_REVIEW_SECRET), env(), ctx);
+    expect(response.status).toBe(400);
+    expect(secretsMatch).toHaveBeenCalledWith(AGE_REVIEW_SECRET, AGE_REVIEW_SECRET);
+  });
+
+  it('refuses a wrong key', async () => {
+    const response = await worker.fetch(ageReviewRequest('wrong'), env(), ctx);
+    expect(response.status).toBe(401);
+    expect(secretsMatch).toHaveBeenCalledWith('wrong', AGE_REVIEW_SECRET);
+  });
+});
