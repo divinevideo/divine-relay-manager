@@ -3119,22 +3119,10 @@ async function verifyZendeskWebhook(
     return false;
   }
 
-  // Option 1: Simple API key header (X-Webhook-Key)
-  // Constant-time comparison via HMAC: HMAC both strings with a fixed key,
-  // compare the digests. Avoids timing side-channel on string equality.
+  // Option 1: Simple API key header (X-Webhook-Key), compared in constant time.
   const apiKey = request.headers.get('X-Webhook-Key');
-  if (apiKey && apiKey.length === secret.length) {
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      'raw', encoder.encode('webhook-compare'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-    );
-    const [macA, macB] = await Promise.all([
-      crypto.subtle.sign('HMAC', key, encoder.encode(apiKey)),
-      crypto.subtle.sign('HMAC', key, encoder.encode(secret)),
-    ]);
-    if (new Uint8Array(macA).every((v, i) => v === new Uint8Array(macB)[i])) {
-      return true;
-    }
+  if (apiKey && secretsMatch(apiKey, secret)) {
+    return true;
   }
 
   // Option 2: Zendesk native webhook signing (X-Zendesk-Webhook-Signature)
@@ -3164,7 +3152,7 @@ async function verifyZendeskWebhook(
 
   const expectedSig = btoa(String.fromCharCode(...new Uint8Array(signatureBytes)));
 
-  return signature === expectedSig;
+  return secretsMatch(signature, expectedSig);
 }
 
 // Verify NIP-98 HTTP Auth (kind 27235)

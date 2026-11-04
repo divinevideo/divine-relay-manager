@@ -1,5 +1,5 @@
-// ABOUTME: Constant-time comparison for shared secrets (admin API keys, service
-// ABOUTME: bearer tokens), so response timing can't reveal how much of a guess matched.
+// ABOUTME: Constant-time comparison for shared secrets (admin API keys, service bearer
+// ABOUTME: tokens, Zendesk webhook keys and signatures), so timing can't reveal how much of a guess matched.
 
 const encoder = new TextEncoder();
 

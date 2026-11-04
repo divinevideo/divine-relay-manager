@@ -1,5 +1,5 @@
 // ABOUTME: Tests secretsMatch, the constant-time comparison for shared secrets
-// ABOUTME: (admin API keys, service bearer tokens). Pins behaviour; timing isn't unit-testable.
+// ABOUTME: (admin keys, bearer tokens, webhook keys and signatures). Pins behaviour; timing isn't unit-testable.
 
 import { describe, it, expect } from 'vitest';
 import { secretsMatch } from './secret-compare';

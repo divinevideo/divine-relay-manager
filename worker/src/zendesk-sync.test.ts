@@ -5,6 +5,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from './index';
 import { syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { echoedFragments } from './test-helpers/secret-echo';
+import { secretsMatch } from './secret-compare';
+
+// The real comparison, wrapped so tests can see the webhook check goes through it.
+vi.mock('./secret-compare', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./secret-compare')>();
+  return { ...actual, secretsMatch: vi.fn(actual.secretsMatch) };
+});
 
 const WEBHOOK_SECRET = 'test-parse-report-secret';
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -799,5 +806,60 @@ describe('GET /api/tickets surfaces a lookup failure instead of an empty list', 
 
     expect(response.status).toBe(500);
     expect((await response.json() as { success: boolean }).success).toBe(false);
+  });
+});
+
+describe('Zendesk webhook authentication compares in constant time', () => {
+  // A body the route refuses after the gate (400), so 400 means authorized
+  // and 401 means refused.
+  const body = JSON.stringify({ ticket_id: 999, description: 'This is a report with no identifiers' });
+
+  function webhookRequest(headers: Record<string, string>) {
+    return new Request('https://api-relay-prod.divine.video/api/zendesk/parse-report', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body,
+    });
+  }
+
+  async function zendeskSignature(timestamp: string): Promise<string> {
+    const key = await crypto.subtle.importKey(
+      'raw', new TextEncoder().encode(WEBHOOK_SECRET), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'],
+    );
+    const mac = await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(`${timestamp}.${body}`));
+    return btoa(String.fromCharCode(...new Uint8Array(mac)));
+  }
+
+  beforeEach(() => vi.mocked(secretsMatch).mockClear());
+
+  it('compares the X-Webhook-Key with secretsMatch, supplied first', async () => {
+    const response = await worker.fetch(webhookRequest({ 'X-Webhook-Key': WEBHOOK_SECRET }), makeEnv(), ctx);
+    expect(response.status).toBe(400);
+    expect(secretsMatch).toHaveBeenCalledWith(WEBHOOK_SECRET, WEBHOOK_SECRET);
+  });
+
+  it('compares a wrong-length X-Webhook-Key instead of refusing on its length', async () => {
+    const response = await worker.fetch(webhookRequest({ 'X-Webhook-Key': 'short' }), makeEnv(), ctx);
+    expect(response.status).toBe(401);
+    expect(secretsMatch).toHaveBeenCalledWith('short', WEBHOOK_SECRET);
+  });
+
+  it('accepts a valid Zendesk webhook signature', async () => {
+    const timestamp = '2026-11-04T12:00:00Z';
+    const response = await worker.fetch(webhookRequest({
+      'X-Zendesk-Webhook-Signature': await zendeskSignature(timestamp),
+      'X-Zendesk-Webhook-Signature-Timestamp': timestamp,
+    }), makeEnv(), ctx);
+    expect(response.status).toBe(400);
+  });
+
+  it('compares the Zendesk webhook signature with secretsMatch, supplied first', async () => {
+    const timestamp = '2026-11-04T12:00:00Z';
+    const response = await worker.fetch(webhookRequest({
+      'X-Zendesk-Webhook-Signature': 'not-the-signature',
+      'X-Zendesk-Webhook-Signature-Timestamp': timestamp,
+    }), makeEnv(), ctx);
+    expect(response.status).toBe(401);
+    expect(secretsMatch).toHaveBeenCalledWith('not-the-signature', await zendeskSignature(timestamp));
   });
 });
