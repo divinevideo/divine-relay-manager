@@ -113,6 +113,9 @@ beforeEach(() => {
   blobReads = [];
   recordStatus = 'permanent_ban';
   vi.spyOn(console, 'error').mockImplementation(() => {});
+  // The allowed calls to /api/moderate-media in the parity table below log a
+  // line each from syncZendeskAfterAction.
+  vi.spyOn(console, 'log').mockImplementation(() => {});
   vi.spyOn(globalThis, 'fetch').mockImplementation((async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = new URL(String(input instanceof Request ? input.url : input));
     if (url.host === 'media.example' && url.pathname.startsWith('/admin/api/blob/')) {
