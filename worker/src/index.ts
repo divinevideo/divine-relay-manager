@@ -2656,8 +2656,8 @@ async function mediaLiftGuard(
 // /api/moderate-media's lift guard and nothing more: `pubkey` and `from` are
 // ignored here, where /api/moderate-media would run its account check and its
 // expected-state check. Writes no media decision; the caller writes. The
-// guard's ensureAgeReviewSchema may run the per-isolate schema bootstrap, as
-// it does for /api/moderate-media.
+// guard's ensureAgeReviewSchema may run the per-isolate schema bootstrap and
+// its backfills of older rows, as it does for /api/moderate-media.
 // Check-then-act, as on /api/moderate-media: the caller's write is a
 // separate request, so a case opened between the two is not seen.
 async function handleMediaLiftCheck(

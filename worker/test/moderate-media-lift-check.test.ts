@@ -50,6 +50,8 @@ const db = {
   prepare(sql: string) {
     let binds: unknown[] = [];
     const stmt = {
+      sql,
+      get binds() { return binds; },
       bind(...args: unknown[]) { binds = args; return stmt; },
       async first() {
         sqls.push({ sql, binds });
@@ -64,7 +66,10 @@ const db = {
     };
     return stmt;
   },
-  async batch() { return []; },
+  async batch(stmts: Array<{ sql: string; binds: unknown[] }>) {
+    for (const s of stmts) sqls.push({ sql: s.sql, binds: s.binds });
+    return stmts.map(() => ({ results: [], meta: { changes: 0 } }));
+  },
 };
 
 function env(extra: Record<string, unknown> = {}) {
@@ -284,17 +289,19 @@ describe('/api/moderate-media/lift-check', () => {
         recordStatus = r;
         openCase = s ? { id: 'case-open', pubkey: OWNER, state: s } : null;
       };
+      // Mixed case, so both routes have to agree on the hash a write uses too.
+      const asked = 'aB'.repeat(32);
       arrange();
-      const fromCheck = await check({ sha256: SHA, action });
+      const fromCheck = await check({ sha256: asked, action });
       expect(writes()).toHaveLength(0);
       arrange();
-      const fromModerate = await moderate({ sha256: SHA, action });
+      const fromModerate = await moderate({ sha256: asked, action });
       const wrote = writes().length === 1;
 
       expect(fromCheck.status === 200).toBe(wrote);
       if (wrote) {
-        expect(await fromCheck.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
-        expect(writes()[0].body).toMatchObject({ sha256: SHA });
+        expect(await fromCheck.json()).toEqual({ success: true, allowed: true, checked: true, sha256: asked.toLowerCase() });
+        expect(writes()[0].body).toMatchObject({ sha256: asked.toLowerCase() });
       } else {
         expect(fromCheck.status).toBe(fromModerate.status);
         expect(await fromCheck.json()).toEqual(await fromModerate.json());
