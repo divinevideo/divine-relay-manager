@@ -1804,7 +1804,7 @@ describe('relay-rpc admin access via MOD_RELAY_ADMIN_KEY (Secrets Store shared k
     expect(body.error).toBe('Missing method');
   });
 
-  it('does not authorize other admin endpoints with MOD_RELAY_ADMIN_KEY', async () => {
+  it('does not authorize /api/moderate-media, which writes media decisions, with MOD_RELAY_ADMIN_KEY', async () => {
     const testEnv = makeEnvWithModKey('mod-shared-key');
     const response = await worker.fetch(
       new Request('https://api-relay-prod.divine.video/api/moderate-media', {
