@@ -938,6 +938,36 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     ]);
   });
 
+  // A hidden thumbnail is already out of sight, and the hide may be age review's,
+  // which it lifts when the case clears; a ban would outlive it.
+  it('offers no Block again when the only thumbnail is hidden', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        hasBlockedMedia={true}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
+        ]} />
+    );
+
+    expect(screen.queryByRole('button', { name: /Block again/ })).not.toBeInTheDocument();
+  });
+
+  it('never sends a ban to a hidden thumbnail when blocking the video', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: true, isRestricted: false, action: 'QUARANTINE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
+  });
+
   it('offers no Block again on a video age review hid, so a hide never becomes a permanent ban', () => {
     // Age review un-hides on clear only what is hidden (worker/src/bulk-moderate.ts
     // MAY_CHANGE_FROM.SAFE), so a ban sent here would outlive the case.

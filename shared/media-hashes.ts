@@ -44,6 +44,8 @@ function imetaEntries(tag: string[]): Array<[string, string]> {
 export function extractMediaFiles(content: string, tags: string[][]): MediaFiles {
   const media = new Set<string>();
   const thumbnails = new Set<string>();
+  // The url and x of a video imeta: the video itself, whatever else names it.
+  const videoFiles = new Set<string>();
   let hasVideo = false;
 
   // Read last: a link in the content to a file the tags name as a thumbnail
@@ -56,7 +58,7 @@ export function extractMediaFiles(content: string, tags: string[][]): MediaFiles
       if (entries.some(([key, value]) => key === 'm' && value.toLowerCase().startsWith('video/'))) {
         hasVideo = true;
         for (const [key, value] of entries) {
-          if (key === 'url' || key === 'x') hashesIn(value).forEach((hash) => media.add(hash));
+          if (key === 'url' || key === 'x') hashesIn(value).forEach((hash) => { media.add(hash); videoFiles.add(hash); });
           else if (THUMBNAIL_KEYS.has(key)) hashesIn(value).forEach((hash) => thumbnails.add(hash));
         }
       } else {
@@ -78,12 +80,14 @@ export function extractMediaFiles(content: string, tags: string[][]): MediaFiles
     }
   }
 
-  // The media server's own {video}.jpg follows the video's status, so it is the
-  // video, not a second file.
-  const tagThumbnails = Array.from(thumbnails).filter((hash) => !media.has(hash));
-  const contentMedia = fromContent.filter((hash) => !tagThumbnails.includes(hash));
+  // A file the tags name as a video's thumbnail stays one wherever else it is
+  // named, in the content or another imeta: read as media, Unblock Media and
+  // Remove Restriction would lift it with the video. The exception is the video
+  // itself: the media server's own {video}.jpg follows the video's status, so it
+  // is the video, not a second file.
+  const tagThumbnails = Array.from(thumbnails).filter((hash) => !videoFiles.has(hash));
   return {
-    media: Array.from(new Set([...contentMedia, ...media])),
+    media: Array.from(new Set([...fromContent, ...media])).filter((hash) => !tagThumbnails.includes(hash)),
     thumbnails: tagThumbnails,
   };
 }

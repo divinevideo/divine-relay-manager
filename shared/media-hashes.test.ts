@@ -21,6 +21,15 @@ describe('extractMediaFiles', () => {
     expect(extractMediaFiles(content, tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
   });
 
+  it('keeps a thumbnail a thumbnail when another imeta names it as an image', () => {
+    const tags = [
+      ['imeta', `url https://media.divine.video/${VIDEO}`, 'm video/mp4', `image https://media.divine.video/${THUMB}`],
+      ['imeta', `url https://media.divine.video/${THUMB}`, 'm image/jpeg'],
+    ];
+
+    expect(extractMediaFiles('', tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+  });
+
   it('still reads a file only the content links as media', () => {
     const tags = [['imeta', `url https://media.divine.video/${VIDEO}`, 'm video/mp4']];
     const content = `see https://media.divine.video/${OTHER_THUMB}`;

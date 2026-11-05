@@ -295,6 +295,23 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [OTHER_VIDEO], thumbnailHashes: [] });
   });
 
+  it("keeps the original's thumbnail a thumbnail when the repost's text links it too", () => {
+    // Read as media, Unblock Media and Remove Restriction would lift it with the video.
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
+      content: `look https://media.divine.video/${THUMB}`,
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
+  });
+
   it("reads a repost's own media tags as well as the original's files", () => {
     repost.value = {
       id: '9'.repeat(64),

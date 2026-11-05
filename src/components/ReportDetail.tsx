@@ -393,9 +393,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     } else if (displayEvent) {
       add(displayEvent.content, displayEvent.tags);
     }
+    // As within one extraction, a file any source names as a thumbnail stays one:
+    // a repost's text linking the original's thumbnail does not make it a video,
+    // which Unblock Media and Remove Restriction would lift.
     return {
-      mediaHashes: Array.from(media),
-      thumbnailHashes: Array.from(thumbnails).filter(h => !media.has(h)),
+      mediaHashes: Array.from(media).filter(h => !thumbnails.has(h)),
+      thumbnailHashes: Array.from(thumbnails),
     };
   }, [displayEvent, context.thread?.repostedEvent]);
 

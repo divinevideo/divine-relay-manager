@@ -147,8 +147,12 @@ export function EventActions({
   // Restrict are both withheld (see UNREADABLE_REASON).
   const isDeleted = (hash: string) => statusOf(hash)?.action === 'DELETE';
   const videoDeleted = mediaHashes.some(isDeleted);
+  // A hidden thumbnail is skipped too: it is already out of sight, and the hide
+  // may be age review's, which the review lifts when the case clears and a ban
+  // would outlive (the same reason Block again is never offered on a hidden video).
   const filesToBlock = allFiles.filter((hash) =>
-    !(thumbnails.includes(hash) && (isDeleted(hash) || statusOf(hash)?.unreadable)));
+    !(thumbnails.includes(hash)
+      && (isDeleted(hash) || statusOf(hash)?.unreadable || statusOf(hash)?.action === 'QUARANTINE')));
   // Age Restrict also never touches a thumbnail that is blocked: that would weaken
   // it. (The buttons only offer Age Restrict when the video is not known to be
   // blocked.)
