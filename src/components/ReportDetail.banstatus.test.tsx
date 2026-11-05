@@ -23,6 +23,8 @@ const CHECKED_AT = new Date('2026-08-10T12:00:00Z');
 // Set in beforeEach; tests change single fields.
 const status = vi.hoisted(() => ({ value: {} as ModerationStatus }));
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),

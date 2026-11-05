@@ -147,6 +147,24 @@ export const RELAY_PROFILE_BADGE = {
   },
 } as const;
 
+// What a Keycast account lookup can say about an account (#132). Keycast holds
+// accounts that sign in through Divine login; a Divine user who holds their own
+// key is not in it, so "no account" must never read as "not a Divine user".
+export const ACCOUNT_TYPE_BADGE = {
+  divine: {
+    label: 'Divine login account',
+    title: 'Keycast has an account for this pubkey, so it signs in through Divine login.',
+  },
+  self_custody: {
+    label: 'No Divine login account',
+    title: "Keycast has no account for this pubkey. It may be an outside Nostr account, or a Divine user who holds their own key; this can't tell which.",
+  },
+  unknown: {
+    label: 'Account type unavailable',
+    title: 'The Keycast account lookup failed, timed out, or could not be made for this pubkey, so the account type is unknown.',
+  },
+} as const;
+
 // Build a public event URL. Only production routes to divine.video; staging/local
 // fall back to njump so moderators never get kicked to production unexpectedly.
 export function getPublicEventUrl(encodedRef: string, apiUrl?: string): string {

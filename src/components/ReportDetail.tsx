@@ -32,6 +32,7 @@ import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
+import { AccountTypeLabel } from "@/components/AccountTypeBadge";
 import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
@@ -829,6 +830,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                             navigate(`/events?pubkey=${pubkey}`);
                           }}
                         />
+                        <AccountTypeLabel pubkey={r.pubkey} />
                       </div>
                       {/* Report details */}
                       <div className="flex items-center gap-2 mb-1 min-w-0">
@@ -872,6 +874,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       navigate(`/events?pubkey=${pubkey}`);
                     }}
                   />
+                  <AccountTypeLabel pubkey={report.pubkey} />
                   <ReportClientText reports={[report]} />
                 </div>
                 {report.content ? (
@@ -1109,6 +1112,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           {(context.reportedUser.pubkey || (!context.isLoading && !isBannedEventLoading)) && (
           <>
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported User</h4>
+          <AccountTypeLabel pubkey={context.reportedUser.pubkey} />
           <UserProfileCard
             key={report.id}
             profile={context.reportedUser.profile}

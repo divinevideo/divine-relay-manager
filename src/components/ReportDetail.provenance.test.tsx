@@ -1,5 +1,5 @@
-// ABOUTME: Pins where report detail names the app a report says it was filed from:
-// ABOUTME: each entry under "Why This Was Reported", and not the header (#132).
+// ABOUTME: Pins report detail's provenance (#132): the app each report says it was filed
+// ABOUTME: from, and a Keycast account-type label for each reporter and the reported user.
 
 import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -14,6 +14,11 @@ const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
 
 
+// The label's own wording is pinned in AccountTypeBadge.test.tsx; here it names
+// the pubkey it was given, so the tests can see whose account each label is for.
+vi.mock('@/components/AccountTypeBadge', () => ({
+  AccountTypeLabel: ({ pubkey }: { pubkey?: string }) => (pubkey ? <span>{`account type of ${pubkey}`}</span> : null),
+}));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
@@ -168,5 +173,27 @@ describe('ReportDetail reporting app', () => {
     renderDetail([REPORT, unnamed]);
     const reasons = screen.getByText(/^Why This Was Reported/).closest('.border-red-200')!;
     expect(reasons).toHaveTextContent('No app named');
+  });
+});
+
+describe('ReportDetail account-type labels', () => {
+  it('labels every listed reporter and the reported user', () => {
+    renderDetail([REPORT, OTHER_REPORT]);
+    const reasons = screen.getByText(/^Why This Was Reported/).closest('.border-red-200')!;
+    expect(reasons).toHaveTextContent(`account type of ${REPORT.pubkey}`);
+    expect(reasons).toHaveTextContent(`account type of ${OTHER_REPORT.pubkey}`);
+    expect(screen.getByText(`account type of ${REPORTED_PUBKEY}`)).toBeInTheDocument();
+  });
+
+  it('labels the reporter on the single-report card when there is no group list', () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <ReportDetail report={REPORT} allReportsForTarget={undefined} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(screen.getByText(`account type of ${REPORT.pubkey}`)).toBeInTheDocument();
   });
 });

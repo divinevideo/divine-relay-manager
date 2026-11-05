@@ -1621,7 +1621,8 @@ export async function getAccountStatus(
 ): Promise<AccountStatusResponse> {
   return apiRequest<AccountStatusResponse>(
     apiUrl,
-    `/api/account-status/${pubkey}`,
+    // Encoded: callers can pass a report's attacker-authored p tag.
+    `/api/account-status/${encodeURIComponent(pubkey)}`,
     'GET',
   );
 }
