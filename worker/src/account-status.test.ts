@@ -16,7 +16,7 @@ function makeEnv(overrides: Partial<KeycastEnv> = {}): KeycastEnv {
 describe('handleAccountStatus', () => {
   afterEach(() => vi.unstubAllGlobals());
 
-  it('bounds the Keycast lookup with a 5-second timeout, so a hung Keycast reads as unavailable', async () => {
+  it('bounds the Keycast lookup with a 10-second timeout, so a hung Keycast reads as unavailable', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -25,7 +25,7 @@ describe('handleAccountStatus', () => {
     });
     vi.stubGlobal('fetch', fetchMock);
     await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS);
-    expect(timeout).toHaveBeenCalledWith(5000);
+    expect(timeout).toHaveBeenCalledWith(10_000);
     expect(fetchMock.mock.calls[0][1].signal).toBe(timeout.mock.results[0].value);
     timeout.mockRestore();
   });

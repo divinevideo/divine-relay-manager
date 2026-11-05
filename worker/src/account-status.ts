@@ -4,7 +4,10 @@
 import { getUserStatus, HEX_64, type KeycastEnv, type UserStatusResult } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 
-const ACCOUNT_STATUS_TIMEOUT_MS = 5000;
+// Not measured against Keycast's real latency. Matches STATUS_READ_TIMEOUT_MS in
+// media-server.ts, the other moderator-facing status read from another service,
+// and leaves room for a Keycast cold start under the browser's 30-second limit.
+const ACCOUNT_STATUS_TIMEOUT_MS = 10_000;
 
 function json(
   data: unknown,
