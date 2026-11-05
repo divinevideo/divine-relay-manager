@@ -86,6 +86,16 @@ vi.mock('@/components/UserActions', () => ({ UserActions: () => null }));
 vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
 vi.mock('@/components/ReporterCard', () => ({ ReporterInline: () => null }));
 vi.mock('@/components/UserIdentifier', () => ({ UserIdentifier: () => null }));
+// Related Reports reads the account's reports itself (RelatedReportsCard), not
+// from a prop, so the related lists come from this read.
+vi.mock('@/hooks/useRelatedReports', () => ({
+  useRelatedReports: () => ({
+    status: 'ready',
+    truncated: false,
+    userReports: [ACCOUNT_REPORT],
+    eventReports: [OTHER_EVENT_REPORT],
+  }),
+}));
 
 // Each report's NIP-56 type names a different inherited object key, so each
 // list in the pane is checked on its own.
@@ -119,7 +129,6 @@ function renderDetail() {
         <ReportDetail
           report={REPORT}
           allReportsForTarget={[REPORT]}
-          allReports={[REPORT, ACCOUNT_REPORT, OTHER_EVENT_REPORT]}
         />
       </TooltipProvider>
     </QueryClientProvider>,

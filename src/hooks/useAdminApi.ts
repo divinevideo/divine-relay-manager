@@ -24,6 +24,11 @@ export function useAdminApi() {
 
   // Memoize bound functions to prevent unnecessary re-renders
   const boundApi = useMemo(() => ({
+    getSexualQuarantineCases: (cursor?: string) => adminApi.getSexualQuarantineCases(apiUrl, cursor),
+    getSexualQuarantineCase: (eventId: string) => adminApi.getSexualQuarantineCase(apiUrl, eventId),
+    getSexualQuarantineHistory: (eventId: string) => adminApi.getSexualQuarantineHistory(apiUrl, eventId),
+    decideSexualQuarantine: (eventId: string, body: Parameters<typeof adminApi.decideSexualQuarantine>[2]) =>
+      adminApi.decideSexualQuarantine(apiUrl, eventId, body),
     // Info
     getWorkerInfo: () => adminApi.getWorkerInfo(apiUrl),
 
@@ -69,10 +74,12 @@ export function useAdminApi() {
       adminApi.listSuspendedPubkeys(apiUrl, opts),
 
     // Server-side relay queries (replaces browser WebSocket for freshness)
-    fetchReports: () =>
-      adminApi.fetchReports(apiUrl),
     fetchReportsByTarget: (target: { event: string } | { pubkey: string }) =>
       adminApi.fetchReportsByTarget(apiUrl, target),
+    fetchReportsNeedingAttention: () =>
+      adminApi.fetchReportsNeedingAttention(apiUrl),
+    fetchResolvedReportsPage: (params: { cursor?: number; limit?: number }) =>
+      adminApi.fetchResolvedReportsPage(apiUrl, params),
     fetchResolutionLabels: (opts?: { timeoutMs?: number }) =>
       adminApi.fetchResolutionLabels(apiUrl, opts),
     fetchResolutionState: (opts?: { timeoutMs?: number }) =>

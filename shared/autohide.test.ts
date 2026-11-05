@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { AUTO_HIDE_ACTION, pendingReviewTargetKeys } from './autohide';
+import { AUTO_HIDE_ACTION, pendingReviewTargetKeys, pendingReviewTargetStates } from './autohide';
 
 const row = (id: string, action: string) => ({ target_type: 'event', target_id: id, action });
 
@@ -35,5 +35,22 @@ describe('pendingReviewTargetKeys', () => {
       { target_type: 'pubkey', target_id: 'a', action: AUTO_HIDE_ACTION.hidden },
     ]);
     expect([...keys]).toEqual(['pubkey:a']);
+  });
+});
+
+describe('pendingReviewTargetStates', () => {
+  // The queue labels a target whose hide or restore may not have landed
+  // differently from one that is hidden, so it needs the latest state, not just
+  // that the target is pending.
+  it("keeps each pending target's latest state, newest first", () => {
+    const states = pendingReviewTargetStates([
+      row('a', AUTO_HIDE_ACTION.unresolved), row('a', AUTO_HIDE_ACTION.hidden),
+      row('b', AUTO_HIDE_ACTION.hidden),
+      row('c', AUTO_HIDE_ACTION.confirmed), row('c', AUTO_HIDE_ACTION.hidden),
+    ]);
+    expect(Object.fromEntries(states)).toEqual({
+      'event:a': AUTO_HIDE_ACTION.unresolved,
+      'event:b': AUTO_HIDE_ACTION.hidden,
+    });
   });
 });

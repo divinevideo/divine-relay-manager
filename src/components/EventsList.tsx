@@ -208,11 +208,24 @@ function EventCard({
           <p className="text-sm mt-2 text-muted-foreground truncate">
             {event.kind === 0 ? (() => {
               try {
-                const meta = JSON.parse(event.content);
+                const meta: unknown = JSON.parse(event.content);
+                // Not a JSON object, so there are no fields to show
+                if (typeof meta !== 'object' || meta === null || Array.isArray(meta)) {
+                  return truncateContent(event.content);
+                }
+                // A field holds whatever JSON value its author wrote; only text is shown
+                const fields = meta as Record<string, unknown>;
+                const text = (key: string) => {
+                  const value = fields[key];
+                  return typeof value === 'string' ? value : undefined;
+                };
+                const displayName = text('display_name');
+                const about = text('about');
+                const nip05 = text('nip05');
                 const parts: string[] = [];
-                if (meta.display_name) parts.push(meta.display_name);
-                if (meta.about) parts.push(meta.about);
-                else if (meta.nip05) parts.push(meta.nip05);
+                if (displayName) parts.push(displayName);
+                if (about) parts.push(about);
+                else if (nip05) parts.push(nip05);
                 return parts.join(' — ') || 'Profile update';
               } catch {
                 return truncateContent(event.content);

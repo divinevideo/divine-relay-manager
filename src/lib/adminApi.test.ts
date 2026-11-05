@@ -21,8 +21,9 @@ import {
   listBannedPubkeys,
   listBannedEvents,
   listSuspendedPubkeys,
-  fetchReports,
   fetchReportsByTarget,
+  fetchReportsNeedingAttention,
+  fetchResolvedReportsPage,
   fetchResolutionLabels,
   publishLabel,
   publishLabelAndBan,
@@ -797,6 +798,20 @@ describe('adminApi', () => {
 
         const { error } = await ban() as { error: unknown };
         expect(error).toBeInstanceOf(BanNotConfirmedError);
+      });
+
+      // The worker's gate answers 503 when it can't check the login at all.
+      // The request never reached the ban, so it is a plain failure, not a
+      // ban that may have landed.
+      it('rethrows an access_unavailable 503 unchanged without reading the ban list', async () => {
+        mockFetch.mockResolvedValueOnce(workerError(503, {
+          success: false, code: 'access_unavailable', error: 'Access verification is temporarily unavailable; try again shortly',
+        }));
+
+        const { error } = await ban() as { error: unknown };
+        expect(error).toBeInstanceOf(ApiError);
+        expect(error).not.toBeInstanceOf(BanNotConfirmedError);
+        expect(mockFetch).toHaveBeenCalledTimes(1);
       });
 
       // A 4xx is a refusal before anything ran (bad input, expired access), so
@@ -1889,75 +1904,180 @@ describe('adminApi', () => {
     });
   });
 
-  describe('fetchReports', () => {
-    it('should call /api/reports and return sorted events', async () => {
-      const events = [
-        { id: 'report1', kind: 1984, pubkey: 'pk1', created_at: 100, tags: [], content: '', sig: '' },
-        { id: 'report2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: [], content: '', sig: '' },
-      ];
-
+  describe('fetchReportsNeedingAttention', () => {
+    it('asks for the needs-attention mode and returns its reports newest first', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, events }),
+        json: async () => ({
+          success: true,
+          events: [
+            { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, tags: [], content: '', sig: '' },
+            { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: [], content: '', sig: '' },
+          ],
+          counts: { targets: 2, resolved: 7 },
+          truncated: false,
+          resolution_truncated: false,
+          oldest_covered: 100,
+        }),
       });
 
-      const result = await fetchReports(API_URL);
+      const result = await fetchReportsNeedingAttention(API_URL);
 
+      // The exact URL: without the parameter the worker serves its legacy
+      // newest-200 read, and nothing on screen would say so.
       expect(mockFetch).toHaveBeenCalledWith(
-        expect.stringContaining('/api/reports'),
-        expect.objectContaining({ method: 'GET' })
+        `${API_URL}/api/reports?needs_attention=1`,
+        expect.objectContaining({ method: 'GET' }),
       );
-      // Should be sorted newest first
-      expect(result[0].id).toBe('report2');
-      expect(result[1].id).toBe('report1');
+      expect(result.events.map(e => e.id)).toEqual(['r2', 'r1']);
+      expect(result.truncated).toBe(false);
     });
 
-    it('should return empty array when no events', async () => {
+    it('says the reports walk stopped early, and how far back it reached', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, events: [] }),
+        json: async () => ({ success: true, events: [], truncated: true, oldest_covered: 1751000000 }),
       });
 
-      const result = await fetchReports(API_URL);
-      expect(result).toEqual([]);
+      const result = await fetchReportsNeedingAttention(API_URL);
+
+      expect(result.truncated).toBe(true);
+      expect(result.oldestCovered).toBe(1751000000 * 1000);
     });
 
-    it('should throw on HTTP error', async () => {
+    it('treats only an explicit truncated: true as stopped early', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+
+      expect((await fetchReportsNeedingAttention(API_URL)).truncated).toBe(false);
+    });
+
+    it('reads the keys of targets only automation resolved, keeping strings only', async () => {
+      const key = `pubkey:${'a'.repeat(64)}`;
       mockFetch.mockResolvedValueOnce({
-        ok: false,
-        status: 502,
-        statusText: 'Bad Gateway',
-        json: async () => ({}),
+        ok: true,
+        json: async () => ({ success: true, events: [], automated_targets: [key, 42, null, ['x']] }),
       });
 
-      await expect(fetchReports(API_URL)).rejects.toThrow('HTTP 502');
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([key]);
+    });
+
+    it('reads none from a worker that sends no automated_targets, or not a list', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
+
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [], automated_targets: 'pubkey:x' }) });
+      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
     });
 
     it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {
       const events = [
-        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, content: '', sig: '' }, // tags missing
+        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, content: '', sig: '' },
         { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: null, content: '', sig: '' },
         { id: 'r3', kind: 1984, pubkey: 'pk3', created_at: 300, tags: 'junk', content: '', sig: '' },
         { id: 'r4', kind: 1984, pubkey: 'pk4', created_at: 400, tags: [['e', 'ok'], 'rogue', [42, 'x'], ['p', 'ok2']], content: '', sig: '' },
         null,
         'not an event',
       ];
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events }) });
 
+      const result = await fetchReportsNeedingAttention(API_URL);
+
+      expect(result.events.map(e => e.id)).toEqual(['r4', 'r3', 'r2', 'r1']);
+      expect(result.events.map(e => e.tags)).toEqual([[['e', 'ok'], ['p', 'ok2']], [], [], []]);
+    });
+
+    it("throws the worker's reason when the read fails", async () => {
       mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, events }),
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => ({ success: false, error: 'Relay page unconfirmed' }),
       });
 
-      const result = await fetchReports(API_URL);
+      await expect(fetchReportsNeedingAttention(API_URL)).rejects.toThrow('Relay page unconfirmed');
+    });
+  });
 
-      // Sorted newest-first; every survivor has fully validated string[][] tags
-      expect(result.map(e => e.id)).toEqual(['r4', 'r3', 'r2', 'r1']);
-      expect(result.map(e => e.tags)).toEqual([
-        [['e', 'ok'], ['p', 'ok2']],
-        [],
-        [],
-        [],
-      ]);
+  describe('fetchResolvedReportsPage', () => {
+    const page = (overrides: Record<string, unknown> = {}) => ({
+      success: true,
+      events: [
+        { id: 'r1', kind: 1984, pubkey: 'pk1', created_at: 100, tags: [['e', 'x']], content: '', sig: '' },
+        { id: 'r2', kind: 1984, pubkey: 'pk2', created_at: 200, tags: [['e', 'y']], content: '', sig: '' },
+      ],
+      next_cursor: 100,
+      done: false,
+      skipped_within_second: false,
+      resolution_truncated: false,
+      ...overrides,
+    });
+
+    it('reads the first page with no cursor', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page() });
+
+      const result = await fetchResolvedReportsPage(API_URL, { limit: 200 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/reports/resolved?limit=200`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+      expect(result).toMatchObject({ nextCursor: 100, done: false, skippedWithinSecond: false, resolutionTruncated: false });
+      expect(result.events.map(e => e.id)).toEqual(['r2', 'r1']);
+    });
+
+    it('reads a later page from the cursor', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page() });
+
+      await fetchResolvedReportsPage(API_URL, { cursor: 1751000000, limit: 200 });
+
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/reports/resolved?cursor=1751000000&limit=200`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
+    it('reports the end of history only when the worker says so', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page({ events: [], next_cursor: null, done: true }) });
+
+      expect(await fetchResolvedReportsPage(API_URL, {})).toMatchObject({ events: [], nextCursor: null, done: true });
+    });
+
+    it("carries the worker's notes on what a page skipped", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => page({ skipped_within_second: true, resolution_truncated: true }),
+      });
+
+      expect(await fetchResolvedReportsPage(API_URL, {})).toMatchObject({
+        skippedWithinSecond: true,
+        resolutionTruncated: true,
+      });
+    });
+
+    it('ends paging at a cursor it could not send back', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => page({ next_cursor: 99.5 }) });
+
+      expect((await fetchResolvedReportsPage(API_URL, {})).nextCursor).toBeNull();
+    });
+
+    it('refuses a response that does not say whether history ended', async () => {
+      // Anything answering on this path without the endpoint's contract. Read
+      // as the end, it would tell a moderator there is no more resolved
+      // history when nothing was checked.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+
+      await expect(fetchResolvedReportsPage(API_URL, {})).rejects.toThrow(/did not say whether it had ended/);
+    });
+
+    it("throws the worker's reason when the page fails", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false,
+        status: 502,
+        statusText: 'Bad Gateway',
+        json: async () => ({ success: false, error: 'Relay page unconfirmed' }),
+      });
+
+      await expect(fetchResolvedReportsPage(API_URL, {})).rejects.toThrow('Relay page unconfirmed');
     });
   });
 

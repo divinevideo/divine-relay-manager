@@ -1,7 +1,8 @@
 // ABOUTME: Main relay administration interface with tabs for events, users, reports, and labels
 // ABOUTME: Integrates all NIP-86 moderation tools into a unified dashboard with URL routing
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import { EventsList } from "@/components/EventsList";
 import { UserManagement } from "@/components/UserManagement";
@@ -10,7 +11,9 @@ import { Labels } from "@/components/Labels";
 import { DebugPanel } from "@/components/DebugPanel";
 import { SettingsDashboard } from "@/components/SettingsDashboard";
 import { AgeReview } from "@/components/AgeReview";
+import { SexualQuarantine } from "@/components/SexualQuarantine";
 import { EnvironmentSelector } from "@/components/EnvironmentSelector";
+import { getEnvironmentById } from "@/lib/environments";
 import { Card } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Server, FileText, Users, Settings, Flag, Tag, Bug, GripVertical, Clock } from "lucide-react";
@@ -23,6 +26,7 @@ import { AttributionNotice } from "@/components/auth/AttributionNotice";
 const TAB_DEFINITIONS = [
   { id: 'reports', label: 'Reports', icon: Flag },
   { id: 'age-review', label: 'Age Review', icon: Clock },
+  { id: 'sexual-quarantine', label: 'Sexual Quarantine', icon: Flag },
   { id: 'events', label: 'Events', icon: FileText },
   { id: 'users', label: 'Users', icon: Users },
   { id: 'labels', label: 'Labels', icon: Tag },
@@ -39,13 +43,12 @@ function loadTabOrder(): TabId[] {
   try {
     const stored = localStorage.getItem(STORAGE_KEY);
     if (stored) {
-      const parsed = JSON.parse(stored) as TabId[];
-      // Validate: must contain all tab IDs exactly once
-      if (
-        parsed.length === DEFAULT_TAB_ORDER.length &&
-        DEFAULT_TAB_ORDER.every(id => parsed.includes(id))
-      ) {
-        return parsed;
+      const parsed: unknown = JSON.parse(stored);
+      // Keep the saved order of known tabs, once each, and append tabs added
+      // since it was saved, so a new tab does not discard a custom order
+      if (Array.isArray(parsed)) {
+        const saved = [...new Set(parsed)].filter((id): id is TabId => DEFAULT_TAB_ORDER.includes(id as TabId));
+        return [...saved, ...DEFAULT_TAB_ORDER.filter(id => !saved.includes(id))];
       }
     }
   } catch {
@@ -68,6 +71,7 @@ function getTabFromPath(pathname: string): string {
   if (pathname.startsWith('/users')) return 'users';
   if (pathname.startsWith('/reports')) return 'reports';
   if (pathname.startsWith('/age-review')) return 'age-review';
+  if (pathname.startsWith('/sexual-quarantine')) return 'sexual-quarantine';
   if (pathname.startsWith('/labels')) return 'labels';
   if (pathname.startsWith('/settings')) return 'settings';
   if (pathname.startsWith('/debug')) return 'debug';
@@ -81,6 +85,71 @@ export function RelayManager() {
   const { config } = useAppContext();
 
   const currentTab = getTabFromPath(location.pathname);
+  const queryClient = useQueryClient();
+
+  // The Reports screen starts over whenever the environment actually changes,
+  // wherever the change is observed: the selector, another browser tab's
+  // storage event, or a link that names its environment.
+  //
+  // The cache is cleared on every change. Several reads carry no environment in
+  // their key (resolution state, the ban lists, most of the detail pane's), so
+  // they would otherwise serve the old environment's data in the new one, which
+  // the selector's own clear missed for a change made in another tab.
+  //
+  // A report or link in the URL belongs to the environment it was read from;
+  // left there, the screen the change remounts would look it up in the new one,
+  // reopening it or opening history to search for it. So it is dropped, except
+  // a genuine ?event= / ?pubkey= deep link whose &env= names the environment
+  // just switched to: the switch was made to open that link.
+  //
+  // Both are decided here, during render: Reports is not rendered at all for the
+  // pass in which the change is seen. An effect runs after the remounted
+  // screen's own mount effects, which would already have read the old cache and
+  // acted on the old URL. The effect clears the cache and cleans the URL, and
+  // settles only once the URL no longer carries the old report, so it does not
+  // depend on the router applying the navigation in the same pass.
+  //
+  // Not handled here: browser Back from the new environment's queue can still
+  // return to an earlier report URL of the old environment. That is deferred,
+  // with Back and Forward between report URLs, to the follow-up issue.
+  const environmentKey = `${config.relayUrl}|${config.apiUrl}`;
+  const [settledEnvironmentKey, setSettledEnvironmentKey] = useState(environmentKey);
+  const environmentChanged = settledEnvironmentKey !== environmentKey;
+  const urlCarriesReport = location.pathname.startsWith('/reports')
+    && (location.pathname !== '/reports' || location.search !== '');
+  // Only what Reports itself acts on counts as a link: /reports with ?event= or
+  // ?pubkey=, and its &env= naming an environment. A report id alongside ?env=
+  // is not one, and carries the old report into the new environment.
+  const searchParams = new URLSearchParams(location.search);
+  const isDeepLink = location.pathname === '/reports'
+    && (searchParams.has('event') || searchParams.has('pubkey'));
+  const linkEnvironment = getEnvironmentById(searchParams.get('env') ?? '');
+  const linkIsForThisEnvironment = isDeepLink && !!linkEnvironment
+    && linkEnvironment.relayUrl === config.relayUrl && linkEnvironment.apiUrl === config.apiUrl;
+  const stripUrl = environmentChanged && urlCarriesReport && !linkIsForThisEnvironment;
+  const holdReports = environmentChanged;
+  // The key whose reads the cache holds: the one it was last cleared for, and
+  // the settled key whenever nothing is mid-change. A change to a different key
+  // clears. A change undone before it settles must not leave the undone key
+  // recorded, or the next real switch to it would find it "held" and skip the
+  // clear, serving the other environment's reads.
+  const cacheHoldsKey = useRef(environmentKey);
+  useEffect(() => {
+    if (!environmentChanged) {
+      cacheHoldsKey.current = environmentKey;
+      return;
+    }
+    if (cacheHoldsKey.current !== environmentKey) {
+      queryClient.clear();
+      cacheHoldsKey.current = environmentKey;
+    }
+    if (stripUrl) {
+      // Replace: the old environment's report URL does not stay as an entry.
+      navigate('/reports', { replace: true });
+      return; // settle on the next pass, once the URL is clean
+    }
+    setSettledEnvironmentKey(environmentKey);
+  }, [environmentChanged, stripUrl, environmentKey, navigate, queryClient]);
 
   // Tab order state with localStorage persistence
   const [tabOrder, setTabOrder] = useState<TabId[]>(loadTabOrder);
@@ -180,7 +249,7 @@ export function RelayManager() {
       <div className="flex-1 min-h-0 overflow-hidden container mx-auto px-4 py-4 flex flex-col">
         <AttributionNotice />
         <Tabs value={currentTab} onValueChange={handleTabChange} className="flex-1 min-h-0 flex flex-col">
-          <TabsList className="shrink-0 grid w-full grid-cols-7">
+          <TabsList className="shrink-0 grid w-full grid-cols-8">
             {orderedTabs.map((tab) => {
               const Icon = tab.icon;
               const isDragOver = dragOverTab === tab.id;
@@ -210,19 +279,37 @@ export function RelayManager() {
             <EventsList relayUrl={config.relayUrl} />
           </TabsContent>
 
-          <TabsContent value="users" className="flex-1 min-h-0 mt-4">
+          {/* Users, Labels and Debug render natural-height content (no h-full
+              scroll pane of their own, unlike Events, Reports, Age Review or
+              Settings), so their bounded panels must scroll or long content runs
+              past the shell's overflow-hidden. */}
+          <TabsContent value="users" className="flex-1 min-h-0 overflow-y-auto mt-4">
             <UserManagement selectedPubkey={params.pubkey} />
           </TabsContent>
 
           <TabsContent value="reports" className="flex-1 min-h-0 mt-4">
-            <Reports relayUrl={config.relayUrl} selectedReportId={params.reportId} />
+            {/* Keyed by environment: the open report, and every action on it,
+                belongs to the relay and API it was read from, so a switch starts
+                the screen over instead of leaving a report open that would act
+                on the new one. */}
+            {!holdReports && (
+              <Reports
+                key={environmentKey}
+                relayUrl={config.relayUrl}
+                selectedReportId={params.reportId}
+              />
+            )}
           </TabsContent>
 
           <TabsContent value="age-review" className="flex-1 min-h-0 mt-4">
             <AgeReview />
           </TabsContent>
 
-          <TabsContent value="labels" className="flex-1 min-h-0 mt-4">
+          <TabsContent value="sexual-quarantine" className="flex-1 min-h-0 mt-4">
+            <SexualQuarantine />
+          </TabsContent>
+
+          <TabsContent value="labels" className="flex-1 min-h-0 overflow-y-auto mt-4">
             <Labels relayUrl={config.relayUrl} />
           </TabsContent>
 
@@ -230,7 +317,7 @@ export function RelayManager() {
             <SettingsDashboard />
           </TabsContent>
 
-          <TabsContent value="debug" className="flex-1 min-h-0 mt-4">
+          <TabsContent value="debug" className="flex-1 min-h-0 overflow-y-auto mt-4">
             <Card>
               <DebugPanel />
             </Card>

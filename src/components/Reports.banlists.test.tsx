@@ -5,6 +5,7 @@ import { render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
+import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 import { useBannedEvents, useBannedPubkeys } from '@/hooks/useRelayBanLists';
 
@@ -25,7 +26,7 @@ vi.mock('@/hooks/useRelayBanLists', async (orig) => {
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
 
 const TARGET_PUBKEY = 'd'.repeat(64);
-const QUEUE_POLL_MS = 15 * 1000;
+const BAN_LIST_POLL_MS = 15 * 1000;
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -49,6 +50,7 @@ beforeEach(() => {
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
+    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [] });
     if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
@@ -68,8 +70,8 @@ describe('Reports ban-list reads', () => {
     renderQueue();
 
     await waitFor(() => expect(useBannedEvents).toHaveBeenCalled());
-    expect(useBannedEvents).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: QUEUE_POLL_MS }));
-    expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: QUEUE_POLL_MS }));
+    expect(useBannedEvents).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: BAN_LIST_POLL_MS }));
+    expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: BAN_LIST_POLL_MS }));
   });
 
   it('reads the banned accounts with the default 30s staleTime without a deep link', async () => {

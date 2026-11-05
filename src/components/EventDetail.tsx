@@ -117,6 +117,23 @@ function formatEventId(id: string): string {
   }
 }
 
+// A profile field as text, or undefined when its author wrote any other JSON
+// value there.
+function textField(metadata: Record<string, unknown>, key: string): string | undefined {
+  const value = metadata[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+// The website as a link target, only when it is an http or https address.
+function httpHref(website: string): string | undefined {
+  try {
+    const url = new URL(website);
+    return url.protocol === 'http:' || url.protocol === 'https:' ? url.href : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // The picture and banner follow the event's media rule (useMediaVisibility):
 // showImagesByDefault is null while the event's reports are not known, and
 // false when one is sensitive.
@@ -126,11 +143,17 @@ function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
   showImagesByDefault: boolean | null;
 }) {
   const [showImages, toggleImages] = useMediaVisibility(showImagesByDefault, eventId);
-  let metadata: Record<string, unknown>;
+  let metadata: Record<string, unknown> | undefined;
   try {
-    metadata = JSON.parse(content);
+    const parsed: unknown = JSON.parse(content);
+    if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
+      metadata = parsed as Record<string, unknown>;
+    }
   } catch {
-    // If it's not valid JSON, fall back to raw display
+    // Not valid JSON: shown as written below
+  }
+  if (!metadata) {
+    // Not a JSON object, so there are no fields to show: fall back to raw display
     return (
       <Card>
         <CardHeader className="py-2 px-3">
@@ -148,14 +171,15 @@ function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
     );
   }
 
-  const name = metadata.name as string | undefined;
-  const displayName = metadata.display_name as string | undefined;
-  const about = metadata.about as string | undefined;
-  const picture = metadata.picture as string | undefined;
-  const banner = metadata.banner as string | undefined;
-  const nip05 = metadata.nip05 as string | undefined;
-  const website = metadata.website as string | undefined;
-  const lud16 = metadata.lud16 as string | undefined;
+  const name = textField(metadata, 'name');
+  const displayName = textField(metadata, 'display_name');
+  const about = textField(metadata, 'about');
+  const picture = textField(metadata, 'picture');
+  const banner = textField(metadata, 'banner');
+  const nip05 = textField(metadata, 'nip05');
+  const website = textField(metadata, 'website');
+  const websiteHref = website ? httpHref(website) : undefined;
+  const lud16 = textField(metadata, 'lud16');
   const bot = metadata.bot as boolean | undefined;
 
   return (
@@ -223,12 +247,17 @@ function ProfileMetadataCard({ content, eventId, showImagesByDefault }: {
         {/* Links */}
         {(website || lud16) && (
           <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-muted-foreground">
-            {website && (
-              <a href={website} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground">
+            {website && (websiteHref ? (
+              <a href={websiteHref} target="_blank" rel="noopener noreferrer" className="flex items-center gap-1 hover:text-foreground">
                 <Link className="h-3 w-3" />
                 {website.replace(/^https?:\/\//, '')}
               </a>
-            )}
+            ) : (
+              <span className="flex items-center gap-1">
+                <Link className="h-3 w-3" />
+                {website}
+              </span>
+            ))}
             {lud16 && (
               <span className="flex items-center gap-1">
                 <AtSign className="h-3 w-3" />

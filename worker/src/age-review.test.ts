@@ -6,7 +6,6 @@ import {
   handleUpdateAgeReviewCase,
   handleGetModerationStatus,
   handleParentContact,
-  handleParentConsent,
   handleAgeReviewReplyWebhook,
   handleCreateMinorAccount,
   checkAgeReviewDeadlines,
@@ -30,6 +29,7 @@ import { runBulkModeration } from './bulk-moderate';
 import { storeBulkNotes, ensureBulkNotesTable, deleteBulkFailure } from './bulk-notes';
 import { autoDeletePendingWarning, bulkLegStoppedWarning, listFallbackWarning } from '../../shared/bulk-moderation';
 import { echoedFragments, MALFORMED_WEBHOOK, rejectLikeWorkersRuntime } from './test-helpers/secret-echo';
+import { submitSignedConsent, consentPayloadHash } from './test-helpers/signed-consent';
 
 vi.mock('./keycast-client', () => ({
   suspendUser: vi.fn().mockResolvedValue({ success: true }),
@@ -1764,27 +1764,27 @@ describe('handleParentConsent', () => {
   it('requires the caller to own an eligible case', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
     const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(null) }) })) };
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(404);
   });
 
   it('rejects an under-13 case before reading the video', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', suspected_age_band: 'under_13' });
     const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
   });
 
   it('rejects a terminal case and an empty video file', async () => {
     const c = makeCase({ state: 'denied_closed' });
     const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
-    expect((await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+    expect((await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
     c.state = 'restricted_pending_parental_consent';
     const form = new FormData();
     form.set('email', 'parent@example.com');
     form.set('video', new File([], 'empty.mp4', { type: 'video/mp4' }));
     const empty = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', { method: 'POST', body: form });
-    expect((await handleParentConsent(empty, c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+    expect((await submitSignedConsent(empty, c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
   });
 
   it('rejects a non-video file', async () => {
@@ -1794,19 +1794,19 @@ describe('handleParentConsent', () => {
     const nonVideo = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', {
       method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=test' }, body: raw,
     });
-    const res = await handleParentConsent(nonVideo, c.id, c.pubkey, makeEnv(db), corsHeaders);
+    const res = await submitSignedConsent(nonVideo, c.id, c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(415);
   });
 
   it('rejects invalid email, disallowed state, and declared oversize upload', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
     const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
-    expect((await handleParentConsent(request('bad-email'), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+    expect((await submitSignedConsent(request('bad-email'), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
     const tooLarge = request();
     tooLarge.headers.set('Content-Length', String(83 * 1024 * 1024));
-    expect((await handleParentConsent(tooLarge, c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(413);
+    expect((await submitSignedConsent(tooLarge, c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(413);
     c.state = 'open_reported';
-    expect((await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
+    expect((await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders)).status).toBe(400);
   });
 
   function fakeBucket(fail = false): R2Bucket & { objects: Map<string, Uint8Array> } {
@@ -1833,16 +1833,17 @@ describe('handleParentConsent', () => {
     const db = { prepare: vi.fn().mockImplementation((sql: string) => ({
       bind: vi.fn().mockImplementation((...args: unknown[]) => ({
         first: vi.fn().mockResolvedValue(
-          sql.includes('FROM age_review_parent_consent_submissions') ? row : c),
+          sql.includes('FROM retention_legal_holds') ? { held: 0 }
+            : sql.includes('FROM age_review_parent_consent_submissions') ? row : c),
         run: vi.fn().mockImplementation(async () => {
-          calls.push(sql);
-          if (sql.includes('INSERT OR IGNORE')) {
+          if (!sql.startsWith('INSERT OR IGNORE INTO age_review_consent_objects') && !sql.startsWith('DELETE FROM age_review_consent_objects')) calls.push(sql);
+          if (sql.includes('INSERT OR IGNORE INTO age_review_parent_consent_submissions')) {
             if (row) return { meta: { changes: 0 } };
-            row = { status: 'processing', upload_token: null, ticket_id: null, lease_until: args[1], created_at: args[2], receipt_id: args[3], object_key: args[4] };
+            row = { payload_hash: args[5], status: 'processing', upload_token: null, ticket_id: null, lease_until: args[1], created_at: args[2], receipt_id: args[3], object_key: args[4] };
             return { meta: { changes: 1 } };
           }
-          if (sql.includes("receipt_id = NULL") && row) { row.status = 'processing'; row.receipt_id = null; row.object_key = null; row.case_version = null; row.ticket_attempt_at = null; }
-          if (sql.includes("SET status = 'stored'") && row) { row.status = 'stored'; row.content_type = args[0]; row.size_bytes = args[1]; row.receipt_id = args[2]; row.object_key = args[3]; }
+          if (sql.includes("receipt_id = NULL") && row) { row.status = 'processing'; row.receipt_id = null; row.object_key = null; row.case_version = null; row.ticket_attempt_at = null; row.payload_hash = null; }
+          if (sql.includes("SET status = 'stored'") && row) { row.status = 'stored'; row.content_type = args[0]; row.size_bytes = args[1]; row.receipt_id = args[2]; row.object_key = args[3]; row.payload_hash = args[5]; }
           if (sql.includes("SET status = 'commented'") && row) { row.status = 'commented'; row.ticket_id = args[0]; }
           if (sql.includes('SET ticket_id') && row) { row.ticket_id = args[0]; }
           if (sql.includes("state = 'submitted_for_review'")) { c.state = 'submitted_for_review' as never; }
@@ -1869,13 +1870,100 @@ describe('handleParentConsent', () => {
     return { fetchFn, comment: () => commentBody };
   }
 
+  it.each(['email', 'video', 'missing'])('rejects an unbound %s upload without completing storage or advancing', async (change) => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42 });
+    const { db, calls } = consentDb(c);
+    const bucket = fakeBucket();
+    const z = zendeskWithComment();
+    vi.stubGlobal('fetch', z.fetchFn);
+    const boundary = 'signed-boundary';
+    const raw = `--${boundary}\r\nContent-Disposition: form-data; name="email"\r\n\r\nparent@example.com\r\n--${boundary}\r\nContent-Disposition: form-data; name="video"; filename="clip.mp4"\r\nContent-Type: video/mp4\r\n\r\nclip\r\n--${boundary}--\r\n`;
+    const digest = Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(raw))), b => b.toString(16).padStart(2, '0')).join('');
+    const changed = change === 'email' ? raw.replace('parent@example.com', 'other@example.com') : change === 'video' ? raw.replace('\r\nclip\r\n', '\r\nedit\r\n') : raw;
+    const req = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', {
+      method: 'POST', headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` }, body: changed,
+    });
+    const res = await submitSignedConsent(req, c.id, c.pubkey, makeEnv(db, {
+      ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
+    } as Partial<AgeReviewEnv>), corsHeaders, change === 'missing' ? '' : digest);
+    expect(res.status).toBe(401);
+    expect(bucket.objects.size).toBe(0);
+    if (change !== 'missing') {
+      const pendingUpload = await vi.mocked(bucket.createMultipartUpload).mock.results[0].value;
+      expect(pendingUpload.abort).toHaveBeenCalledTimes(1);
+      expect(pendingUpload.complete).not.toHaveBeenCalled();
+    }
+    expect(calls).toEqual([]);
+    expect(z.fetchFn).not.toHaveBeenCalled();
+    expect(c.state).toBe('restricted_pending_parental_consent');
+  });
+
+  it('retains an earlier round when the replacement body does not verify', async () => {
+    const c = makeCase({ state: 'restricted_pending_parental_consent', version: 8 });
+    const prior = { status: 'commented', object_key: 'old-clip', receipt_id: 'old-receipt', case_version: 7 };
+    const { db, calls } = consentDb(c, prior);
+    const bucket = fakeBucket();
+    bucket.objects.set('old-clip', new Uint8Array([1, 2, 3]));
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db, { CONSENT_VIDEO_BUCKET: bucket } as Partial<AgeReviewEnv>), corsHeaders, '0'.repeat(64));
+    expect(res.status).toBe(401);
+    expect(bucket.objects.get('old-clip')).toEqual(new Uint8Array([1, 2, 3]));
+    expect(bucket.delete).not.toHaveBeenCalled();
+    expect(calls).toEqual([]);
+    expect(prior.status).toBe('commented');
+  });
+
+  it('verifies a retry even when its case is already submitted', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    const { db, calls } = consentDb(c);
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders, '0'.repeat(64));
+    expect(res.status).toBe(401);
+    expect(calls).toEqual([]);
+  });
+
+  it('explains an already submitted case without claiming a video was recorded', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    const { db, calls } = consentDb(c);
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ success: false, error: 'This case was already submitted for review' });
+    expect(calls).toEqual([]);
+  });
+
+  it('explains an already submitted case whose sent-back round never recorded a clip', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    // A send-back reset cleared the row, then an email reply submitted the case.
+    const { db, calls } = consentDb(c, { status: 'processing', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: null, object_key: null, case_version: null, ticket_attempt_at: null, created_at: 1, payload_hash: null });
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({ success: false, error: 'This case was already submitted for review' });
+    expect(calls).toEqual([]);
+  });
+
+  it('logs a retry whose body cannot be read', async () => {
+    const c = makeCase({ state: 'submitted_for_review' });
+    const { db } = consentDb(c);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const broken = new Request('https://api.test/v1/minor-review-cases/case-1/parent-consent', {
+      method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=test' },
+      body: new ReadableStream({ pull(controller) { controller.error(new Error('connection reset')); } }),
+      duplex: 'half',
+    } as RequestInit);
+    try {
+      const res = await submitSignedConsent(broken, c.id, c.pubkey, makeEnv(db), corsHeaders, 'a'.repeat(64));
+      expect(res.status).toBe(503);
+      expect(errorSpy).toHaveBeenCalledWith('[age-review] Failed to read consent retry:', expect.objectContaining({ message: 'connection reset' }));
+    } finally {
+      errorSpy.mockRestore();
+    }
+  });
+
   it('stores the clip in R2 and comments the reviewer link before advancing the case', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42, version: 7 });
     const { db, calls } = consentDb(c);
     const bucket = fakeBucket();
     const z = zendeskWithComment();
     vi.stubGlobal('fetch', z.fetchFn);
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
       CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
@@ -1894,7 +1982,7 @@ describe('handleParentConsent', () => {
     const { db, calls } = consentDb(c);
     const z = zendeskWithComment();
     vi.stubGlobal('fetch', z.fetchFn);
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
       CONSENT_VIDEO_BUCKET: fakeBucket(),
     } as Partial<AgeReviewEnv>), corsHeaders);
@@ -1910,7 +1998,7 @@ describe('handleParentConsent', () => {
       if (url.includes('/comments?')) return { ok: true, json: async () => ({ comments: [] }) };
       return { ok: true };
     }));
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token',
       CONSENT_VIDEO_BUCKET: fakeBucket(),
     } as Partial<AgeReviewEnv>), corsHeaders);
@@ -1918,23 +2006,25 @@ describe('handleParentConsent', () => {
     expect(calls.some((sql) => sql.includes("state = 'submitted_for_review'"))).toBe(false);
   });
 
-  it('keeps the case pending when storage fails and accepts a retry after submission', async () => {
+  it('keeps the case pending when storage fails and refuses an unverifiable submitted retry', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42 });
     const { db, calls } = consentDb(c);
     const env = makeEnv(db, { ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: fakeBucket(true) } as Partial<AgeReviewEnv>);
-    expect((await handleParentConsent(request(), c.id, c.pubkey, env, corsHeaders)).status).toBe(503);
+    expect((await submitSignedConsent(request(), c.id, c.pubkey, env, corsHeaders)).status).toBe(503);
     expect(calls.some((sql) => sql.includes("state = 'submitted_for_review'"))).toBe(false);
     c.state = 'submitted_for_review';
-    expect((await handleParentConsent(request(), c.id, c.pubkey, env, corsHeaders)).status).toBe(200);
+    expect((await submitSignedConsent(request(), c.id, c.pubkey, env, corsHeaders)).status).toBe(409);
   });
 
   it('advances an already-commented submission without uploading again', async () => {
+    const req = request();
+    const payload_hash = await consentPayloadHash(req);
     const c = makeCase({ state: 'restricted_pending_parental_consent', version: 3 });
-    const { db, calls } = consentDb(c, { status: 'commented', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'r1', object_key: 'k1', created_at: 1 });
+    const { db, calls } = consentDb(c, { payload_hash, status: 'commented', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'r1', object_key: 'k1', created_at: 1 });
     const bucket = fakeBucket();
     const mockFetch = vi.fn();
     vi.stubGlobal('fetch', mockFetch);
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, { CONSENT_VIDEO_BUCKET: bucket } as Partial<AgeReviewEnv>), corsHeaders);
+    const res = await submitSignedConsent(req, c.id, c.pubkey, makeEnv(db, { CONSENT_VIDEO_BUCKET: bucket } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(200);
     expect(mockFetch).not.toHaveBeenCalled();
     expect(bucket.createMultipartUpload).not.toHaveBeenCalled();
@@ -1942,13 +2032,15 @@ describe('handleParentConsent', () => {
   });
 
   it('resumes a stored upload without uploading again', async () => {
+    const req = request();
+    const payload_hash = await consentPayloadHash(req);
     const c = makeCase({ state: 'restricted_pending_parental_consent', zendesk_ticket_id: 42 });
-    const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'receipt-9', object_key: 'obj-9', created_at: Math.floor(Date.now() / 1000) });
+    const { db } = consentDb(c, { payload_hash, status: 'stored', upload_token: null, ticket_id: 42, lease_until: 0, receipt_id: 'receipt-9', object_key: 'obj-9', created_at: Math.floor(Date.now() / 1000) });
     const bucket = fakeBucket();
     bucket.objects.set('obj-9', new TextEncoder().encode('clip'));
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, json: async () => ({ comments: [{ body: 'Review: https://w/api/age-review/consent-video/receipt-9' }] }) });
     vi.stubGlobal('fetch', mockFetch);
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(req, c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(200);
@@ -1959,7 +2051,7 @@ describe('handleParentConsent', () => {
   it('rejects a 16+ claimed case on the support-review-only path', async () => {
     const c = makeCase({ state: 'restricted_pending_parental_consent', suspected_age_band: 'age_16_plus_claimed', allowed_resolution: 'support_review_only' });
     const db = { prepare: vi.fn().mockImplementation(() => ({ bind: vi.fn().mockReturnValue({ first: vi.fn().mockResolvedValue(c) }) })) };
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db), corsHeaders);
     expect(res.status).toBe(400);
   });
 
@@ -1970,7 +2062,7 @@ describe('handleParentConsent', () => {
     bucket.objects.set('old-key', new TextEncoder().encode('old'));
     const z = zendeskWithComment();
     vi.stubGlobal('fetch', z.fetchFn);
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(request(), c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(200);
@@ -1982,16 +2074,19 @@ describe('handleParentConsent', () => {
   });
 
   it('returns a non-retryable 409 when ticket creation needs manual reconciliation', async () => {
+    const req = request();
+    const payload_hash = await consentPayloadHash(req);
     const c = makeCase({ state: 'restricted_pending_parental_consent' });
-    const { db } = consentDb(c, { status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
+    const { db } = consentDb(c, { payload_hash, status: 'stored', upload_token: null, ticket_id: null, lease_until: 0, receipt_id: 'r-old', object_key: 'k-old', case_version: null, ticket_attempt_at: Math.floor(Date.now() / 1000) - 60 * 60, created_at: 1 });
     const bucket = fakeBucket();
     bucket.objects.set('k-old', new TextEncoder().encode('clip'));
     const mockFetch = vi.fn();
     vi.stubGlobal('fetch', mockFetch);
-    const res = await handleParentConsent(request(), c.id, c.pubkey, makeEnv(db, {
+    const res = await submitSignedConsent(req, c.id, c.pubkey, makeEnv(db, {
       ZENDESK_SUBDOMAIN: 'test', ZENDESK_EMAIL: 'agent@test.com', ZENDESK_API_TOKEN: 'token', CONSENT_VIDEO_BUCKET: bucket,
     } as Partial<AgeReviewEnv>), corsHeaders);
     expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ error: 'Consent submission needs manual review; contact support' });
     expect(mockFetch).not.toHaveBeenCalled();
   });
 
@@ -4655,4 +4750,3 @@ describe('ageReviewActiveGuard — non-canonical pubkey', () => {
     expect(response).toBeNull();
   });
 });
-

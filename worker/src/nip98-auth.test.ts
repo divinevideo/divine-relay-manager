@@ -115,3 +115,19 @@ describe('verifyNip98Auth host allowlist', () => {
     expect(res.valid).toBe(false);
   });
 });
+
+describe('verified payload tag extraction', () => {
+  it.each([
+    { tags: [['payload', 'a'.repeat(64)]], expected: 'a'.repeat(64) },
+    { tags: [], expected: undefined },
+    { tags: [['payload', 'bad']], expected: undefined },
+    { tags: [['payload', 'a'.repeat(64)], ['payload', 'b'.repeat(64)]], expected: undefined },
+    { tags: [['payload', 'a'.repeat(64), 'extra']], expected: undefined },
+  ])('exposes only one canonical signed hash: $tags', async ({ tags, expected }) => {
+    const evt = finalizeEvent({ kind: 27235, content: '', created_at: Math.floor(Date.now() / 1000),
+      tags: [['u', OWN], ['method', 'POST'], ...tags] }, generateSecretKey());
+    const result = await verifyNip98Auth(reqAtOwnHost(toHeader(evt), 'POST'), OWN);
+    expect(result.valid).toBe(true);
+    expect(result.payloadHash).toBe(expected);
+  });
+});

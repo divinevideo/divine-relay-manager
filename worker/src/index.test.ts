@@ -15,6 +15,21 @@ const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlf
 
 const ctx = {} as ExecutionContext;
 
+describe('parent-consent payload auth wiring', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('passes only the signed body digest to the upload handler', async () => {
+    const handler = vi.spyOn(ageReview, 'handleParentConsent').mockResolvedValue(new Response('{}'));
+    const url = 'https://worker.test/v1/minor-review-cases/case-1/parent-consent';
+    const digest = 'a'.repeat(64);
+    const signed = finalizeEvent({ kind: 27235, content: '', created_at: Math.floor(Date.now() / 1000),
+      tags: [['u', url], ['method', 'POST'], ['payload', digest]],
+    }, generateSecretKey());
+    await worker.fetch(new Request(url, { method: 'POST', headers: { Authorization: 'Nostr ' + btoa(JSON.stringify(signed)) }, body: 'upload' }), env, ctx);
+    expect(handler).toHaveBeenCalledWith(expect.any(Request), 'case-1', signed.pubkey, env, expect.anything(), digest);
+  });
+});
+
 describe('account-status route', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -159,6 +174,9 @@ describe('relay manager cors', () => {
   });
 });
 
+// A QUARANTINE: it reaches the upstream call with nothing read first, so only
+// the token resolution is under test. (A SAFE or AGE_RESTRICTED meets the
+// age-review lift guard first, #335.)
 describe('SERVICE_API_TOKEN secrets store resolution', () => {
   it('resolves plain string token', async () => {
     const testEnv = makeModerateMediaEnv('my-secret-token');
@@ -170,7 +188,7 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
           'X-Admin-Key': 'test-admin-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({ sha256: 'abc123', action: 'QUARANTINE' }),
       }),
       testEnv,
       ctx,
@@ -193,7 +211,7 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
           'X-Admin-Key': 'test-admin-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({ sha256: 'abc123', action: 'QUARANTINE' }),
       }),
       testEnv,
       ctx,
@@ -217,7 +235,7 @@ describe('SERVICE_API_TOKEN secrets store resolution', () => {
           'X-Admin-Key': 'test-admin-key',
           Origin: 'https://app.divine.video',
         },
-        body: JSON.stringify({ sha256: 'abc123', action: 'AGE_RESTRICTED' }),
+        body: JSON.stringify({ sha256: 'abc123', action: 'QUARANTINE' }),
       }),
       testEnv,
       ctx,

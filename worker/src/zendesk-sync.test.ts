@@ -137,12 +137,14 @@ function makeParseReportRequest(description: string, ticketId = 12345) {
   });
 }
 
+const PUBLISH_ADMIN_KEY = 'test-admin-key';
+
 function makeResolutionPublishRequest(targetEventId: string) {
   return new Request('https://api-relay-prod.divine.video/api/publish', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      'Cf-Access-Jwt-Assertion': 'test',
+      'X-Admin-Key': PUBLISH_ADMIN_KEY,
     },
     body: JSON.stringify({
       kind: 1985,
@@ -490,7 +492,10 @@ describe('addZendeskInternalNote solve payload', () => {
     const targetEventId = 'ab13eb2c66bea4cd8f538798054d23a02d5dca879401be5045b8482590e2482c';
     const response = await worker.fetch(
       makeResolutionPublishRequest(targetEventId),
-      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687' }),
+      makeEnv({ DB: db, ZENDESK_GROUP_ID: '15225535020687', ADMIN_API_KEY: PUBLISH_ADMIN_KEY, REPORT_WATCHER: {
+        idFromName: () => 'singleton',
+        get: () => ({ fetch: async () => Response.json({ success: true, recorded: true }) }),
+      } }),
       ctx,
     );
 
@@ -517,7 +522,7 @@ describe('addZendeskInternalNote solve payload', () => {
     expect(resolvedUpdate?.bindings).toEqual(['reviewed', expect.any(String), LINKED_TICKET_ID]);
   });
 
-  it.each(['hide_event', 'allow_event'])('resolves a linked ticket for final human action %s', async (action) => {
+  it.each(['hide_event', 'allow_event', 'sexual_quarantine_restore', 'sexual_quarantine_remove'])('resolves a linked ticket for final human action %s', async (action) => {
     const { db, sqlLog } = createMockDB();
     const mockFetch = vi.fn().mockResolvedValue({ ok: true, text: async () => '' });
     vi.stubGlobal('fetch', mockFetch);
@@ -575,6 +580,32 @@ describe('addZendeskInternalNote solve payload', () => {
     expect(mockFetch).toHaveBeenCalledTimes(1);
     // ...but failed, so D1 must NOT be marked resolved — the panel keeps the Close button.
     expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
+
+  it('keeps timed-out quarantine ticket delivery retryable', async () => {
+    const { db, sqlLog } = createMockDB([111]);
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((_resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    })));
+    await syncZendeskAfterAction(makeEnv({ DB: db }), 'sexual_quarantine_remove', 'event',
+      'a'.repeat(64), 'b'.repeat(64), 1);
+    expect(sqlLog.some(entry => entry.sql.includes('UPDATE zendesk_tickets'))).toBe(false);
+  });
+
+  it('gives each linked ticket its own timeout', async () => {
+    const { db, sqlLog } = createMockDB([111, 222, 333]);
+    vi.stubGlobal('fetch', vi.fn((_url: string, init: RequestInit) => new Promise((resolve, reject) => {
+      init.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+      setTimeout(() => resolve({ ok: true, text: async () => '' }), 40);
+    })));
+    // Three 40ms updates take longer than one 100ms budget shared between them.
+    await syncZendeskAfterAction(makeEnv({ DB: db }), 'sexual_quarantine_remove', 'event',
+      'a'.repeat(64), 'b'.repeat(64), 100);
+    const updatedIds = sqlLog
+      .filter(entry => entry.sql.includes('UPDATE zendesk_tickets'))
+      .map(entry => entry.bindings[2])
+      .sort();
+    expect(updatedIds).toEqual([111, 222, 333]);
   });
 });
 

@@ -7,6 +7,7 @@ import type { toast as showToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
+import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { ShieldX, Undo2, Video, ShieldAlert, Unlock, Trash2 } from 'lucide-react';
 
 export interface MediaHashStatus {
@@ -247,7 +248,7 @@ export function EventActions({
       api.logDecision({ ...params, moderatorPubkey })
         .then(() => {
           queryClient.invalidateQueries({ queryKey: ['decisions'] });
-          queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+          invalidateResolutionState(queryClient);
         })
         .catch((e) => {
           console.warn('[EventActions] audit log failed', e);

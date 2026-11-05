@@ -94,6 +94,10 @@ function stubFetch({
   const calls = { labels: 0, resolutionState: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
+    // The queue's read: every report that still needs attention.
+    if (url.includes('/api/reports?needs_attention=1')) {
+      return jsonResponse({ success: true, events, truncated: false });
+    }
     if (url.includes('/api/reports?')) {
       const hit = Object.keys(targeted).find((hex) => url.includes(hex));
       return jsonResponse({ success: true, events: hit ? targeted[hit] : [] });
@@ -374,11 +378,13 @@ describe('Reports sensitive pending-review switch', () => {
   });
 
   describe('while resolution labels load', () => {
-    // The CSAM target is resolved only by a resolution label. With Hide
-    // resolved on, labels gate the whole queue behind a skeleton, which would
-    // make "absent from the default view" true for the wrong reason. So the
-    // labels land empty first, Hide resolved goes off, and then the labels
-    // query is reset to a first load that has not answered yet.
+    // The CSAM target is resolved only by a resolution label. Labels gate
+    // every view but the pending-review one: the default view subtracts them,
+    // and the history view (Hide resolved off) counts resolved rows with them.
+    // So while a first load has not answered, the whole list waits behind a
+    // skeleton, and no CSAM report can show in it. The labels land empty
+    // first, Hide resolved goes off, and then the labels query is reset to a
+    // first load that has not answered yet.
     async function renderWithLabelsHeld() {
       let release: (targets: LabelTarget[]) => void = () => {};
       let first = true;
@@ -409,17 +415,26 @@ describe('Reports sensitive pending-review switch', () => {
       return { release: (targets: LabelTarget[]) => release(targets) };
     }
 
-    it('keeps a CSAM target behind the switch while resolution labels are still loading', async () => {
+    it('shows no CSAM target while resolution labels are still loading', async () => {
       await renderWithLabelsHeld();
 
-      expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument();
+      // The queue's own gate holds the whole list, which is safer than the
+      // switch's partial-list rule it replaces here: nothing is listed.
+      expect(screen.getByTestId('reports-loading-skeleton')).toBeInTheDocument();
+      expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+    });
+
+    it('keeps an unresolved CSAM target behind the switch once the labels land empty', async () => {
+      const { release } = await renderWithLabelsHeld();
+
+      await act(async () => { release([]); });
+      await waitFor(() => expect(screen.getByText(NOTE_SPAM)).toBeInTheDocument());
       expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
       expect(switchLabelText()).toBe('Pending review (sensitive)1');
     });
 
     it('drops a resolved CSAM target out of the switch', async () => {
       const { release } = await renderWithLabelsHeld();
-      expect(switchLabelText()).toBe('Pending review (sensitive)1');
 
       await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
       await waitFor(() =>

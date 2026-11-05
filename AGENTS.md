@@ -192,7 +192,7 @@ worker/
 ## Build, Test, and Validation Commands
 - `npm run test`: primary repo test command.
 - `npx tsc -p tsconfig.app.json --noEmit`: frontend type-check. **Bare `npx tsc --noEmit` is a false green here** — the root `tsconfig.json` has `"files": []` with project references, so in non-build mode it type-checks nothing and exits 0. Always pass `-p tsconfig.app.json` (or run `npm run test`).
-- `npx vite build`: frontend production build.
+- `npx vite build`: frontend production build. Stops unless `.env.local` holds the Cloudflare Access token; to check the code compiles without it, use `npx vite build --mode development`.
 - `npx vite --port 8080`: frontend dev server.
 - `cd worker && npx vitest run`: worker tests when touching worker code. **This is a partial run.** `worker/vitest.config.ts` deliberately excludes `test/**/*.d1.test.ts` and `test/**/*.e2e.test.ts` to keep the default suite fast and free of a Miniflare/workerd or local-relay dependency. Tests living in those files do not run here and their absence looks like a pass.
 - `cd worker && npm run test:d1`: D1-backed worker tests. Run these whenever a change touches D1 schema, migrations, or a route that reads or writes D1. A worker change can be fully green under `npx vitest run` while every test written for it sits in an excluded file.
@@ -202,7 +202,8 @@ worker/
 ```bash
 # Frontend
 npx vite --port 8080          # dev server
-npx vite build                # production build
+npx vite build                # production build (needs the Access token in .env.local)
+npx vite build --mode development   # check build, no token needed
 npx tsc -p tsconfig.app.json --noEmit   # type-check (bare `tsc --noEmit` checks nothing here)
 
 # Worker
@@ -299,8 +300,8 @@ All relay queries are subject to network latency (500ms-2s per round-trip). Use 
 
 ### Authentication layers
 
-1. **CF Access** (edge): Enforced on frontend and API domains. Unauthenticated requests never reach the worker.
-2. **Worker auth** (`verifyAdminAccess()`): Checks for CF Access JWT or API key header. Defense-in-depth.
+1. **CF Access** (edge): Enforced on the frontend and API domains. Service bindings (moderation-service) reach the worker without passing through Access.
+2. **Worker auth** (`verifyAdminAccess()`): Accepts an `X-Admin-Key` (`ADMIN_API_KEY`, or `MOD_RELAY_ADMIN_KEY` on `/api/relay-rpc`), or a `Cf-Access-Jwt-Assertion` that verifies against the team certs (`ACCESS_TEAM_DOMAIN`) and the API Access application's audience (`API_ACCESS_AUD`, a `[vars]` entry). The header's presence alone is not enough. Without `API_ACCESS_AUD` or `ACCESS_TEAM_DOMAIN`, no Access login is accepted. The admin UI reaches the API through a shared Access service token, so the verified token does not identify the moderator.
 3. **Zendesk endpoints**: Exempt from admin auth. Use HMAC signature verification (webhooks) or JWT validation (mobile SDK).
 
 ### Secrets

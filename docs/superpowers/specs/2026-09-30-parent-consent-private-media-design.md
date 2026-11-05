@@ -1,5 +1,25 @@
 # Parent-consent private media design
 
+## Upload body authentication
+
+The mobile client freezes the multipart body before signing. Its NIP-98 event carries one lowercase SHA-256 `payload` tag covering all bytes, including the email field, video, and multipart framing. The Worker obtains the digest from the verified event and hashes the full incoming stream with bounded memory. It completes the R2 multipart object only after the digest and email validate; otherwise it aborts that upload without replacing the previous round or advancing the case. Retries still verify their complete body before returning success.
+
+The selected opening boundary must begin at byte zero, and the closing boundary must end the body with at most one trailing CRLF. Nonempty MIME preambles and epilogues are rejected, including when their bytes have a valid signed digest. This prevents the unsigned Content-Type boundary parameter from selecting a different embedded multipart message from the same authenticated bytes.
+
+Roll out the coordinated mobile client and Worker contract together. Older flag-enabled clients that send an empty-body digest cannot use this endpoint once enforcement is deployed. The recording flag stays off by default, and the controlled staging/device submission, private playback, and approval/recovery walkthrough remains a merge gate for mobile PR #9451. Local unit or D1 tests do not establish deployment or reviewer access.
+
+## Retry identity and cleanup
+
+The server records the authenticated whole-body SHA-256 digest with the consent round. Before the reviewer link is posted, a stored upload can be replaced by a different authenticated email, video, or multipart body. The replacement takes the submission lease, verifies that the previous receipt is absent from the ticket comments, and adopts a new object and receipt only if the upload identity, lease, and case state still match. A failed lookup preserves the earlier upload. If ticket creation was attempted but no ticket ID was recorded, its outcome is ambiguous and requires reconciliation before replacement; the existing exact-body retry remains available within the provider retry window.
+
+Once linked or submitted, only the exact same multipart bytes may resume the upload or receive idempotent success. A different body returns 409 without changing the recorded consent. Clients must retain their frozen multipart body for retries. A moderator send-back permits a new body, but replaying the previous round's exact body returns 409 before the new round resets the previous submission row. If an email reply submits the case while its video is still stored and unlinked, an exact video retry finishes the reviewer link before returning success, preserving the email-submitted case state and contact address. A submitted case without any video record returns 409 with an accurate already-submitted message. Stored/commented legacy rows without a digest fail closed and need support reconciliation; no fingerprint is inferred from a later request. Parent-contact body binding is outside this upload change.
+
+Known replay and retry limits: resetting the submission row clears the preceding round's digest. A later retry against the new round's processing or unlinked stored row can therefore accept that earlier body through ordinary recovery; there is no persistent historical replay guard. Round detection also uses case-version changes, so a version change during linking or case advancement can make an invited exact-body retry require a new body instead. These limits do not prevent the moderator from reviewing the authenticated clip that is ultimately linked.
+
+Migration `0018_parent_consent_payload.sql` adds the digest and an independent object inventory; lazy schema initialization adds the same fields. Each verified upload attempt is inventoried before storage completion, and replaced keys are inventoried before adoption. Immediate deletion remains the first attempt. Retention retries deletion of unreferenced inventoried objects after a one-day grace period, honors consent-video legal holds, and marks an object as deleting before deleting it so a stalled upload cannot adopt it. Referenced clips retain the existing closure-based retention period. This cannot discover orphaned keys created before inventory tracking was deployed.
+
+Active case-level `all` or `consent_video` legal holds also pause immediate loser, replacement, and send-back cleanup, not just scheduled deletion. Held objects keep their inventory entries for a later eligible sweep. The abandoned-upload sweep observes the same holds; it does not mark a held clip disposed. A failed hold lookup does not permit immediate deletion.
+
 ## Decision and scope
 
 The in-app parent-consent endpoint keeps its mobile contract: `POST /v1/minor-review-cases/{caseId}/parent-consent` with multipart `email` and `video`, authenticated with NIP-98. The video will be stored in a private Cloudflare R2 bucket. Zendesk will receive a private ticket comment with a reviewer link instead of an attachment. The existing email and private-link fallback remains available.

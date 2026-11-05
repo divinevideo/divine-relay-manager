@@ -1,0 +1,62 @@
+// ABOUTME: Reads every report naming an account, for the report pane's Related Reports card.
+// ABOUTME: Independent of the queue's loaded rows, so the count does not follow the view or the pages loaded.
+
+import { useMemo } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAppContext } from "@/hooks/useAppContext";
+import { isHex64 } from "@/lib/constants";
+import { splitRelatedReports, type RelatedReports } from "@/lib/relatedReports";
+import { reportTargetKey, type ReportTarget } from "../../shared/report-target";
+
+export type RelatedReportsState =
+  | { status: 'loading' }
+  | { status: 'error'; retry: () => void; retrying: boolean }
+  | ({ status: 'ready'; truncated: boolean } & RelatedReports);
+
+export function useRelatedReports(
+  pubkey: string,
+  currentTarget: ReportTarget | null,
+): RelatedReportsState {
+  const { fetchReportsByTarget } = useAdminApi();
+  const { config } = useAppContext();
+  // The endpoint takes lowercase hex.
+  const key = pubkey.toLowerCase();
+
+  const query = useQuery({
+    // Not "related-reports": EventDetail owns that namespace for its own capped
+    // read.
+    // apiUrl is in the key: another environment's reports for the same pubkey
+    // must never be served from this one's cache.
+    queryKey: ['account-reports', config.apiUrl, key],
+    queryFn: () => fetchReportsByTarget({ pubkey: key }),
+    // Only for a key the endpoint accepts. It answers anything but 64 hex with a
+    // 400, and the key can come from a report's p tag, which the reporter wrote.
+    enabled: isHex64(key),
+    staleTime: 60_000,
+    // One retry, as the queue's resolution reads (labels, decisions, ban
+    // lists). The default of three would keep the card on "checking" through
+    // four attempts, and a read that times out takes the full request timeout
+    // each time.
+    retry: 1,
+    // The app default is Infinity, and each entry can be a read of tens of
+    // thousands of reports. Keep an account's read for a few minutes, not for
+    // every account the moderator ever opened.
+    gcTime: 5 * 60_000,
+  });
+
+  const events = query.data?.events;
+  // Keyed by the target's string: context.target is rebuilt on every render, so
+  // depending on the object would re-split the whole read each time.
+  const targetKey = currentTarget ? reportTargetKey(currentTarget) : '';
+  const split = useMemo(
+    () => (events ? splitRelatedReports(events, key, targetKey) : null),
+    [events, key, targetKey],
+  );
+
+  // An error is checked before data: a failed refetch keeps the last good data
+  // on the query, but a read that is failing now must not read as a total.
+  if (query.isError) return { status: 'error', retry: () => void query.refetch(), retrying: query.isFetching };
+  if (!split) return { status: 'loading' };
+  return { status: 'ready', truncated: query.data?.truncated === true, ...split };
+}

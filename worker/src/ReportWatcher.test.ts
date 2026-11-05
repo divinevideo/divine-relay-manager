@@ -89,7 +89,7 @@ function createMockState() {
   let alarmTime: number | null = null;
   let concurrencyGate: Promise<unknown> = Promise.resolve();
 
-  return {
+  const state = {
     id: { toString: () => 'test-id' },
     storage: {
       get: vi.fn(async <T>(key: string) => storage.get(key) as T | undefined),
@@ -97,7 +97,8 @@ function createMockState() {
         storage.set(key, value);
       }),
       delete: vi.fn(async (key: string) => storage.delete(key)),
-      list: vi.fn(async () => storage),
+      list: vi.fn(async ({ prefix = '', limit = Infinity }: { prefix?: string; limit?: number } = {}) =>
+        new Map([...storage].filter(([key]) => key.startsWith(prefix)).slice(0, limit))),
       setAlarm: vi.fn(async (time: number) => {
         alarmTime = time;
       }),
@@ -112,7 +113,9 @@ function createMockState() {
       return result;
     }),
     waitUntil: vi.fn(),
-  } as unknown as DurableObjectState;
+  };
+  Object.assign(state.storage, { transaction: async (fn: (tx: unknown) => Promise<unknown>) => fn(state.storage) });
+  return state as unknown as DurableObjectState;
 }
 
 // Mock environment
@@ -2879,6 +2882,31 @@ describe('ReportWatcher', () => {
           (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
         );
         expect(insertCall).toBeDefined();
+      }, { timeout: 2000 });
+    });
+
+    it('still creates the age review case when the report also carries a CSAM label', async () => {
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'underage_report_with_csam_label',
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [
+          ['p', 'reported_pubkey_abc'],
+          ['l', 'NS-underageUser', 'social.nos.ontology'],
+          ['l', 'csam', 'MOD'],
+          ['client', 'diVine'],
+        ],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+
+      await vi.waitFor(() => {
+        expect((ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls.some(
+          (c: unknown[]) => typeof c[0] === 'string' && c[0].includes('age_review_cases') && c[0].includes('INSERT')
+        )).toBe(true);
       }, { timeout: 2000 });
     });
 

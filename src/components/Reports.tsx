@@ -1,7 +1,7 @@
 // ABOUTME: Displays kind 1984 reports with split-pane layout and consolidation
 // ABOUTME: Groups multiple reports on same target, shows count and all reporters
 
-import { useState, useMemo, useEffect, useRef, useCallback } from "react";
+import { useState, useMemo, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -12,7 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner, TruncatedHistoryBanner } from "@/components/ResolutionStateNotice";
+import { QueueTruncatedBanner, ResolutionUnavailablePane, ResolutionOverrideWarning, StaleResolutionBanner, TruncatedHistoryBanner } from "@/components/ResolutionStateNotice";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
@@ -49,10 +49,20 @@ import { DeepLinkFallback } from "@/components/DeepLinkFallback";
 import { ReportClientText } from "@/components/ReportClientText";
 import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } from "@/lib/deepLinkResolution";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailure";
+import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
-import { AUTO_HIDE_ACTION, HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getLatestAutoHideState, getReportCategory, getReportTargetIds, hasCsamSignal } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
+import { historyCount } from "@/lib/historyCount";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
+import { mergeReportFeeds } from "@/lib/reportFeeds";
+import { historyFooterState } from "@/lib/historyFooter";
+import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "@/lib/scrollAnchor";
+import { ResolvedHistoryFooter } from "@/components/ResolvedHistoryFooter";
+import { getReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
+import { pendingReviewTargetStates } from "../../shared/autohide";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
 import type { NostrEvent } from "@nostrify/nostrify";
@@ -90,6 +100,18 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
+// How often the queue re-reads the reports that need attention. Each read
+// walks every report on the relay and, inside the worker, every resolution
+// label and both decision projections, so it runs once a minute: new reports
+// reach the queue within a minute. Handled work still leaves sooner, because
+// the resolution reads below keep their own cadence (decisions and both ban
+// lists every 15s).
+// A moderator's own resolve or reopen refreshes this read at once
+// (invalidateResolutionState).
+const QUEUE_POLL_MS = 60 * 1000;
+
+const NO_REPORTS: NostrEvent[] = [];
+
 // The four polled reads that build resolvedTargets. Named at module scope so the
 // acknowledged-override state can be keyed by it.
 type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
@@ -104,104 +126,6 @@ function getCategoryPriority(categories: string[], csamSignal = false): number {
 interface ReportsProps {
   relayUrl: string;
   selectedReportId?: string;
-}
-
-interface ReportTarget {
-  type: 'event' | 'pubkey';
-  value: string;
-}
-
-interface ConsolidatedReport {
-  target: ReportTarget;
-  reports: NostrEvent[];
-  categories: string[];
-  reporters: string[];
-  latestReport: NostrEvent;
-  oldestReport: NostrEvent;
-  // The reported author (report `p` tag), used to cross-resolve an event-scoped
-  // report when its author has been banned. Undefined if no valid `p` tag.
-  authorPubkey?: string;
-}
-
-// Deliberately presence-based (a valueless ["e"] still yields an event target)
-// rather than delegating to getReportTargetIds: returning null here would drop
-// malformed reports from the consolidated queue entirely, and useReportContext/
-// ReportDetail carry identical copies the detail pane relies on. TODO(#160):
-// consolidate all report-target extraction sites behind shared helpers with
-// agreed semantics.
-function getReportTarget(event: NostrEvent): ReportTarget | null {
-  const eTag = event.tags.find(t => t[0] === 'e');
-  if (eTag) return { type: 'event', value: eTag[1] };
-  const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return { type: 'pubkey', value: pTag[1] };
-  return null;
-}
-
-function consolidateReports(reports: NostrEvent[]): ConsolidatedReport[] {
-  const byTarget = new Map<string, ConsolidatedReport>();
-
-  for (const report of reports) {
-    const target = getReportTarget(report);
-    if (!target) continue;
-
-    const key = `${target.type}:${target.value}`;
-    const category = getReportCategory(report);
-
-    if (!byTarget.has(key)) {
-      byTarget.set(key, {
-        target,
-        reports: [],
-        categories: [],
-        reporters: [],
-        latestReport: report,
-        oldestReport: report,
-      });
-    }
-
-    const consolidated = byTarget.get(key)!;
-    consolidated.reports.push(report);
-
-    if (!consolidated.categories.includes(category)) {
-      consolidated.categories.push(category);
-    }
-
-    if (!consolidated.reporters.includes(report.pubkey)) {
-      consolidated.reporters.push(report.pubkey);
-    }
-
-    if (report.created_at > consolidated.latestReport.created_at) {
-      consolidated.latestReport = report;
-    }
-    if (report.created_at < consolidated.oldestReport.created_at) {
-      consolidated.oldestReport = report;
-    }
-  }
-
-  // Derive each group's author from ALL its reports, not just the first-processed
-  // (newest) one. Cross-resolution hides a whole consolidated group from the default
-  // queue, so taking the author from a single unverified `p` tag is gameable: a newer
-  // report naming any banned pubkey would bury the genuine older report with it
-  // (NIP-56 warns reports "can be easily gamed"). Require agreement instead — cross-
-  // resolve only when every report carries a valid `p` tag and names the same author.
-  // A missing author cannot be ignored: otherwise one later report naming a banned
-  // pubkey could still bury an existing report that supplied no author. Lowercased so
-  // a casing difference is not a false disagreement; undefined when any author is
-  // missing or the reports conflict, in which case the group is never cross-resolved.
-  for (const consolidated of byTarget.values()) {
-    const authors = consolidated.reports.map(r => getReportTargetIds(r).pubkey);
-    const uniqueAuthors = new Set(authors.filter((p): p is string => !!p).map(p => p.toLowerCase()));
-    consolidated.authorPubkey = authors.every((p): p is string => !!p) && uniqueAuthors.size === 1
-      ? [...uniqueAuthors][0]
-      : undefined;
-  }
-
-  // Sort by number of reports (most reported first), then by latest report date
-  return Array.from(byTarget.values()).sort((a, b) => {
-    if (b.reports.length !== a.reports.length) {
-      return b.reports.length - a.reports.length;
-    }
-    return b.latestReport.created_at - a.latestReport.created_at;
-  });
 }
 
 // Full-width bech32 ID with CSS truncation and copy button.
@@ -261,11 +185,15 @@ function ConsolidatedReportItem({
   isSelected,
   onClick,
   switchState,
+  countTruncated = false,
 }: {
   consolidated: ConsolidatedReport;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
+  // The reports of this target may be more than the count: the read that
+  // loaded them stopped early. Shown as "N+", as in the open pane.
+  countTruncated?: boolean;
 }) {
   const reportCount = consolidated.reports.length;
   const reporterCount = consolidated.reporters.length;
@@ -287,6 +215,7 @@ function ConsolidatedReportItem({
           : 'hover:bg-muted/50'
       }`}
       onClick={onClick}
+      data-row-key={reportTargetKey(consolidated.target)}
     >
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-2">
@@ -323,7 +252,7 @@ function ConsolidatedReportItem({
         <div className="flex items-center gap-3 text-xs">
           <span className={`flex items-center gap-1 font-medium ${reportCount > 5 ? 'text-red-600' : reportCount > 2 ? 'text-orange-600' : 'text-muted-foreground'}`}>
             <Flag className="h-3 w-3" />
-            {reportCount} report{reportCount !== 1 ? 's' : ''}
+            {countTruncated ? `${historyCount(reportCount, true)} reports` : `${reportCount} report${reportCount !== 1 ? 's' : ''}`}
           </span>
           <span className="flex items-center gap-1 text-muted-foreground">
             <Users className="h-3 w-3" />
@@ -368,6 +297,7 @@ function IndividualReportItem({
           : 'hover:bg-muted/50'
       }`}
       onClick={onClick}
+      data-row-key={report.id}
     >
       <div className="space-y-2">
         <div className="flex items-start justify-between gap-2">
@@ -408,11 +338,14 @@ function IndividualReportItem({
 export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { getDecisions, fetchReports, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
+  const { getDecisions, fetchReportsNeedingAttention, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
   const { config, updateConfig } = useAppContext();
   const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
+  // The report whose target the queue has called "left", held until its
+  // reports are back in hand (see selectedTargetLeftList).
+  const [leftListFor, setLeftListFor] = useState<string | null>(null);
   const detailBoundaryRef = useRef<ErrorBoundary | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
@@ -443,24 +376,41 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // keyed to the target (on its relay), not to the one report the lookup
   // selected: any report of that target reads it as true, and a report of any
   // other target, or the same target after a relay switch, reads it as false.
+  // `exact`: the read was for this very target. A ?pubkey= link whose account
+  // has no profile report falls back to the reports on the account's posts, and
+  // the post it opens was not itself read.
   const [targetedHistory, setTargetedHistory] =
-    useState<{ relayUrl: string; target: ReportTarget; truncated: boolean } | null>(null);
+    useState<{ relayUrl: string; target: ReportTarget; truncated: boolean; exact: boolean } | null>(null);
   const selectedTarget = selectedReport ? getReportTarget(selectedReport) : null;
-  const targetedHistoryTruncated =
-    targetedHistory !== null && targetedHistory.truncated && selectedTarget !== null
+  const targetedHistoryOfSelected =
+    targetedHistory !== null && selectedTarget !== null
     && targetedHistory.relayUrl === relayUrl
     && targetedHistory.target.type === selectedTarget.type
-    && targetedHistory.target.value === selectedTarget.value;
+    && targetedHistory.target.value === selectedTarget.value
+    ? targetedHistory : null;
+  const targetedHistoryTruncated = targetedHistoryOfSelected?.truncated === true;
+  // Every report of the selected target was read: a targeted read of that same
+  // target that did not stop early.
+  const targetedReadComplete = targetedHistoryOfSelected !== null
+    && targetedHistoryOfSelected.exact && !targetedHistoryOfSelected.truncated;
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
+  // The relay and /reports/<id> the history view was last opened for, so it
+  // opens once per id in each environment and does not reopen after the
+  // moderator turns Hide resolved back on. Keyed like attemptedTargetRef.
+  const urlHistoryTriedRef = useRef<string | null>(null);
   // True only while the CURRENT selection came from a deep link. A ref, not
   // state: the unhide effect reads it when it runs, and flipping it must not
   // itself cause a render.
   const deepLinkSelectedRef = useRef(false);
   // What the moderator had set before entering the pending-review view. That
-  // view is its own mode and forces Hide resolved off and the category filter
-  // clear, so leaving it has to hand both back -- otherwise a look at the
-  // auto-hidden queue silently spends settings they chose.
-  const prePendingReviewRef = useRef<{ hideResolved: boolean; filterCategory: string | null } | null>(null);
+  // view is its own mode and forces Hide resolved off and the category and
+  // target-type filters clear, so leaving it has to hand all three back --
+  // otherwise a look at the auto-hidden queue silently spends settings they chose.
+  const prePendingReviewRef = useRef<{
+    hideResolved: boolean;
+    filterCategory: string | null;
+    filterTargetType: 'all' | 'event' | 'pubkey';
+  } | null>(null);
   // Hide resolved as the moderator had it before a deep link's courtesy last
   // turned it off to show a resolved linked report. Null until a courtesy
   // does, and again once the moderator sets Hide resolved or the switch
@@ -485,13 +435,109 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Reports and resolution labels fetched via server-side relay query through
   // the worker. Replaces browser-side WebSocket (nostrify NPool) which served
   // stale cached data. The worker opens a fresh WebSocket per request.
-  const { data: reports, isLoading, error, refetch, isFetching, dataUpdatedAt } = useQuery({
+  //
+  // None of the queue's reads carry `placeholderData: prev => prev`. After an
+  // environment switch it seeded the new environment's empty query with the
+  // old one's data, reported as a success, so the queue listed and filtered
+  // with it until the new environment answered. A failed refresh keeps the
+  // last good data without it.
+  const { data: queueFeed, isLoading, error, errorUpdateCount: feedErrorUpdateCount, refetch, isFetching, dataUpdatedAt } = useQuery({
     queryKey: ['reports', relayUrl],
-    queryFn: fetchReports,
-    refetchInterval: 15 * 1000,
-    placeholderData: (previousData) => previousData,
+    queryFn: fetchReportsNeedingAttention,
+    refetchInterval: QUEUE_POLL_MS,
     retry: false,
   });
+
+  // Reports a deep link found through the targeted lookup, held beside the
+  // feed rather than written into its cache. The feed carries only targets that
+  // still need attention, so a deep link to a resolved target -- the usual way
+  // in from a closed ticket -- would drop out of the list at the next poll
+  // while its detail pane stayed open. Keyed by relay so an environment switch
+  // cannot carry them across.
+  const [deepLinked, setDeepLinked] = useState<{ relayUrl: string; events: NostrEvent[] } | null>(null);
+  const deepLinkedReports = deepLinked?.relayUrl === relayUrl ? deepLinked.events : NO_REPORTS;
+  const reports = useMemo(
+    () => (queueFeed ? mergeReportFeeds(queueFeed.events, deepLinkedReports) : undefined),
+    [queueFeed, deepLinkedReports],
+  );
+
+  // The reports query itself failing is the more fundamental problem: if the
+  // relay read is down, resolution state is beside the point, and the
+  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // but only full-pane when there is nothing to show. When a REFRESH fails
+  // (e.g. the worker 502s on a relay timeout), the last good list stays
+  // rendered with a stale-data warning below, so one slow poll does not look
+  // like "no reports pending".
+  //
+  // Latched on errorUpdateCount, as hasColdFailed is for resolution sources:
+  // every re-read of a feed with no data (Try again, or the minute poll) puts
+  // it back to `{error: null, status: 'pending'}`. Keyed on `error` alone,
+  // each re-read looked like a first load: the cold-load skeleton took the
+  // screen, unmounting a deep-linked report beside the failure and any dialog
+  // open in it, and the deep-link effect set a concluded lookup back to
+  // 'resolving', where it stayed. Both read this one value.
+  const queueFailedCold = !reports && (!!error || feedErrorUpdateCount > 0);
+
+  // The resolved-history view: Hide resolved off, outside the pending-review
+  // view. The needs-attention feed no longer carries targets the worker
+  // resolved, so this view adds them from their own paged read, fetched only
+  // while the view is open.
+  const historyView = !hideResolved && !showPendingReview;
+  // The history view opens on Newest First, the one order a loaded page cannot
+  // rearrange: an older page lands below every row already shown. The control
+  // stays usable. Under any other order an older page can add rows anywhere,
+  // or move a target it adds reports to, and a note under the control says the
+  // sort covers only what is loaded; the scroll anchor keeps the row being read
+  // in place either way. Leaving the view hands back the sort chosen before
+  // entering it, whatever was picked inside. Adjusted while rendering rather
+  // than in an effect, so the list never renders a frame in the old order.
+  const [historySort, setHistorySort] = useState<{ inHistory: boolean; before: SortOption | null }>({
+    inHistory: false,
+    before: null,
+  });
+  if (historySort.inHistory !== historyView) {
+    if (historyView) {
+      setHistorySort({ inHistory: true, before: sortBy });
+      setSortBy('newest');
+    } else {
+      setHistorySort({ inHistory: false, before: null });
+      if (historySort.before !== null) setSortBy(historySort.before);
+    }
+  }
+  const history = useResolvedHistory(relayUrl, historyView);
+  const historyPages = history.data?.pages;
+  // What the list is built from: the feed plus deep-linked reports, plus
+  // loaded history in the history view. They can hold the same report, and
+  // merging keeps one copy.
+  const listReports = useMemo(() => {
+    if (!reports) return undefined;
+    if (!historyView || !historyPages) return reports;
+    return mergeReportFeeds(reports, ...historyPages.map(page => page.events));
+  }, [reports, historyView, historyPages]);
+
+  // Load more keeps the moderator's place. An older page can land above rows
+  // already on screen (ban-resolved posts from the feed sit at every depth), so
+  // the row at the top of the viewport is remembered on click and put back
+  // where it was once the new page has rendered. Browsers' own scroll anchoring
+  // is not relied on: Safari does not do it.
+  const listViewportRef = useRef<HTMLDivElement>(null);
+  const loadMoreAnchorRef = useRef<ScrollAnchor | null>(null);
+  const loadedHistoryPages = historyPages?.length ?? 0;
+  useLayoutEffect(() => {
+    const anchor = loadMoreAnchorRef.current;
+    const viewport = listViewportRef.current;
+    if (!anchor || !viewport) return;
+    loadMoreAnchorRef.current = null;
+    restoreScrollAnchor(viewport, anchor);
+  }, [loadedHistoryPages]);
+
+  // fetchNextPage settles into the query's own state (isFetchNextPageError),
+  // which the footer renders, so nothing here needs its promise.
+  const loadMoreHistory = () => {
+    const viewport = listViewportRef.current;
+    loadMoreAnchorRef.current = viewport ? captureScrollAnchor(viewport) : null;
+    history.fetchNextPage();
+  };
 
   // resolvedTargets is subtractive: these labels HIDE work already handled, so
   // a failed fetch makes the queue bigger and wrong rather than smaller and
@@ -517,7 +563,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // actions, this query -- not because of either poll. Only another
     // moderator's label-only resolution can lag, by at most a minute.
     refetchInterval: 60 * 1000,
-    placeholderData: (previousData) => previousData,
     retry: 1,
   });
   const labelTargets = labelsResult?.targets;
@@ -573,7 +618,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     },
     staleTime: 30 * 1000,
     refetchInterval: 15 * 1000,
-    placeholderData: (previousData) => previousData,
     retry: 1,
   });
   const resolvedDecisionTargets = decisionsResult?.resolved;
@@ -656,7 +700,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // browser over a single capped page.
     if (labelTargets) {
       for (const target of labelTargets) {
-        resolved.add(`${target.type}:${target.value}`);
+        resolved.add(reportTargetKey(target));
       }
     }
 
@@ -676,6 +720,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     const handled = new Set(resolved);
 
+    // Targets only the worker's own decisions resolved: from this read's
+    // `automated` flag, and from the feed, which keeps these targets and marks
+    // them so Hide resolved does not depend on this read having landed.
+    const automated = new Set<string>(queueFeed?.automatedTargets);
+
     // Add from moderation decisions (ban_user, delete_event, etc.). The worker
     // already excluded auto-hide actions and collapsed the table to distinct
     // targets, so what arrives here is the resolved set itself rather than a
@@ -684,14 +733,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       for (const target of resolvedDecisionTargets) {
         if (target.target_type === 'pubkey' || target.target_type === 'event') {
           const key = `${target.target_type}:${target.target_id}`;
-          resolved.add(key);
-          if (!target.automated) handled.add(key);
+          if (target.automated) {
+            automated.add(key);
+          } else {
+            resolved.add(key);
+            handled.add(key);
+          }
         }
       }
     }
 
+    // TODO(#332): whether Hide resolved should count a target only automation
+    // resolved is open. It does today, as it always has; the switch does not.
+    // Dropping this loop is the whole change if #332 decides otherwise.
+    for (const key of automated) resolved.add(key);
+
     return { resolvedTargets: resolved, handledTargets: handled };
-  }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets]);
+  }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets, queueFeed?.automatedTargets]);
 
   // Set of relay-banned pubkeys, used to cross-resolve an event-scoped report
   // whose author has been banned. banpubkey purges the account's events without
@@ -714,41 +772,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [bannedPubkeys],
   );
 
-  // Targets pending review (auto-hidden but not yet confirmed/restored), keyed
-  // to their latest auto-hide state so a row can say when a hide needs a check
-  // (auto_hide_unresolved / auto_hide_restore_failed).
-  // TODO(#284): share this with pendingReviewTargetKeys in shared/autohide.ts in the
-  // queue-screen change. That helper returns a Set, so it would first need to
-  // return the latest action per key, which the switch labels depend on.
-  const pendingReviewTargets = useMemo(() => {
-    const pending = new Map<string, string>();
-    if (!autoHideStates) return pending;
-
-    // Group by target to check status. The worker sends only the auto-hide STATE
-    // actions, already newest-first, which is exactly what
-    // getLatestAutoHideState reads -- that function stays the sole authority on
-    // what the state machine means, and is still applied here rather than in SQL.
-    const targetDecisions = new Map<string, string[]>();
-    for (const decision of autoHideStates) {
-      const key = `${decision.target_type}:${decision.target_id}`;
-      if (!targetDecisions.has(key)) {
-        targetDecisions.set(key, []);
-      }
-      targetDecisions.get(key)!.push(decision.action);
-    }
-
-    // Decisions arrive newest first, so the first state transition is authoritative.
-    for (const [key, actions] of targetDecisions) {
-      const latestAction = getLatestAutoHideState(actions);
-      if (latestAction === AUTO_HIDE_ACTION.hidden
-        || latestAction === AUTO_HIDE_ACTION.unresolved
-        || latestAction === AUTO_HIDE_ACTION.restoreFailed) {
-        pending.set(key, latestAction);
-      }
-    }
-
-    return pending;
-  }, [autoHideStates]);
+  // Targets auto-hidden and still waiting for a human, keyed to their latest
+  // auto-hide state so a row can say when a hide needs a check
+  // (auto_hide_unresolved / auto_hide_restore_failed). The same definition the
+  // worker uses to keep them in the needs-attention payload, so the queue
+  // splits out exactly the targets the worker kept for this view.
+  const pendingReviewTargets = useMemo(
+    () => pendingReviewTargetStates(autoHideStates ?? []),
+    [autoHideStates],
+  );
 
   const humanHandledTargets = useMemo(
     () => humanHandledAutoHideTargets(autoHideStates ?? []),
@@ -836,17 +868,25 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     resolvedDecisionTargets, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
   ]);
 
-  // Models only when the LIST FILTER (the "hide resolved" toggle applied to
-  // consolidated/individual) consults resolvedTargets. Three other
-  // consumers -- the deep-link auto-deselect, the deep-link resolved
-  // branch, and the resolved-count label -- key on hideResolved alone and
-  // stay live even in the pending-review view where this is false. That is
-  // deliberate, not a gap this flag should also gate: all three fail in the
-  // show-more direction on a partially-loaded resolvedTargets, which is the
-  // safe direction for a subtractive set, and they self-correct once the
-  // source lands.
+  // Whether the list filter (Hide resolved on, outside the pending-review
+  // view) subtracts resolvedTargets. Only the label truncation bound below
+  // still keys on it.
   const resolvedFilterActive = hideResolved && !showPendingReview;
-  const gatingSources = resolutionSources.filter(s => s.gatesAlways || resolvedFilterActive);
+  // Labels and the ban lists gate every view but pending review. The default
+  // view subtracts them from the list; the history view counts resolved rows
+  // with them in its footer, so a failed or unlanded read there would state a
+  // count, even "No resolved reports.", with nothing to back it. The
+  // pending-review view lists the switch's members: auto-hidden targets, which
+  // the decisions source alone builds, and unhandled CSAM-signal targets, which
+  // labels and the ban lists only subtract from. So an unlanded or failed read
+  // there keeps a target behind the switch, the safe direction (#323), and does
+  // not need to gate that view. Two other consumers -- the deep-link
+  // auto-deselect and the deep-link resolved branch -- key on Hide resolved
+  // alone, so they stay live in the pending-review view, where these three do
+  // not gate. That is deliberate: both fail in the show-more direction on a
+  // partially-loaded set, which is safe for a subtractive set, and self-correct
+  // once the source lands.
+  const gatingSources = resolutionSources.filter(s => s.gatesAlways || !showPendingReview);
   // Has this source failed with nothing to fall back on, and stayed failed?
   //
   // Reading the live `error` alone is not enough to answer that. query-core's
@@ -931,29 +971,71 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Get all unique categories from reports for filter chips
   const availableCategories = useMemo(() => {
-    if (!reports) return [];
+    if (!listReports) return [];
     const categories = new Set<string>();
-    for (const report of reports) {
+    for (const report of listReports) {
       categories.add(getReportCategory(report));
     }
     return Array.from(categories).sort();
-  }, [reports]);
+  }, [listReports]);
 
+  // The needs-attention feed plus deep-linked reports (`reports`), grouped,
+  // without loaded history. The pending-review view lists from `reports`, so
+  // its badge counts from here; and a listed target this does not carry came
+  // from resolved history.
+  const feedConsolidated = useMemo(() => (reports ? consolidateReports(reports) : []), [reports]);
+
+  // Outside the history view the list is the feed itself (listReports is
+  // `reports`), so its grouping is feedConsolidated. Group again only for the
+  // feed merged with loaded history. The feed can hold tens of thousands of
+  // reports, and this runs on every poll.
   const allConsolidated = useMemo(() => {
-    if (!reports) return [];
-    return consolidateReports(reports);
-  }, [reports]);
+    if (!listReports) return [];
+    return listReports === reports ? feedConsolidated : consolidateReports(listReports);
+  }, [listReports, reports, feedConsolidated]);
+
+  // Targets the needs-attention feed itself holds, apart from deep-linked
+  // reports merged into `reports`, and whose reports the feed read in full: it
+  // carries every report on them only when it did not stop early. A feed that
+  // did (the red "stopped reading" banner) is missing reports older than its
+  // cut-off for every target in it, so none of them counts as fully read.
+  const queueFeedTargetKeys = useMemo(
+    () => reportTargetKeys(queueFeed?.events ?? []),
+    [queueFeed],
+  );
+  const needsAttentionTargetKeys = useMemo(
+    () => (queueFeed?.truncated ? new Set<string>() : queueFeedTargetKeys),
+    [queueFeed, queueFeedTargetKeys],
+  );
+  const feedTargetKeys = useMemo(
+    () => new Set(feedConsolidated.map(c => reportTargetKey(c.target))),
+    [feedConsolidated],
+  );
+
+  // The reports the switch classifies: the needs-attention feed plus deep-linked
+  // reports (`reports`), never loaded history. A history page holds targets the
+  // worker already resolved, which a person has handled by definition: one only
+  // the worker's own decisions resolved stays in the feed instead. Built
+  // over them, a resolved CSAM-signal target the browser cannot yet see as
+  // resolved (a label read still loading or overridden) would become a member
+  // and leave the list as soon as the switch opened, and the deep-link effects
+  // would then open and close the switch without end. With the queue failed
+  // cold there is no feed, so the deep link's own reports stand in and the pane
+  // still gets its label.
+  const deepLinkedConsolidated = useMemo(() => consolidateReports(deepLinkedReports), [deepLinkedReports]);
+  const switchCandidates = reports ? feedConsolidated : deepLinkedConsolidated;
 
   // Who sits behind the Pending review switch: every auto-hidden target, plus
-  // any loaded target with a CSAM signal that no person has handled yet. It
+  // any target in the feed or the deep-linked reports with a CSAM signal that
+  // no person has handled yet. Not loaded history; see switchCandidates. It
   // does not read hideResolved; see buildSwitchMembership.
   const switchMembership = useMemo(() => buildSwitchMembership({
-    consolidated: allConsolidated,
+    consolidated: switchCandidates,
     pendingReview: pendingReviewTargets,
     humanHandled: humanHandledTargets,
     handledTargets,
     bannedPubkeys: bannedPubkeySet,
-  }), [allConsolidated, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
+  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
 
   const consolidated = useMemo(() => {
     // A copy, so the in-place sort below can never reorder allConsolidated.
@@ -963,10 +1045,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
-      items = items.filter(c => switchMembership.has(`${c.target.type}:${c.target.value}`));
+      items = items.filter(c => switchMembership.has(reportTargetKey(c.target)));
     } else {
       // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
-      items = items.filter(c => !switchMembership.has(`${c.target.type}:${c.target.value}`));
+      items = items.filter(c => !switchMembership.has(reportTargetKey(c.target)));
       // Also filter out resolved if toggle is on
       if (hideResolved) {
         items = items.filter(c => !isConsolidatedReportResolved(c, resolvedTargets, bannedPubkeySet));
@@ -1037,27 +1119,40 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const authorByTarget = useMemo(() => new Map(
-    allConsolidated.map(c => [`${c.target.type}:${c.target.value}`, c.authorPubkey]),
+    allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
   ), [allConsolidated]);
+
+  // The reports of the open report's target. From every grouped report, not the
+  // filtered list: a filter that drops the open row must not empty the pane's
+  // report set. With the queue failed cold there is no list to draw the target's
+  // reports from; the deep link's own lookup holds them. Searches every group,
+  // so it is memoized (and sits above the early returns, as a hook must): it
+  // would otherwise rescan the whole feed on every render, including the
+  // freshness text's tick every few seconds.
+  const selectedPaneReports = useMemo(() => {
+    if (!selectedReport) return undefined;
+    const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
+    return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id))?.reports;
+  }, [selectedReport, listReports, allConsolidated, deepLinkedConsolidated]);
 
   // Filter individual reports when hideResolved is on
   const filteredReports = useMemo(() => {
-    if (!reports) return [];
-    let items = [...reports];
+    if (!listReports) return [];
+    let items = [...listReports];
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return false;
-        return switchMembership.has(`${target.type}:${target.value}`);
+        return switchMembership.has(reportTargetKey(target));
       });
     } else {
       // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
       items = items.filter(report => {
         const target = getReportTarget(report);
         if (!target) return true; // Keep reports without targets
-        return !switchMembership.has(`${target.type}:${target.value}`);
+        return !switchMembership.has(reportTargetKey(target));
       });
       // Also filter resolved if toggle is on
       if (hideResolved) {
@@ -1065,7 +1160,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           const target = getReportTarget(report);
           if (!target) return true; // Keep reports without targets
           return !isConsolidatedReportResolved(
-            { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
+            { target, authorPubkey: authorByTarget.get(reportTargetKey(target)) },
             resolvedTargets,
             bannedPubkeySet,
           );
@@ -1116,24 +1211,99 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
 
     return items;
-  }, [reports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
+  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
-  const pendingReviewCount = switchMembership.size;
-  const totalTargets = allConsolidated.length;
-  const totalReports = reports?.length || 0;
   const filteredReportsCount = filteredReports.length;
-  // Loaded targets behind the switch are pending review, not resolved, so the
-  // header's "N resolved" must not count them.
-  const switchMembersLoaded = allConsolidated.filter(
-    c => switchMembership.has(`${c.target.type}:${c.target.value}`),
-  ).length;
-  const resolvedCount = totalTargets - uniqueTargets - switchMembersLoaded;
+  // The header counts the rows the active tab renders: targets when grouped,
+  // reports in the All tab.
+  const headerCount = viewMode === 'consolidated' ? uniqueTargets : filteredReportsCount;
+
+  // The pending-review badge counts the rows that view will list on entry: the
+  // grouped targets behind the switch, auto-hidden or CSAM-signal and not yet
+  // handled. Not switchMembership.size -- auto-hidden members span every
+  // decision on record, and a member with no report loaded here is a badge
+  // with no row behind it. Counted from the feed and deep-linked reports, which
+  // is what the view lists, not from loaded history. "On entry" because
+  // entering clears the category and type filters; a filter chosen inside
+  // the view narrows the list and its Grouped count, not this badge, which
+  // keeps saying how many targets are waiting.
+  const pendingReviewRows = useMemo(
+    () => feedConsolidated.filter(c => switchMembership.has(reportTargetKey(c.target))),
+    [feedConsolidated, switchMembership],
+  );
+  const pendingReviewCount = pendingReviewRows.length;
+
+  // Whether a listed target is resolved, from both halves of the history view.
+  // A target neither the feed nor a deep link carries came from resolved
+  // history, which the worker resolved by a person's decision or a label. One
+  // they do carry is resolved if the browser's own sources say so: a relay ban,
+  // including a banned author's posts, or a decision or label (which is how a
+  // deep-linked resolved target counts), or only the worker's own decisions
+  // (the feed keeps those; see resolvedTargets).
+  const isListedTargetResolved = useCallback(
+    (target: ReportTarget, authorPubkey: string | undefined) =>
+      !feedTargetKeys.has(reportTargetKey(target))
+      || isConsolidatedReportResolved({ target, authorPubkey }, resolvedTargets, bannedPubkeySet),
+    [feedTargetKeys, resolvedTargets, bannedPubkeySet],
+  );
+
+  // Counted from the rows on screen in the current view (spec: every count
+  // beside a list comes from the rows it renders).
+  const resolvedRowsShown = useMemo(() => viewMode === 'consolidated'
+    ? consolidated.filter(c => isListedTargetResolved(c.target, c.authorPubkey)).length
+    : filteredReports.filter(report => {
+        const target = getReportTarget(report);
+        return !!target && isListedTargetResolved(target, authorByTarget.get(reportTargetKey(target)));
+      }).length,
+  [viewMode, consolidated, filteredReports, authorByTarget, isListedTargetResolved]);
+
+  // The failure a failed Load more left (see refreshFailed), remembered against
+  // the cached query's own error: src/lib/loadMoreFailure.ts says why it is not
+  // component state, and why it is the error and its timestamp together.
+  // Written during render: it only records values already in the query, and
+  // rendering twice records the same ones.
+  if (history.isFetchNextPageError) rememberLoadMoreFailure(history.error, history.errorUpdatedAt);
+  const isLoadMoreLeftover = isLoadMoreFailure(history.error, history.errorUpdatedAt);
+
+  const lastHistoryPage = historyPages && historyPages.length > 0 ? historyPages[historyPages.length - 1] : undefined;
+  const footerState = historyFooterState({
+    firstPageFailed: history.isError && !history.data,
+    // isRefetchError is an error with data on hand that is not a Load more
+    // failure (query-core 5.75 infiniteQueryObserver). It stays true for the
+    // error a failed Load more left once a later plain re-read starts, because
+    // query-core keeps the error and drops the fetch direction. The re-read has
+    // not failed, so that same error is not a refresh failure. A re-read that
+    // fails itself is told apart by its newer errorUpdatedAt, even when the
+    // error object is shared (see loadMoreFailure.ts).
+    refreshFailed: history.isRefetchError && !isLoadMoreLeftover,
+    lastPage: lastHistoryPage,
+    loadingMore: history.isFetchingNextPage,
+    busy: history.isFetching && !history.isFetchingNextPage,
+    loadMoreFailed: history.isFetchNextPageError,
+    resolvedRowsShown,
+    // Sources in currentlyBlockedSources are on screen only once overridden;
+    // stale sources are not among them and keep counting.
+    incompleteSources: currentlyBlockedSources.map(s => s.label),
+    filterActive: filterCategory !== null || filterTargetType !== 'all',
+    skippedWithinSecond: !!historyPages?.some(page => page.skippedWithinSecond),
+    resolutionTruncated: !!historyPages?.some(page => page.resolutionTruncated),
+  });
+  // In the history view an empty list is final only once resolved history has
+  // been read to its end. While it is loading, failed, cut short or has more,
+  // the footer below says so, and the list must not read as empty (#186, #221).
+  const listEmptyIsFinal = !historyView || footerState.kind === 'ended';
+  // The note under the sort control, while a sort other than Newest First
+  // orders a history that has more pages to load. Shown only where the footer
+  // states its count ('more'), so the note's number is the footer's: not once
+  // history has ended, and not while a count is withheld for an unread source
+  // or a failed re-read.
+  const showSortScopeNote = historyView && sortBy !== 'newest' && footerState.kind === 'more';
 
   // Sync selected report with URL
   useEffect(() => {
-    if (selectedReportId && reports && !selectedReport) {
-      const report = reports.find(r => r.id === selectedReportId);
+    if (selectedReportId && listReports && !selectedReport) {
+      const report = listReports.find(r => r.id === selectedReportId);
       if (report) {
         // Arriving at /reports/<id> directly -- a shared link, or a reload after
         // following a Zendesk deep link -- is a deep-link selection too, and
@@ -1142,9 +1312,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // this cannot re-select behind a dismissal.
         deepLinkSelectedRef.current = true;
         setSelectedReport(report);
+      } else if (hideResolved && !showPendingReview && !isFetching && urlHistoryTriedRef.current !== `${relayUrl}|${selectedReportId}`) {
+        // The feed has answered and does not hold it: most likely resolved.
+        // Not while it is re-reading: a cached feed from before the report was
+        // filed lacks it, and the re-read may bring it. A visit re-reads a
+        // cache older than the app's one-minute staleTime; a fresher cache is
+        // not re-read, so a report filed within that minute still looks here.
+        // Look in resolved history, as the old single read did for its newest
+        // 200; this branch selects it once page 1 lands. An id older than
+        // page 1 stays unselected, as it did then. A courtesy like the deep
+        // link's, so a switch the link opens later saves the setting from
+        // before it.
+        urlHistoryTriedRef.current = `${relayUrl}|${selectedReportId}`;
+        hideResolvedBeforeCourtesyRef.current = hideResolved;
+        setHideResolved(false);
       }
     }
-  }, [selectedReportId, reports, selectedReport]);
+  }, [selectedReportId, listReports, selectedReport, hideResolved, showPendingReview, isFetching, relayUrl]);
 
   // A deep link can select a report before ban/label/decision queries finish.
   // Re-check the selected target as resolution data arrives so it cannot stay
@@ -1165,7 +1349,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current || !switchMembershipKnown) return;
     const target = getReportTarget(selectedReport);
     if (target && isConsolidatedReportResolved(
-      { target, authorPubkey: authorByTarget.get(`${target.type}:${target.value}`) },
+      { target, authorPubkey: authorByTarget.get(reportTargetKey(target)) },
       resolvedTargets,
       bannedPubkeySet,
     )) {
@@ -1175,7 +1359,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembershipKnown]);
 
   // Memoized because the deep-link effect below depends on it; it reads
-  // hideResolved and filterCategory, so it changes only when those do.
+  // hideResolved, filterCategory and filterTargetType, so it changes only when
+  // those do.
   const enterPendingReview = useCallback(() => {
     setShowPendingReview(true);
     // A failed or offline read counts as settled, so a link's courtesy can
@@ -1184,10 +1369,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     prePendingReviewRef.current = {
       hideResolved: hideResolvedBeforeCourtesyRef.current ?? hideResolved,
       filterCategory,
+      filterTargetType,
     };
     setHideResolved(false);
     setFilterCategory(null);
-  }, [hideResolved, filterCategory]);
+    // The badge counts every target waiting for review, so the view opens on
+    // all of them. A Users filter carried in would hide auto-hidden posts under
+    // a badge that counted them.
+    setFilterTargetType('all');
+  }, [hideResolved, filterCategory, filterTargetType]);
 
   // Memoized for the same reason: the auto-leave effect below depends on it.
   const leavePendingReview = useCallback(({ keepDeepLinkCourtesy = false } = {}) => {
@@ -1209,9 +1399,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (filterCategory === null) {
         setFilterCategory(previous.filterCategory);
       }
+      // Same rule for the target type.
+      if (filterTargetType === 'all') {
+        setFilterTargetType(previous.filterTargetType);
+      }
       prePendingReviewRef.current = null;
     }
-  }, [filterCategory]);
+  }, [filterCategory, filterTargetType]);
 
   // A link that lands on a report behind the pending-review switch opens the
   // switch, or the report sits in the detail pane with no row in the list.
@@ -1222,7 +1416,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   useEffect(() => {
     if (showPendingReview || !selectedReport || !deepLinkSelectedRef.current) return;
     const target = getReportTarget(selectedReport);
-    if (target && switchMembership.has(`${target.type}:${target.value}`)) {
+    if (target && switchMembership.has(reportTargetKey(target))) {
       enterPendingReview();
       switchOpenedByDeepLinkRef.current = true;
     }
@@ -1239,7 +1433,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   useEffect(() => {
     if (!showPendingReview || !switchOpenedByDeepLinkRef.current || !selectedReport) return;
     const target = getReportTarget(selectedReport);
-    if (target && !switchMembership.has(`${target.type}:${target.value}`)) {
+    if (target && !switchMembership.has(reportTargetKey(target))) {
       switchOpenedByDeepLinkRef.current = false;
       leavePendingReview({ keepDeepLinkCourtesy: true });
     }
@@ -1260,10 +1454,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (currentEnv?.id !== envParam) {
         const targetEnv = getEnvironmentById(envParam);
         if (targetEnv) {
+          // RelayManager sees the change, clears the cache and remounts this
+          // screen on the new environment, keeping this link.
           updateConfig(c => ({ ...c, relayUrl: targetEnv.relayUrl, apiUrl: targetEnv.apiUrl }));
-          queryClient.clear();
-          queryClient.refetchQueries();
-          return; // Data will reload, effect re-runs with matching environment
+          return; // The remounted screen's effect runs with the matching environment
         }
       }
     }
@@ -1272,7 +1466,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // do NOT gate on isFetchingBanned: ban data affects how a report is displayed,
     // not whether it exists, and gating on it flips a resolved pane back to
     // 'resolving' (and re-fires the lookup) on every background ban refetch.
-    if (isLoading) {
+    // Nor on a re-read of a feed that failed cold: the lookup already ran when
+    // the feed failed, and attemptedTargetRef keeps it from running again, so
+    // 'resolving' would never clear.
+    if (isLoading && !queueFailedCold) {
       setDeepLinkStatus('resolving');
       return;
     }
@@ -1284,6 +1481,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       : null;
     if (!target) return;
 
+    // In the history view, loaded history rows count as already listed: the
+    // target is selected from them without the targeted lookup, so no floor mark.
     const inBulk = allConsolidated.find(
       c => c.target.type === target.type && c.target.value === target.value
     );
@@ -1298,7 +1497,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       if (
         hideResolved
         && switchMembershipKnown
-        && !switchMembership.has(`${inBulk.target.type}:${inBulk.target.value}`)
+        && !switchMembership.has(reportTargetKey(inBulk.target))
         && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
       ) {
         hideResolvedBeforeCourtesyRef.current = hideResolved;
@@ -1315,11 +1514,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       return;
     }
 
-    // Bulk list is loaded and the target isn't in it. Do one targeted relay fetch
-    // per target to tell "aged out / vanished" apart from "still loading". Key the
-    // attempt on the full target identity (relay + type + value) so a same-value
-    // target across type, or a relay/environment switch, re-resolves instead of
-    // reusing the prior attempt or its stale result.
+    // The target isn't in what is listed: not in the needs-attention feed (so
+    // most likely resolved or gone, unless that read failed or stopped early),
+    // nor, in the history view, in any history page loaded so far (outside it
+    // the list is the feed plus deep-linked reports). Do one targeted relay
+    // fetch per target to tell those apart from "still loading". Key the
+    // attempt on the full target identity (relay + type + value) so a
+    // same-value target across type, or a relay/environment switch,
+    // re-resolves instead of reusing the prior attempt or its stale result.
     const targetKey = `${relayUrl}|${target.type}|${target.value}`;
     if (attemptedTargetRef.current === targetKey) return;
     attemptedTargetRef.current = targetKey;
@@ -1344,7 +1546,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // p-tags a ?pubkey= target (but resolves to an event) a false 'gone'. An empty
         // result here is a relay-confirmed absence; an empty *timeout* never reaches this
         // branch (the worker 502s it → the catch below → 'unavailable').
-        const matching = reportsMatchingTarget(events, target, getReportTarget);
+        // The worker's filter lowercases the target, so the reports it returns
+        // are matched against the lowercase form: an uppercase link then opens
+        // the same report its lowercase twin does.
+        const matching = reportsMatchingTarget(
+          events,
+          { type: target.type, value: target.value.toLowerCase() },
+          (e: NostrEvent) => getReportTarget(e),
+        );
         if (truncated && events.length === 0) {
           setDeepLinkStatus('unavailable');
           return;
@@ -1354,12 +1563,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           // Prefer a report whose resolved target IS the deep-link target for display;
           // fall back to any returned report (all of them tag the target).
           const pool = matching.length > 0 ? matching : events;
-          // Merge into the reports cache so the detail pane has full context,
-          queryClient.setQueryData<NostrEvent[]>(['reports', relayUrl], (old) => {
-            const merged = [...(old ?? [])];
-            for (const e of pool) if (!merged.some(m => m.id === e.id)) merged.push(e);
-            return merged;
-          });
+          // Held beside the feed so the detail pane has full context and the
+          // row survives polls (see deepLinked above),
+          setDeepLinked({ relayUrl, events: pool });
           // and select the newest report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
           const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
@@ -1369,7 +1575,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           // pane counts; it can differ from the deep-link target when no
           // returned report resolves to it (the fallback pool above).
           const latestTarget = getReportTarget(latest);
-          setTargetedHistory(latestTarget ? { relayUrl, target: latestTarget, truncated } : null);
+          setTargetedHistory(latestTarget
+            ? {
+                relayUrl,
+                target: latestTarget,
+                truncated,
+                // The read fetched the link's lowercase form (the worker's filter
+                // lowercases it), so only a report whose own tag is that lowercase
+                // value was read for this target: an uppercase tag was not fetched
+                // by a lowercase link. A malformed report's tag can have no value,
+                // and an absent value never equals a string.
+                exact: latestTarget.type === target.type
+                  && latestTarget.value === target.value.toLowerCase(),
+              }
+            : null);
           setDeepLinkStatus('found');
           navigate(`/reports/${latest.id}`, { replace: true });
         } else {
@@ -1380,7 +1599,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, config.relayUrl, config.apiUrl, updateConfig, queryClient, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -1459,7 +1678,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // landed contributes nothing to resolvedTargets, so rendering here would show
   // handled work as pending, and would show auto-hidden content in the default
   // view (#221).
-  if (isLoading || blockingLoadStillBlocking.length > 0) {
+  if ((isLoading && !queueFailedCold) || blockingLoadStillBlocking.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
         <CardHeader>
@@ -1479,21 +1698,38 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
-  // The reports query itself failing is the more fundamental problem: if the
-  // relay read is down, resolution state is beside the point, and the
-  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
-  // but only full-pane when there is nothing to show. When a REFRESH fails
-  // (e.g. the worker 502s on a relay timeout), the last good list stays
-  // rendered with a stale-data warning below, so one slow poll does not look
-  // like "no reports pending".
-  if (error && !reports) {
-    return (
-      <Alert variant="destructive">
-        <AlertDescription>
-          Failed to load reports: {error instanceof Error ? error.message : "Unknown error"}
-        </AlertDescription>
-      </Alert>
-    );
+  const showDeepLinkFallback =
+    !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
+  const showDeepLinkResolving =
+    !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
+  // Whether the detail side has anything to show. Opens the mobile sheet, and
+  // keeps a cold queue failure from replacing the screen below.
+  const detailPaneOpen = !!selectedReport || showDeepLinkResolving || showDeepLinkFallback;
+
+  // Try again is the only way back short of the next 60s poll: the header's
+  // Refresh is not rendered in either layout. During a re-read the query holds
+  // no error, so the notice says it is trying again instead of repeating the
+  // last reason, and the button waits.
+  const queueLoadFailure = (
+    <Alert variant="destructive">
+      <AlertDescription className="space-y-2">
+        <p>
+          {error
+            ? `Failed to load reports: ${error instanceof Error ? error.message : "Unknown error"}`
+            : "Failed to load reports. Trying again…"}
+        </p>
+        <Button variant="outline" size="sm" onClick={() => refetch()} disabled={isFetching}>
+          <RefreshCw className={`mr-1 h-3 w-3 ${isFetching ? 'animate-spin' : ''}`} />
+          Try again
+        </Button>
+      </AlertDescription>
+    </Alert>
+  );
+  // A deep link's own lookup does not depend on the queue, so the report it
+  // found (or its gone/unavailable pane) still opens, with this failure in
+  // place of the list rather than replacing the screen.
+  if (queueFailedCold && !detailPaneOpen) {
+    return queueLoadFailure;
   }
 
   // A gating source failed cold (no previous data to fall back on). Rendering
@@ -1510,6 +1746,61 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
   }
 
+  // Whether the open report's target has left the list: none of its reports is
+  // in hand, and no read in flight could bring it back. The feed and resolved
+  // history re-read together after a resolve or Refresh, and in the history
+  // view the target moves from one to the other (or back, on a reopen); while
+  // either is still reading, a target missing from both is only between them.
+  // A report with a target is only ever selected from reports in hand, so one
+  // missing from them with nothing in flight had them and lost them. (A report
+  // with no target is never grouped with a target's reports, so it reads as
+  // left as well; with no target, the pane has no target media to hide.)
+  //
+  // Once called, the call holds until the report's reports are back in hand. A
+  // read in flight only stops a target being called "left"; it does not undo
+  // the call. Otherwise every later poll, Refresh or Load more would send the
+  // pane's default back to "not known" and then to hidden again, which drops a
+  // moderator's Show each time. A target that is only between two reads is
+  // never called, so it is never held.
+  const leftNow = !!selectedReport
+    && !selectedPaneReports
+    && !isFetching
+    && !(historyView && history.isFetching);
+  if (leftNow && leftListFor !== selectedReport.id) setLeftListFor(selectedReport.id);
+  if (selectedPaneReports && leftListFor !== null) setLeftListFor(null);
+  const selectedTargetLeftList = leftNow
+    || (!!selectedReport && !selectedPaneReports && leftListFor === selectedReport.id);
+
+  // The open report's side of the switch, so the pane carries the row's label.
+  const selectedSwitchKey = selectedTarget ? reportTargetKey(selectedTarget) : undefined;
+
+  // The pane may start a target's media visible only when the reports in hand
+  // are all of that target's: the target is in the needs-attention feed itself
+  // (not merely in the merged list, which also holds deep-linked reports and,
+  // in the history view, pages), or a targeted read of that same target did not
+  // stop early. Anything else may be missing a CSAM-signal report: a target
+  // opened from history pages not yet loaded, a read cut short by the worker's
+  // page bound, a feed that itself stopped early (it gives no credit to any
+  // target in it), or a post opened by a ?pubkey= link, whose read was the
+  // account's and misses a report that lacks the author's p tag. Those start
+  // hidden until clicked.
+  const selectedTargetReportsPartial = !!selectedTarget
+    && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
+    && !targetedReadComplete;
+  // Older history pages can contain more reports on an already listed target.
+  // Its count is a floor until the walk ends without gaps, unless the feed or
+  // an exact targeted read already read that target in full. Use the same rule
+  // for the row and pane; the footer counts loaded rows, not reports per target.
+  const historyReadComplete = footerState.kind === 'ended'
+    && !footerState.notes.length;
+  const targetCountTruncated = (key: string) => {
+    if (needsAttentionTargetKeys.has(key)) return false;
+    if (key === selectedSwitchKey && targetedReadComplete) return false;
+    return !(historyReadComplete && !feedTargetKeys.has(key));
+  };
+  const selectedTargetCountTruncated = !!selectedSwitchKey
+    && (targetedHistoryTruncated || (!!selectedPaneReports && targetCountTruncated(selectedSwitchKey)));
+
   // Built once and rendered in both the desktop pane and the mobile sheet so
   // the two views cannot drift. Reports render attacker-authored event data:
   // a crashing report degrades to the inline fallback (with the target's
@@ -1518,14 +1809,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // reports filter (reportsMode lowercases too), so the per-target
   // decisions read keys off the same normalized hex an uppercase-hex deep link
   // would otherwise miss.
-  const showDeepLinkFallback =
-    !selectedReport && hasDeepLinkParams && (deepLinkStatus === 'gone' || deepLinkStatus === 'unavailable');
-  const showDeepLinkResolving =
-    !selectedReport && deepLinkStatus === 'resolving' && hasDeepLinkParams;
-
-  // The open report's side of the switch, so the pane carries the row's label.
-  const selectedSwitchKey = selectedTarget ? `${selectedTarget.type}:${selectedTarget.value}` : undefined;
-
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
       status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}
@@ -1557,15 +1840,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     >
       <ReportDetail
         report={selectedReport}
-        allReportsForTarget={
-          selectedReport
-            ? consolidated.find(c =>
-                c.reports.some(r => r.id === selectedReport.id)
-              )?.reports
-            : undefined
-        }
-        allReportsForTargetTruncated={targetedHistoryTruncated}
-        allReports={reports || []}
+        allReportsForTarget={selectedPaneReports}
+        allReportsForTargetTruncated={selectedTargetCountTruncated}
+        targetReportsMayBePartial={selectedTargetReportsPartial}
+        targetLeftList={selectedTargetLeftList}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
       />
@@ -1576,6 +1854,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     <>
       <div className="grid grid-cols-1 lg:grid-cols-5 gap-4 h-full">
         {/* Left Pane - Report List */}
+        {queueFailedCold ? (
+          <div className="lg:col-span-2">{queueLoadFailure}</div>
+        ) : (
         <ErrorBoundary fallback={reset => <ReportsListErrorFallback onRetry={reset} />}>
         <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
         <CardHeader className="pb-3 shrink-0">
@@ -1586,9 +1867,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 Reports
               </CardTitle>
               <CardDescription>
-                {uniqueTargets} pending{resolvedCount > 0 && hideResolved && (
-                  <span className="text-green-600"> ({resolvedCount} resolved)</span>
-                )}
+                {showPendingReview
+                  ? `${headerCount} pending review`
+                  : hideResolved
+                    ? `${headerCount} pending`
+                    : `${headerCount} shown`}
               </CardDescription>
             </div>
             <div className="flex items-center gap-2">
@@ -1600,7 +1883,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               <Button
                 variant="outline"
                 size="sm"
-                onClick={() => refetch()}
+                onClick={() => {
+                  refetch();
+                  // Another moderator's resolutions reach loaded history only
+                  // when it is re-read; this re-reads every loaded page.
+                  if (historyView) history.refetch();
+                }}
                 disabled={isFetching}
                 title={lastUpdatedText ? `Last updated ${lastUpdatedText}` : 'Refresh'}
                 className="min-w-[44px] min-h-[44px] sm:min-w-0 sm:min-h-0"
@@ -1630,8 +1918,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             <TruncatedHistoryBanner oldestCovered={truncatedOldestCovered} />
           )}
 
+          {queueFeed?.truncated && (
+            <QueueTruncatedBanner oldestCovered={queueFeed.oldestCovered} />
+          )}
+
           {/* Refresh failed but we still hold a previous list: warn instead of
-              blanking the queue. The poll keeps retrying every 15s. */}
+              blanking the queue. The poll retries every minute. */}
           {error && (
             <Alert variant="destructive" className="mt-2 py-2">
               <AlertDescription className="text-xs">
@@ -1649,7 +1941,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </TabsTrigger>
               <TabsTrigger value="individual" className="text-xs">
                 <Flag className="h-3 w-3 mr-1" />
-                All ({hideResolved ? filteredReportsCount : totalReports})
+                All ({filteredReportsCount})
               </TabsTrigger>
             </TabsList>
           </Tabs>
@@ -1659,8 +1951,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             {/* Sort dropdown */}
             <div className="flex items-center gap-2">
               <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
-              <Select value={sortBy} onValueChange={(v) => setSortBy(v as SortOption)}>
-                <SelectTrigger className="h-8 text-xs flex-1">
+              <Select
+                value={sortBy}
+                onValueChange={(v) => setSortBy(v as SortOption)}
+              >
+                <SelectTrigger
+                  className="h-8 text-xs flex-1"
+                  aria-describedby={showSortScopeNote ? 'sort-scope-note' : undefined}
+                >
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1672,6 +1970,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 </SelectContent>
               </Select>
             </div>
+            {/* Sorted history covers only the pages loaded so far. */}
+            {showSortScopeNote && (
+              <p id="sort-scope-note" className="text-[10px] italic leading-tight opacity-70">
+                Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
+              </p>
+            )}
 
             {/* Target type filter */}
             <div className="flex items-center gap-2">
@@ -1806,17 +2110,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </div>
         </CardHeader>
         <CardContent className="p-0 flex-1 min-h-0">
-          <ScrollArea className="h-full">
+          {/* Radix wraps the viewport's content in a display:table div, which is
+              never narrower than its widest row (a nowrap 63-character ID).
+              Block it, or below about 1280 px the list's footer sentences are
+              cut off at the card edge. */}
+          <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]>div]:!block" viewportRef={listViewportRef}>
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
                 !consolidated || consolidated.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No reports found</p>
-                  </div>
+                  listEmptyIsFinal ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No reports found</p>
+                    </div>
+                  ) : null
                 ) : (
                   consolidated.map((item) => {
-                    const key = `${item.target.type}:${item.target.value}`;
+                    const key = reportTargetKey(item.target);
                     return (
                       <ConsolidatedReportItem
                         key={key}
@@ -1824,20 +2134,25 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                         isSelected={selectedReport?.id === item.latestReport.id}
                         onClick={() => handleSelectReport(item.latestReport)}
                         switchState={switchMembership.get(key)}
+                        countTruncated={key === selectedSwitchKey
+                          ? selectedTargetCountTruncated
+                          : targetCountTruncated(key)}
                       />
                     );
                   })
                 )
               ) : (
                 filteredReports.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No reports found</p>
-                  </div>
+                  listEmptyIsFinal ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No reports found</p>
+                    </div>
+                  ) : null
                 ) : (
                   filteredReports.map((report) => {
                     const target = getReportTarget(report);
-                    const key = target ? `${target.type}:${target.value}` : undefined;
+                    const key = target ? reportTargetKey(target) : undefined;
                     return (
                       <IndividualReportItem
                         key={report.id}
@@ -1850,11 +2165,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   })
                 )
               )}
+              {historyView && (
+                <ResolvedHistoryFooter
+                  state={footerState}
+                  errorMessage={history.error instanceof Error ? history.error.message : undefined}
+                  retrying={history.isFetching && !history.isFetchingNextPage}
+                  onLoadMore={loadMoreHistory}
+                  onRetry={() => history.refetch()}
+                />
+              )}
             </div>
           </ScrollArea>
         </CardContent>
       </Card>
         </ErrorBoundary>
+        )}
 
         {/* Right Pane - Report Detail (Desktop) */}
         {!isMobile && (
@@ -1867,10 +2192,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       {/* Mobile Sheet - Report Detail */}
       {isMobile && (
         <Sheet
-          open={!!selectedReport || showDeepLinkResolving || showDeepLinkFallback}
+          open={detailPaneOpen}
           onOpenChange={(open) => !open && handleSelectReport(null)}
         >
           <SheetContent side="right" className="!w-full !max-w-[100vw] pt-10 px-0 pb-0 overflow-y-auto">
+            {/* The sheet covers the list column where the failure is drawn, so
+                say it here too: the moderator can act on this report but must
+                know the queue is not loaded. */}
+            {queueFailedCold && <div className="px-4 pb-3">{queueLoadFailure}</div>}
             {reportDetailPane}
           </SheetContent>
         </Sheet>
