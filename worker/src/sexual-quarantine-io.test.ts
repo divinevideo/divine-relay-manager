@@ -11,6 +11,10 @@ const HASH = 'a'.repeat(64);
 const env = { NOSTR_NSEC: 'test', RELAY_URL: 'wss://relay.example.test', CDN_DOMAIN: 'media.example.test', BLOSSOM_WEBHOOK_SECRET: 'test-only-secret' };
 const video = (tags = [['imeta', `url https://media.example.test/${HASH}.mp4`, `x ${HASH}`, 'm video/mp4']]) =>
   finalizeEvent({ kind: 34236, created_at: 1, tags, content: '' }, new Uint8Array(32).fill(2));
+type ReviewItem = Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
+const reviewItem = (event = video()) => ({ eventId: event.id, goal: 'review', state: 'review', reporters: 1,
+  firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
+  snapshot: snapshotVideo(event.id, event, env) }) as ReviewItem;
 afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 
 describe('quarantine service IO', () => {
@@ -204,13 +208,77 @@ describe('quarantine service IO', () => {
   });
 
   it('accepts the real empty 202 COOP async submission response', async () => {
-    const event = video();
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 202 })));
-    const item = { eventId: event.id, goal: 'review', state: 'review', reporters: 1,
-      firstReport: { id: 'c'.repeat(64), reason: 'nudity' }, deadlineAt: 1000,
-      snapshot: snapshotVideo(event.id, event, env) } as Parameters<ReturnType<typeof createQuarantineIO>['review']>[0];
     await expect(createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test', COOP_API_KEY: 'test',
-      REVIEWER_BASE_URL: 'https://review.example.test' }).review(item)).resolves.toBeUndefined();
+      REVIEWER_BASE_URL: 'https://review.example.test' }).review(reviewItem())).resolves.toBeUndefined();
+  });
+
+  it.each(['plain', 'store'])('authenticates COOP through Access with %s bindings', async source => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', fetcher);
+    const binding = (value: string) => source === 'store' ? { get: async () => value } : value;
+    await createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test',
+      COOP_API_KEY: binding('test-only-ingestion-key'), REVIEWER_BASE_URL: 'https://review.example.test',
+      COOP_ACCESS_CLIENT_ID: binding('test-only-access-id'),
+      COOP_ACCESS_CLIENT_SECRET: binding('test-only-access-secret') }).review(reviewItem());
+    expect(fetcher).toHaveBeenCalledWith('https://coop.example.test/api/v1/content', expect.objectContaining({
+      redirect: 'manual', headers: expect.objectContaining({
+        'x-api-key': 'test-only-ingestion-key', 'CF-Access-Client-Id': 'test-only-access-id',
+        'CF-Access-Client-Secret': 'test-only-access-secret',
+      }),
+    }));
+  });
+
+  it.each(['missing', 'empty'])('rejects %s Access credentials before sending review data', async source => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
+    await expect(createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test',
+      COOP_ACCESS_CLIENT_ID: 'test-only-access-id',
+      ...(source === 'empty' ? { COOP_ACCESS_CLIENT_SECRET: { get: async () => '' } } : {}),
+    }).review(reviewItem())).rejects.toThrow('Review access credentials unavailable');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['missing', { COOP_ACCESS_CLIENT_SECRET: 'test-only-access-secret' }],
+    ['empty', { COOP_ACCESS_CLIENT_ID: '', COOP_ACCESS_CLIENT_SECRET: 'test-only-access-secret' }],
+  ])('rejects an Access client id that is %s before sending review data', async (_case, access) => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
+    await expect(createQuarantineIO({ ...env, COOP_URL: 'https://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test', ...access,
+    }).review(reviewItem())).rejects.toThrow('Review access credentials unavailable');
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('sends only the ingestion key, over any scheme, when no Access pair is bound', async () => {
+    const fetcher = vi.fn(async (_url: string, _init: RequestInit) => new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', fetcher);
+    await createQuarantineIO({ ...env, COOP_URL: 'http://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test' }).review(reviewItem());
+    expect(fetcher).toHaveBeenCalledOnce();
+    expect(fetcher.mock.calls[0][1].headers).toEqual({ 'Content-Type': 'application/json', 'x-api-key': 'test-only-ingestion-key' });
+  });
+
+  it('does not consume or forward shared Access credentials without a dedicated COOP pair', async () => {
+    const clientId = vi.fn(async () => 'test-only-shared-id');
+    const clientSecret = vi.fn(async () => 'test-only-shared-secret');
+    const sharedEnv = { ...env, CF_ACCESS_CLIENT_ID: { get: clientId }, CF_ACCESS_CLIENT_SECRET: { get: clientSecret } };
+    const fetcher = vi.fn(async (_url: string, _init: RequestInit) => new Response(null, { status: 202 }));
+    vi.stubGlobal('fetch', fetcher);
+    await createQuarantineIO({ ...sharedEnv, COOP_URL: 'https://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test' }).review(reviewItem());
+    expect(clientId).not.toHaveBeenCalled();
+    expect(clientSecret).not.toHaveBeenCalled();
+    expect(fetcher.mock.calls[0][1].headers).toEqual({ 'Content-Type': 'application/json', 'x-api-key': 'test-only-ingestion-key' });
+  });
+
+  it('does not send Access credentials over an insecure COOP connection', async () => {
+    const fetcher = vi.fn(async () => new Response(null, { status: 202 })); vi.stubGlobal('fetch', fetcher);
+    await expect(createQuarantineIO({ ...env, COOP_URL: 'http://coop.example.test',
+      COOP_API_KEY: 'test-only-ingestion-key', REVIEWER_BASE_URL: 'https://review.example.test',
+      COOP_ACCESS_CLIENT_ID: 'test-only-access-id', COOP_ACCESS_CLIENT_SECRET: 'test-only-access-secret',
+    }).review(reviewItem())).rejects.toThrow('Review access requires HTTPS');
+    expect(fetcher).not.toHaveBeenCalled();
   });
 
   it.each(['external', 'hash-only'])('restores an unheld %s candidate absent from the media server', async kind => {
