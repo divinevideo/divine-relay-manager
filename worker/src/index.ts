@@ -1103,6 +1103,15 @@ async function handlePublish(
 
   const secretKey = await getSecretKey(env);
 
+  // A resolution label names its target by the lowercase id every reader keys
+  // it by (#313, #315): an older frontend can still send a report's tag as
+  // written. Only the label's e and p values change, before it is signed.
+  if (body.kind === 1985 && body.tags?.some(tag => tag[0] === 'L' && tag[1] === 'moderation/resolution')) {
+    body.tags = body.tags.map(tag => (tag[0] === 'e' || tag[0] === 'p')
+      ? [tag[0], canonicalHex64(tag[1]) ?? tag[1], ...tag.slice(2)]
+      : tag);
+  }
+
   const event = finalizeEvent(
     {
       kind: body.kind,
@@ -1499,11 +1508,15 @@ async function handleModerate(
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
+        // The unban above used the spelling given, so a ban stored in uppercase
+        // stays removable. The mark and the ticket sync key the lowercase id
+        // every reader uses (#313, #315).
+        const markedPubkey = canonicalHex64(body.pubkey) ?? body.pubkey;
         if (env.DB) {
-          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
+          await markHumanAction(env.DB, 'pubkey', markedPubkey, body.action);
         }
         try {
-          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+          await syncZendeskAfterAction(env, body.action, 'pubkey', markedPubkey, getPublicKey(secretKey));
         } catch (err) {
           console.error('[handleModerate] Zendesk sync error:', err);
         }

@@ -56,10 +56,10 @@ describe('selectReportsNeedingAttention', () => {
 
   it('drops a report naming its target in uppercase hex once that target is resolved', () => {
     // getReportTarget keys both reports lowercase (#315).
-    const mixed = 'ab'.repeat(32);
+    const lower = 'ab'.repeat(32);
     const result = selectReportsNeedingAttention(
-      [report('r1', [['e', mixed.toUpperCase()]]), report('r2', [['e', mixed]])],
-      new Set([`event:${mixed}`]),
+      [report('r1', [['e', lower.toUpperCase()]]), report('r2', [['e', lower]])],
+      new Set([`event:${lower}`]),
       new Set(),
     );
     expect(result.events).toEqual([]);
