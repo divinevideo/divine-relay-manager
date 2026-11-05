@@ -179,4 +179,10 @@ function useToast() {
   }
 }
 
-export { useToast, toast }
+// The toasts in the store now, for code that runs outside a render, such as an
+// audit write that settles after the component that started it has unmounted.
+function getToasts() {
+  return memoryState.toasts
+}
+
+export { useToast, toast, getToasts }
