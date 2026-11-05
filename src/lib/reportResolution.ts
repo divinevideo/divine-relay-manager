@@ -31,8 +31,9 @@ export function isConsolidatedReportResolved(
   bannedPubkeys: Set<string>,
 ): boolean {
   if (resolvedTargets.has(reportTargetKey(report.target))) return true;
-  // Only the report's side is lowercased. authorPubkey is a reporter-authored `p`
-  // tag, validated as hex without being case-normalized. The relay's side is kept
+  // Only the report's side is lowercased. authorPubkey comes from a
+  // reporter-authored `p` tag; consolidateReports lowercases it, and this is a
+  // backstop for any other caller. The relay's side is kept
   // as written on purpose (Reports.tsx `bannedPubkeySet`): funnelcake stores what
   // `banpubkey` was handed but matches bans exactly, so an uppercase entry never
   // banned the lowercase account, and the reports on its posts still need a

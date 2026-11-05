@@ -52,10 +52,8 @@ export async function replayAdultReports(
     const target = canonicalHex64(event.tags.find(t => t[0] === 'e')?.[1]);
     // List reports never enter the quarantine. The live path already logged
     // them for human review; replaying them would repeat that log and alert.
-    if (adultSexualCategory(category) && !getReportedList(event)) {
-      if (target) await ingest(event as ReportEvent, category, target);
-      // The quarantine raised this for such a target; it is now dropped first.
-      else console.error(`[ALERT] Sexual quarantine report ${event.id} not admitted: invalid target identifier`);
+    if (adultSexualCategory(category) && target && !getReportedList(event)) {
+      await ingest(event as ReportEvent, category, target);
     }
   }
   if (events.length < PAGE) {

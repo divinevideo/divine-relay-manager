@@ -905,15 +905,7 @@ export class ReportWatcher implements DurableObject {
     // 64-character hex id names nothing that can be hidden or reviewed.
     const targetEventId = canonicalHex64(targetEventTag?.[1]);
     if (targetEventTag && !targetEventId) {
-      // The quarantine raised an alert for such a target; it is now dropped
-      // before reaching it, so the alert is raised here instead.
-      const quarantineOn = adultSexualCategory(category) && !getReportedList(event)
-        && (this.env.SEXUAL_QUARANTINE_ENABLED === 'true' || await this.state.storage.get('sexual-quarantine-activated'));
-      if (quarantineOn) {
-        console.error(`[ALERT] Sexual quarantine report ${event.id} not admitted: invalid target identifier`);
-      } else {
-        console.log('[ReportWatcher] Report e tag is not a 64-character hex id, skipping auto-hide');
-      }
+      console.log('[ReportWatcher] Report e tag is not a 64-character hex id, skipping auto-hide');
     }
 
     // Process auto-hide if enabled and category qualifies
@@ -994,6 +986,9 @@ export class ReportWatcher implements DurableObject {
         console.error(`[ALERT] Sexual quarantine report ${event.id} not admitted: invalid signature or over the evidence bound`);
         return;
       }
+      // A backstop: intake and replay already drop a target that is not a
+      // 64-character hex id and lowercase the rest (#315), so no current
+      // caller reaches this.
       if (!isLowerHex64(targetEventId)) {
         console.error(`[ALERT] Sexual quarantine report ${wire.id} not admitted: invalid target identifier`);
         return;

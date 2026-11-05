@@ -346,33 +346,6 @@ describe('sexual quarantine watcher integration', () => {
     expect(await new SexualQuarantine(f.durable, f.io).get(ID)).toBeUndefined();
   });
 
-  // Intake drops an e tag that is not a 64-character hex id before the
-  // quarantine sees it, so it raises the alert the quarantine used to.
-  it('alerts at intake on an adult report whose target is not a 64-character hex id', async () => {
-    const f = fixture();
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
-      enabled: true, trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['NS-sexualContent'], threshold: 2, requireTrustedClient: false }],
-    }) }));
-    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', 'not-an-event-id', 'NS-sexualContent']] }, new Uint8Array(32).fill(9));
-    await (f.watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
-    expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/\[ALERT\] Sexual quarantine report .* not admitted: invalid target identifier/));
-    expect(f.io.snapshot).not.toHaveBeenCalled();
-    consoleError.mockRestore();
-  });
-
-  it('keeps an adult report with a malformed target quiet while the quarantine is off', async () => {
-    const f = fixture('false');
-    const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
-    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({
-      enabled: true, trustedClients: [], tiers: [{ kind: 'threshold', name: 'Adult', categories: ['NS-sexualContent'], threshold: 2, requireTrustedClient: false }],
-    }) }));
-    const event = finalizeEvent({ kind: 1984, created_at: 1, content: '', tags: [['e', 'not-an-event-id', 'NS-sexualContent']] }, new Uint8Array(32).fill(9));
-    await (f.watcher as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event as ReportEvent);
-    expect(consoleError).not.toHaveBeenCalledWith(expect.stringMatching(/\[ALERT\]/));
-    consoleError.mockRestore();
-  });
-
   it('skips invalid target identifiers before storage and transport work', async () => {
     const f = fixture();
     await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({

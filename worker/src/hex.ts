@@ -9,9 +9,8 @@ export function isHex64(value: unknown): boolean {
 // The same in lowercase only, the form ids are stored and compared in.
 // ReportWatcher holds its callers to it, since an uppercase event id would key
 // a row nobody reads. Every route hands it lowercase ids, lowercasing them or
-// forwarding only lowercase ones, except /api/publish: a resolution label's
-// `e` tag goes over as sent, so an uppercase tag there gets a 400 from
-// ReportWatcher, as it did before this helper.
+// forwarding only lowercase ones (/api/publish lowercases a resolution
+// label's target before it gets here).
 export function isLowerHex64(value: unknown): boolean {
   return typeof value === 'string' && /^[0-9a-f]{64}$/.test(value);
 }
