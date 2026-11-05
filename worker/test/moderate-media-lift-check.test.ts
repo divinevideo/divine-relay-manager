@@ -257,6 +257,24 @@ describe('/api/moderate-media/lift-check', () => {
     },
   );
 
+  // This worker's credentials for moderation-service are used only by a check
+  // that reads its record. An action the guard does not check is answered
+  // before they are resolved, so a missing or unreadable credential cannot
+  // refuse it.
+  it.each([
+    ['are not configured', { SERVICE_API_TOKEN: undefined }],
+    ['cannot be read', { SERVICE_API_TOKEN: { get: async () => { throw new Error('secrets store down'); } } }],
+  ])('allows an unchecked action while the credentials for moderation-service %s', async (_label, extra) => {
+    for (const action of ['PERMANENT_BAN', 'QUARANTINE', 'DELETE', 'REVIEW']) {
+      const res = await check({ sha256: SHA, action }, extra);
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true, allowed: true, checked: false });
+    }
+    expect(blobReads).toEqual([]);
+    expect(sqls).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
   // The schema bootstrap runs once per isolate on whichever route first reads
   // age-review cases, this one included. Past it, the check only reads.
   it('issues only reads to D1 once the schema is set up', async () => {
