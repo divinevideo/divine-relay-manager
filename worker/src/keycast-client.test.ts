@@ -25,6 +25,9 @@ describe('keycast-client', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    // A failed assertion skips a mockRestore at the end of a test body and would
+    // leave its spy (AbortSignal.timeout, console.warn) installed for later tests.
+    vi.restoreAllMocks();
   });
 
   describe('suspendUser', () => {
@@ -395,7 +398,6 @@ describe('keycast-client', () => {
       await getUserStatus(VALID_PUBKEY, makeEnv(), { timeoutMs: 5000 });
       expect(timeout).toHaveBeenCalledWith(5000);
       expect(fetchMock.mock.calls[0][1].signal).toBe(timeout.mock.results[0].value);
-      timeout.mockRestore();
     });
 
     it('sets no timeout unless asked, so callers that must wait for an answer still do', async () => {
@@ -416,7 +418,6 @@ describe('keycast-client', () => {
       expect(result.success).toBe(false);
       expect(result.notFound).toBeUndefined();
       expect(warn).toHaveBeenCalledWith(expect.stringContaining('timed out'));
-      warn.mockRestore();
     });
 
     it('returns verified_minor true only for boolean true', async () => {

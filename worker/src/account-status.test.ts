@@ -14,7 +14,12 @@ function makeEnv(overrides: Partial<KeycastEnv> = {}): KeycastEnv {
 }
 
 describe('handleAccountStatus', () => {
-  afterEach(() => vi.unstubAllGlobals());
+  // restoreAllMocks, not a mockRestore at the end of a test body: a failed assertion
+  // would skip that line and leave the AbortSignal.timeout spy installed.
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
 
   it('bounds the Keycast lookup with a 10-second timeout, so a hung Keycast reads as unavailable', async () => {
     const timeout = vi.spyOn(AbortSignal, 'timeout');
@@ -27,7 +32,6 @@ describe('handleAccountStatus', () => {
     await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS);
     expect(timeout).toHaveBeenCalledWith(10_000);
     expect(fetchMock.mock.calls[0][1].signal).toBe(timeout.mock.results[0].value);
-    timeout.mockRestore();
   });
 
   it('returns verified_minor from keycast on success', async () => {
