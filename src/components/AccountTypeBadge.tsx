@@ -4,7 +4,7 @@ import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import type { AccountStatusResponse } from '@/lib/adminApi';
 import { deriveAccountIdentity } from '@/lib/accountVerdict';
-import { ACCOUNT_TYPE_BADGE } from '@/lib/constants';
+import { ACCOUNT_TYPE_BADGE, isHex64 } from '@/lib/constants';
 import { useAccountStatus } from '@/hooks/useAccountStatus';
 
 interface Props {
@@ -54,15 +54,12 @@ export function AccountTypeBadge({ accountStatus, accountStatusError, accountSta
   );
 }
 
-const HEX_64 = /^[0-9a-f]{64}$/;
-
 /** The badge for one pubkey, looked up through the shared account-status query. */
 export function AccountTypeLabel({ pubkey }: { pubkey: string | null | undefined }) {
   // Lowercase to share age review's cache entry. A report's p tag is written by
   // whoever filed it, so anything but a 64-hex pubkey is never looked up: a path
   // like '../info' would otherwise reach another route that answers success.
-  const normalized = pubkey?.toLowerCase();
-  const lookup = normalized && HEX_64.test(normalized) ? normalized : undefined;
+  const lookup = isHex64(pubkey) ? pubkey.toLowerCase() : undefined;
   const { data, isError, isLoading } = useAccountStatus(lookup);
   if (!pubkey) return null;
   if (!lookup) return <AccountTypeBadge accountStatus={undefined} accountStatusError accountStatusLoading={false} />;

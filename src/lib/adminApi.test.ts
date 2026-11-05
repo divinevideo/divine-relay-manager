@@ -115,7 +115,7 @@ describe('adminApi', () => {
   });
 
   describe('getAccountStatus', () => {
-    it('encodes the pubkey, so a crafted value cannot reach another route', async () => {
+    it('escapes path separators in the pubkey', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: false }) });
       await getAccountStatus(API_URL, '../info');
       expect(mockFetch).toHaveBeenCalledWith(
