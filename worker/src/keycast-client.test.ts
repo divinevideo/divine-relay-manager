@@ -386,6 +386,39 @@ describe('keycast-client', () => {
   });
 
   describe('getUserStatus', () => {
+    it('bounds the lookup with the timeout its caller asks for', async () => {
+      const timeout = vi.spyOn(AbortSignal, 'timeout');
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active' }),
+      });
+      await getUserStatus(VALID_PUBKEY, makeEnv(), { timeoutMs: 5000 });
+      expect(timeout).toHaveBeenCalledWith(5000);
+      expect(fetchMock.mock.calls[0][1].signal).toBe(timeout.mock.results[0].value);
+      timeout.mockRestore();
+    });
+
+    it('sets no timeout unless asked, so callers that must wait for an answer still do', async () => {
+      // ReportWatcher's approved-minor fallback reads a lookup failure as "not an
+      // approved minor"; a timeout there could open a deadline case on a protected minor.
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active' }),
+      });
+      await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(fetchMock.mock.calls[0][1].signal).toBeUndefined();
+    });
+
+    it('returns unavailable, and logs it, when the lookup times out', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      fetchMock.mockRejectedValue(new DOMException('The operation was aborted due to timeout', 'TimeoutError'));
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv(), { timeoutMs: 5000 });
+      expect(result.success).toBe(false);
+      expect(result.notFound).toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('timed out'));
+      warn.mockRestore();
+    });
+
     it('returns verified_minor true only for boolean true', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
