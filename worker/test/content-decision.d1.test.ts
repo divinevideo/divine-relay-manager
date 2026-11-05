@@ -254,6 +254,21 @@ describe('recorded content decisions on real D1', () => {
     expect(body.decisions.map(d => d.action)).toEqual(['reviewed']);
   });
 
+  // An older frontend tab can ask with a report's uppercase tag while the
+  // worker now stores the decision lowercase, so the request is canonicalized
+  // (not the match widened) and the tab reads the row it just wrote.
+  it('reads a target\'s history for an uppercase hex request in lowercase', async () => {
+    const targetId = 'e5'.repeat(32);
+    await DB.prepare(`INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
+      VALUES ('pubkey', ?, 'reviewed', '2026-08-16 00:00:00')`).bind(targetId).run();
+    const response = await worker.fetch(
+      new Request(`https://api.example.test/api/decisions/${targetId.toUpperCase()}`, { headers: { 'X-Admin-Key': 'test-admin-key' } }),
+      { ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext);
+    const body = await response.json() as { decisions: Array<{ action: string }> };
+    expect(body.decisions.map(d => d.action)).toEqual(['reviewed']);
+  });
+
   it('does not let a delayed audit write overwrite authoritative visibility intent', async () => {
     const eventId = 'ef'.repeat(32);
     await DB.prepare(`

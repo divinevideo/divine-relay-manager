@@ -923,7 +923,11 @@ export class ReportWatcher implements DurableObject {
     // category: a child-safety label elsewhere in the report must not
     // suppress the age review.
     const reportedPubkey = canonicalHex64(targetPubkeyTag?.[1]);
-    if (ageReviewCategory(event) === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
+    const isUnderageReport = ageReviewCategory(event) === 'NS-underageUser';
+    if (isUnderageReport && targetPubkeyTag && !reportedPubkey) {
+      console.log('[ReportWatcher] Report p tag is not a 64-character hex id, skipping age review');
+    }
+    if (isUnderageReport && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
       try {
         await this.createAgeReviewCase(event, reportedPubkey);

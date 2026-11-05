@@ -3349,10 +3349,12 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
   });
 
-  // Decision rows are deleted in the requested spelling only, as the queue
-  // keys every stored record as stored; a machine auto-hide row in a report's
-  // uppercase spelling never applied to the lowercase target.
-  it('deletes decision rows in the requested spelling only', async () => {
+  // The request is canonicalized, so an older tab asking with a report's
+  // uppercase tag clears the lowercase rows the worker now writes. The match
+  // itself stays exact, as the queue keys every stored record as stored; a
+  // machine auto-hide row in a report's uppercase spelling never applied to
+  // the lowercase target.
+  it('deletes decision rows in the canonical spelling only, whichever spelling is asked for', async () => {
     vi.stubGlobal('fetch', vi.fn(async () =>
       new Response(JSON.stringify({ result: true }), { status: 200 })
     ));
@@ -3372,7 +3374,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     };
 
     const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=event`, {
+      new Request(`https://api.example/api/decisions/${'A'.repeat(64)}?targetType=event`, {
         method: 'DELETE',
         headers: { 'X-Admin-Key': 'test-admin-key' },
       }),
@@ -3386,6 +3388,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     sock.message(['EOSE', sock.subId()]);
     await resPromise;
 
+    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
     const del = statements.find((s) => /DELETE FROM moderation_decisions/.test(s.sql));
     expect(del?.binds).toEqual(['a'.repeat(64)]);
     // And by an exact match: lower() or COLLATE NOCASE would widen it with

@@ -3040,8 +3040,9 @@ describe('ReportWatcher', () => {
       expect(bindCallsFor('age_review_cases')).toEqual([]);
     });
 
-    it('opens no case for a p tag that is not a 64-character hex id', async () => {
+    it('opens no case for a p tag that is not a 64-character hex id, and says why', async () => {
       const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
       await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
       await new Promise(resolve => setTimeout(resolve, 10));
       getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
@@ -3057,7 +3058,10 @@ describe('ReportWatcher', () => {
       expect(bindCallsFor('age_review_cases')).toEqual([]);
       // Intake skips it; the case-opening backstop is never reached.
       expect(consoleError).not.toHaveBeenCalledWith(expect.stringMatching(/Refusing to open an age review case/));
+      // The drop is recorded, as the e-tag skip is.
+      expect(consoleLog).toHaveBeenCalledWith(expect.stringMatching(/p tag is not a 64-character hex id, skipping age review/));
       consoleError.mockRestore();
+      consoleLog.mockRestore();
     });
 
     it('records the captured handle on the case', async () => {

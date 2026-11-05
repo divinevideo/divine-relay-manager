@@ -701,13 +701,17 @@ export default {
         return handleCloseTicket(env, ticketId, closeBody, corsHeaders);
       }
 
+      // A hex id in the path is canonicalized, the form decisions are now
+      // written in: an older frontend can still ask with a report's uppercase
+      // tag (#313, #315). The match itself stays exact.
       if (path.startsWith('/api/decisions/') && request.method === 'GET') {
-        const targetId = path.replace('/api/decisions/', '');
-        return handleGetDecisions(targetId, env, corsHeaders);
+        const rawId = path.replace('/api/decisions/', '');
+        return handleGetDecisions(canonicalHex64(rawId) ?? rawId, env, corsHeaders);
       }
 
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
-        const targetId = path.replace('/api/decisions/', '');
+        const rawId = path.replace('/api/decisions/', '');
+        const targetId = canonicalHex64(rawId) ?? rawId;
         // Optional: an older frontend omits it, and then both tags are checked.
         // A present-but-unrecognised value takes the same safe path, but that
         // means a client-side typo is invisible in production, so it is logged.
@@ -1990,9 +1994,10 @@ async function handleLogDecision(
 
     await ensureSchemaOnce(env.DB);
 
-    // A hex id is stored lowercase, the form every reader looks it up in. An
+    // A 64-character hex value of any target type (event id, pubkey or media
+    // sha256) is stored lowercase, the form every reader looks it up in. An
     // older frontend can post a report's tag as written (#313, #315). Any
-    // other value, such as a media hash name, is kept as written.
+    // other value is kept as written.
     const targetId = canonicalHex64(body.targetId) ?? body.targetId;
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
