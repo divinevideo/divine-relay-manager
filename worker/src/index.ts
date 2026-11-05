@@ -58,6 +58,7 @@ import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { verifyAccessJwt } from './access-jwt';
+import { secretsMatch } from './secret-compare';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -455,10 +456,10 @@ async function verifyAdminAccess(
   env: Env,
   options: { allowModRelayAdminKey?: boolean } = {}
 ): Promise<{ status: 401 | 503; error: string; code?: string } | null> {
-  // Server-to-server callers use a shared API key.
+  // Server-to-server callers use a shared API key, compared in constant time.
   const adminKey = request.headers.get('X-Admin-Key');
   if (adminKey) {
-    if (env.ADMIN_API_KEY && adminKey === env.ADMIN_API_KEY) {
+    if (env.ADMIN_API_KEY && secretsMatch(adminKey, env.ADMIN_API_KEY)) {
       return null;
     }
     if (options.allowModRelayAdminKey) {
@@ -466,7 +467,7 @@ async function verifyAdminAccess(
       // ADMIN_API_KEY for relay-rpc so it can be rotated without disrupting other callers.
       try {
         const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
-        if (modRelayKey && adminKey === modRelayKey) {
+        if (modRelayKey && secretsMatch(adminKey, modRelayKey)) {
           return null;
         }
       } catch (error) {
@@ -3118,22 +3119,10 @@ async function verifyZendeskWebhook(
     return false;
   }
 
-  // Option 1: Simple API key header (X-Webhook-Key)
-  // Constant-time comparison via HMAC: HMAC both strings with a fixed key,
-  // compare the digests. Avoids timing side-channel on string equality.
+  // Option 1: Simple API key header (X-Webhook-Key), compared in constant time.
   const apiKey = request.headers.get('X-Webhook-Key');
-  if (apiKey && apiKey.length === secret.length) {
-    const encoder = new TextEncoder();
-    const key = await crypto.subtle.importKey(
-      'raw', encoder.encode('webhook-compare'), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']
-    );
-    const [macA, macB] = await Promise.all([
-      crypto.subtle.sign('HMAC', key, encoder.encode(apiKey)),
-      crypto.subtle.sign('HMAC', key, encoder.encode(secret)),
-    ]);
-    if (new Uint8Array(macA).every((v, i) => v === new Uint8Array(macB)[i])) {
-      return true;
-    }
+  if (apiKey && secretsMatch(apiKey, secret)) {
+    return true;
   }
 
   // Option 2: Zendesk native webhook signing (X-Zendesk-Webhook-Signature)
@@ -3163,7 +3152,7 @@ async function verifyZendeskWebhook(
 
   const expectedSig = btoa(String.fromCharCode(...new Uint8Array(signatureBytes)));
 
-  return signature === expectedSig;
+  return secretsMatch(signature, expectedSig);
 }
 
 // Verify NIP-98 HTTP Auth (kind 27235)

@@ -5,6 +5,13 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import worker from './index';
 import { __resetAccessCertsCacheForTests } from './access-jwt';
 import { makeAccessJwtSigner, TEAM_DOMAIN, AUDIENCE } from './test-helpers/access-jwt';
+import { secretsMatch } from './secret-compare';
+
+// The real comparison, wrapped so tests can see the gate goes through it.
+vi.mock('./secret-compare', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./secret-compare')>();
+  return { ...actual, secretsMatch: vi.fn(actual.secretsMatch) };
+});
 
 // Past the gate and matched by no route: authorized gets 404, refused gets 401.
 const PROBE = 'https://api.test/api/no-such-route';
@@ -218,4 +225,41 @@ describe('verifyAdminAccess: X-Admin-Key paths unchanged', () => {
   });
 
   // MOD_RELAY_ADMIN_KEY on /api/relay-rpc is covered in index.test.ts.
+});
+
+describe('verifyAdminAccess: X-Admin-Key comparisons are constant-time', () => {
+  // Timing can't be measured in a unit test; secret-compare.test.ts pins the
+  // helper's behaviour, and these pin that both key checks go through it.
+  it('compares the key to ADMIN_API_KEY with secretsMatch', async () => {
+    vi.mocked(secretsMatch).mockClear();
+    expect(await status({ 'X-Admin-Key': 'admin-key' })).toBe(404);
+    expect(secretsMatch).toHaveBeenCalledWith('admin-key', 'admin-key');
+  });
+
+  it('passes the supplied key first, so timing follows the caller and not ADMIN_API_KEY', async () => {
+    vi.mocked(secretsMatch).mockClear();
+    expect(await status({ 'X-Admin-Key': 'wrong' })).toBe(401);
+    expect(secretsMatch).toHaveBeenCalledWith('wrong', 'admin-key');
+  });
+
+  it('compares the key to MOD_RELAY_ADMIN_KEY with secretsMatch', async () => {
+    vi.mocked(secretsMatch).mockClear();
+    const env = { ...baseEnv, MOD_RELAY_ADMIN_KEY: { get: async () => 'mod-relay-key' } };
+    const res = await worker.fetch(new Request('https://api.test/api/relay-rpc', {
+      method: 'POST', headers: { 'X-Admin-Key': 'mod-relay-key' }, body: '{}',
+    }), env as never, ctx);
+    // An authorized empty RPC payload reaches route validation (400).
+    expect(res.status).toBe(400);
+    expect(secretsMatch).toHaveBeenCalledWith('mod-relay-key', 'mod-relay-key');
+  });
+
+  it('passes the supplied key first when comparing to MOD_RELAY_ADMIN_KEY', async () => {
+    vi.mocked(secretsMatch).mockClear();
+    const env = { ...baseEnv, MOD_RELAY_ADMIN_KEY: { get: async () => 'mod-relay-key' } };
+    const res = await worker.fetch(new Request('https://api.test/api/relay-rpc', {
+      method: 'POST', headers: { 'X-Admin-Key': 'wrong' }, body: '{}',
+    }), env as never, ctx);
+    expect(res.status).toBe(401);
+    expect(secretsMatch).toHaveBeenCalledWith('wrong', 'mod-relay-key');
+  });
 });
