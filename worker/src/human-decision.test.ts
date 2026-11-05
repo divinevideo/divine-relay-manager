@@ -483,6 +483,32 @@ describe('human decision persistence', () => {
       expect(reviewedAtPublication).toBe(true);
     });
 
+    // The event coordinator refuses an id that is not lowercase, so an older
+    // tab marking an uppercase-tagged event report reviewed needs the label's
+    // e value lowercased before it reaches the coordinator.
+    it('hands the coordinator and the relay an event label\'s target in lowercase', async () => {
+      const { db } = createMockDB();
+      const operations: Array<{ eventId: string }> = [];
+      const env = createEnv(db, operations);
+      const id = 'cd'.repeat(32);
+      const sent: string[] = [];
+      const originalSend = MockWebSocket.prototype.send;
+      vi.spyOn(MockWebSocket.prototype, 'send').mockImplementation(function (this: MockWebSocket, data: string) {
+        sent.push(data);
+        originalSend.call(this, data);
+      });
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
+        body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
+          ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', id.toUpperCase()],
+        ] }),
+      }), env as never, mockCtx);
+      expect(response.status).toBe(200);
+      expect(operations.map(o => o.eventId)).toEqual([id]);
+      const published = sent.map(d => JSON.parse(d)).find(m => m[0] === 'EVENT')?.[1] as { tags: string[][] };
+      expect(published.tags).toContainEqual(['e', id]);
+    });
+
     it('reports saved human review when the later label publication fails', async () => {
       const { db, sqlLog } = createMockDB();
       vi.stubGlobal('WebSocket', class { constructor() { throw new Error('Synthetic relay unavailable'); } });
