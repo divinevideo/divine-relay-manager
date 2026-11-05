@@ -117,9 +117,10 @@ interface Env extends KeycastEnv, ConsentVideoEnv {
   AUTO_HIDE_ENABLED?: string;
   // Admin API key — required on all admin endpoints when request doesn't come through CF Access
   ADMIN_API_KEY?: string;
-  // Dedicated shared key for the divine-moderation-service -> /api/relay-rpc connection.
-  // Secrets Store secret (MODERATION_TO_RELAY_ADMIN_KEY), accepted in addition to
-  // ADMIN_API_KEY on that route so it can be rotated independently of other callers (#170).
+  // Dedicated shared key for divine-moderation-service's calls to /api/relay-rpc and
+  // /api/moderate-media/lift-check. Secrets Store secret (MODERATION_TO_RELAY_ADMIN_KEY),
+  // accepted in addition to ADMIN_API_KEY on those routes so it can be rotated
+  // independently of other callers (#170).
   MOD_RELAY_ADMIN_KEY?: string | SecretStoreSecret;
   PROTECTED_MINOR_SERVICE_TOKEN?: string | SecretStoreSecret;
   PROTECTED_MINOR_REPLACEMENT_ENABLED?: string;
@@ -425,6 +426,11 @@ interface ApiResponse {
   // as the guard's own refusal carries them.
   caseId?: string;
   state?: string;
+  // /api/moderate-media/lift-check: whether the lift may go ahead, whether the
+  // action needed checking at all, and the hash a write should use.
+  allowed?: boolean;
+  checked?: boolean;
+  sha256?: string;
   // /api/tickets: Zendesk tickets linked to a report target.
   tickets?: Array<{ ticket_id: number; status: string; url: string }>;
 }
@@ -443,7 +449,8 @@ const ACCESS_UNAVAILABLE = {
 // Accepts any of:
 //   1. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
 //   2. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY, only when allowModRelayAdminKey
-//      is true for the divine-moderation-service -> /api/relay-rpc connection (#170)
+//      is true for divine-moderation-service's calls to /api/relay-rpc (#170) and
+//      /api/moderate-media/lift-check
 //   3. A Cf-Access-Jwt-Assertion that verifies (signature, then issuer, audience, exp, nbf) for the
 //      main API's Access application (API_ACCESS_AUD on ACCESS_TEAM_DOMAIN). The
 //      header alone proves nothing: service bindings reach this Worker without
@@ -463,7 +470,7 @@ async function verifyAdminAccess(
     }
     if (options.allowModRelayAdminKey) {
       // Dedicated moderation-service key (Secrets Store), accepted in addition to
-      // ADMIN_API_KEY for relay-rpc so it can be rotated without disrupting other callers.
+      // ADMIN_API_KEY on its routes so it can be rotated without disrupting other callers.
       try {
         const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
         if (modRelayKey && adminKey === modRelayKey) {
@@ -584,8 +591,12 @@ export default {
       // docs/protected-minor-edge-auth.md) must stay before this check: their
       // tokens carry a different audience and would be refused here
       // (admin-access.test.ts pins both routes' order).
+      // moderation-service's key opens only relay-rpc (#170) and the read-only
+      // media lift check (moderation-service#231), never a route that writes
+      // media decisions.
       const adminAuthError = await verifyAdminAccess(request, env, {
-        allowModRelayAdminKey: path === '/api/relay-rpc' && request.method === 'POST',
+        allowModRelayAdminKey: request.method === 'POST'
+          && (path === '/api/relay-rpc' || path === '/api/moderate-media/lift-check'),
       });
       if (adminAuthError) {
         const { status, error, code } = adminAuthError;
@@ -656,6 +667,10 @@ export default {
 
       if (path === '/api/moderate-media' && request.method === 'POST') {
         return handleModerateMedia(request, env, corsHeaders);
+      }
+
+      if (path === '/api/moderate-media/lift-check' && request.method === 'POST') {
+        return handleMediaLiftCheck(request, env, corsHeaders);
       }
 
       if (path === '/api/decisions' && request.method === 'POST') {
@@ -2429,13 +2444,13 @@ async function ensureAgeReviewSchema(env: Env): Promise<void> {
   try {
     await ensureSchemaOnce(env.DB);
   } catch (err) {
-    console.error('[handleModerateMedia] age-review schema bootstrap failed:', err);
+    console.error('[ensureAgeReviewSchema] age-review schema bootstrap failed:', err);
   }
 }
 
 // moderation-service's recorded action for a file, uppercased: 'UNKNOWN' when
 // it has no record. Throws when it cannot be read. Read by the `from` check
-// and the lift guard in handleModerateMedia.
+// in handleModerateMedia, and by mediaLiftGuard.
 async function readRecordedAction(sha256: string, env: Env, headers: Record<string, string>): Promise<string> {
   // Built inside the caller's try on purpose: getModerationServiceUrl throws
   // when the binding is missing, and a misconfiguration is the same "could not
@@ -2465,6 +2480,213 @@ async function readRecordedAction(sha256: string, env: Env, headers: Record<stri
     throw new Error('check-result carried no status');
   }
   return state.status.toUpperCase();
+}
+
+// Auth headers for calls to moderation-service: Bearer when SERVICE_API_TOKEN
+// is configured, CF Access otherwise. A misconfiguration is answered as the
+// 500 to return.
+async function moderationServiceHeaders(
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Record<string, string> | Response> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+
+  if (env.SERVICE_API_TOKEN) {
+    const token = await resolveSecret(env.SERVICE_API_TOKEN);
+    if (!token) {
+      return jsonResponse({ success: false, error: 'SERVICE_API_TOKEN binding exists but resolved to empty' }, 500, corsHeaders);
+    }
+    headers['Authorization'] = `Bearer ${token}`;
+  } else {
+    const cfAccess = await getCfAccessCredentials(env);
+    if (!cfAccess) {
+      return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
+    }
+    headers['CF-Access-Client-Id'] = cfAccess.clientId;
+    headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
+  }
+  return headers;
+}
+
+// The actions mediaLiftGuard checks, given uppercased.
+function isLiftAction(action: string): action is 'SAFE' | 'AGE_RESTRICTED' {
+  return action === 'SAFE' || action === 'AGE_RESTRICTED';
+}
+
+// moderation-service's other actions, which make nothing more visible. The
+// lift check answers "nothing to check" only for these, so a name it does not
+// know is refused rather than allowed.
+const NON_LIFT_MEDIA_ACTIONS = new Set(['PERMANENT_BAN', 'QUARANTINE', 'DELETE', 'REVIEW']);
+
+// The age-review lift guard (#335). A file whose owner has an open age review
+// is made more visible only through that case, whoever asks: an Unblock,
+// Remove Restriction or Age Restrict on a single post, an automated caller, a
+// stale screen, or moderation-service's own dashboard, which writes without
+// coming through here and so is meant to ask /api/moderate-media/lift-check first
+// (moderation-service#231).
+// Both routes run this function, so they cannot disagree.
+//   - A SAFE is always a lift: it sets the file Active and clears the
+//     relay's quarantine for its event, whatever the file was.
+//   - An AGE_RESTRICTED is a lift over a file that is hidden, blocked or
+//     deleted: the 18+ gate shows it to signed-in adults, and it clears the
+//     relay's quarantine too. The 18+ gate is never the tool for a
+//     suspected minor's file (see bulk-moderate.ts). Over a public or
+//     already-gated file it only tightens, so it goes through even during
+//     a case: a case hides nothing until it restricts the account, and
+//     refusing would leave the file fully public (Osprey sends these for
+//     confirmed adult content). Hidden is read from the media server and,
+//     since that status is cached for up to 5 minutes and can still read
+//     public right after the case's withhold, from moderation-service's
+//     record too, which the withhold writes at once. Both are consulted
+//     only while the owner has an open case: the record is read only then,
+//     while the media server's status comes from the owner read every SAFE
+//     and AGE_RESTRICTED makes. Once the case has restricted the
+//     account (and so run the withhold), every AGE_RESTRICTED is refused.
+//   - Block, Quarantine, Delete and REVIEW are not checked (callers test
+//     isLiftAction first).
+//   - The hash must be 64 hex: it becomes a path on the media server's
+//     admin API, with its key attached.
+//   - The owner is read from the media server, fail-closed: unreadable
+//     refuses (503). No record of the file (404) refuses too, as a 409 that
+//     says so: retrying will not help, and a misconfigured CDN_DOMAIN also
+//     answers 404, so it can never mean "nothing to protect".
+//   - The owner's open case refuses (409), and a lookup that cannot run
+//     refuses (503), as the account check does. So does a record that
+//     cannot be read when an AGE_RESTRICTED needs it (503).
+// Returns the refusal to answer with, or the lowercased hash that was checked.
+async function mediaLiftGuard(
+  rawSha256: unknown,
+  action: 'SAFE' | 'AGE_RESTRICTED',
+  env: Env,
+  corsHeaders: Record<string, string>,
+  headers: Record<string, string>
+): Promise<Response | { sha256: string }> {
+  if (typeof rawSha256 !== 'string' || !isHex64(rawSha256)) {
+    return jsonResponse(
+      { success: false, error: '`sha256` must be a 64-character hex hash to make a file more visible', code: 'invalid_sha256' },
+      400,
+      corsHeaders
+    );
+  }
+  const sha256 = rawSha256.toLowerCase();
+  let file: BlossomBlob;
+  try {
+    file = await readMediaRecord(sha256, env);
+  } catch (err) {
+    if (err instanceof MediaRecordMissing) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "The media server has no record of this file, so it can't be checked for an open age review; nothing was changed.",
+          code: 'media_record_missing',
+        },
+        409,
+        corsHeaders
+      );
+    }
+    console.error('[mediaLiftGuard] owner read failed; refusing:', err);
+    return jsonResponse(
+      { success: false, error: 'Could not read who owns this file; refusing to act', code: 'owner_unreadable' },
+      503,
+      corsHeaders
+    );
+  }
+  await ensureAgeReviewSchema(env);
+  const held = await ageReviewActiveGuard(
+    file.owner, env, corsHeaders,
+    action === 'SAFE'
+      ? 'The account that owns this file has an open age review, so its files can only be made public through that case.'
+      : "This file is withheld (hidden, blocked or deleted) and its owner has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
+    { failClosed: true },
+  );
+  // A 409 is an open case. Anything else the guard answers (a 503) means
+  // the lookup could not run, and refuses whatever the action.
+  if (held && (held.status !== 409 || action === 'SAFE')) return held;
+  if (held) {
+    // Once the case restricts the account, its withhold has hidden the
+    // files, and for up to 5 minutes the media server can still read them
+    // public; a REVIEW (unchecked here) rewrites the record without hiding
+    // anything. Neither source can then be trusted to say "hidden", so
+    // every AGE_RESTRICTED is refused. The later states can be reached
+    // without a restriction, so whether the file is hidden decides there.
+    // ageReviewActiveGuard's one 409 always carries the case's state
+    // (age-review.ts); a 409 without it would fall through to the checks
+    // below, so keep that shape if the guard ever grows another 409.
+    const heldCase = await held.clone().json() as { caseId?: string; state?: string };
+    if (isAccountRestrictedAgeReviewState(heldCase.state as AgeReviewState)) {
+      return jsonResponse(
+        {
+          success: false,
+          error: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+          code: 'age_review_active',
+          caseId: heldCase.caseId,
+          state: heldCase.state,
+        },
+        409,
+        corsHeaders
+      );
+    }
+    if (file.level === 'hidden' || file.level === 'blocked' || file.level === 'deleted') return held;
+    let recorded: string;
+    try {
+      recorded = await readRecordedAction(sha256, env, headers);
+    } catch (err) {
+      console.error('[mediaLiftGuard] record read failed; refusing:', err);
+      return jsonResponse(
+        { success: false, error: 'Could not read current media state; refusing to act', code: 'state_unreadable' },
+        503,
+        corsHeaders
+      );
+    }
+    if (recorded === 'QUARANTINE' || recorded === 'PERMANENT_BAN' || recorded === 'DELETE') return held;
+  }
+  return { sha256 };
+}
+
+// POST /api/moderate-media/lift-check: /api/moderate-media's lift guard
+// without the write (moderation-service#231). moderation-service's dashboard
+// writes media decisions itself, so it is meant to ask here before a SAFE or
+// AGE_RESTRICTED instead of restating the rules. Answers 200 with
+// `checked: true` and the hash a write should use when the lift may go ahead,
+// and 200 with `checked: false` for one of moderation-service's other
+// actions. Anything else is a refusal: the guard's own 400, 409 or 503, a 400
+// for a missing hash or an action it does not know, or a 500. The answer is
+// /api/moderate-media's for a request that names no account: `pubkey` is
+// ignored here, where /api/moderate-media would run its account check.
+// Reads only; the caller writes.
+// Check-then-act, as on /api/moderate-media: the caller's write is a
+// separate request, so a case opened between the two is not seen.
+async function handleMediaLiftCheck(
+  request: Request,
+  env: Env,
+  corsHeaders: Record<string, string>
+): Promise<Response> {
+  try {
+    const body = await request.json() as { sha256?: unknown; action?: unknown };
+    if (!body.sha256) {
+      return jsonResponse({ success: false, error: 'Missing sha256' }, 400, corsHeaders);
+    }
+    if (typeof body.action !== 'string' || !body.action) {
+      return jsonResponse({ success: false, error: '`action` must be a string', code: 'invalid_action' }, 400, corsHeaders);
+    }
+    const action = body.action.toUpperCase();
+    if (NON_LIFT_MEDIA_ACTIONS.has(action)) {
+      return jsonResponse({ success: true, allowed: true, checked: false }, 200, corsHeaders);
+    }
+    if (!isLiftAction(action)) {
+      return jsonResponse({ success: false, error: `Unknown action ${JSON.stringify(body.action)}`, code: 'invalid_action' }, 400, corsHeaders);
+    }
+    const headers = await moderationServiceHeaders(env, corsHeaders);
+    if (headers instanceof Response) return headers;
+    const lift = await mediaLiftGuard(body.sha256, action, env, corsHeaders, headers);
+    if (lift instanceof Response) return lift;
+    return jsonResponse({ success: true, allowed: true, checked: true, sha256: lift.sha256 }, 200, corsHeaders);
+  } catch (error) {
+    console.error('[handleMediaLiftCheck] Error:', error);
+    return jsonResponse({ success: false, error: 'Lift check failed; refusing' }, 500, corsHeaders);
+  }
 }
 
 async function handleModerateMedia(
@@ -2572,61 +2794,14 @@ async function handleModerateMedia(
       }
     }
 
-    // Build auth headers: Bearer when SERVICE_API_TOKEN is configured, CF Access otherwise
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-    };
-
-    if (env.SERVICE_API_TOKEN) {
-      const token = await resolveSecret(env.SERVICE_API_TOKEN);
-      if (!token) {
-        return jsonResponse({ success: false, error: 'SERVICE_API_TOKEN binding exists but resolved to empty' }, 500, corsHeaders);
-      }
-      headers['Authorization'] = `Bearer ${token}`;
-    } else {
-      const cfAccess = await getCfAccessCredentials(env);
-      if (!cfAccess) {
-        return jsonResponse({ success: false, error: 'CF_ACCESS credentials not configured' }, 500, corsHeaders);
-      }
-      headers['CF-Access-Client-Id'] = cfAccess.clientId;
-      headers['CF-Access-Client-Secret'] = cfAccess.clientSecret;
-    }
+    const headers = await moderationServiceHeaders(env, corsHeaders);
+    if (headers instanceof Response) return headers;
 
     // The age-review lift guard (#335), mandatory where the account check
-    // above is opt-in. A file whose owner has an open age review is made more
-    // visible only through that case, whoever asks: an Unblock, Remove
-    // Restriction or Age Restrict on a single post, an automated caller, a
-    // stale screen.
-    //   - A SAFE is always a lift: it sets the file Active and clears the
-    //     relay's quarantine for its event, whatever the file was.
-    //   - An AGE_RESTRICTED is a lift over a file that is hidden, blocked or
-    //     deleted: the 18+ gate shows it to signed-in adults, and it clears the
-    //     relay's quarantine too. The 18+ gate is never the tool for a
-    //     suspected minor's file (see bulk-moderate.ts). Over a public or
-    //     already-gated file it only tightens, so it goes through even during
-    //     a case: a case hides nothing until it restricts the account, and
-    //     refusing would leave the file fully public (Osprey sends these for
-    //     confirmed adult content). Hidden is read from the media server and,
-    //     since that status is cached for up to 5 minutes and can still read
-    //     public right after the case's withhold, from moderation-service's
-    //     record too, which the withhold writes at once. Both are consulted
-    //     only while the owner has an open case: the record is read only then,
-    //     while the media server's status comes from the owner read every SAFE
-    //     and AGE_RESTRICTED makes. Once the case has restricted the
-    //     account (and so run the withhold), every AGE_RESTRICTED is refused.
-    //   - Block, Quarantine, Delete and REVIEW are not checked.
-    //   - The hash must be 64 hex: it becomes a path on the media server's
-    //     admin API, with its key attached.
-    //   - The owner is read from the media server, fail-closed: unreadable
-    //     refuses (503). No record of the file (404) refuses too, as a 409 that
-    //     says so: retrying will not help, and a misconfigured CDN_DOMAIN also
-    //     answers 404, so it can never mean "nothing to protect".
-    //   - The owner's open case refuses (409), and a lookup that cannot run
-    //     refuses (503), as the account check does. So does a record that
-    //     cannot be read when an AGE_RESTRICTED needs it (503).
-    // A request that names the account already had the same owner and case
-    // checks above, on that account, so they are not repeated (there a 404 is
-    // a 503 owner_unreadable, as #333 shipped it, and every AGE_RESTRICTED is
+    // above is opt-in; mediaLiftGuard says what it checks. A request that
+    // names the account already had the same owner and case checks above, on
+    // that account, so they are not repeated (there a 404 is a 503
+    // owner_unreadable, as #333 shipped it, and every AGE_RESTRICTED is
     // refused during a case). Age review's own clearance does not come through
     // here: the case writes to moderation-service through the bulk path
     // (age-review.ts, triggerBulkModerate), after its transition.
@@ -2635,88 +2810,12 @@ async function handleModerateMedia(
     // The action is compared as moderation-service reads it: it uppercases
     // the action before it validates and writes it, so "safe" is a SAFE.
     const upstreamAction = body.action.toUpperCase();
-    if (subject === undefined && (upstreamAction === 'SAFE' || upstreamAction === 'AGE_RESTRICTED')) {
-      if (typeof body.sha256 !== 'string' || !isHex64(body.sha256)) {
-        return jsonResponse(
-          { success: false, error: '`sha256` must be a 64-character hex hash to make a file more visible', code: 'invalid_sha256' },
-          400,
-          corsHeaders
-        );
-      }
+    if (subject === undefined && isLiftAction(upstreamAction)) {
+      const lift = await mediaLiftGuard(body.sha256, upstreamAction, env, corsHeaders, headers);
+      if (lift instanceof Response) return lift;
       // The hash checked is the hash written: the moderation record is keyed
       // case-sensitively (see the `from` block below).
-      sha256 = body.sha256.toLowerCase();
-      let file: BlossomBlob;
-      try {
-        file = await readMediaRecord(sha256, env);
-      } catch (err) {
-        if (err instanceof MediaRecordMissing) {
-          return jsonResponse(
-            {
-              success: false,
-              error: "The media server has no record of this file, so it can't be checked for an open age review; nothing was changed.",
-              code: 'media_record_missing',
-            },
-            409,
-            corsHeaders
-          );
-        }
-        console.error('[handleModerateMedia] owner read for the lift guard failed; refusing:', err);
-        return jsonResponse(
-          { success: false, error: 'Could not read who owns this file; refusing to act', code: 'owner_unreadable' },
-          503,
-          corsHeaders
-        );
-      }
-      await ensureAgeReviewSchema(env);
-      const held = await ageReviewActiveGuard(
-        file.owner, env, corsHeaders,
-        upstreamAction === 'SAFE'
-          ? 'The account that owns this file has an open age review, so its files can only be made public through that case.'
-          : "This file is withheld (hidden, blocked or deleted) and its owner has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
-        { failClosed: true },
-      );
-      // A 409 is an open case. Anything else the guard answers (a 503) means
-      // the lookup could not run, and refuses whatever the action.
-      if (held && (held.status !== 409 || upstreamAction === 'SAFE')) return held;
-      if (held) {
-        // Once the case restricts the account, its withhold has hidden the
-        // files, and for up to 5 minutes the media server can still read them
-        // public; a REVIEW (unchecked here) rewrites the record without hiding
-        // anything. Neither source can then be trusted to say "hidden", so
-        // every AGE_RESTRICTED is refused. The later states can be reached
-        // without a restriction, so whether the file is hidden decides there.
-        // ageReviewActiveGuard's one 409 always carries the case's state
-        // (age-review.ts); a 409 without it would fall through to the checks
-        // below, so keep that shape if the guard ever grows another 409.
-        const heldCase = await held.clone().json() as { caseId?: string; state?: string };
-        if (isAccountRestrictedAgeReviewState(heldCase.state as AgeReviewState)) {
-          return jsonResponse(
-            {
-              success: false,
-              error: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
-              code: 'age_review_active',
-              caseId: heldCase.caseId,
-              state: heldCase.state,
-            },
-            409,
-            corsHeaders
-          );
-        }
-        if (file.level === 'hidden' || file.level === 'blocked' || file.level === 'deleted') return held;
-        let recorded: string;
-        try {
-          recorded = await readRecordedAction(sha256, env, headers);
-        } catch (err) {
-          console.error('[handleModerateMedia] record read for the lift guard failed; refusing:', err);
-          return jsonResponse(
-            { success: false, error: 'Could not read current media state; refusing to act', code: 'state_unreadable' },
-            503,
-            corsHeaders
-          );
-        }
-        if (recorded === 'QUARANTINE' || recorded === 'PERMANENT_BAN' || recorded === 'DELETE') return held;
-      }
+      sha256 = lift.sha256;
     }
 
     // The expected-state check, when the caller declares what it believes it is

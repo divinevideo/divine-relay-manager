@@ -296,6 +296,46 @@ an action that is not a string is refused (400 `invalid_action`).
 
 ---
 
+### POST /api/moderate-media/lift-check
+
+Asks whether a `SAFE` or `AGE_RESTRICTED` may go ahead, without writing
+anything. It runs the age-review lift guard of `POST /api/moderate-media`
+above, the same code, so the two agree for any request that names no account
+(`pubkey` is ignored here). It is for a caller that writes media decisions
+itself and must not restate the rules, such as moderation-service's
+dashboard.
+
+Besides the admin credentials every route accepts, it accepts
+moderation-service's relay key (`MOD_RELAY_ADMIN_KEY`), as `/api/relay-rpc`
+does. `/api/moderate-media` still refuses that key.
+
+**Request:**
+```json
+{
+  "sha256": "abc123...",
+  "action": "SAFE"
+}
+```
+
+**Responses:**
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 200 | `{ "success": true, "allowed": true, "checked": true, "sha256": "..." }` | The lift may go ahead. `sha256` is the hash, lowercased; write that one. |
+| 200 | `{ "success": true, "allowed": true, "checked": false }` | The action is not one the guard checks (`PERMANENT_BAN`, `QUARANTINE`, `DELETE`, `REVIEW`). Nothing was read. |
+| 400 | `code: "invalid_action"` | `action` is missing, not a string, or not one of the six actions above. |
+| 400 | no `code` | `sha256` is missing. |
+| 409, 503, 400 | the lift guard's refusal | Exactly what `/api/moderate-media` would answer, from the table above. |
+| 500 | | The body is not JSON, or is `null`, or this worker's credentials for moderation-service are misconfigured. |
+
+Anything but a 200 with `"allowed": true` is a refusal.
+
+The answer is a check, not a lock: a case opened between it and the caller's
+write is not seen, as with `/api/moderate-media`'s own check and write. A caller
+that cannot get an answer should refuse the lift.
+
+---
+
 ### GET /api/check-result/:sha256
 
 Check the moderation status of a media file.
