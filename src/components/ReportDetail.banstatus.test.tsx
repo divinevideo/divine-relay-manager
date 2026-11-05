@@ -216,6 +216,45 @@ describe('ReportDetail user ban-status panel', () => {
     expect(status.value.recheck).not.toHaveBeenCalled();
   });
 
+  // The reported user's sign-in label shares the account-status query with age
+  // review, and a ban or suspend flips what it should say. Without this the label
+  // keeps its pre-action answer for the query's whole minute of staleness.
+  it('refreshes the reported user\'s account-status entry, and only that one, when an account action completes', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+
+      onActionComplete({ accountStatusChanged: true });
+
+      const call = invalidate.mock.calls
+        .map(([filters]) => filters)
+        .find((filters) => JSON.stringify(filters?.queryKey) === JSON.stringify(['account-status']));
+      expect(call?.predicate).toBeTypeOf('function');
+      const matches = (pubkey: string) =>
+        call!.predicate!({ queryKey: ['account-status', 'https://api.example', pubkey] } as never);
+      expect(matches(REPORTED_PUBKEY)).toBe(true);
+      expect(matches(MOD_PUBKEY)).toBe(false);
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
+  it('leaves the account-status entry alone when a content action completes', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+
+      onActionComplete({ accountStatusChanged: false });
+
+      const keys = invalidate.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+      expect(keys).not.toContain(JSON.stringify(['account-status']));
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
   it('runs a plain check, re-reading the account lists, when a content action completes', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {

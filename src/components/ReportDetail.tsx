@@ -532,6 +532,19 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
+      // The reported user's sign-in label reads the shared account-status query,
+      // and the worker mirrors this action into Keycast. Refresh it, or the label
+      // keeps its pre-action answer for the query's minute of staleness. The mirror
+      // runs after the worker responds, so this read can still beat it. Key shape:
+      // ['account-status', apiUrl, pubkey], lowercased as AccountTypeLabel looks it
+      // up. Only this account changed, so only its entry is refreshed.
+      const subject = context.reportedUser.pubkey?.toLowerCase();
+      if (subject) {
+        queryClient.invalidateQueries({
+          queryKey: ['account-status'],
+          predicate: (query) => query.queryKey[2] === subject,
+        });
+      }
     } else {
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.
