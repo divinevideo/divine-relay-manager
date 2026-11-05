@@ -16,6 +16,7 @@
 // key, which /api/moderate-media does not.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import worker from '../src/index';
+import { STATUS_READ_TIMEOUT_MS } from '../src/media-server';
 
 const SHA = '5'.repeat(64);
 const OWNER = 'a1'.repeat(32);
@@ -39,6 +40,12 @@ const moderationApi = {
     calls.push({ url: url.pathname, method: request.method, body });
     if (url.pathname.startsWith('/check-result/')) {
       if (typeof recordStatus === 'number') return new Response('err', { status: recordStatus });
+      // A read that never answers, unless its request is aborted.
+      if (recordStatus === 'hang') {
+        return new Promise((_, reject) => {
+          request.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+        });
+      }
       return Response.json({ sha256: SHA, status: recordStatus, moderated: recordStatus !== 'unknown' });
     }
     if (url.pathname === '/api/v1/moderate') return Response.json({ success: true, sha256: SHA });
@@ -195,6 +202,49 @@ describe('/api/moderate-media/lift-check', () => {
     const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED' });
     expect(res.status).toBe(503);
     expect(await res.json()).toMatchObject({ success: false, code: 'state_unreadable' });
+  });
+
+  it('refuses with 503 when an AGE_RESTRICTED needs the record and its read does not answer in time', async () => {
+    let timeoutMs: number | undefined;
+    const expire = new AbortController();
+    vi.spyOn(AbortSignal, 'timeout').mockImplementation((ms: number) => {
+      timeoutMs = ms;
+      return expire.signal;
+    });
+    blobStatus = 'active';
+    recordStatus = 'hang';
+    openCase = { id: 'case-open', pubkey: OWNER, state: 'open_reported' };
+    const pending = check({ sha256: SHA, action: 'AGE_RESTRICTED' });
+    await vi.waitFor(() => expect(stateReads()).toHaveLength(1));
+    expire.abort();
+    const res = await pending;
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ success: false, code: 'state_unreadable' });
+    expect(timeoutMs).toBe(STATUS_READ_TIMEOUT_MS);
+  });
+
+  // This worker's credentials for moderation-service are used only to read its
+  // record. A missing or unreadable one refuses only a check that needs that
+  // read, and refuses it as an unreadable record does.
+  const BROKEN_CREDENTIALS = [
+    ['are not configured', { SERVICE_API_TOKEN: undefined }],
+    ['cannot be read', { SERVICE_API_TOKEN: { get: async () => { throw new Error('secrets store down'); } } }],
+  ] as const;
+
+  it.each(BROKEN_CREDENTIALS)('allows a SAFE that reads no record while the credentials for moderation-service %s', async (_label, extra) => {
+    const res = await check({ sha256: SHA, action: 'SAFE' }, extra);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
+  });
+
+  it.each(BROKEN_CREDENTIALS)('refuses with 503 an AGE_RESTRICTED that needs the record while the credentials for moderation-service %s', async (_label, extra) => {
+    blobStatus = 'active';
+    recordStatus = 'safe';
+    openCase = { id: 'case-open', pubkey: OWNER, state: 'open_reported' };
+    const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED' }, extra);
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ success: false, code: 'state_unreadable' });
+    expect(stateReads()).toHaveLength(0);
   });
 
   it.each(['abc', `../user/${OWNER}`, 'g'.repeat(64), 5])('refuses the hash %j, and never asks the media server', async (sha256) => {

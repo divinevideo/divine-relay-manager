@@ -273,7 +273,7 @@ an action that is not a string is refused (400 `invalid_action`).
 | 409 | `media_record_missing` | The media server has no record of the file, so the owner cannot be checked. Not retryable. |
 | 503 | `owner_unreadable` | The media server could not be read for the owner. Retryable. |
 | 503 | `age_review_check_failed` | The open-case lookup could not run. Retryable. |
-| 503 | `state_unreadable` | An `AGE_RESTRICTED` during an open case, and moderation-service's record could not be read. Retryable. |
+| 503 | `state_unreadable` | An `AGE_RESTRICTED` during an open case, and moderation-service's record could not be read: the read failed or took longer than 10 seconds, or, on the lift check below, this worker's credentials for moderation-service could not be built. Retryable. |
 
 **Response:**
 ```json
@@ -332,7 +332,7 @@ worker's `MOD_RELAY_ADMIN_KEY` binding), as `POST /api/relay-rpc` does.
 | 400 | `code: "invalid_action"` | `action` is missing, not a string, or not one of the six actions above. |
 | 400 | no `code` | `sha256` is missing. |
 | 409, 503, 400 | the lift guard's refusal | Exactly what `/api/moderate-media` would answer, from the table above. |
-| 500 | | The body is not JSON, or is `null`, or this worker's credentials for moderation-service are misconfigured. |
+| 500 | | The body is not JSON, or is `null`. |
 
 Anything but a 200 with `"allowed": true` is a refusal.
 

@@ -42,7 +42,7 @@ import {
 import { handleAccountStatus } from './account-status';
 import { handleBulkModerateEnqueue, handleBulkJobStatus, handleBulkKindCounts, processBulkJob, LOOSENS_AGE_REVIEW_HOLD } from './bulk-moderate';
 import { handleBulkJobNotes, handleCaseBulkNotesJob, markStillHiddenRestored } from './bulk-notes';
-import { MediaRecordMissing, readMediaRecord, type BlossomBlob } from './media-server';
+import { MediaRecordMissing, readMediaRecord, STATUS_READ_TIMEOUT_MS, type BlossomBlob } from './media-server';
 import type { BulkAction, BulkJobMessage } from '../../shared/bulk-moderation';
 import { ensureZendeskTable, addZendeskInternalNote, syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { buildReportNote, parseKind0Profile, type ReportedProfile } from './report-note';
@@ -2456,9 +2456,12 @@ async function readRecordedAction(sha256: string, env: Env, headers: Record<stri
   // when the binding is missing, and a misconfiguration is the same "could not
   // check" case as an upstream failure. Outside, it exited as a 500 naming an
   // internal binding instead of the retryable 503 the callers commit to.
+  // Bounded like the media server's status read: a stalled read is the
+  // callers' "could not check" 503, not a request held open.
   const checkRequest = new Request(`${getModerationServiceUrl(env)}/check-result/${encodeURIComponent(sha256)}`, {
     method: 'GET',
     headers,
+    signal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS),
   });
   const checkResponse = env.MODERATION_API
     ? await env.MODERATION_API.fetch(checkRequest)
@@ -2526,7 +2529,9 @@ const NON_LIFT_MEDIA_ACTIONS = new Set(['PERMANENT_BAN', 'QUARANTINE', 'DELETE',
 // stale screen, or moderation-service's own dashboard, which writes without
 // coming through here and so is meant to ask /api/moderate-media/lift-check first
 // (moderation-service#231).
-// Both routes run this function, so they cannot disagree.
+// Both routes run this function, so they give the same answer to a request
+// that names no account: /api/moderate-media runs it only when no `pubkey`
+// is sent, and the lift check ignores `pubkey`.
 //   - A SAFE is always a lift: it sets the file Active and clears the
 //     relay's quarantine for its event, whatever the file was.
 //   - An AGE_RESTRICTED is a lift over a file that is hidden, blocked or
@@ -2554,14 +2559,16 @@ const NON_LIFT_MEDIA_ACTIONS = new Set(['PERMANENT_BAN', 'QUARANTINE', 'DELETE',
 //     answers 404, so it can never mean "nothing to protect".
 //   - The owner's open case refuses (409), and a lookup that cannot run
 //     refuses (503), as the account check does. So does a record that
-//     cannot be read when an AGE_RESTRICTED needs it (503).
+//     cannot be read when an AGE_RESTRICTED needs it (503), including when
+//     the credentials for reading it cannot be built: `getHeaders` is called
+//     only for that read, so a missing credential refuses nothing else.
 // Returns the refusal to answer with, or the lowercased hash that was checked.
 async function mediaLiftGuard(
   rawSha256: unknown,
   action: 'SAFE' | 'AGE_RESTRICTED',
   env: Env,
   corsHeaders: Record<string, string>,
-  headers: Record<string, string>
+  getHeaders: () => Promise<Record<string, string> | Response>
 ): Promise<Response | { sha256: string }> {
   if (typeof rawSha256 !== 'string' || !isHex64(rawSha256)) {
     return jsonResponse(
@@ -2631,6 +2638,8 @@ async function mediaLiftGuard(
     if (file.level === 'hidden' || file.level === 'blocked' || file.level === 'deleted') return held;
     let recorded: string;
     try {
+      const headers = await getHeaders();
+      if (headers instanceof Response) throw new Error(`credentials for moderation-service: HTTP ${headers.status}`);
       recorded = await readRecordedAction(sha256, env, headers);
     } catch (err) {
       console.error('[mediaLiftGuard] record read failed; refusing:', err);
@@ -2671,7 +2680,7 @@ async function handleMediaLiftCheck(
       return jsonResponse({ success: false, error: 'Missing sha256' }, 400, corsHeaders);
     }
     if (typeof body.action !== 'string' || !body.action) {
-      return jsonResponse({ success: false, error: '`action` must be a string', code: 'invalid_action' }, 400, corsHeaders);
+      return jsonResponse({ success: false, error: '`action` is required and must be a non-empty string', code: 'invalid_action' }, 400, corsHeaders);
     }
     const action = body.action.toUpperCase();
     if (NON_LIFT_MEDIA_ACTIONS.has(action)) {
@@ -2680,9 +2689,9 @@ async function handleMediaLiftCheck(
     if (!isLiftAction(action)) {
       return jsonResponse({ success: false, error: `Unknown action ${JSON.stringify(body.action)}`, code: 'invalid_action' }, 400, corsHeaders);
     }
-    const headers = await moderationServiceHeaders(env, corsHeaders);
-    if (headers instanceof Response) return headers;
-    const lift = await mediaLiftGuard(body.sha256, action, env, corsHeaders, headers);
+    // This route writes nothing to moderation-service, so its credentials are
+    // built only if the guard reads the file's record.
+    const lift = await mediaLiftGuard(body.sha256, action, env, corsHeaders, () => moderationServiceHeaders(env, corsHeaders));
     if (lift instanceof Response) return lift;
     return jsonResponse({ success: true, allowed: true, checked: true, sha256: lift.sha256 }, 200, corsHeaders);
   } catch (error) {
@@ -2813,7 +2822,7 @@ async function handleModerateMedia(
     // the action before it validates and writes it, so "safe" is a SAFE.
     const upstreamAction = body.action.toUpperCase();
     if (subject === undefined && isLiftAction(upstreamAction)) {
-      const lift = await mediaLiftGuard(body.sha256, upstreamAction, env, corsHeaders, headers);
+      const lift = await mediaLiftGuard(body.sha256, upstreamAction, env, corsHeaders, async () => headers);
       if (lift instanceof Response) return lift;
       // The hash checked is the hash written: the moderation record is keyed
       // case-sensitively (see the `from` block below).
