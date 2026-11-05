@@ -2008,9 +2008,10 @@ async function handleLogDecision(
     await ensureSchemaOnce(env.DB);
 
     // A 64-character hex value of any target type (event id, pubkey or media
-    // sha256) is stored lowercase, the form every reader looks it up in. An
-    // older frontend can post a report's tag as written (#313, #315). Any
-    // other value is kept as written.
+    // sha256) is stored lowercase, the form the queue, the report's history
+    // and Reopen look it up in (the Zendesk sidebar reads ids its tickets
+    // already store lowercase). An older frontend can post a report's tag as
+    // written (#313, #315). Any other value is kept as written.
     const targetId = canonicalHex64(body.targetId) ?? body.targetId;
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
