@@ -6,22 +6,15 @@ import NostrProvider from '@/components/NostrProvider'
 import { Toaster } from "@/components/ui/toaster";
 import { Toaster as Sonner } from "@/components/ui/sonner";
 import { TooltipProvider } from "@/components/ui/tooltip";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 import AppRouter from './AppRouter';
+import { createQueryClient } from '@/lib/queryClient';
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      refetchOnWindowFocus: true,
-      staleTime: 60000, // 1 minute
-      gcTime: Infinity,
-    },
-  },
-});
+const queryClient = createQueryClient();
 
 const defaultConfig: AppConfig = {
   theme: "light",
