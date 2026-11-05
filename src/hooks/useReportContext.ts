@@ -7,10 +7,14 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { useAppContext } from "@/hooks/useAppContext";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getReportTarget } from "../../shared/report-target";
+import { canonicalHex64 } from "../../shared/hex-id";
 
+// Lowercased when it is a 64-character hex id (#316): cases and the
+// active-case lookup hold pubkeys in lowercase, so the account actions and
+// the Age Review hand-off must not carry the tag's own spelling.
 function getReportedPubkey(event: NostrEvent): string | null {
   const pTag = event.tags.find(t => t[0] === 'p');
-  if (pTag) return pTag[1];
+  if (pTag) return canonicalHex64(pTag[1]) ?? pTag[1];
   return null;
 }
 

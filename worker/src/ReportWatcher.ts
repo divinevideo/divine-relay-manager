@@ -24,6 +24,7 @@ import { getReportedList } from '../../shared/list-report';
 import { ageReviewCategory } from '../../shared/report-classification';
 import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
 import { isLowerHex64 } from './hex';
+import { canonicalHex64 } from '../../shared/hex-id';
 import { getUserStatus, type KeycastEnv } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
 import { fetchAccountIdentity } from './relay-profile';
@@ -895,14 +896,22 @@ export class ReportWatcher implements DurableObject {
     const category = reportCategory(event.tags);
 
     const targetType = targetEventTag ? 'event' : targetPubkeyTag ? 'pubkey' : 'unknown';
-    const targetId = targetEventTag?.[1] || targetPubkeyTag?.[1] || 'unknown';
 
     console.log('[ReportWatcher] Report received', { category, targetType });
 
+    // Ids are lowercased once, here, before any lookup, decision or relay call
+    // (#315, #313): the relay bans and every D1 table match them exactly, and
+    // the reporter's client may spell them in uppercase. A value that is not a
+    // 64-character hex id names nothing that can be hidden or reviewed.
+    const targetEventId = canonicalHex64(targetEventTag?.[1]);
+    if (targetEventTag && !targetEventId) {
+      console.log('[ReportWatcher] Report e tag is not a 64-character hex id, skipping auto-hide');
+    }
+
     // Process auto-hide if enabled and category qualifies
-    if (targetType === 'event' && targetId !== 'unknown') {
+    if (targetEventId) {
       try {
-        await this.processAutoHide(event, category, targetId);
+        await this.processAutoHide(event, category, targetEventId);
       } catch (error) {
         console.error('[ReportWatcher] Auto-hide processing failed:', error);
       }
@@ -913,7 +922,7 @@ export class ReportWatcher implements DurableObject {
     // Gated on the same reading the moderator UI uses, not the auto-hide
     // category: a child-safety label elsewhere in the report must not
     // suppress the age review.
-    const reportedPubkey = targetPubkeyTag?.[1];
+    const reportedPubkey = canonicalHex64(targetPubkeyTag?.[1]);
     if (ageReviewCategory(event) === 'NS-underageUser' && reportedPubkey && !this.pendingAgeReviewPubkeys.has(reportedPubkey)) {
       this.pendingAgeReviewPubkeys.add(reportedPubkey);
       try {
@@ -1537,6 +1546,12 @@ export class ReportWatcher implements DurableObject {
   }
 
   private async createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void> {
+    // Every case lookup is by lowercase pubkey (#313). handleReportEvent
+    // lowercases the tag; this holds any other caller to the same form.
+    if (!isLowerHex64(reportedPubkey)) {
+      console.error('[ReportWatcher] Refusing to open an age review case: pubkey is not lowercase hex');
+      return;
+    }
     if (!this.env.DB) {
       console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
       return;

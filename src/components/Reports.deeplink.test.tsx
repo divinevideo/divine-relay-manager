@@ -167,6 +167,33 @@ describe('Reports deep-link resolution', () => {
     expect(screen.queryByText(/no prior moderation actions/i)).not.toBeInTheDocument();
   });
 
+  // A value that is not a hex id is stored as written (TODO(#160)), so its
+  // history is asked for as written; a hex id is asked for lowercase.
+  it.each([
+    ['a non-hex value as written', 'NOT-HEX', 'NOT-HEX'],
+    ['an uppercase hex id lowercased', 'AB'.repeat(32), 'ab'.repeat(32)],
+  ])('reads prior actions for %s', async (_label, param, expected) => {
+    window.history.pushState({}, '', `/reports?pubkey=${param}`);
+    stubFetch(() => jsonResponse({ success: true, events: [] }));
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    const decisionUrls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/decisions/')) decisionUrls.push(url);
+      return healthy(input, init);
+    }));
+
+    render(
+      <TestApp>
+        <Reports relayUrl="wss://relay.example" />
+      </TestApp>
+    );
+
+    expect(await screen.findByText(/no longer on the relay/i)).toBeInTheDocument();
+    await waitFor(() => expect(decisionUrls.length).toBeGreaterThan(0));
+    expect(decisionUrls.every(u => u.endsWith(`/api/decisions/${expected}`))).toBe(true);
+  });
+
   it('says the prior-action read failed rather than claiming the target has no history', async () => {
     window.history.pushState({}, '', `/reports?pubkey=${PGONE}`);
     stubFetch(() => jsonResponse({ success: true, events: [] }));

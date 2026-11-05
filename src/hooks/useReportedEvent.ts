@@ -94,8 +94,8 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
       // A report may carry more than one `e` tag (a threaded reply also tags its
       // root, a repost its original), so consider all of them rather than
       // declaring the first one foreign and hiding the real target.
-      // Hex is compared lowercased throughout: isHex64 accepts either case and
-      // the case pubkey is stored verbatim from the reporter's `p` tag, so a
+      // Hex is compared lowercased throughout: isHex64 accepts either case, and
+      // a case opened before #313 stored the reporter's `p` tag verbatim, so a
       // non-canonical client could otherwise make an account look foreign to
       // its own post.
       const targetIds = report.tags

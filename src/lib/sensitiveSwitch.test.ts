@@ -117,6 +117,12 @@ describe('humanHandledAutoHideTargets', () => {
       `pubkey:${'3'.repeat(64)}`,
     ]);
   });
+
+  it('keys a human row as stored, as every stored decision is keyed', () => {
+    const id = 'ab'.repeat(32);
+    const rows = [{ target_type: 'event', target_id: id.toUpperCase(), action: 'auto_hide_confirmed' }];
+    expect([...humanHandledAutoHideTargets(rows)]).toEqual([`event:${id.toUpperCase()}`]);
+  });
 });
 
 describe('SWITCH_STATE_LABELS', () => {

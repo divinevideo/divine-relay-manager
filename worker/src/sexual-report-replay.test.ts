@@ -31,6 +31,21 @@ describe('adult report replay', () => {
     await expect(replayAdultReports(f.storage, 'wss://relay.test', ingest, 300)).rejects.toThrow();
     expect(f.data.get('sexual-replay-through')).toBe(200);
   });
+  it('replays a report written in uppercase hex under the lowercase id, as the live path does (#315)', async () => {
+    const f = fixture(); const ingest = vi.fn(async () => {});
+    const upper = finalizeEvent({ kind: 1984, created_at: 100, content: '', tags: [['e', 'A'.repeat(64), 'NS-sexualContent']] }, new Uint8Array(32).fill(5));
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [upper] });
+    await replayAdultReports(f.storage, 'wss://relay.test', ingest, 200);
+    expect(ingest).toHaveBeenCalledWith(upper, 'NS-sexualContent', 'a'.repeat(64));
+  });
+  it('skips a report whose e tag is not a 64-character hex id, and still commits the window', async () => {
+    const f = fixture(); const ingest = vi.fn(async () => {});
+    const junk = finalizeEvent({ kind: 1984, created_at: 100, content: '', tags: [['e', 'not-an-event-id', 'NS-sexualContent']] }, new Uint8Array(32).fill(6));
+    vi.mocked(queryRelay).mockResolvedValue({ success: true, events: [junk] });
+    await replayAdultReports(f.storage, 'wss://relay.test', ingest, 200);
+    expect(ingest).not.toHaveBeenCalled();
+    expect(f.data.get('sexual-replay-through')).toBe(200);
+  });
   it('leaves list reports to the live human-review path', async () => {
     const f = fixture(); const ingest = vi.fn(async () => {});
     const list = finalizeEvent({ kind: 1984, created_at: 100, content: '', tags: [

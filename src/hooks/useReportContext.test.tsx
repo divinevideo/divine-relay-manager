@@ -61,6 +61,24 @@ describe('useReportContext isFunnelcakeUser', () => {
   });
 });
 
+describe('useReportContext reported pubkey', () => {
+  // Cases, decisions and the active-case lookup all hold pubkeys in lowercase,
+  // so the account actions and the Age Review hand-off get the lowercase form
+  // even when the report's p tag spells it in uppercase (#316).
+  it('lowercases a p tag written in uppercase hex', () => {
+    const pubkey = 'cd'.repeat(32);
+    const upper = { ...report, tags: [['p', pubkey.toUpperCase(), 'spam']] };
+    const { result } = renderHook(() => useReportContext(upper), { wrapper });
+    expect(result.current.reportedUser.pubkey).toBe(pubkey);
+  });
+
+  it('leaves a p tag that is not a 64-character hex id as written', () => {
+    const odd = { ...report, tags: [['p', 'Not-A-Pubkey', 'spam']] };
+    const { result } = renderHook(() => useReportContext(odd), { wrapper });
+    expect(result.current.reportedUser.pubkey).toBe('Not-A-Pubkey');
+  });
+});
+
 describe('useReportContext isLoading', () => {
   // The reporter's profile isn't returned, but the pane still waits for it.
   it('waits for the reporter lookup even when the reported user has loaded', () => {

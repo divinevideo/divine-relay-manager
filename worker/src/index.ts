@@ -51,6 +51,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAccountRestrictedAgeReviewState, type AgeReviewState } from '../../shared/age-review';
+import { canonicalHex64 } from '../../shared/hex-id';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
@@ -1620,9 +1621,9 @@ async function runRelayRpc(
   // the ban list with no way out of the UI. Nothing is risked by allowing it: a
   // non-canonical request value reaches only the relay rows written with that same
   // value (Keycast refuses it outright), so it lifts nothing on the account an
-  // age-review case holds, which is why the guard also lets it through. A stored
-  // case can still carry an uppercase pubkey until #313; for a lowercase reversal
-  // the guard's lookup finds it (see getActiveAgeReviewCase).
+  // age-review case holds, which is why the guard also lets it through. A case
+  // opened before #313 can still carry an uppercase pubkey; for a lowercase
+  // reversal the guard's lookup finds it (see getActiveAgeReviewCase).
   if (
     (body.method === 'banpubkey' || body.method === 'suspendpubkey')
     && !/^[0-9a-f]{64}$/.test(target)
@@ -1989,12 +1990,16 @@ async function handleLogDecision(
 
     await ensureSchemaOnce(env.DB);
 
+    // A hex id is stored lowercase, the form every reader looks it up in. An
+    // older frontend can post a report's tag as written (#313, #315). Any
+    // other value, such as a media hash name, is kept as written.
+    const targetId = canonicalHex64(body.targetId) ?? body.targetId;
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
       VALUES (?, ?, ?, ?, ?, ?)
     `).bind(
       body.targetType,
-      body.targetId,
+      targetId,
       body.action,
       body.reason || null,
       body.moderatorPubkey || null,
@@ -2003,7 +2008,7 @@ async function handleLogDecision(
 
     // This endpoint is an append-only audit write. Detached clients can deliver it
     // after a newer enforcement action, so it must not redefine visibility intent.
-    if (body.targetType !== 'event') await markHumanReviewed(env.DB, body.targetType, body.targetId);
+    if (body.targetType !== 'event') await markHumanReviewed(env.DB, body.targetType, targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -2181,7 +2186,14 @@ async function handleGetDecisions(
 
     await ensureSchemaOnce(env.DB);
 
-    // Get all decisions for this target (could be event ID, pubkey, or media hash)
+    // Get all decisions for this target (could be event ID, pubkey, or media hash).
+    // Exact match, the way the queue keys every stored record: a row counts
+    // only under the spelling it was stored in, so the queue, this history and
+    // Reopen agree, and a row in another spelling leaves its report in front
+    // of a person. Every path that writes a decision now stores a hex id
+    // lowercase (#313). Widening it would also fold in a machine auto-hide row
+    // written in uppercase before #315, which never hid the lowercase target
+    // (see pendingReviewTargetStates).
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       WHERE target_id = ?
@@ -2327,6 +2339,7 @@ async function handleDeleteDecisions(
     }
 
     // Delete all decisions for this target from D1 (reopens the report).
+    // Exact match, as in handleGetDecisions and the label cleanup above.
     // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions

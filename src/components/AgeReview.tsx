@@ -31,6 +31,7 @@ import {
   type AgeReviewState,
   type AgeBand,
 } from "../../shared/age-review";
+import { canonicalHex64 } from "../../shared/hex-id";
 
 const BAND_LABELS: Record<AgeBand, string> = {
   under_13: "Under 13",
@@ -58,7 +59,11 @@ export function AgeReview() {
   const [searchParams, setSearchParams] = useSearchParams();
   const queryClient = useQueryClient();
   const selectedCaseId = searchParams.get('case');
-  const pubkeyParam = searchParams.get('pubkey');
+  // Lowercased when it is a 64-character hex id: cases are stored that way, and
+  // the active-case lookup accepts only lowercase hex (#316). That lookup still
+  // finds a case stored under an older uppercase spelling (TODO(#313) there).
+  const rawPubkeyParam = searchParams.get('pubkey');
+  const pubkeyParam = rawPubkeyParam === null ? null : canonicalHex64(rawPubkeyParam) ?? rawPubkeyParam;
 
   // Case selection lives in the URL (?case=<id>) so a report hand-off can
   // deep-link straight to a case; ?pubkey=<hex> is resolved to its active case.

@@ -221,6 +221,39 @@ describe('recorded content decisions on real D1', () => {
       .toMatchObject({ ever_human_reviewed: 1 });
   });
 
+  // An older frontend can post a report's tag as written (#313, #315). Stored as
+  // written, the decision would key a target no report is listed under.
+  it('stores a generic decision on an uppercase hex id in lowercase', async () => {
+    const targetId = 'e3'.repeat(32);
+    const response = await worker.fetch(new Request('https://api.example.test/api/decisions', {
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key' },
+      body: JSON.stringify({ targetType: 'pubkey', targetId: targetId.toUpperCase(), action: 'reviewed' }),
+    }), { NOSTR_NSEC: TEST_NSEC, ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never,
+    { waitUntil: vi.fn() } as unknown as ExecutionContext);
+    expect(response.status).toBe(200);
+    expect((await DB.prepare("SELECT target_id FROM moderation_decisions WHERE lower(target_id) = ?").bind(targetId).all()).results)
+      .toEqual([{ target_id: targetId }]);
+    expect((await DB.prepare("SELECT target_id FROM moderation_targets WHERE lower(target_id) = ?").bind(targetId).all()).results)
+      .toEqual([{ target_id: targetId }]);
+  });
+
+  // A machine auto-hide row written in a report's uppercase spelling before
+  // #315 banned an id no event has, so it must not read as the lowercase
+  // target's own history: the pane would call live content auto-hidden.
+  it('keeps an uppercase auto-hide row out of the lowercase target\'s history', async () => {
+    const targetId = 'e4'.repeat(32);
+    await DB.prepare(`INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at)
+      VALUES ('event', ?, 'auto_hidden', 'auto', '2026-08-15 00:00:00')`).bind(targetId.toUpperCase()).run();
+    await DB.prepare(`INSERT INTO moderation_decisions (target_type, target_id, action, created_at)
+      VALUES ('event', ?, 'reviewed', '2026-08-16 00:00:00')`).bind(targetId).run();
+    const response = await worker.fetch(
+      new Request(`https://api.example.test/api/decisions/${targetId}`, { headers: { 'X-Admin-Key': 'test-admin-key' } }),
+      { ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never,
+      { waitUntil: vi.fn() } as unknown as ExecutionContext);
+    const body = await response.json() as { decisions: Array<{ action: string }> };
+    expect(body.decisions.map(d => d.action)).toEqual(['reviewed']);
+  });
+
   it('does not let a delayed audit write overwrite authoritative visibility intent', async () => {
     const eventId = 'ef'.repeat(32);
     await DB.prepare(`
