@@ -310,9 +310,10 @@ example with `state_mismatch`. It is for a caller that writes media decisions
 itself and must not restate the rules, such as moderation-service's
 dashboard.
 
-Besides the admin credentials every route accepts, it accepts
-moderation-service's relay key (`MOD_RELAY_ADMIN_KEY`), as `/api/relay-rpc`
-does. `/api/moderate-media` still refuses that key.
+In addition to the credentials described under Authentication above, it
+accepts moderation-service's relay key, sent in the `X-Admin-Key` header (the
+worker's `MOD_RELAY_ADMIN_KEY` binding), as `POST /api/relay-rpc` does.
+`/api/moderate-media` still refuses that key.
 
 **Request:**
 ```json
