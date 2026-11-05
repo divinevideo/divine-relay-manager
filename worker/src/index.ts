@@ -2653,9 +2653,11 @@ async function mediaLiftGuard(
 // and 200 with `checked: false` for one of moderation-service's other
 // actions. Anything else is a refusal: the guard's own 400, 409 or 503, a 400
 // for a missing hash or an action it does not know, or a 500. The answer is
-// /api/moderate-media's for a request that names no account: `pubkey` is
-// ignored here, where /api/moderate-media would run its account check.
-// Reads only; the caller writes.
+// /api/moderate-media's lift guard and nothing more: `pubkey` and `from` are
+// ignored here, where /api/moderate-media would run its account check and its
+// expected-state check. Writes no media decision; the caller writes. The
+// guard's ensureAgeReviewSchema may run the per-isolate schema bootstrap, as
+// it does for /api/moderate-media.
 // Check-then-act, as on /api/moderate-media: the caller's write is a
 // separate request, so a case opened between the two is not seen.
 async function handleMediaLiftCheck(

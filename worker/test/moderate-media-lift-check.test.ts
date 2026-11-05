@@ -1,4 +1,4 @@
-// The read-only lift check, POST /api/moderate-media/lift-check
+// The lift check, POST /api/moderate-media/lift-check
 // (divine-moderation-service#231).
 //
 // moderation-service's own dashboard writes media decisions without coming
@@ -247,10 +247,26 @@ describe('/api/moderate-media/lift-check', () => {
       expect(res.status).toBe(200);
       expect(await res.json()).toEqual({ success: true, allowed: true, checked: false });
       expect(blobReads).toEqual([]);
-      expect(caseLookups()).toHaveLength(0);
-      expect(stateReads()).toHaveLength(0);
+      expect(sqls).toEqual([]);
+      expect(calls).toEqual([]);
     },
   );
+
+  // The schema bootstrap runs once per isolate on whichever route first reads
+  // age-review cases, this one included. Past it, the check only reads.
+  it('issues only reads to D1 once the schema is set up', async () => {
+    openCase = { id: 'case-open', pubkey: OWNER, state: 'open_reported' };
+    blobStatus = 'active';
+    recordStatus = 'safe';
+    await check({ sha256: SHA, action: 'AGE_RESTRICTED' });
+    sqls = [];
+    calls = [];
+    for (const action of ['SAFE', 'AGE_RESTRICTED']) await check({ sha256: SHA, action });
+    expect(caseLookups().length).toBeGreaterThan(0);
+    expect(sqls.filter((s) => !/^\s*SELECT\b/i.test(s.sql))).toEqual([]);
+    expect(stateReads().length).toBeGreaterThan(0);
+    expect(writes()).toHaveLength(0);
+  });
 
   // The check exists so moderation-service never has to restate the rules,
   // so its answer must be /api/moderate-media's, state for state.
@@ -270,12 +286,16 @@ describe('/api/moderate-media/lift-check', () => {
       };
       arrange();
       const fromCheck = await check({ sha256: SHA, action });
+      expect(writes()).toHaveLength(0);
       arrange();
       const fromModerate = await moderate({ sha256: SHA, action });
       const wrote = writes().length === 1;
 
       expect(fromCheck.status === 200).toBe(wrote);
-      if (!wrote) {
+      if (wrote) {
+        expect(await fromCheck.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
+        expect(writes()[0].body).toMatchObject({ sha256: SHA });
+      } else {
         expect(fromCheck.status).toBe(fromModerate.status);
         expect(await fromCheck.json()).toEqual(await fromModerate.json());
       }

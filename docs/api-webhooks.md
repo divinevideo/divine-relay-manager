@@ -298,10 +298,14 @@ an action that is not a string is refused (400 `invalid_action`).
 
 ### POST /api/moderate-media/lift-check
 
-Asks whether a `SAFE` or `AGE_RESTRICTED` may go ahead, without writing
-anything. It runs the age-review lift guard of `POST /api/moderate-media`
-above, the same code, so the two agree for any request that names no account
-(`pubkey` is ignored here). It is for a caller that writes media decisions
+Asks whether a `SAFE` or `AGE_RESTRICTED` may go ahead. It writes no media
+decision and changes no moderation state. Like every route that reads
+age-review cases, the first request a worker instance serves may run the
+idempotent schema setup first. It runs the age-review lift guard of
+`POST /api/moderate-media` above, the same code, so the two give the same
+answer on that guard. It checks nothing else: `pubkey` and `from` are ignored
+here, so `/api/moderate-media` can still refuse a request this allows, for
+example with `state_mismatch`. It is for a caller that writes media decisions
 itself and must not restate the rules, such as moderation-service's
 dashboard.
 
