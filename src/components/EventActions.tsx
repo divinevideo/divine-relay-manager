@@ -8,6 +8,7 @@ import { useAdminApi } from '@/hooks/useAdminApi';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
+import { ApiError } from '@/lib/adminApi';
 import { ShieldX, Undo2, Video, ShieldAlert, Unlock, Trash2 } from 'lucide-react';
 
 export interface MediaHashStatus {
@@ -105,19 +106,25 @@ export function EventActions({
     const videos = hashes.filter((h) => !isThumbnail(h));
     for (const hash of videos) await act(hash);
     let changed = videos.length;
-    const errors: string[] = [];
+    const errors: { message: string; notFound: boolean }[] = [];
     for (const hash of hashes.filter(isThumbnail)) {
       try {
         await act(hash);
         changed++;
       } catch (error) {
-        errors.push(error instanceof Error ? error.message : 'unknown error');
+        const message = error instanceof Error ? error.message : 'unknown error';
+        // Not found on the media server: its own "Blob not found", or the
+        // worker's media_record_missing, which refuses such a file before
+        // writing anything. Either way nothing is left open.
+        const notFound = message.includes('Blob not found')
+          || (error instanceof ApiError && error.code === 'media_record_missing');
+        errors.push({ message, notFound });
       }
     }
     if (errors.length === 0) return { changed };
     const what = errors.length === 1 ? 'thumbnail' : `${errors.length} thumbnails`;
-    const errorText = [...new Set(errors)].join('; ');
-    const openCount = errors.filter((message) => !message.includes('Blob not found')).length;
+    const errorText = [...new Set(errors.map((e) => e.message))].join('; ');
+    const openCount = errors.filter((e) => !e.notFound).length;
     const leftOpen = openCount > 0;
     // The audit log keeps the full error text; the moderator gets it only when
     // something was left open.

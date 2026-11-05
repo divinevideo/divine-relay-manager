@@ -1331,9 +1331,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 hasRestrictedMedia={videoIsRestricted}
                 // Not isLoading, which covers only a first load that is fetching. A
                 // re-check after an action keeps showing the old status until it
-                // answers (isFetching), and a first load held back offline has no
-                // status at all yet (isPending).
-                mediaStatusLoading={mediaStatus.isPending || mediaStatus.isFetching}
+                // answers (isFetching), a first load held back offline has no
+                // status at all yet (isPending), and a re-check held back offline
+                // shows the old status while neither pending nor fetching (isPaused).
+                mediaStatusLoading={mediaStatus.isPending || mediaStatus.isFetching || mediaStatus.isPaused}
                 onActionComplete={handleActionComplete}
               />
             )}

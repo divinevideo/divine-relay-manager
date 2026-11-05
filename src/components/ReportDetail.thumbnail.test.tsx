@@ -76,7 +76,7 @@ vi.mock('@/hooks/useModerationStatus', () => ({
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
-const mediaStatusLoading = vi.hoisted(() => ({ loading: false, fetching: false, paused: false }));
+const mediaStatusLoading = vi.hoisted(() => ({ loading: false, fetching: false, paused: false, pausedRecheck: false }));
 const mediaStatusCalls = vi.hoisted(() => ({ value: [] as string[][] }));
 // The thumbnail alone is restricted, as if it had been gated separately.
 vi.mock('@/hooks/useMediaStatus', () => ({
@@ -89,10 +89,12 @@ vi.mock('@/hooks/useMediaStatus', () => ({
         isRestricted: hash === 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068',
       })),
       // As in TanStack v5: a first load is pending and fetching; one held back
-      // offline is pending but not fetching.
+      // offline is pending but not fetching; a re-check held back offline, with
+      // the old status cached, is neither pending nor fetching, only paused.
       isLoading: mediaStatusLoading.loading,
       isPending: mediaStatusLoading.loading || mediaStatusLoading.paused,
       isFetching: mediaStatusLoading.loading || mediaStatusLoading.fetching,
+      isPaused: mediaStatusLoading.paused || mediaStatusLoading.pausedRecheck,
     };
   },
 }));
@@ -169,6 +171,17 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     mediaStatusLoading.loading = false;
     mediaStatusLoading.fetching = false;
     mediaStatusLoading.paused = false;
+    mediaStatusLoading.pausedRecheck = false;
+  });
+
+  it('tells the buttons while a re-check is held back offline, with the old status still showing', () => {
+    // An action's re-check that goes offline pauses with the old status
+    // cached: neither pending nor fetching. A click then would queue an
+    // action on that old status, to run when the connection returns.
+    mediaStatusLoading.pausedRecheck = true;
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaStatusLoading: true });
   });
 
   it('tells the buttons while a first load is held back offline, with no status yet', () => {

@@ -19,7 +19,7 @@ export interface MediaStatusResult {
 export function useMediaStatus(hashes: string[]) {
   const { readMediaStatus } = useAdminApi();
 
-  const { data, isLoading, isPending, isFetching, error, refetch } = useQuery({
+  const { data, isLoading, isPending, isFetching, isPaused, error, refetch } = useQuery({
     queryKey: ['media-status', ...hashes],
     queryFn: async () => {
       if (hashes.length === 0) return [];
@@ -67,6 +67,7 @@ export function useMediaStatus(hashes: string[]) {
     isLoading,
     isPending,
     isFetching,
+    isPaused,
     error,
     refetch,
   };

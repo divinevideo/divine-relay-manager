@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventActions } from './EventActions';
+import { ApiError } from '@/lib/adminApi';
 
 // Stable mocks so failure-path tests can control the audit log and assert on toasts.
 const api = vi.hoisted(() => ({
@@ -223,6 +224,29 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
       action: 'age_restrict_media',
       reason: 'Age restricted 1 media file(s); thumbnail not changed: Blob not found',
     })));
+  });
+
+  // /api/moderate-media refuses a file the media server has no record of before
+  // it writes anything, as a 409 media_record_missing (worker mediaLiftGuard).
+  // That is the same "not found on the media server" as the media server's own
+  // reply, not a thumbnail left open.
+  it("says a thumbnail was not found when the worker refuses it as media_record_missing", async () => {
+    api.moderateMedia.mockImplementation((hash: string) => (hash === THUMB
+      ? Promise.reject(new ApiError(
+        "The media server has no record of this file, so it can't be checked for an open age review; nothing was changed.",
+        409, 'Conflict', 'media_record_missing',
+      ))
+      : Promise.resolve({ success: true })));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Age restricted 1 media file(s)',
+      description: 'Thumbnail not changed: not found on the media server',
+    }));
   });
 
   it('fails as before when the video itself fails, without touching the thumbnail', async () => {

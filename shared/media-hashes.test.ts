@@ -7,6 +7,27 @@ const THUMB = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068'
 const OTHER_THUMB = 'c3d0f1a2b4e5968778695a4b3c2d1e0f9a8b7c6d5e4f30211203f4e5d6c7b8a9';
 
 describe('extractMediaFiles', () => {
+  // Content mentioning a file the tags name as a thumbnail does not make it a
+  // second video: Unblock and Remove Restriction would lift it with the video.
+  it('keeps a thumbnail a thumbnail when the content links it too', () => {
+    const tags = [[
+      'imeta',
+      `url https://media.divine.video/${VIDEO}`,
+      'm video/mp4',
+      `image https://media.divine.video/${THUMB}`,
+    ]];
+    const content = `look https://media.divine.video/${THUMB} and https://media.divine.video/${VIDEO}`;
+
+    expect(extractMediaFiles(content, tags)).toEqual({ media: [VIDEO], thumbnails: [THUMB] });
+  });
+
+  it('still reads a file only the content links as media', () => {
+    const tags = [['imeta', `url https://media.divine.video/${VIDEO}`, 'm video/mp4']];
+    const content = `see https://media.divine.video/${OTHER_THUMB}`;
+
+    expect(extractMediaFiles(content, tags)).toEqual({ media: [OTHER_THUMB, VIDEO], thumbnails: [] });
+  });
+
   it('separates a mobile-format video thumbnail from the video', () => {
     // divine-mobile writes NIP-92 "key value" entries (video_imeta_builder.dart).
     const tags = [[

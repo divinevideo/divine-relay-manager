@@ -46,7 +46,9 @@ export function extractMediaFiles(content: string, tags: string[][]): MediaFiles
   const thumbnails = new Set<string>();
   let hasVideo = false;
 
-  hashesIn(content).forEach((hash) => media.add(hash));
+  // Read last: a link in the content to a file the tags name as a thumbnail
+  // does not make it a second video.
+  const fromContent = hashesIn(content);
 
   for (const tag of tags) {
     if (tag[0] === 'imeta') {
@@ -78,9 +80,11 @@ export function extractMediaFiles(content: string, tags: string[][]): MediaFiles
 
   // The media server's own {video}.jpg follows the video's status, so it is the
   // video, not a second file.
+  const tagThumbnails = Array.from(thumbnails).filter((hash) => !media.has(hash));
+  const contentMedia = fromContent.filter((hash) => !tagThumbnails.includes(hash));
   return {
-    media: Array.from(media),
-    thumbnails: Array.from(thumbnails).filter((hash) => !media.has(hash)),
+    media: Array.from(new Set([...contentMedia, ...media])),
+    thumbnails: tagThumbnails,
   };
 }
 
