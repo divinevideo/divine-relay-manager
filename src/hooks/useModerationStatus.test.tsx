@@ -455,6 +455,24 @@ describe('useModerationStatus', () => {
     expect(result.current.isEventBanned).toBe(true);
   });
 
+  // A report's p and e tags reach this hook as written, while the worker
+  // lowercases an event id before banning it. An exact match missed both: a
+  // just-deleted post lost Restore, and a suspended account's missing post read
+  // as never stored.
+  it('matches list entries whatever their case', async () => {
+    listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
+    listSuspendedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
+    listBannedEvents.mockResolvedValue([{ id: EVENT_ID }]);
+
+    const { result } = renderHook(
+      () => useModerationStatus(PUBKEY.toUpperCase(), EVENT_ID.toUpperCase(), false),
+      { wrapper },
+    );
+    await waitFor(() => expect(result.current.isUserSuspended).toBe(true), { timeout: 5000 });
+    await waitFor(() => expect(result.current.isEventBanned).toBe(true), { timeout: 5000 });
+    expect(result.current.isUserBanned).toBe(true);
+  });
+
   // Per-list "still checking" flags, so a screen can say "still checking" for
   // the one read still out and "couldn't check" for the one that failed.
   it('says the suspension is being checked only while the suspended list is being read', async () => {

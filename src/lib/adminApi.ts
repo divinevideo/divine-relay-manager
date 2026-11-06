@@ -1065,10 +1065,17 @@ export async function verifyPubkeyBanned(
     await new Promise(resolve => setTimeout(resolve, 500));
 
     const bannedList = await listBannedPubkeys(apiUrl);
-    return bannedList.some(entry => entry.pubkey === pubkey);
+    return bannedList.some(entry => isListedPubkey(entry.pubkey, pubkey));
   } catch {
     return null;
   }
+}
+
+// useModerationStatus matches the ban list case-insensitively and lets this
+// check's answer outrank it, so the two must agree: a report's p tag is not
+// normalized, and older entries in funnelcake's list can be uppercase.
+function isListedPubkey(entryPubkey: unknown, pubkey: string): boolean {
+  return typeof entryPubkey === 'string' && entryPubkey.toLowerCase() === pubkey.toLowerCase();
 }
 
 // Verify that a pubkey was actually unbanned on the relay
@@ -1080,7 +1087,7 @@ export async function verifyPubkeyUnbanned(
     await new Promise(resolve => setTimeout(resolve, 500));
 
     const bannedList = await listBannedPubkeys(apiUrl);
-    return !bannedList.some(entry => entry.pubkey === pubkey);
+    return !bannedList.some(entry => isListedPubkey(entry.pubkey, pubkey));
   } catch {
     return null;
   }

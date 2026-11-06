@@ -1395,6 +1395,22 @@ describe('adminApi', () => {
       vi.useRealTimers();
     });
 
+    // Report detail passes a report's p tag as written. Its ban list match
+    // ignores case, and this answer outranks the list, so this must too.
+    it('confirms a ban listed in another case', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [pubkey] }),
+      });
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey.toUpperCase());
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(true);
+      vi.useRealTimers();
+    });
+
     it('returns null instead of claiming success when the check itself fails', async () => {
       vi.useFakeTimers();
       mockFetch.mockRejectedValueOnce(new Error('network down'));
@@ -1409,6 +1425,20 @@ describe('adminApi', () => {
 
   describe('verifyPubkeyUnbanned', () => {
     const pubkey = 'a'.repeat(64);
+
+    it('does not confirm an unban while the pubkey is listed in another case', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [pubkey] }),
+      });
+
+      const promise = verifyPubkeyUnbanned(API_URL, pubkey.toUpperCase());
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(false);
+      vi.useRealTimers();
+    });
 
     it('confirms an unban when the pubkey is absent', async () => {
       vi.useFakeTimers();
