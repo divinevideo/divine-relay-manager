@@ -181,7 +181,7 @@ export function EventActions({
   // thumbnail's failure, or a partial one) gets that from onActionComplete, and
   // one that fails outright reads it here.
   const recheckMedia = () => queryClient.invalidateQueries({ queryKey: ['media-status'] });
-  const moderateFile =(hash: string, action: ModerationAction, reason: string) =>
+  const moderateFile = (hash: string, action: ModerationAction, reason: string) =>
     writeMedia(hash, action, (from) => api.moderateMedia(hash, action, reason, from));
   const deleteFile = (hash: string) =>
     writeMedia(hash, 'DELETE', (from) => api.deleteMedia(hash, 'Permanently deleted by moderator', from));
@@ -472,8 +472,10 @@ export function EventActions({
     }
   };
 
-  // An undo's failure. After a partial lift something did change, so the screen
-  // checks the media status again, as the combined delete does on a partial.
+  // An undo's failure. After a partial lift something did change, so it ends
+  // through showDone, as the combined delete does on a partial: a failed audit
+  // write joins its warning, and onActionComplete reads the media status again.
+  // With nothing lifted, the status is read again here (see recheckMedia).
   const undoFailed = (title: string) => (error: Error & { partial?: ShownToast }) => {
     const failure: DoneToast = { title, description: error.message, variant: 'destructive' };
     if (error.partial) {
