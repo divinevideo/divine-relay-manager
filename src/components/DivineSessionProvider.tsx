@@ -101,9 +101,18 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     () => (accessToken ? new DivineRpcSigner(() => accessToken) : null),
     [accessToken],
   );
+  // Latest access token, mirrored like signerRef so getModeratorToken is a
+  // synchronous read of the live session at call time.
+  const tokenRef = useRef<string | undefined>(undefined);
   useEffect(() => {
     signerRef.current = signer;
-  }, [signer]);
+    tokenRef.current = accessToken;
+  }, [signer, accessToken]);
+
+  // Stable identity on purpose: it reads the ref, so a caller that took it from
+  // an earlier render still sees the current session. The returned string is a
+  // value, so a token taken at the click is unaffected by what happens next.
+  const getModeratorToken = useCallback((): string | undefined => tokenRef.current, []);
 
   // Snapshot the moderator pubkey for an audit write. Reads the signer at call
   // time (so callers can capture the identity at ACTION START and a later
@@ -192,6 +201,13 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     generationRef.current += 1;
     sdkLogout();
+    // Drop the token AND the signer now rather than waiting for the post-commit
+    // effect, so a click between logout and the re-render sees a consistently
+    // signed-out session (no token, no pubkey). The only signerRef reader,
+    // getModeratorPubkey, copies it into a local at call start, so an in-flight
+    // call that already captured its signer is unaffected.
+    tokenRef.current = undefined;
+    signerRef.current = null;
     setCredentials(null);
     setResolvedIdentity(NO_IDENTITY);
     setCredentialsResolved(true); // logout is a definitive "signed out" resolution
@@ -221,11 +237,12 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       isResolving,
       identityUnavailable,
       getModeratorPubkey,
+      getModeratorToken,
       startLogin: sdkStartLogin,
       logout,
       refresh,
     }),
-    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorPubkey, logout, refresh],
+    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorPubkey, getModeratorToken, logout, refresh],
   );
 
   return <DivineSessionContext.Provider value={value}>{children}</DivineSessionContext.Provider>;

@@ -232,3 +232,101 @@ describe('getModeratorPubkey (audit-write identity snapshot)', () => {
     expect(captured).toBeUndefined();
   });
 });
+
+describe('getModeratorToken (synchronous login-token snapshot)', () => {
+  function TokenProbe({ onReady }: { onReady: (get: () => string | undefined, logout: () => void) => void }) {
+    const { getModeratorToken, logout, credentials } = useDivineSession();
+    onReady(getModeratorToken, logout);
+    return <span data-testid="token">{credentials?.accessToken ?? 'none'}</span>;
+  }
+
+  function renderTokenProbe() {
+    const handle: { get: () => string | undefined; logout: () => void } = {
+      get: () => 'unset',
+      logout: () => {},
+    };
+    render(
+      <DivineSessionProvider>
+        <TokenProbe onReady={(get, logout) => { handle.get = get; handle.logout = logout; }} />
+      </DivineSessionProvider>,
+    );
+    return handle;
+  }
+
+  it('returns the signed-in access token', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a' });
+    const handle = renderTokenProbe();
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok-a'));
+    expect(handle.get()).toBe('tok-a');
+  });
+
+  it('returns undefined after logout', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a' });
+    const handle = renderTokenProbe();
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok-a'));
+    act(() => handle.logout());
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('none'));
+    expect(handle.get()).toBeUndefined();
+  });
+
+  it('token and pubkey both read as signed out in the same act as logout, before React flushes', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a' });
+    let h: { token: () => string | undefined; pubkey: () => Promise<string | undefined>; logout: () => void } = {
+      token: () => 'unset',
+      pubkey: async () => 'unset',
+      logout: () => {},
+    };
+    function Both() {
+      const s = useDivineSession();
+      h = { token: s.getModeratorToken, pubkey: s.getModeratorPubkey, logout: s.logout };
+      return <span data-testid="token">{s.credentials?.accessToken ?? 'none'}</span>;
+    }
+    render(
+      <DivineSessionProvider>
+        <Both />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok-a'));
+    let tok: string | undefined = 'unset';
+    let pkPromise: Promise<string | undefined> = Promise.resolve('unset');
+    act(() => {
+      h.logout();
+      tok = h.token();
+      pkPromise = h.pubkey();
+    });
+    expect(tok).toBeUndefined();
+    await expect(pkPromise).resolves.toBeUndefined();
+  });
+
+  it('returns undefined when signed out from the start', async () => {
+    getSession.mockResolvedValue(null);
+    const handle = renderTokenProbe();
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('none'));
+    expect(handle.get()).toBeUndefined();
+  });
+
+  it('a token taken before an account switch keeps the old value', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a' });
+    const handle = renderTokenProbe();
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok-a'));
+    const captured = handle.get();
+    // The moderator switches accounts: the next focus refresh yields new credentials.
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://y', accessToken: 'tok-b' });
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+    });
+    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok-b'));
+    expect(handle.get()).toBe('tok-b');
+    expect(captured).toBe('tok-a');
+  });
+
+  it('defaults to undefined with no provider', () => {
+    let got: string | undefined = 'sentinel';
+    function Bare() {
+      got = useDivineSession().getModeratorToken();
+      return null;
+    }
+    render(<Bare />);
+    expect(got).toBeUndefined();
+  });
+});

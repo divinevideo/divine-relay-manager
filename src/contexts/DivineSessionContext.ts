@@ -38,6 +38,13 @@ export interface DivineSessionValue {
    * falling back to undefined. Never gate a moderation action on this.
    */
   getModeratorPubkey: () => Promise<string | undefined>;
+  /**
+   * Snapshot the moderator's login token, synchronously. Call it at the click
+   * and keep using that value for the whole action: a later logout or account
+   * switch changes what this returns, never the string already taken. Undefined
+   * when signed out (or the session has no access token).
+   */
+  getModeratorToken: () => string | undefined;
   startLogin: (returnPath?: string) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
@@ -53,6 +60,7 @@ export const DivineSessionContext = createContext<DivineSessionValue>({
   isResolving: false,
   identityUnavailable: false,
   getModeratorPubkey: async () => undefined,
+  getModeratorToken: () => undefined,
   startLogin: sdkStartLogin,
   logout: () => {},
   refresh: async () => {},
