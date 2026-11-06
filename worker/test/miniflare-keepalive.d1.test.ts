@@ -70,33 +70,58 @@ describe('miniflare runtime connections (#349)', () => {
   it('closes idle connections itself, before workerd can close them under a reused request', async () => {
     // workerd drops idle connections after about 5 s. If undici kept a socket
     // that long, a call could be written to a socket workerd is closing and
-    // fail. The shim closes idle sockets after 1 s. Watch the sockets this call
-    // opens and require them gone well inside workerd's window.
-    const sockets: Array<{ destroyed: boolean }> = [];
-    const onConnected = ({ socket }: { socket: { destroyed: boolean } }) => { sockets.push(socket); };
-    // Let any socket left from earlier tests close, so the next call connects.
-    await new Promise((resolve) => setTimeout(resolve, 2_500));
-    subscribe('undici:client:connected', onConnected as (message: unknown) => void);
+    // fail. The shim closes idle sockets after 1 s.
+    //
+    // This uses its own Miniflare and plain dispatchFetch() calls, with every
+    // response body read and no D1 proxies. On the shared instance above,
+    // miniflare can send background requests when garbage collection frees proxy
+    // objects from earlier calls. One landing near the end of the idle wait
+    // keeps a socket open, and the check below would fail with a working shim.
+    // Sockets are filtered to this instance's port so the shared instance's
+    // traffic can't count either way.
+    const fresh = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+    });
     try {
-      expect((await DB.prepare('SELECT 2 AS two').first<{ two: number }>())?.two).toBe(2);
+      const url = await fresh.ready;
+      const port = Number(url.port);
+      const call = async () => {
+        const res = await fresh.dispatchFetch(url);
+        expect(await res.text()).toBe('ok');
+      };
+      const sockets: Array<{ destroyed: boolean; remotePort?: number }> = [];
+      const onConnected = ({ socket }: { socket: { destroyed: boolean; remotePort?: number } }) => {
+        if (socket.remotePort === port) sockets.push(socket);
+      };
+
+      // Open a connection, then leave it idle well past the 1 s close.
+      await call();
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      subscribe('undici:client:connected', onConnected as (message: unknown) => void);
+      try {
+        await call();
+      } finally {
+        unsubscribe('undici:client:connected', onConnected as (message: unknown) => void);
+      }
+      // This is the idle-close check. The first call's socket should have
+      // closed during the wait, so this call must open a new one. If none
+      // opened, it reused a socket that outlived 2.5 s idle.
+      expect(
+        sockets.length,
+        'no new connection: an earlier socket outlived 2.5 s idle, so idle sockets are not closing at 1 s',
+      ).toBeGreaterThanOrEqual(1);
+      // The socket this call opened must also close within 2.5 s of going idle.
+      await new Promise((resolve) => setTimeout(resolve, 2_500));
+      expect(
+        sockets.every((socket) => socket.destroyed),
+        'a socket opened by this call was still open after 2.5 s idle',
+      ).toBe(true);
+      // A fresh connection works after the idle close.
+      await call();
     } finally {
-      unsubscribe('undici:client:connected', onConnected as (message: unknown) => void);
+      await fresh.dispose();
     }
-    // This is the idle-close check. After 2.5 s idle, every earlier socket
-    // should be closed, so the call must open a new one. If none opened, an
-    // earlier socket outlived 2.5 s idle and idle sockets aren't closing at 1 s.
-    // More than one is allowed, as in the reuse test above.
-    expect(
-      sockets.length,
-      'no new connection: an earlier socket outlived 2.5 s idle, so idle sockets are not closing at 1 s',
-    ).toBeGreaterThanOrEqual(1);
-    // The socket this call opened must also close within 2.5 s of going idle.
-    await new Promise((resolve) => setTimeout(resolve, 2_500));
-    expect(
-      sockets.every((socket) => socket.destroyed),
-      'a socket opened by this call was still open after 2.5 s idle',
-    ).toBe(true);
-    // A fresh connection works after the idle close.
-    expect((await DB.prepare('SELECT 3 AS three').first<{ three: number }>())?.three).toBe(3);
   });
 });
