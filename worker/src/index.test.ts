@@ -2065,6 +2065,31 @@ describe('bulk-moderate age-review guard', () => {
     });
   }
 
+  it('queues the moderator verified from the login token, not one named in the body', async () => {
+    __clearModeratorLoginCache();
+    const VERIFIED = 'b'.repeat(64);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith('/api/nostr')) return new Response(JSON.stringify({ result: VERIFIED }), { status: 200 });
+      return new Response('{}', { status: 200 });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { env, send } = makeBulkEnv(null);
+      const req = enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all', moderatorPubkey: 'c'.repeat(64) });
+      req.headers.set('X-Divine-Login-Token', 'tok');
+      const response = await worker.fetch(
+        req, { ...(env as unknown as Record<string, unknown>), MODERATOR_LOGIN_URL: 'https://login.example.test' } as never, ctx,
+      );
+      expect(response.status).toBe(200);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({ moderatorPubkey: VERIFIED });
+    } finally {
+      warn.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('refuses a bulk action when the target has an active age-review case', async () => {
     const { env, executed, send } = makeBulkEnv({ id: 'case-b1', state: 'restricted_pending_user_response' });
     const response = await worker.fetch(

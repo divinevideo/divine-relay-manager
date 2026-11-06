@@ -70,7 +70,7 @@ describe('bulk media actions find the account\'s files through the media server 
 
   async function enqueue(action: BulkAction): Promise<{ jobId: string; first: BulkJobMessage }> {
     const res = await handleBulkModerateEnqueue(
-      new Request('https://test/api/bulk-moderate', { method: 'POST', body: JSON.stringify({ pubkey: ACCOUNT, action }) }), env, {},
+      new Request('https://test/api/bulk-moderate', { method: 'POST', body: JSON.stringify({ pubkey: ACCOUNT, action }) }), env, {}, undefined,
     );
     const { jobId } = await res.json() as BulkEnqueueResponse;
     return { jobId, first: sent.shift()! };

@@ -869,7 +869,7 @@ export default {
             { failClosed });
           if (guarded) return guarded;
         }
-        return handleBulkModerateEnqueue(request, env, corsHeaders);
+        return handleBulkModerateEnqueue(request, env, corsHeaders, moderator);
       }
 
       // Bulk-moderate job status: the UI polls this until status is terminal.

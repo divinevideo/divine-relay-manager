@@ -81,9 +81,9 @@ describe('bulk_jobs kind column on a real D1', () => {
     } as unknown as BulkModerateEnv;
     const req = new Request('https://test/api/bulk-moderate', {
       method: 'POST',
-      body: JSON.stringify({ pubkey: PUBKEY, action: 'delete-kind', kind: 7, reason: 'spam', moderatorPubkey: MODERATOR, reportId: REPORT_ID }),
+      body: JSON.stringify({ pubkey: PUBKEY, action: 'delete-kind', kind: 7, reason: 'spam', reportId: REPORT_ID }),
     });
-    const { jobId } = await (await handleBulkModerateEnqueue(req, env, {})).json() as BulkEnqueueResponse;
+    const { jobId } = await (await handleBulkModerateEnqueue(req, env, {}, MODERATOR)).json() as BulkEnqueueResponse;
 
     const relayEvents = [
       { id: '1'.repeat(64), pubkey: PUBKEY, kind: 7, content: '', tags: [], created_at: 2 },
