@@ -399,7 +399,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     // text is.
     if (displayEvent && isRepostKind(displayEvent.kind)) {
       add('', displayEvent.tags);
-      if (checkedOriginal) add(checkedOriginal.content, checkedOriginal.tags);
+      // An original that is itself a repost has the same JSON in its content, and
+      // read as text it would give up its inner event's id and author key as files.
+      if (checkedOriginal) add(isRepostKind(checkedOriginal.kind) ? '' : checkedOriginal.content, checkedOriginal.tags);
       if (!looksLikeEventCopy(displayEvent.content)) add(displayEvent.content, []);
     } else if (displayEvent) {
       add(displayEvent.content, displayEvent.tags);
