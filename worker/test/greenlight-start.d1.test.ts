@@ -1,6 +1,6 @@
 import { Miniflare } from 'miniflare';
 import { DEADLINE_DAYS, type AgeReviewCase } from '../../shared/age-review';
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleStartGreenlight, handleGetModerationStatus, handleUpdateAgeReviewCase } from '../src/age-review';
 
@@ -25,6 +25,7 @@ beforeAll(async () => {
 });
 afterAll(async () => { await mf.dispose(); });
 beforeEach(async () => { await DB.prepare('DELETE FROM age_review_cases').run(); });
+afterEach(() => { vi.restoreAllMocks(); });
 
 async function start(pubkey = owner) {
   return handleStartGreenlight(pubkey, { DB }, {});
@@ -52,7 +53,7 @@ describe('starting the existing Greenlight consent process', () => {
     const id = body.minorReviewCase.id;
     const patch = (state: string) => handleUpdateAgeReviewCase(new Request('https://api.test/case', {
       method: 'PATCH', body: JSON.stringify({ state }),
-    }), id, { DB }, {});
+    }), id, { DB }, {}, undefined);
     await patch('under_moderator_review');
     const reviewed = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(id).first<AgeReviewCase>();
     expect(reviewed?.moderation_started_at).toBeTruthy();
@@ -73,11 +74,46 @@ describe('starting the existing Greenlight consent process', () => {
     const id = body.minorReviewCase.id;
     const patch = (body: Record<string, unknown>) => handleUpdateAgeReviewCase(new Request('https://api.test/case', {
       method: 'PATCH', body: JSON.stringify(body),
-    }), id, { DB }, {});
+    }), id, { DB }, {}, undefined);
     await patch({ state: 'under_moderator_review' });
     await patch({ state: 'restricted_pending_user_response', clock_paused: true });
     const status = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
     expect(status.minorReviewCase.responseDeadline.clock).toBe('paused');
+  });
+  // #178 phase 2: the PATCH no longer writes moderator_pubkey from its body, and
+  // does not write the verified moderator there either. The column gates
+  // voluntary-case detection and report attachment (moderator_pubkey IS NULL),
+  // so writing it would change both.
+  it('a greenlight case stays voluntary after a PATCH that names a moderator in the body', async () => {
+    const body = await (await start()).json() as StartResponse;
+    const id = body.minorReviewCase.id;
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await handleUpdateAgeReviewCase(new Request('https://api.test/case', {
+      method: 'PATCH', body: JSON.stringify({ resolution_note: 'family called', moderator_pubkey: other }),
+    }), id, { DB }, {}, 'e'.repeat(64));
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`claimed moderator ${other} differs`));
+    const row = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(id).first<AgeReviewCase>();
+    expect(row?.moderator_pubkey).toBeNull();
+    // A repeat start resumes the voluntary case instead of refusing it as another process.
+    const again = await start();
+    expect(again.status).toBe(200);
+    expect((await again.json() as StartResponse).minorReviewCase.id).toBe(id);
+  });
+  it('an unreviewed report still takes a family application after a PATCH that names a moderator in the body', async () => {
+    await DB.prepare("INSERT INTO age_review_cases (id, pubkey, state, suspected_age_band, allowed_resolution, created_via, report_id) VALUES ('named', ?, 'open_reported', 'age_13_15', 'parent_video_or_email', 'report', 'report-1')")
+      .bind(owner).run();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const res = await handleUpdateAgeReviewCase(new Request('https://api.test/case', {
+      method: 'PATCH', body: JSON.stringify({ resolution_note: 'looked', moderator_pubkey: other }),
+    }), 'named', { DB }, {}, 'e'.repeat(64));
+    expect(res.status).toBe(200);
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining(`claimed moderator ${other} differs`));
+    const response = await start();
+    expect(response.status).toBe(200);
+    expect((await response.json() as StartResponse).minorReviewCase.id).toBe('named');
+    const row = await DB.prepare("SELECT * FROM age_review_cases WHERE id = 'named'").first<AgeReviewCase>();
+    expect(row?.greenlight_requested_at).toBeTruthy();
   });
   it('resumes the same case on retries and concurrent starts', async () => {
     const responses = await Promise.all([start(), start(), start()]);

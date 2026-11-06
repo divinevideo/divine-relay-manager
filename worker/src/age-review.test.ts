@@ -230,7 +230,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'under_moderator_review' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     expect(res.status).toBe(200);
 
     const updateCall = db.prepare.mock.calls.find(
@@ -244,7 +244,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'bogus_state' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Invalid state');
@@ -255,7 +255,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'submitted_for_review' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('Cannot transition');
@@ -268,7 +268,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'under_moderator_review' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(closedDb), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(closedDb), corsHeaders, undefined);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('closed case');
@@ -279,7 +279,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ clock_paused: true }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     expect(res.status).toBe(200);
 
     const updateCall = db.prepare.mock.calls.find(
@@ -322,7 +322,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ clock_paused: true }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(expiredDb), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(expiredDb), corsHeaders, undefined);
 
     expect(res.status).toBe(200);
     expect(bound).toContainEqual(['2026-08-26T12:00:00.000Z', 0, 'case-1', 0]);
@@ -340,7 +340,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ clock_paused: false }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(pausedDb), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(pausedDb), corsHeaders, undefined);
     expect(res.status).toBe(200);
 
     const updateCall = pausedDb.prepare.mock.calls.find(
@@ -354,7 +354,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ parent_contact_email: 'not-an-email' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     expect(res.status).toBe(400);
     const body = await res.json() as { error: string };
     expect(body.error).toContain('email');
@@ -365,7 +365,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify({ parent_contact_email: null }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     expect(res.status).toBe(200);
   });
 
@@ -388,7 +388,7 @@ describe('handleUpdateAgeReviewCase', () => {
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
       ZENDESK_GROUP_ID: '15225535020687',
-    }), corsHeaders);
+    }), corsHeaders, undefined);
     expect(res.status).toBe(200);
 
     const zendeskCall = mockFetch.mock.calls.find(
@@ -446,7 +446,7 @@ describe('handleUpdateAgeReviewCase', () => {
       method: 'PATCH',
       body: JSON.stringify(transition.body),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(reviewDb), corsHeaders, undefined);
     const body = await res.json() as {
       case: { state: string };
       enforcement: { relay: string; bulk: string; bulkError?: string; bulkNotes?: unknown[]; keycast: string };
@@ -643,7 +643,7 @@ describe('handleUpdateAgeReviewCase', () => {
       ZENDESK_FIELD_CATEGORY: '1001',
       ZENDESK_FIELD_ISSUE: '1002',
       ZENDESK_FIELD_AGE_REVIEW_DEADLINE: '1003',
-    }), corsHeaders);
+    }), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; case: AgeReviewCase };
 
     expect(res.status).toBe(200);
@@ -710,7 +710,7 @@ describe('handleUpdateAgeReviewCase', () => {
       ZENDESK_SUBDOMAIN: 'test',
       ZENDESK_API_TOKEN: 'tok',
       ZENDESK_EMAIL: 'agent@test.com',
-    }), corsHeaders);
+    }), corsHeaders, undefined);
 
     const payload = JSON.parse(mockFetch.mock.calls[0][1].body);
     expect(payload.ticket.comment.body).toContain('/age-review?case=case-1');
@@ -758,14 +758,14 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean; bulkActionTriggered?: string };
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(suspendUser).toHaveBeenCalledOnce();
-    expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }));
+    expect(suspendUser).toHaveBeenCalledWith(reviewCase.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }), undefined);
     // The withhold, not the moderator's 18+ gate: age-gate-all would serve a
     // suspected minor's videos to any signed-in viewer (#290).
     expect(runBulkModeration).toHaveBeenCalledOnce();
@@ -797,14 +797,14 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendUser).toHaveBeenCalledWith(restrictedCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('calls unsuspendUser when clearing a case that was never restricted', async () => {
@@ -831,7 +831,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
@@ -864,7 +864,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_parental_consent' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean; bulkActionTriggered?: string };
 
     expect(res.status).toBe(200);
@@ -898,13 +898,13 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(submittedCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendUser).toHaveBeenCalledWith(submittedCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('unsuspends when clearing after needs_follow_up (may have been restricted)', async () => {
@@ -931,13 +931,13 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
     expect(body.keycastUpdated).toBe(true);
     expect(unsuspendUser).toHaveBeenCalledOnce();
-    expect(unsuspendUser).toHaveBeenCalledWith(followUpCase.pubkey, expect.objectContaining({ DB: expect.anything() }));
+    expect(unsuspendUser).toHaveBeenCalledWith(followUpCase.pubkey, expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   it('calls banUser when transitioning to denied_closed', async () => {
@@ -968,14 +968,14 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; keycastUpdated: boolean };
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.keycastUpdated).toBe(true);
     expect(banUser).toHaveBeenCalledOnce();
-    expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }));
+    expect(banUser).toHaveBeenCalledWith(restrictedCase.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }), undefined);
   });
 
   // Issue #147: revoke/deny composes a verified_minor clear with the status leg.
@@ -1011,7 +1011,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
 
     expect(body.enforcement.keycastMinorClear).toBe('not_applicable');
@@ -1021,16 +1021,40 @@ describe('Keycast suspension wiring', () => {
     // SQLite in worker/test/age-review-handler.d1.test.ts.
   });
 
-  it('clears verified_minor (with actor + deny reason) when transitioning to denied_closed', async () => {
-    const moderator = 'b'.repeat(64);
-    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: moderator });
+  // #178 phase 2: the Keycast audit actor is the moderator the fetch handler
+  // verified from the login token. The case row's moderator_pubkey is never a
+  // stand-in for it.
+  it('passes the verified moderator as actor to suspendUser, unsuspendUser and banUser', async () => {
+    const verified = 'e'.repeat(64);
+    const send = (existing: ReturnType<typeof makeCase>, state: string, extra: Record<string, unknown> = {}) =>
+      handleUpdateAgeReviewCase(new Request('https://api.test/api/age-review/cases/case-1', {
+        method: 'PATCH',
+        body: JSON.stringify({ state, ...extra }),
+      }), 'case-1', makeEnv(makeDbFor(existing, { ...existing, state: state as AgeReviewCase['state'] })), corsHeaders, verified);
+
+    // A linked ticket already exists, so the restriction opens no internal one.
+    const review = makeCase({ state: 'under_moderator_review', zendesk_ticket_id: 7 });
+    expect((await send(review, 'restricted_pending_user_response')).status).toBe(200);
+    expect(suspendUser).toHaveBeenCalledWith(review.pubkey, 'age_review', expect.objectContaining({ DB: expect.anything() }), verified);
+
+    const restricted = makeCase({ state: 'restricted_pending_user_response' });
+    expect((await send(restricted, 'cleared', { resolution: 'not_minor' })).status).toBe(200);
+    expect(unsuspendUser).toHaveBeenCalledWith(restricted.pubkey, expect.objectContaining({ DB: expect.anything() }), verified);
+
+    expect((await send(restricted, 'denied_closed')).status).toBe(200);
+    expect(banUser).toHaveBeenCalledWith(restricted.pubkey, 'age_review_denied', expect.objectContaining({ DB: expect.anything() }), verified);
+  });
+
+  it('clears verified_minor (with the verified moderator + deny reason) when transitioning to denied_closed', async () => {
+    const verified = 'e'.repeat(64);
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response' });
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders, verified);
     const body = await res.json() as { success: boolean; enforcement: { keycastMinorClear: string } };
 
     expect(res.status).toBe(200);
@@ -1039,25 +1063,25 @@ describe('Keycast suspension wiring', () => {
     expect(clearVerifiedMinor).toHaveBeenCalledOnce();
     expect(clearVerifiedMinor).toHaveBeenCalledWith(
       restrictedCase.pubkey,
-      moderator,
+      verified,
       'age_review_denied',
       expect.objectContaining({ DB: expect.anything() }),
     );
   });
 
-  it('clears verified_minor with an undefined actor when the case has no moderator_pubkey', async () => {
-    // relay-manager auths with a shared admin pubkey, so a case row may carry a
-    // null moderator_pubkey. The clear must still fire, with actor `undefined`
-    // (keycast then falls back to a log-only audit row). Locks the handler's
-    // `(updated ?? existing) ?? undefined` fallback on the interactive path.
-    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: null });
+  it('passes no actor without a verified login, even when the case row has moderator_pubkey set', async () => {
+    // The stored column was only ever written from a request body, so it names
+    // nobody the worker verified. Without a login the clear and the ban still
+    // fire, with actor `undefined` (keycast then falls back to a log-only audit
+    // row), rather than borrowing the stored value.
+    const restrictedCase = makeCase({ state: 'restricted_pending_user_response', moderator_pubkey: 'd'.repeat(64) });
     const updatedCase = { ...restrictedCase, state: 'denied_closed' as const };
 
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders, undefined);
     const body = await res.json() as { enforcement: { keycastMinorClear: string } };
 
     expect(res.status).toBe(200);
@@ -1067,6 +1091,12 @@ describe('Keycast suspension wiring', () => {
       undefined,
       'age_review_denied',
       expect.objectContaining({ DB: expect.anything() }),
+    );
+    expect(banUser).toHaveBeenCalledWith(
+      restrictedCase.pubkey,
+      'age_review_denied',
+      expect.objectContaining({ DB: expect.anything() }),
+      undefined,
     );
   });
 
@@ -1080,7 +1110,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders, undefined);
 
     expect(res.status).toBe(200);
     expect(clearVerifiedMinor).not.toHaveBeenCalled();
@@ -1098,7 +1128,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(restrictedCase, updatedCase)), corsHeaders, undefined);
     const body = await res.json() as {
       success: boolean; enforcementComplete: boolean;
       enforcement: { keycastMinorClear: string; keycastMinorClearError: string; keycast: string };
@@ -1124,7 +1154,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(makeDbFor(reviewCase, updatedCase)), corsHeaders, undefined);
 
     expect(res.status).toBe(200);
     expect(clearVerifiedMinor).not.toHaveBeenCalled();
@@ -1163,7 +1193,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as {
       success: boolean; keycastUpdated: boolean; enforcementComplete: boolean;
       enforcement: { keycast: string; relay: string }; case: { state: string };
@@ -1207,7 +1237,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as {
       success: boolean; keycastUpdated: boolean;
       enforcement: { keycast: string }; case: { state: string };
@@ -1251,7 +1281,7 @@ describe('Keycast suspension wiring', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'denied_closed' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as {
       success: boolean; enforcement: { keycast: string }; case: { state: string };
     };
@@ -1295,7 +1325,7 @@ describe('Relay pubkey enforcement wiring', () => {
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH', body: JSON.stringify(to === 'cleared' ? { state: to, resolution: 'not_minor' } : { state: to }),
     });
-    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     return c;
   }
 
@@ -1324,7 +1354,7 @@ describe('Relay pubkey enforcement wiring', () => {
     const req = new Request('https://api.test/api/age-review/cases/case-1', {
       method: 'PATCH', body: JSON.stringify({ state: 'restricted_pending_user_response' }),
     });
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; enforcement: { relay: string } };
     expect(res.status).toBe(207);
     expect(body.success).toBe(false);
@@ -1347,7 +1377,7 @@ describe('Relay pubkey enforcement wiring', () => {
       method: 'PATCH', body: JSON.stringify({ state: 'denied_closed' }),
     });
 
-    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders);
+    const res = await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db), corsHeaders, undefined);
     const body = await res.json() as { success: boolean; enforcement: { relay: string; relayError?: string } };
 
     expect(res.status).toBe(207);
@@ -3145,7 +3175,7 @@ describe('parent contact record', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'restricted_pending_support_email' }),
     });
-    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, zendeskEnv), corsHeaders);
+    await handleUpdateAgeReviewCase(req, 'case-1', makeEnv(db, zendeskEnv), corsHeaders, undefined);
 
     const userCalls = mockFetch.mock.calls.filter((call: unknown[]) => (call[0] as string).includes('/users/'));
     expect(userCalls).toEqual([]);

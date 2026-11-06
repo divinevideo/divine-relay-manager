@@ -948,7 +948,7 @@ export default {
         const caseId = path.replace('/api/age-review/cases/', '');
         // Deny also waits for ban confirmation before its remaining enforcement
         // legs. Keep those legs alive if the moderator disconnects mid-request.
-        return surviveDisconnect(handleUpdateAgeReviewCase(request, caseId, env, corsHeaders), ctx);
+        return surviveDisconnect(handleUpdateAgeReviewCase(request, caseId, env, corsHeaders, moderator), ctx);
       }
       if (path === '/api/age-review/create-minor-account' && request.method === 'POST') {
         if (env.DB) await ensureSchemaOnce(env.DB);
