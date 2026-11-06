@@ -294,9 +294,35 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
-    expect(screen.getByText(/copy of the original doesn't match the event it names/)).toBeInTheDocument();
+    expect(screen.getByText(/No copy of the original that checks out was found/)).toBeInTheDocument();
     // Nor does any preview show the copy's files, in its text or its tags.
     expect(JSON.stringify(previewedEvents.value)).not.toMatch(/media\.divine\.video/);
+  });
+
+  it.each([
+    ['names no event, only an addressable one', [['a', `34236:${SIGNED_VIDEO.pubkey}:clip`], ['p', SIGNED_VIDEO.pubkey]], JSON.stringify(SIGNED_VIDEO)],
+    ['has plain text that happens to start with a bracket', [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]], `[watch] https://media.divine.video/${OTHER_VIDEO}.mp4`],
+  ])('offers no files, without blaming the copy for a mismatch, when a repost %s', (_, tags, content) => {
+    // Content that looks like JSON is taken as the repost's copy and never read,
+    // so nothing is offered. The card says only that no checked original was
+    // found: it must not claim a mismatch with an event the repost never named,
+    // or accuse a plain-text repost of carrying a forged copy.
+    repost.resolved = false;
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 16,
+      tags,
+      content,
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
+    expect(screen.getByText(/No copy of the original that checks out was found/)).toBeInTheDocument();
+    expect(screen.queryByText(/doesn't match the event it names/)).not.toBeInTheDocument();
   });
 
   it.each([

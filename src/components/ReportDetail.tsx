@@ -1022,7 +1022,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 ) : (
                   <p className="text-sm text-muted-foreground italic">
                     {repostCopyUnchecked
-                      ? "The repost's copy of the original doesn't match the event it names, and the original couldn't be loaded, so its files aren't offered"
+                      ? "No copy of the original that checks out was found, so its files aren't offered"
                       : 'Could not load the original event that was reposted'}
                   </p>
                 )}
