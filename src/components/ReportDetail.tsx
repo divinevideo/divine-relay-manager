@@ -37,7 +37,7 @@ import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
 import { ThreadModal } from "@/components/ThreadModal";
-import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAdminApi, type ModeratorApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
@@ -105,38 +105,37 @@ interface ReportDetailProps {
 export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const {
-    deleteEvent, restoreEvent, markAsReviewed, logDecision, confirmAutoHide, deleteDecisions,
-  } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const api = useAdminApi();
+  const { deleteDecisions } = api;
+  const { getModeratorToken } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
   // /api/decisions write can't make an action whose authoritative step already
   // SUCCEEDED (markAsReviewed label publish, restoreEvent) report failure. On a
   // successful write, re-invalidate the decision log; on failure, a non-blocking
   // toast. Mirrors UserActions.logAudit.
-  // Detached audit write. `moderator` is captured by the caller BEFORE the
-  // authoritative request (so a logout/switch mid-request can't retarget it) and
-  // reused across every write in the action. Waits for the in-flight identity,
-  // attributes or falls back to null, and never blocks the action.
+  // Detached audit write. `act` is the api bound to the moderator's login when
+  // the action started, so a logout or switch mid-request can't retarget it.
+  // Never blocks the action.
   const logAudit = (
-    moderator: Promise<string | undefined>,
-    params: Parameters<typeof logDecision>[0],
+    act: ModeratorApi,
+    params: Parameters<typeof api.logDecision>[0],
   ) =>
-    void moderator.then((moderatorPubkey) =>
-      logDecision({ ...params, moderatorPubkey })
-        .then(() => {
-          queryClient.invalidateQueries({ queryKey: ['decisions'] });
-          // The queue reads its resolved set from the resolution-state
-          // projection, not the decision log, and the worker filters both
-          // report feeds by the same decisions, so all of them need refreshing
-          // or the target stays listed until the next poll.
-          invalidateResolutionState(queryClient);
-        })
-        .catch((e) => {
-          console.warn('[ReportDetail] audit log failed', e);
-          toast({ title: 'Action applied; audit log not recorded' });
-        }));
+    // Started from a resolved promise so that even a synchronous throw lands in
+    // the catch below rather than failing the action.
+    void Promise.resolve().then(() => act.logDecision(params))
+      .then(() => {
+        queryClient.invalidateQueries({ queryKey: ['decisions'] });
+        // The queue reads its resolved set from the resolution-state
+        // projection, not the decision log, and the worker filters both
+        // report feeds by the same decisions, so all of them need refreshing
+        // or the target stays listed until the next poll.
+        invalidateResolutionState(queryClient);
+      })
+      .catch((e) => {
+        console.warn('[ReportDetail] audit log failed', e);
+        toast({ title: 'Action applied; audit log not recorded' });
+      });
 
   const { config } = useAppContext();
   const navigate = useNavigate();
@@ -211,17 +210,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const reviewMutation = useMutation({
     mutationFn: async ({ status, comment }: { status: ResolutionStatus; comment?: string }) => {
       if (!context.target) throw new Error('No target');
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await markAsReviewed(
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const result = await act.markAsReviewed(
         context.target.type,
         context.target.value,
         status,
         comment,
-        await moderator,
       );
       // Audit log is non-critical; markAsReviewed (the resolution label) is the
       // authoritative action, so don't let a failed decision write report failure.
-      logAudit(moderator, {
+      logAudit(act, {
         targetType: context.target.type,
         targetId: context.target.value,
         action: status,
@@ -466,23 +464,21 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Confirm auto-hidden content (approve the auto-hide decision)
   const confirmAutoHideMutation = useMutation({
     mutationFn: async ({ targetId, targetType }: { targetId: string; targetType: 'event' | 'pubkey' }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       if (targetType === 'event') {
-        await confirmAutoHide({
+        await act.confirmAutoHide({
           eventId: targetId,
           reason: 'Auto-hide confirmed by moderator',
           reportId: report?.id,
           reporterPubkey: report?.pubkey,
-          moderatorPubkey: await moderator,
         });
       } else {
-        await logDecision({
+        await act.logDecision({
           targetType,
           targetId,
           action: 'auto_hide_confirmed',
           reason: 'Auto-hide confirmed by moderator',
           reportId: report?.id,
-          moderatorPubkey: await moderator,
         });
       }
       return targetId;
@@ -508,8 +504,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Restore auto-hidden content (reverse the auto-hide)
   const restoreAutoHideMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      const moderatorPubkey = await getModeratorPubkey();
-      return restoreEvent(eventId, moderatorPubkey, 'Auto-hide reversed by moderator');
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      return act.restoreEvent(eventId, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
@@ -1165,9 +1161,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             } : undefined}
             onDeleteEvent={async (eventId) => {
               try {
-                const moderator = getModeratorPubkey(); // capture before the authoritative request
-                await deleteEvent(eventId, 'Deleted from report review');
-                logAudit(moderator, {
+                const act = api.asModerator(getModeratorToken()); // take the login at the click
+                await act.deleteEvent(eventId, 'Deleted from report review');
+                logAudit(act, {
                   targetType: 'event',
                   targetId: eventId,
                   action: 'delete_event',
@@ -1179,11 +1175,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   description: "The event has been removed from the relay.",
                   action: (
                     <ToastAction altText="Undo delete" onClick={async () => {
-                      const result = await restoreEvent(
-                        eventId,
-                        await moderator,
-                        'Deletion undone by moderator',
-                      );
+                      // The undo is its own action, by whoever clicks it.
+                      const undo = api.asModerator(getModeratorToken()); // take the login at the click
+                      const result = await undo.restoreEvent(eventId, 'Deletion undone by moderator');
                       handleActionComplete();
                       toast(result.recorded === true && result.reconciled !== false
                         ? { title: "Event restored" }
@@ -1408,7 +1402,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       <BulkDeleteByKind
                         pubkey={context.reportedUser.pubkey}
                         reportId={report?.id}
-                        getModeratorPubkey={getModeratorPubkey}
+                        getModeratorToken={getModeratorToken}
                         isBanned={isUserBanned}
                         isSuspended={moderationStatus.isUserSuspended}
                         onComplete={handleActionComplete}

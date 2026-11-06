@@ -22,7 +22,7 @@ interface LinkedTicketPanelProps {
 export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
   const api = useAdminApi();
   const { toast } = useToast();
-  const { getModeratorPubkey } = useCurrentUser();
+  const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
 
   const queryKey = ['linked-tickets', eventId ?? null, pubkey ?? null];
@@ -45,8 +45,8 @@ export function LinkedTicketPanel({ eventId, pubkey }: LinkedTicketPanelProps) {
 
   const closeMutation = useMutation({
     mutationFn: async (ticketId: number) => {
-      const moderator = await getModeratorPubkey();
-      await api.closeTicket(ticketId, moderator);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.closeTicket(ticketId);
     },
     onMutate: (ticketId: number) => {
       setClosingIds(prev => new Set(prev).add(ticketId));

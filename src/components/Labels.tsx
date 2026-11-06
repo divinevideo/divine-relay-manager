@@ -25,6 +25,7 @@ import {
 import { Tag, UserX, Clock, Filter, ChevronDown, ChevronRight, Eye, Loader2, CheckCircle, XCircle } from "lucide-react";
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { LabelPublisher } from "@/components/LabelPublisher";
 import { EventContentPreview } from "@/components/EventContentPreview";
@@ -89,7 +90,9 @@ export function Labels({ relayUrl }: LabelsProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { banPubkey, verifyPubkeyBanned } = useAdminApi();
+  const api = useAdminApi();
+  const { verifyPubkeyBanned } = api;
+  const { getModeratorToken } = useCurrentUser();
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
   const [confirmBan, setConfirmBan] = useState<{ pubkey: string; reason: string } | null>(null);
@@ -128,7 +131,8 @@ export function Labels({ relayUrl }: LabelsProps) {
   // Ban mutation with proper loading state and error handling
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
-      const outcome = await banPubkey(pubkey, reason);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const outcome = await act.banPubkey(pubkey, reason);
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {

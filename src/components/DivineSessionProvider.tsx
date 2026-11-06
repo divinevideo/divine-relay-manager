@@ -1,6 +1,6 @@
 // ABOUTME: Provider that resolves the divine-login session AND the moderator
 // identity (pubkey + signer) once, so every useCurrentUser consumer shares it
-// (no per-mount RPC, no act-before-resolve null-attribution race).
+// (no per-mount RPC). Attribution goes by the login token (getModeratorToken).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { StoredCredentials } from '@divinevideo/login';
 import type { NostrSigner } from '@nostrify/nostrify';
@@ -9,10 +9,6 @@ import { DivineRpcSigner } from '@/lib/divineSigner';
 import { DivineSessionContext, type DivineSessionValue } from '@/contexts/DivineSessionContext';
 
 const HEX_64 = /^[0-9a-f]{64}$/;
-// How long an audit write waits for an in-flight pubkey before falling back to
-// null. getPublicKey is cached once resolved, so this only bites in the brief
-// boot window. Never blocks the moderation action itself.
-const MOD_PUBKEY_WAIT_MS = 3000;
 // Stable "no resolved identity" record, so clearing never allocates a new object
 // and re-runs the value memo for nothing.
 const NO_IDENTITY = { token: undefined, pubkey: undefined } as const;
@@ -37,9 +33,6 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // lost the race and undo any session the SDK re-persisted mid-refresh.
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
-  // Latest signer, read by getModeratorPubkey so it can snapshot the identity at
-  // action-start time (see below).
-  const signerRef = useRef<NostrSigner | null>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -101,48 +94,17 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     () => (accessToken ? new DivineRpcSigner(() => accessToken) : null),
     [accessToken],
   );
-  // Latest access token, mirrored like signerRef so getModeratorToken is a
+  // Latest access token, mirrored in a ref so getModeratorToken is a
   // synchronous read of the live session at call time.
   const tokenRef = useRef<string | undefined>(undefined);
   useEffect(() => {
-    signerRef.current = signer;
     tokenRef.current = accessToken;
-  }, [signer, accessToken]);
+  }, [accessToken]);
 
   // Stable identity on purpose: it reads the ref, so a caller that took it from
   // an earlier render still sees the current session. The returned string is a
   // value, so a token taken at the click is unaffected by what happens next.
   const getModeratorToken = useCallback((): string | undefined => tokenRef.current, []);
-
-  // Snapshot the moderator pubkey for an audit write. Reads the signer at call
-  // time (so callers can capture the identity at ACTION START and a later
-  // logout/switch can't retarget a long job) and waits briefly for an in-flight
-  // pubkey before falling back to undefined. getPublicKey is cached once
-  // resolved, so this returns instantly in the common case and never gates the
-  // moderation action.
-  const getModeratorPubkey = useCallback(async (): Promise<string | undefined> => {
-    const sig = signerRef.current;
-    if (!sig) return undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const pkPromise = sig.getPublicKey();
-      // If the timeout wins the race, getPublicKey stays pending; swallow a late
-      // rejection so it doesn't surface as an unhandled promise rejection.
-      pkPromise.catch(() => {});
-      const pk = await Promise.race([
-        pkPromise,
-        new Promise<string>((resolve) => {
-          timer = setTimeout(() => resolve(''), MOD_PUBKEY_WAIT_MS);
-        }),
-      ]);
-      const normalized = pk.trim().toLowerCase();
-      return HEX_64.test(normalized) ? normalized : undefined;
-    } catch {
-      return undefined;
-    } finally {
-      if (timer) clearTimeout(timer);
-    }
-  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -201,13 +163,10 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     generationRef.current += 1;
     sdkLogout();
-    // Drop the token AND the signer now rather than waiting for the post-commit
-    // effect, so a click between logout and the re-render sees a consistently
-    // signed-out session (no token, no pubkey). The only signerRef reader,
-    // getModeratorPubkey, copies it into a local at call start, so an in-flight
-    // call that already captured its signer is unaffected.
+    // Drop the token now rather than waiting for the post-commit effect, so a
+    // click between logout and the re-render takes no token. An action that
+    // already took one keeps its own copy.
     tokenRef.current = undefined;
-    signerRef.current = null;
     setCredentials(null);
     setResolvedIdentity(NO_IDENTITY);
     setCredentialsResolved(true); // logout is a definitive "signed out" resolution
@@ -236,13 +195,12 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       isSignedIn,
       isResolving,
       identityUnavailable,
-      getModeratorPubkey,
       getModeratorToken,
       startLogin: sdkStartLogin,
       logout,
       refresh,
     }),
-    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorPubkey, getModeratorToken, logout, refresh],
+    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorToken, logout, refresh],
   );
 
   return <DivineSessionContext.Provider value={value}>{children}</DivineSessionContext.Provider>;

@@ -64,19 +64,16 @@ let actionId = 0;
 export function DebugPanel() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const api = useAdminApi();
   const {
     getWorkerInfo,
-    banPubkey,
-    unbanPubkey,
     listBannedPubkeys,
     listBannedEvents,
     getAllDecisions,
-    callRelayRpc,
-    logDecision,
     verifyPubkeyBanned,
     verifyPubkeyUnbanned,
-  } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  } = api;
+  const { getModeratorToken } = useCurrentUser();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
@@ -189,11 +186,11 @@ export function DebugPanel() {
     mutationFn: async (pubkey: string) => {
       const start = Date.now();
       const results: { banResult?: unknown; banError?: string; logResult?: unknown; logError?: string } = {};
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
 
       // Try to ban via NIP-86 RPC
       try {
-        const banResult = await banPubkey(pubkey, "Debug test ban");
+        const banResult = await act.banPubkey(pubkey, "Debug test ban");
         results.banResult = banResult;
       } catch (error) {
         results.banError = String(error);
@@ -201,12 +198,11 @@ export function DebugPanel() {
 
       // Log to our database regardless
       try {
-        const logResult = await logDecision({
+        const logResult = await act.logDecision({
           targetType: 'pubkey',
           targetId: pubkey,
           action: 'ban_user',
           reason: 'Debug test ban',
-          moderatorPubkey: await moderator,
         });
         results.logResult = logResult;
       } catch (error) {
@@ -292,22 +288,21 @@ export function DebugPanel() {
     mutationFn: async (pubkey: string) => {
       const start = Date.now();
       const results: { unbanResult?: unknown; unbanError?: string; logResult?: unknown; logError?: string } = {};
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
 
       try {
-        const unbanResult = await unbanPubkey(pubkey);
+        const unbanResult = await act.unbanPubkey(pubkey);
         results.unbanResult = unbanResult;
       } catch (error) {
         results.unbanError = String(error);
       }
 
       try {
-        const logResult = await logDecision({
+        const logResult = await act.logDecision({
           targetType: 'pubkey',
           targetId: pubkey,
           action: 'unban_user',
           reason: 'Debug test unban',
-          moderatorPubkey: await moderator,
         });
         results.logResult = logResult;
       } catch (error) {
@@ -390,6 +385,8 @@ export function DebugPanel() {
 
   // Generic RPC call
   const executeRpc = async () => {
+    // A raw RPC can be an account action, which the worker attributes.
+    const act = api.asModerator(getModeratorToken()); // take the login at the click
     const start = Date.now();
     let params: (string | number)[] = [];
     try {
@@ -402,7 +399,7 @@ export function DebugPanel() {
     }
 
     try {
-      const result = await callRelayRpc(rpcMethod, params);
+      const result = await act.callRelayRpc(rpcMethod, params);
       const duration = Date.now() - start;
       setRpcResults(prev => [{
         method: rpcMethod,

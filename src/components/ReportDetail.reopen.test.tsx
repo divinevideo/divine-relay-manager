@@ -1,9 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 // Reopen used to assert a queue state rather than report an outcome: it told
 // the moderator the report was "back in the pending queue". Whether that was
@@ -43,10 +44,14 @@ vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
 }));
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const MOD_TOKEN = 'moderator-login-token';
+// The live token, read at call time, so a test can switch accounts mid-action.
+const session = vi.hoisted(() => ({ token: undefined as string | undefined }));
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => session.token }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
@@ -109,7 +114,12 @@ vi.mock('@/hooks/useReportContext', () => ({
 // Heavy presentational children are irrelevant to the reopen decision and drag
 // in relay sockets of their own.
 vi.mock('@/components/ThreadContext', () => ({ ThreadContext: () => null }));
-vi.mock('@/components/UserProfileCard', () => ({ UserProfileCard: () => null }));
+// Only its delete-a-recent-post hook is exercised here.
+vi.mock('@/components/UserProfileCard', () => ({
+  UserProfileCard: ({ onDeleteEvent }: { onDeleteEvent?: (eventId: string) => void }) => (
+    onDeleteEvent ? <button onClick={() => onDeleteEvent('7'.repeat(64))}>Delete recent post</button> : null
+  ),
+}));
 vi.mock('@/components/AISummary', () => ({ AISummary: () => null }));
 vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
@@ -133,6 +143,7 @@ const REPORT: NostrEvent = {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  session.token = MOD_TOKEN;
   ctx.targetValue = TARGET_EVENT;
   ctx.targetType = 'event';
   ctx.reportedPubkey = REPORTED_PUBKEY;
@@ -162,6 +173,43 @@ function renderDetail(onDismiss?: () => void) {
 
 const clickReopen = () => fireEvent.click(screen.getByRole('button', { name: /reopen/i }));
 
+describe('ReportDetail recent-post delete', () => {
+  it('the delete and its audit write carry the token taken at the click, even after an account switch mid-delete (#178)', async () => {
+    let release!: () => void;
+    api.deleteEvent.mockReturnValue(new Promise((resolve) => { release = () => resolve({ success: true }); }));
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete recent post' }));
+    await waitFor(() => expect(api.deleteEvent).toHaveBeenCalledWith('7'.repeat(64), 'Deleted from report review'));
+    session.token = 'other-account-token';
+    release();
+
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'delete_event' })));
+    expect(tokensFor(moderatorApi, 'deleteEvent')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
+  });
+});
+
+describe('ReportDetail recent-post delete undo', () => {
+  // The undo is its own action, so it carries the login of whoever clicks it.
+  it('the toast Undo restores with the token taken at the undo click (#178)', async () => {
+    api.deleteEvent.mockResolvedValue({ success: true });
+    api.restoreEvent.mockResolvedValue({ success: true, recorded: true, reconciled: true });
+    renderDetail();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete recent post' }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Event deleted' })));
+    const { action } = toast.mock.calls.find(([arg]) => arg.title === 'Event deleted')![0] as {
+      action: React.ReactElement<{ onClick: () => Promise<void> }>;
+    };
+    session.token = 'undo-token';
+    await act(async () => { await action.props.onClick(); });
+
+    expect(api.restoreEvent).toHaveBeenCalledWith('7'.repeat(64), 'Deletion undone by moderator');
+    expect(tokensFor(moderatorApi, 'restoreEvent')).toEqual(['undo-token']);
+  });
+});
+
 describe('ReportDetail reopen reporting', () => {
   it('confirms an auto-hide without repeating the relay mutation', async () => {
     decisionLog.isPendingReview = true;
@@ -173,6 +221,8 @@ describe('ReportDetail reopen reporting', () => {
     await waitFor(() => expect(api.confirmAutoHide).toHaveBeenCalledWith(expect.objectContaining({
       eventId: ctx.targetValue,
     })));
+    expect(api.confirmAutoHide.mock.calls[0][0]).not.toHaveProperty('moderatorPubkey');
+    expect(tokensFor(moderatorApi, 'confirmAutoHide')).toEqual([MOD_TOKEN]);
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_confirmed' }));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Auto-hide confirmed' }));
   });
@@ -186,9 +236,9 @@ describe('ReportDetail reopen reporting', () => {
 
     await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
       ctx.targetValue,
-      MOD_PUBKEY,
       'Auto-hide reversed by moderator',
     ));
+    expect(tokensFor(moderatorApi, 'restoreEvent')).toEqual([MOD_TOKEN]);
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'auto_hide_restored' }));
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
   });
@@ -235,8 +285,8 @@ describe('ReportDetail reopen reporting', () => {
       ctx.targetValue,
       'dismissed',
       'Dismissed - no action needed',
-      MOD_PUBKEY,
     ));
+    expect(tokensFor(moderatorApi, 'markAsReviewed')).toEqual([MOD_TOKEN]);
     const warning = toast.mock.calls.find(([arg]) => arg.title === 'Resolution saved; visibility needs attention')?.[0];
     expect(warning).toMatchObject({ variant: 'destructive', duration: Infinity });
     expect(warning.description).toMatch(/could not be restored/i);

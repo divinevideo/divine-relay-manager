@@ -13,7 +13,7 @@ const MOD_PUBKEY = 'e'.repeat(64);
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => ({}) }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useNostr', () => ({ useNostr: () => ({ nostr: { query: vi.fn(async () => []) } }) }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));

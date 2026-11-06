@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { LabelAndBanResult, LabelParams } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
 
@@ -86,7 +87,8 @@ const NAMESPACES = [
 export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnPublish }: LabelPublisherProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { publishLabel, publishLabelAndBan } = useAdminApi();
+  const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const [isOpen, setIsOpen] = useState(false);
 
   const [targetType, setTargetType] = useState<'event' | 'pubkey'>(defaultTarget?.type || 'pubkey');
@@ -100,6 +102,7 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
 
   const publishMutation = useMutation({
     mutationFn: async () => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       const ns = namespace === 'custom' ? customNamespace : namespace;
       const params: LabelParams & { shouldBan?: boolean } = {
         targetType,
@@ -111,9 +114,9 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
       };
 
       if (params.shouldBan) {
-        return publishLabelAndBan(params);
+        return act.publishLabelAndBan(params);
       } else {
-        await publishLabel(params);
+        await act.publishLabel(params);
         return { labelPublished: true, banned: false };
       }
     },
@@ -339,12 +342,14 @@ export function LabelPublisherInline({
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { publishLabel, publishLabelAndBan } = useAdminApi();
+  const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const [shouldBan, setShouldBan] = useState(false);
 
   const publishMutation = useMutation({
     mutationFn: async () => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       const params: LabelParams & { shouldBan?: boolean } = {
         targetType,
         targetValue,
@@ -354,9 +359,9 @@ export function LabelPublisherInline({
       };
 
       if (params.shouldBan) {
-        return publishLabelAndBan(params);
+        return act.publishLabelAndBan(params);
       } else {
-        await publishLabel(params);
+        await act.publishLabel(params);
         return { labelPublished: true, banned: false };
       }
     },

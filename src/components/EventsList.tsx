@@ -362,8 +362,9 @@ function EventCard({
 export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
-  const { callRelayRpc, hideEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const api = useAdminApi();
+  const { callRelayRpc, verifyEventDeleted } = api;
+  const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
   const [searchParams, setSearchParams] = useSearchParams();
   const [isVerifying, setIsVerifying] = useState(false);
@@ -645,12 +646,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Mutation for event moderation
   const moderateEventMutation = useMutation({
     mutationFn: async ({ eventId, action, reason }: { eventId: string; action: 'allow' | 'ban'; reason?: string }) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       if (action === 'allow') {
-        const result = await restoreEvent(
-          eventId,
-          await getModeratorPubkey(),
-          reason || 'Allowed from event list',
-        );
+        const result = await act.restoreEvent(eventId, reason || 'Allowed from event list');
         return {
           eventId,
           action,
@@ -658,7 +656,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
           reconciled: result.reconciled !== false,
         };
       } else {
-        const result = await hideEvent(eventId, reason);
+        const result = await act.hideEvent(eventId, reason);
         return { eventId, action, recorded: result.recorded === true, reconciled: true };
       }
     },
@@ -1003,6 +1001,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
               <BulkDeleteByKind
                 pubkey={filterByPubkey}
                 onComplete={() => refetch()}
+                getModeratorToken={getModeratorToken}
               />
             </div>
           )}

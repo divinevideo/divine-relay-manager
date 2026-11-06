@@ -168,71 +168,6 @@ describe('DivineSessionProvider / useDivineSession', () => {
   });
 });
 
-describe('getModeratorPubkey (audit-write identity snapshot)', () => {
-  function ModProbe({ onCapture }: { onCapture: (v: string | undefined) => void }) {
-    const { getModeratorPubkey, credentials } = useDivineSession();
-    return (
-      <div>
-        <span data-testid="token">{credentials?.accessToken ?? 'none'}</span>
-        <button onClick={async () => onCapture(await getModeratorPubkey())}>capture</button>
-      </div>
-    );
-  }
-
-  it('snapshots the resolved moderator pubkey for an audit write', async () => {
-    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
-    let captured: string | undefined = 'sentinel';
-    render(
-      <DivineSessionProvider>
-        <ModProbe onCapture={(v) => { captured = v; }} />
-      </DivineSessionProvider>,
-    );
-    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok'));
-    await act(async () => {
-      fireEvent.click(screen.getByText('capture'));
-    });
-    expect(captured).toBe(PUBKEY);
-  });
-
-  it('waits for an in-flight pubkey then returns it (boot-window race)', async () => {
-    let releasePubkey!: (pk: string) => void;
-    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
-    getPublicKey.mockReturnValue(
-      new Promise((resolve) => {
-        releasePubkey = resolve;
-      }),
-    );
-    let captured: string | undefined = 'sentinel';
-    render(
-      <DivineSessionProvider>
-        <ModProbe onCapture={(v) => { captured = v; }} />
-      </DivineSessionProvider>,
-    );
-    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok'));
-    // Capture while the pubkey is still resolving; the audit path must wait for it.
-    await act(async () => {
-      fireEvent.click(screen.getByText('capture'));
-      releasePubkey(PUBKEY);
-    });
-    expect(captured).toBe(PUBKEY);
-  });
-
-  it('returns undefined for an audit write when signed out', async () => {
-    getSession.mockResolvedValue(null);
-    let captured: string | undefined = 'sentinel';
-    render(
-      <DivineSessionProvider>
-        <ModProbe onCapture={(v) => { captured = v; }} />
-      </DivineSessionProvider>,
-    );
-    await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('none'));
-    await act(async () => {
-      fireEvent.click(screen.getByText('capture'));
-    });
-    expect(captured).toBeUndefined();
-  });
-});
-
 describe('getModeratorToken (synchronous login-token snapshot)', () => {
   function TokenProbe({ onReady }: { onReady: (get: () => string | undefined, logout: () => void) => void }) {
     const { getModeratorToken, logout, credentials } = useDivineSession();
@@ -269,33 +204,29 @@ describe('getModeratorToken (synchronous login-token snapshot)', () => {
     expect(handle.get()).toBeUndefined();
   });
 
-  it('token and pubkey both read as signed out in the same act as logout, before React flushes', async () => {
+  it('reads as signed out in the same act as logout, before React flushes', async () => {
     getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a' });
-    let h: { token: () => string | undefined; pubkey: () => Promise<string | undefined>; logout: () => void } = {
+    let h: { token: () => string | undefined; logout: () => void } = {
       token: () => 'unset',
-      pubkey: async () => 'unset',
       logout: () => {},
     };
-    function Both() {
+    function LogoutProbe() {
       const s = useDivineSession();
-      h = { token: s.getModeratorToken, pubkey: s.getModeratorPubkey, logout: s.logout };
+      h = { token: s.getModeratorToken, logout: s.logout };
       return <span data-testid="token">{s.credentials?.accessToken ?? 'none'}</span>;
     }
     render(
       <DivineSessionProvider>
-        <Both />
+        <LogoutProbe />
       </DivineSessionProvider>,
     );
     await waitFor(() => expect(screen.getByTestId('token')).toHaveTextContent('tok-a'));
     let tok: string | undefined = 'unset';
-    let pkPromise: Promise<string | undefined> = Promise.resolve('unset');
     act(() => {
       h.logout();
       tok = h.token();
-      pkPromise = h.pubkey();
     });
     expect(tok).toBeUndefined();
-    await expect(pkPromise).resolves.toBeUndefined();
   });
 
   it('returns undefined when signed out from the start', async () => {

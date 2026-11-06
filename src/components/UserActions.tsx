@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
-import { useAdminApi } from '@/hooks/useAdminApi';
+import { useAdminApi, type ModeratorApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
@@ -70,11 +70,11 @@ export function UserActions({
 }: UserActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
-  // Snapshot of the moderator at bulk-job start; a logout/switch during the long
-  // job must not retarget its completion audit write (#178).
-  const bulkModeratorRef = useRef<Promise<string | undefined>>();
+  // The api bound to the moderator's login at bulk-job start; a logout/switch
+  // during the long job must not retarget its completion audit write (#178).
+  const bulkActRef = useRef<ModeratorApi>();
   const navigate = useNavigate();
 
   // An under-16 report must be worked through the Age Review flow, not the
@@ -125,19 +125,19 @@ export function UserActions({
   // by invalidateResolutionState.
   // A report legitimately stays unresolved when no row was written (the .catch
   // path), which is correct.
-  // Detached audit write. `moderator` is captured by the caller BEFORE the
-  // authoritative request (so a logout/switch mid-request can't retarget it) and
-  // reused across the action. Waits for the in-flight identity, attributes or
-  // falls back to null, and never blocks the action.
+  // Detached audit write. `act` is the api bound to the moderator's login when
+  // the action started, so a logout or switch mid-request can't retarget it.
+  // Never blocks the action.
   // `note` rides on the audit warning because the app shows one toast at a
   // time: the warning would otherwise replace a note the action just showed.
   const logAudit = (
-    moderator: Promise<string | undefined>,
+    act: ModeratorApi,
     params: Parameters<typeof api.logDecision>[0],
     note?: string,
   ) =>
-    void moderator.then((moderatorPubkey) =>
-      api.logDecision({ ...params, moderatorPubkey })
+    // Started from a resolved promise so that even a synchronous throw lands in
+    // the catch below rather than failing the action.
+    void Promise.resolve().then(() => act.logDecision(params))
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
         invalidateResolutionState(queryClient);
@@ -145,13 +145,13 @@ export function UserActions({
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);
         toast({ title: 'Action applied; audit log not recorded', description: note });
-      }));
+      });
 
   const suspendUserMutation = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.suspendPubkey(pubkey, 'Suspended by moderator');
-      logAudit(moderator, {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.suspendPubkey(pubkey, 'Suspended by moderator');
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'suspend_user',
@@ -170,9 +170,9 @@ export function UserActions({
 
   const unsuspendUserMutation = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.unsuspendPubkey(pubkey);
-      logAudit(moderator, {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.unsuspendPubkey(pubkey);
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unsuspend_user',
@@ -191,9 +191,9 @@ export function UserActions({
 
   const banUserMutation = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const outcome = await api.banPubkey(pubkey, 'Banned by moderator');
-      logAudit(moderator, {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const outcome = await act.banPubkey(pubkey, 'Banned by moderator');
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'ban_user',
@@ -213,9 +213,9 @@ export function UserActions({
 
   const unbanUserMutation = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.unbanPubkey(pubkey);
-      logAudit(moderator, {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.unbanPubkey(pubkey);
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
@@ -269,17 +269,17 @@ export function UserActions({
         toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events`, description: extra });
       }
       // Non-critical audit log; never block the action. Attribute to the
-      // moderator snapshotted at job START (not now), so a mid-job logout/switch
-      // can't retarget it.
-      void (bulkModeratorRef.current ?? Promise.resolve(undefined))
-        .then((moderatorPubkey) =>
-          api.logDecision({
-            targetType: 'pubkey',
-            targetId: pubkey,
-            action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
-            reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
-            moderatorPubkey,
-          }))
+      // login taken at job START (not now), so a mid-job logout/switch can't
+      // retarget it. With no start on record, the write goes unattributed
+      // rather than to whoever is signed in now.
+      const act = bulkActRef.current ?? api.asModerator(undefined);
+      void Promise.resolve()
+        .then(() => act.logDecision({
+          targetType: 'pubkey',
+          targetId: pubkey,
+          action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
+          reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
+        }))
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.({ accountStatusChanged: false });
     },
@@ -409,7 +409,7 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-gate-all'); }} disabled={bulkBlocked}>
+                onClick={() => { const token = getModeratorToken(); bulkActRef.current = api.asModerator(token); bulkJob.start('age-gate-all', undefined, token); }} disabled={bulkBlocked}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'age-gate-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
@@ -428,7 +428,7 @@ export function UserActions({
             summary="This will permanently delete all events and media from this user. This cannot be undone."
             confirmLabel="Confirm Delete"
             pendingLabel="Starting..."
-            onConfirm={async () => { bulkModeratorRef.current = getModeratorPubkey(); await bulkJob.startAsync('delete-all'); }}
+            onConfirm={async () => { const token = getModeratorToken(); bulkActRef.current = api.asModerator(token); await bulkJob.startAsync('delete-all', undefined, token); }}
             isPending={bulkJob.runningAction === 'delete-all'}
           />
         </>

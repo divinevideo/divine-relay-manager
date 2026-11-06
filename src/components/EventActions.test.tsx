@@ -4,6 +4,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventActions } from './EventActions';
 import { ApiError } from '@/lib/adminApi';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 // Stable mocks so failure-path tests can control the audit log and assert on toasts.
 const api = vi.hoisted(() => ({
@@ -19,15 +20,20 @@ const toast = vi.hoisted(() => vi.fn());
 // What useToast reports on screen; empty unless a test puts a toast there.
 const toastsOnScreen = vi.hoisted(() => ({ value: [] as Array<{ id: string; open: boolean }> }));
 const MOD_PUBKEY = 'e'.repeat(64);
+const MOD_TOKEN = 'moderator-login-token';
+const moderatorApi = withAsModerator(api);
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({
   useToast: () => ({ toast, toasts: toastsOnScreen.value }),
   getToasts: () => toastsOnScreen.value,
 }));
 // Logged-in moderator, so audit writes carry attribution (#178).
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({
+    user: { pubkey: MOD_PUBKEY },
+    getModeratorToken: () => MOD_TOKEN,
+  }),
 }));
 
 beforeEach(() => {
@@ -93,12 +99,11 @@ describe('EventActions', () => {
 
     fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
 
-    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
-      'event-1',
-      MOD_PUBKEY,
-      'Restored by moderator',
-    ));
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith('event-1', 'Restored by moderator'));
     expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'restore_event' }));
+    // Both through asModerator, with the token taken at the click.
+    expect(tokensFor(moderatorApi, 'restoreEvent')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 
   it('renders unblock when media is blocked', () => {
@@ -127,10 +132,9 @@ describe('EventActions', () => {
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
     await waitFor(() => expect(api.hideEvent).toHaveBeenCalledWith('event-1', 'Banned by moderator'));
-    // #178: the audit write is attributed to the logged-in moderator.
-    await waitFor(() =>
-      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ moderatorPubkey: MOD_PUBKEY })),
-    );
+    // #178: the action and its audit write go through asModerator(token).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'hideEvent')).toEqual([MOD_TOKEN]);
     await waitFor(() =>
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Event banned from relay' })),
     );

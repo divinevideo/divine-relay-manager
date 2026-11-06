@@ -457,8 +457,9 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const { nostr } = useNostr();
   const { toast } = useToast();
   const redirectIfGuarded = useAgeReviewGuardRedirect();
-  const { banPubkey, deleteEvent, unbanPubkey, restoreEvent, verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted, logDecision } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const api = useAdminApi();
+  const { verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted } = api;
+  const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
@@ -548,7 +549,8 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
-      const outcome = await banPubkey(pubkey, reason);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const outcome = await act.banPubkey(pubkey, reason);
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {
@@ -600,7 +602,8 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const deleteMutation = useMutation({
     mutationFn: async ({ eventId, reason }: { eventId: string; reason: string }) => {
-      await deleteEvent(eventId, reason);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.deleteEvent(eventId, reason);
       return eventId;
     },
     onSuccess: async (eventId) => {
@@ -652,14 +655,13 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const unbanMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await unbanPubkey(pubkey);
-      await logDecision({
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.unbanPubkey(pubkey);
+      await act.logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
         reason: 'Unbanned from event viewer',
-        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -704,16 +706,15 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const restoreMutation = useMutation({
     mutationFn: async ({ eventId }: { eventId: string }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const result = await restoreEvent(eventId, await moderator, 'Restored from event viewer');
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const result = await act.restoreEvent(eventId, 'Restored from event viewer');
       let auditRecorded = true;
       try {
-        await logDecision({
+        await act.logDecision({
           targetType: 'event',
           targetId: eventId,
           action: 'restore_event',
           reason: 'Restored from event viewer',
-          moderatorPubkey: await moderator,
         });
       } catch (error) {
         auditRecorded = false;

@@ -26,7 +26,7 @@ vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({
     user: { pubkey: MOD_PUBKEY },
-    getModeratorPubkey: async () => MOD_PUBKEY,
+    getModeratorToken: () => 'moderator-login-token',
   }),
 }));
 

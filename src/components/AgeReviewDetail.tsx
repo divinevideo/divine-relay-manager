@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
 import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
 import { useUserStats } from "@/hooks/useUserStats";
@@ -141,6 +142,7 @@ const ENFORCEMENT_STATES: AgeReviewState[] = [
 
 export function AgeReviewDetail({ caseData: c }: Props) {
   const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
@@ -175,8 +177,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
 
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       pendingStateRef.current = updates.state as string | undefined;
-      return api.updateAgeReviewCase(c.id, { ...updates, expected_version: c.version });
+      return act.updateAgeReviewCase(c.id, { ...updates, expected_version: c.version });
     },
     // Capture the mutated case's identity at mutate time: onSuccess/onError
     // fire with the LATEST render's closure, so after a mid-flight case

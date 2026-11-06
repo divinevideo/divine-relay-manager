@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkDeleteByKind } from './BulkDeleteByKind';
 import { ApiError } from '@/lib/adminApi';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const api = vi.hoisted(() => ({
   bulkModerate: vi.fn(),
@@ -16,11 +17,12 @@ vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => navigate,
 }));
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 
 const PUBKEY = 'a'.repeat(64);
-const MODERATOR = 'd'.repeat(64);
+const MOD_TOKEN = 'moderator-login-token';
 const REPORT_ID = 'f'.repeat(64);
 const EVENT_ID = '1'.repeat(64);
 const RERUN = "Running it again is safe; it only picks up what's left.";
@@ -46,7 +48,7 @@ function renderDialog(
 ) {
   return render(
     <QueryClientProvider client={qc}>
-      <BulkDeleteByKind pubkey={PUBKEY} {...props} />
+      <BulkDeleteByKind pubkey={PUBKEY} getModeratorToken={() => MOD_TOKEN} {...props} />
     </QueryClientProvider>,
   );
 }
@@ -289,7 +291,7 @@ describe('BulkDeleteByKind account status', () => {
     await openAndPickReactions();
     expect(screen.getByRole('button', { name: 'Delete 3 Reaction events' })).toBeEnabled();
 
-    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} getModeratorToken={() => MOD_TOKEN} isBanned={true} /></QueryClientProvider>);
 
     expect(screen.getByText(/can't be counted or deleted here/)).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /^Delete/ })).toBeDisabled();
@@ -304,7 +306,7 @@ describe('BulkDeleteByKind account status', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
 
-    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} getModeratorToken={() => MOD_TOKEN} isBanned={true} /></QueryClientProvider>);
     open();
 
     expect(await screen.findByText(HIDDEN)).toBeInTheDocument();
@@ -351,45 +353,48 @@ describe('BulkDeleteByKind account status', () => {
 });
 
 describe('BulkDeleteByKind running a job', () => {
-  it('starts a kind-scoped job carrying the moderator, report, and reason', async () => {
+  it('starts a kind-scoped job carrying the report and reason, through asModerator(token)', async () => {
     api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 0 }));
-    renderDialog({ reportId: REPORT_ID, getModeratorPubkey: async () => MODERATOR });
+    let token: string | undefined = MOD_TOKEN;
+    renderDialog({ reportId: REPORT_ID, getModeratorToken: () => token });
     await openAndPickReactions();
     fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'spam' } });
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
+    // An account switch after the click does not change who the job is for.
+    token = 'other-account-token';
 
     await waitFor(() => expect(api.bulkModerate).toHaveBeenCalledWith(
-      PUBKEY, 'delete-kind', 'spam', { kind: 7, moderatorPubkey: MODERATOR, reportId: REPORT_ID },
+      PUBKEY, 'delete-kind', 'spam', { kind: 7, reportId: REPORT_ID },
     ));
+    expect(tokensFor(moderatorApi, 'bulkModerate')).toEqual([MOD_TOKEN]);
   });
 
-  it('starts one job when Delete is clicked twice while the moderator resolves', async () => {
+  it('starts one job when Delete is clicked twice while the enqueue is pending', async () => {
     api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 0 }));
-    let release: (pubkey: string) => void = () => {};
-    const identity = new Promise<string>((resolve) => { release = resolve; });
-    renderDialog({ getModeratorPubkey: () => identity });
+    let release: () => void = () => {};
+    api.bulkModerate.mockReturnValue(new Promise((resolve) => { release = () => resolve({ success: true, jobId: 'job-1' }); }));
+    renderDialog({ getModeratorToken: () => MOD_TOKEN });
     await openAndPickReactions();
 
     const deleteButton = screen.getByRole('button', { name: 'Delete 3 Reaction events' });
     fireEvent.click(deleteButton);
     fireEvent.click(deleteButton);
-    release(MODERATOR);
+    await act(async () => { release(); });
 
-    await waitFor(() => expect(api.bulkModerate).toHaveBeenCalled());
     await screen.findByText(/closing this dialog does not stop it/i);
     expect(api.bulkModerate).toHaveBeenCalledTimes(1);
   });
 
-  it('deletes from the confirmed account when the account changes while the moderator resolves', async () => {
+  it('deletes from the confirmed account when the account changes while the enqueue is pending', async () => {
     const other = 'b'.repeat(64);
     api.getBulkJobStatus.mockResolvedValue(job({ status: 'running', eventsProcessed: 0 }));
-    let release: (pubkey: string) => void = () => {};
-    const identity = new Promise<string>((resolve) => { release = resolve; });
+    let release: () => void = () => {};
+    api.bulkModerate.mockReturnValue(new Promise((resolve) => { release = () => resolve({ success: true, jobId: 'job-1' }); }));
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const view = (pubkey: string) => (
       <QueryClientProvider client={qc}>
-        <BulkDeleteByKind pubkey={pubkey} getModeratorPubkey={() => identity} />
+        <BulkDeleteByKind pubkey={pubkey} getModeratorToken={() => MOD_TOKEN} />
       </QueryClientProvider>
     );
     const { rerender } = render(view(PUBKEY));
@@ -398,7 +403,7 @@ describe('BulkDeleteByKind running a job', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
     fireEvent.click(screen.getByRole('button', { name: 'Close' }));
     rerender(view(other));
-    await act(async () => { release(MODERATOR); });
+    await act(async () => { release(); });
 
     await waitFor(() => expect(api.bulkModerate).toHaveBeenCalledTimes(1));
     expect(api.bulkModerate.mock.calls[0][0]).toBe(PUBKEY);
@@ -721,7 +726,7 @@ describe('BulkDeleteByKind outcomes', () => {
     await screen.findByRole('status');
     api.getBulkJobStatus.mockResolvedValue(job({ eventsProcessed: 1, ...over }));
 
-    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} getModeratorToken={() => MOD_TOKEN} isBanned={true} /></QueryClientProvider>);
 
     await waitFor(() => expect(toast).toHaveBeenCalled(), { timeout: 4000 });
     expect(lastToast()).toEqual({ title, description, variant: 'destructive', className: '[overflow-wrap:anywhere]' });
@@ -744,7 +749,7 @@ describe('BulkDeleteByKind outcomes', () => {
     await screen.findByRole('status');
     api.getBulkJobStatus.mockResolvedValue(job({ eventsProcessed: deleted }));
 
-    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} isBanned={true} /></QueryClientProvider>);
+    rerender(<QueryClientProvider client={qc}><BulkDeleteByKind pubkey={PUBKEY} getModeratorToken={() => MOD_TOKEN} isBanned={true} /></QueryClientProvider>);
 
     await waitFor(() => expect(toast).toHaveBeenCalled(), { timeout: 4000 });
   }

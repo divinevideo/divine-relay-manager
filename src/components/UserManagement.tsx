@@ -45,8 +45,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const redirectIfGuarded = useAgeReviewGuardRedirect();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { callRelayRpc, banPubkey, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const api = useAdminApi();
+  const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned } = api;
+  const { getModeratorToken } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -87,19 +88,18 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for banning users
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const outcome = await banPubkey(pubkey, reason || 'Account banned by moderator');
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const outcome = await act.banPubkey(pubkey, reason || 'Account banned by moderator');
       // Log to D1 for audit trail. The ban has already landed, so a failed write
       // must not fail the mutation: that would read as "Failed to ban user" and
       // invite a retry of an applied ban.
       let auditRecorded = true;
       try {
-        await logDecision({
+        await act.logDecision({
           targetType: 'pubkey',
           targetId: pubkey,
           action: 'ban_user',
           reason: reason || 'Banned via User Management',
-          moderatorPubkey: await moderator,
         });
       } catch (e) {
         console.warn('[UserManagement] audit log failed', e);
@@ -134,15 +134,14 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for allowing users
   const allowUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await callRelayRpc('unbanpubkey', [pubkey, reason]);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.callRelayRpc('unbanpubkey', [pubkey, reason]);
       // Log to D1 for audit trail
-      await logDecision({
+      await act.logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'allow_user',
         reason: reason || 'Allowed via User Management',
-        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -211,14 +210,13 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // Mutation for unbanning users
   const unbanUserMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await unbanPubkey(pubkey);
-      await logDecision({
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.unbanPubkey(pubkey);
+      await act.logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unban_user',
         reason: 'Unbanned via User Management',
-        moderatorPubkey: await moderator,
       });
       return pubkey;
     },
@@ -245,14 +243,13 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
 
   const unsuspendUserMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
-      const moderator = getModeratorPubkey(); // snapshot identity at action start
-      await unsuspendPubkey(pubkey);
-      await logDecision({
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.unsuspendPubkey(pubkey);
+      await act.logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
         action: 'unsuspend_user',
         reason: 'Unsuspended via User Management',
-        moderatorPubkey: await moderator,
       });
       return pubkey;
     },

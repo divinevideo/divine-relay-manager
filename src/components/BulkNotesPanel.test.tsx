@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { BulkNotesPanel } from './BulkNotesPanel';
 import { ApiError, type BulkNote } from '@/lib/adminApi';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { listFallbackWarning, mediaFailure, notSavedWarning, statusDisagreeCause } from '../../shared/bulk-moderation';
 
 const api = vi.hoisted(() => ({
@@ -10,10 +11,12 @@ const api = vi.hoisted(() => ({
   logDecision: vi.fn(),
   getActiveAgeReviewCase: vi.fn(),
 }));
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api, useApiUrl: () => 'https://api.test' }));
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi, useApiUrl: () => 'https://api.test' }));
 const MOD_PUBKEY = 'e'.repeat(64);
+const MOD_TOKEN = 'moderator-login-token';
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => MOD_TOKEN }),
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
@@ -137,8 +140,11 @@ describe('BulkNotesPanel', () => {
     expect(within(row).queryByRole('button', { name: /restore/i })).not.toBeInTheDocument();
     expect(within(row).getByText('Restored').closest('[aria-live]')).toHaveAttribute('aria-live', 'polite');
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
-      targetType: 'media', targetId: HIDDEN_A, action: 'remove_restriction', moderatorPubkey: MOD_PUBKEY,
+      targetType: 'media', targetId: HIDDEN_A, action: 'remove_restriction',
     })));
+    // The restore and its audit write go through asModerator(token) (#178).
+    expect(tokensFor(moderatorApi, 'moderateMedia')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 
   it('shows a file a restore already made public as Restored, with no Restore', () => {

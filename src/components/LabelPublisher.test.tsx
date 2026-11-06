@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LabelPublisher, LabelPublisherInline } from './LabelPublisher';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banSuccessNote } from '@/lib/banFeedback';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const api = vi.hoisted(() => ({
   publishLabel: vi.fn(),
@@ -14,8 +15,11 @@ const api = vi.hoisted(() => ({
 }));
 const toast = vi.hoisted(() => vi.fn());
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const MOD_TOKEN = 'moderator-login-token';
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
+vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ getModeratorToken: () => MOD_TOKEN }) }));
 
 function renderWith(ui: React.ReactElement) {
   const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
@@ -30,6 +34,18 @@ async function labelAndBanInline() {
   fireEvent.click(screen.getByRole('checkbox'));
   fireEvent.click(screen.getByRole('button', { name: 'Label' }));
   return rendered;
+}
+
+async function labelOnlyInline() {
+  renderWith(<LabelPublisherInline targetType="pubkey" targetValue={'a'.repeat(64)} />);
+  fireEvent.click(screen.getByText('CSAM'));
+  fireEvent.click(screen.getByRole('button', { name: 'Label' }));
+}
+
+async function labelOnlyDialog() {
+  renderWith(<LabelPublisher defaultTarget={{ type: 'pubkey', value: 'a'.repeat(64) }} defaultLabels={['csam']} />);
+  fireEvent.click(screen.getByRole('button', { name: /Create Label/i }));
+  fireEvent.click(await screen.findByRole('button', { name: /Publish Label/i }));
 }
 
 async function labelAndBanDialog() {
@@ -103,5 +119,33 @@ describe.each([
         description: banSuccessNote({ unconfirmed: 'removal_error' }),
       })),
     );
+  });
+});
+
+// The worker records the moderator it verifies from the login header (#178), so
+// each publish, and the ban with it, goes through asModerator(token).
+describe.each([
+  ['inline form', labelOnlyInline, labelAndBanInline],
+  ['dialog', labelOnlyDialog, labelAndBanDialog],
+] as const)('LabelPublisher %s attribution', (_name, labelOnly, labelAndBan) => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('publishes a label through asModerator(token)', async () => {
+    api.publishLabel.mockResolvedValue({ success: true });
+
+    await labelOnly();
+
+    await waitFor(() => expect(api.publishLabel).toHaveBeenCalled());
+    expect(tokensFor(moderatorApi, 'publishLabel')).toEqual([MOD_TOKEN]);
+  });
+
+  it('publishes a label and bans through asModerator(token)', async () => {
+    api.publishLabelAndBan.mockResolvedValue(published({ banned: true }));
+
+    await labelAndBan();
+
+    await waitFor(() => expect(api.publishLabelAndBan).toHaveBeenCalled());
+    expect(tokensFor(moderatorApi, 'publishLabelAndBan')).toEqual([MOD_TOKEN]);
   });
 });

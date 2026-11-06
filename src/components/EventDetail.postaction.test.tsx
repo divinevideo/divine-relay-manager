@@ -8,6 +8,7 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
 import { BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 // The re-verify control was fixed separately (EventDetail.reverify.test.tsx).
 // This is the other hop in the same file: the verification that runs straight
@@ -30,13 +31,18 @@ const api = vi.hoisted(() => ({
   logDecision: vi.fn(),
 }));
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const MOD_TOKEN = 'moderator-login-token';
+// The live token, read at call time, so a test can switch accounts mid-action.
+const session = vi.hoisted(() => ({ token: undefined as string | undefined }));
+const moderatorApi = withAsModerator(api);
+beforeEach(() => { session.token = MOD_TOKEN; });
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 const toast = vi.hoisted(() => vi.fn());
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({
     user: { pubkey: MOD_PUBKEY },
-    getModeratorPubkey: async () => MOD_PUBKEY,
+    getModeratorToken: () => session.token,
   }),
 }));
 vi.mock('@/hooks/useNostr', () => ({ useNostr: () => ({ nostr: { query: vi.fn().mockResolvedValue([]) } }) }));
@@ -106,6 +112,16 @@ describe('EventDetail post-ban verification', () => {
     modStatus.isUserBanned = false;
     modStatus.isEventGone = false;
     api.banPubkey.mockResolvedValue({ unconfirmed: null });
+  });
+
+  it('bans through asModerator(token) (#178)', async () => {
+    api.verifyPubkeyBanned.mockResolvedValue(true);
+
+    renderDetail();
+    await banTheUser();
+
+    await waitFor(() => expect(api.banPubkey).toHaveBeenCalled());
+    expect(tokensFor(moderatorApi, 'banPubkey')).toEqual([MOD_TOKEN]);
   });
 
   it('confirms the ban when the relay lists the pubkey', async () => {
@@ -270,6 +286,22 @@ describe('EventDetail post-unban verification', () => {
     });
   }
 
+  it('the unban and its audit write carry the token taken at the click, even after an account switch mid-unban (#178)', async () => {
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+    let release!: () => void;
+    api.unbanPubkey.mockReturnValue(new Promise<void>((resolve) => { release = resolve; }));
+
+    renderDetail();
+    await unbanTheUser();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalled());
+    session.token = 'other-account-token';
+    await act(async () => { release(); });
+
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'unban_user' })));
+    expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
+  });
+
   it('confirms the unban when the relay no longer lists the pubkey', async () => {
     api.verifyPubkeyUnbanned.mockResolvedValue(true);
 
@@ -323,7 +355,6 @@ describe('EventDetail restore routing', () => {
 
     await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith(
       EVENT.id,
-      MOD_PUBKEY,
       'Restored from event viewer',
     ));
     expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
@@ -331,6 +362,9 @@ describe('EventDetail restore routing', () => {
       targetId: EVENT.id,
       action: 'restore_event',
     }));
+    // The restore and its audit write go through asModerator(token) (#178).
+    expect(tokensFor(moderatorApi, 'restoreEvent')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 });
 
