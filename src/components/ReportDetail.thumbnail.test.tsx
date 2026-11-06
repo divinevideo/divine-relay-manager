@@ -371,4 +371,25 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
 
     expect(eventActionsProps.value).toMatchObject({ hasRestrictedMedia: false, hasBlockedMedia: false });
   });
+
+  // An action that ends in showDone, a thumbnail's failure or a partial one
+  // included, leaves the media status re-read to this host (#336), so the
+  // buttons match the files again.
+  it('reads the media status again, once, when the media buttons report an action done', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = eventActionsProps.value?.onActionComplete as () => void;
+      invalidate.mockClear();
+
+      onActionComplete();
+
+      const mediaStatusReads = invalidate.mock.calls.filter(
+        ([filters]) => JSON.stringify(filters?.queryKey) === JSON.stringify(['media-status']),
+      );
+      expect(mediaStatusReads).toHaveLength(1);
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
 });
