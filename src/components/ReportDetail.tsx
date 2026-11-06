@@ -371,6 +371,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     [context.thread?.repostedEvent, displayEvent, isRepostEvent],
   );
   const repostCopyUnchecked = repostHasCopy && !checkedOriginal;
+  // The same for an original that is itself a repost: its JSON content is its own
+  // copy of another event, never checked, and read as text it would give up that
+  // event's id and author key as files and its URLs to a preview. Plain text in
+  // an out-of-spec one is read as any post's is.
+  const originalHasCopy = !!checkedOriginal && isRepostKind(checkedOriginal.kind)
+    && looksLikeEventCopy(checkedOriginal.content);
+  // The checked original as its preview in the repost card shows it.
+  const originalPreviewEvent = useMemo(
+    () => (checkedOriginal && originalHasCopy ? { ...checkedOriginal, content: '' } : checkedOriginal),
+    [checkedOriginal, originalHasCopy],
+  );
   // The reported repost as its own media preview shows it: without a copy of
   // the original in its content, so the preview never shows files the buttons
   // were refused. A checked original has its own preview, in the repost card.
@@ -398,9 +409,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     // text is.
     if (displayEvent && isRepostEvent) {
       add('', displayEvent.tags);
-      // An original that is itself a repost has the same JSON in its content, and
-      // read as text it would give up its inner event's id and author key as files.
-      if (checkedOriginal) add(isRepostKind(checkedOriginal.kind) ? '' : checkedOriginal.content, checkedOriginal.tags);
+      if (checkedOriginal) add(originalHasCopy ? '' : checkedOriginal.content, checkedOriginal.tags);
       if (!repostHasCopy) add(displayEvent.content, []);
     } else if (displayEvent) {
       add(displayEvent.content, displayEvent.tags);
@@ -412,7 +421,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       mediaHashes: Array.from(media).filter(h => !thumbnails.has(h)),
       thumbnailHashes: Array.from(thumbnails),
     };
-  }, [displayEvent, isRepostEvent, repostHasCopy, checkedOriginal]);
+  }, [displayEvent, isRepostEvent, repostHasCopy, checkedOriginal, originalHasCopy]);
 
   // Check media status from moderation service. Thumbnails are included, so a
   // gated thumbnail gets its own undo button and Age Restrict skips a blocked one.
@@ -1013,7 +1022,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         report. */}
                     <MediaPreview
                       key={report.id}
-                      event={checkedOriginal}
+                      event={originalPreviewEvent ?? checkedOriginal}
                       showByDefault={mediaShownByDefault}
                       maxItems={6}
                     />

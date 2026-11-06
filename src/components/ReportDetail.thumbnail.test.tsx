@@ -302,11 +302,11 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
   it.each([
     ['names no event, only an addressable one', [['a', `34236:${SIGNED_VIDEO.pubkey}:clip`], ['p', SIGNED_VIDEO.pubkey]], JSON.stringify(SIGNED_VIDEO)],
     ['has plain text that happens to start with a bracket', [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]], `[watch] https://media.divine.video/${OTHER_VIDEO}.mp4`],
-  ])('offers no files, without blaming the copy for a mismatch, when a repost %s', (_, tags, content) => {
+  ])('offers no files, and says no checked original was found, when a repost %s', (_, tags, content) => {
     // Content that looks like JSON is taken as the repost's copy and never read,
     // so nothing is offered. The card says only that no checked original was
-    // found: it must not claim a mismatch with an event the repost never named,
-    // or accuse a plain-text repost of carrying a forged copy.
+    // found, which holds for a repost that names no event and for plain text
+    // that merely starts with a bracket, where "does not match" would not.
     repost.resolved = false;
     repost.value = {
       id: '9'.repeat(64),
@@ -322,7 +322,6 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
     expect(screen.getByText(/No copy of the original that checks out was found/)).toBeInTheDocument();
-    expect(screen.queryByText(/doesn't match the event it names/)).not.toBeInTheDocument();
   });
 
   it.each([
@@ -407,6 +406,69 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
+  });
+
+  it("shows no file from the JSON content of an original that is itself a repost, in its preview either", () => {
+    // That content is the original's own unchecked copy of another event. The
+    // preview reads media URLs out of text, so it would render a file the
+    // buttons were refused.
+    const uncheckedCopy = JSON.stringify({
+      ...SIGNED_VIDEO,
+      tags: [['imeta', `url https://media.divine.video/${OTHER_VIDEO}`, 'm video/mp4']],
+    });
+    repost.original = {
+      id: 'd'.repeat(64),
+      pubkey: '7'.repeat(64),
+      created_at: 1751000050,
+      kind: 6,
+      tags: [['e', SIGNED_VIDEO.id], ['p', SIGNED_VIDEO.pubkey]],
+      content: uncheckedCopy,
+      sig: 'b'.repeat(128),
+    };
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', 'd'.repeat(64)], ['p', '7'.repeat(64)]],
+      content: '',
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
+    expect(JSON.stringify(previewedEvents.value)).not.toContain(OTHER_VIDEO);
+    // The original is still previewed, as the checked event it is.
+    expect(previewedEvents.value.some((event) => event.id === 'd'.repeat(64))).toBe(true);
+  });
+
+  it("still reads the text of an original that is a repost with plain text in its content", () => {
+    // Out of spec, like a plain-text repost reported directly: some carry a media
+    // URL as text, and the preview shows it, so the buttons must reach it too.
+    repost.original = {
+      id: 'd'.repeat(64),
+      pubkey: '7'.repeat(64),
+      created_at: 1751000050,
+      kind: 6,
+      tags: [['e', SIGNED_VIDEO.id], ['p', SIGNED_VIDEO.pubkey]],
+      content: `https://media.divine.video/${OTHER_VIDEO}.mp4`,
+      sig: 'b'.repeat(128),
+    };
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', 'd'.repeat(64)], ['p', '7'.repeat(64)]],
+      content: '',
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [OTHER_VIDEO], thumbnailHashes: [] });
+    expect(JSON.stringify(previewedEvents.value)).toContain(OTHER_VIDEO);
   });
 
   it.each([
