@@ -23,15 +23,26 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
 import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
+import { queryStrict } from "@/lib/relayRead";
+import { authoredContentStat } from "@/lib/historyCount";
+
+// One capped page of authored content. A count at this limit is a floor.
+const RECENT_CONTENT_LIMIT = 50;
 
 interface BannedUserCardProps {
   pubkey: string;
   reason?: string;
   onUnban?: () => void;
   actionButton?: React.ReactNode;
+  /**
+   * Rendered from the relay's suspended list. The relay hides a suspended
+   * account's content, so an empty read here is the suspension, not an empty
+   * account.
+   */
+  suspended?: boolean;
 }
 
-export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton }: BannedUserCardProps) {
+export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton, suspended = false }: BannedUserCardProps) {
   const { nostr } = useNostr();
   const { config } = useAppContext();
   const [isOpen, setIsOpen] = useState(false);
@@ -63,14 +74,18 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   // Fetch recent authored content — kind 1 alone missed comment-spam accounts
   // whose only activity is comments/reposts (#159); RECENT_CONTENT_KINDS is
   // shared with useUserStats so this card and the report page stay aligned.
-  const { data: postStats } = useQuery({
+  const { data: postStats, isError: postStatsFailed } = useQuery({
     // Env key (apiUrl): singleton QueryClient + per-env NPool — without it a
     // card can serve the other environment's events for the staleTime window
     queryKey: ['user-posts-stats', config.apiUrl, pubkey],
     queryFn: async ({ signal }) => {
-      const events = await nostr.query(
-        [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 50 }],
-        { signal: AbortSignal.any([signal, AbortSignal.timeout(3000)]) }
+      // queryStrict, not nostr.query: NPool.query resolves [] when the relay
+      // fails, which printed as a confident "0 events on relay". A read that
+      // does not reach EOSE throws, and the card says the count is unavailable.
+      const events = await queryStrict(
+        nostr,
+        [{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: RECENT_CONTENT_LIMIT }],
+        { signal, timeoutMs: 3000 }
       );
       return {
         count: events.length,
@@ -80,6 +95,9 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
         allEvents: events,
       };
     },
+    // The read throws on failure, so one retry like ReporterCard's count: a
+    // single dropped subscription settles to "unavailable" only if it repeats.
+    retry: 1,
     // UserManagement renders one card per banned/suspended user and Radix
     // Tabs remount on tab switch — without staleTime every switch refires
     // N x 2 relay queries (aligned with useUserStats' 2min)
@@ -96,6 +114,22 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   );
   const { titles } = useEventTitles(commentTargets);
   const activityLine = formatCommentActivity(allEvents);
+  // No good read yet, versus a good read whose refresh failed: React Query keeps
+  // the earlier data, so that count is last known, not current.
+  const readFailed = postStatsFailed && !postStats;
+  const refreshFailed = postStatsFailed && !!postStats;
+  const eventCountLabel = authoredContentStat({
+    count: postStats?.count ?? (readFailed ? 0 : undefined),
+    incomplete: readFailed,
+    suspended,
+    // Never a stale copy: a failed refresh of UserManagement's suspended list
+    // sets its error, and the tab then shows an error alert in place of the
+    // list, so no card renders from a copy that could not be refreshed.
+    suspendedStale: false,
+    noun: 'events on relay',
+    limit: RECENT_CONTENT_LIMIT,
+    lastKnown: refreshFailed,
+  });
 
   const displayName = profile?.name || profile?.display_name || shortNpub;
   const njumpUrl = `https://njump.me/${npub}`;
@@ -163,7 +197,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
               <div className="flex items-center gap-3 mt-2 text-sm">
                 <span className="flex items-center gap-1 text-muted-foreground">
                   <FileText className="h-3 w-3" />
-                  {postStats?.count || 0} events on relay
+                  {eventCountLabel}
                 </span>
                 {activityLine && (
                   <span className="text-amber-700 dark:text-amber-400">{activityLine}</span>
@@ -272,6 +306,22 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                     );
                   })}
                 </div>
+              ) : suspended ? (
+                <p className="text-sm text-muted-foreground">
+                  The relay hides a suspended account's content, so none is shown here.
+                </p>
+              ) : readFailed ? (
+                <p className="text-sm text-muted-foreground">
+                  Couldn't load this account's content (relay error).
+                </p>
+              ) : !postStats ? (
+                <p className="text-sm text-muted-foreground">
+                  Checking for content…
+                </p>
+              ) : refreshFailed ? (
+                <p className="text-sm text-muted-foreground">
+                  No recent content at the last good read. The latest refresh failed.
+                </p>
               ) : (
                 <p className="text-sm text-muted-foreground">
                   No recent content found on this relay
