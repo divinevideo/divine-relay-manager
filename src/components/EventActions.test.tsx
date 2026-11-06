@@ -1714,11 +1714,16 @@ describe('EventActions: media actions send the state the screen showed', () => {
     expectStatusRechecked(invalidate);
   });
 
-  it('warns when the thumbnail changed, and checks the status again', async () => {
+  // The action still completes, so the status is read again through
+  // onActionComplete (ReportDetail's handleActionComplete), once, and not by the
+  // panel as well.
+  it('warns when the thumbnail changed, and checks the status again once the action ends', async () => {
     api.moderateMedia.mockImplementation((hash: string) =>
       (hash === THUMB ? Promise.reject(changed('UNKNOWN')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
     const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        onActionComplete={onActionComplete}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
           { hash: THUMB, isBlocked: false, isRestricted: false, action: 'SAFE' },
@@ -1733,7 +1738,8 @@ describe('EventActions: media actions send the state the screen showed', () => {
       variant: 'destructive',
       duration: 10000,
     }));
-    expectStatusRechecked(invalidate);
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(invalidate.mock.calls).not.toContainEqual([{ queryKey: ['media-status'] }]);
   });
 
   it('fails an undo in plain words when the state could not be checked, and checks the status again', async () => {

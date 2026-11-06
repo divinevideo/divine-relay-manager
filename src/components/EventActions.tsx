@@ -143,13 +143,8 @@ export function EventActions({
   // Every media write names the state this screen showed for the file (#336), so
   // the worker refuses it if another moderator or the automated checks changed
   // the file since. A refusal fails a video's action and is a warning for a
-  // thumbnail, as any failure is, in plain words.
-  //
-  // Any failed write reads the status again, not only a refused `from`: the
-  // worker's lift guard answers a SAFE or AGE_RESTRICTED first, so a file age
-  // review hid since this screen loaded comes back as an open age review, and a
-  // write that timed out may have landed. Either way the buttons were decided
-  // on a status that may no longer hold. Other errors keep the worker's words.
+  // thumbnail, as any failure is, in plain words. Other errors keep the
+  // worker's words.
   //
   // A record that already shows the action asked for is the one change the
   // write cannot overwrite: another moderator got there first. So the write is
@@ -169,13 +164,20 @@ export function EventActions({
         throw error;
       });
     } catch (error) {
-      queryClient.invalidateQueries({ queryKey: ['media-status'] });
       const refusal = describeStateRefusal(error);
       if (refusal === undefined) throw error;
       throw new Error(refusal);
     }
   };
-  const moderateFile = (hash: string, action: ModerationAction, reason: string) =>
+  // Any failed write puts this screen's status in doubt, not only a refused
+  // `from`: the worker's lift guard answers a SAFE or AGE_RESTRICTED first, so a
+  // file age review hid since this screen loaded comes back as an open age
+  // review, and a write that timed out may have landed. So the status is read
+  // again once, when the action ends: an action that ends in showDone (a
+  // thumbnail's failure, or a partial one) gets that from onActionComplete, and
+  // one that fails outright reads it here.
+  const recheckMedia = () => queryClient.invalidateQueries({ queryKey: ['media-status'] });
+  const moderateFile =(hash: string, action: ModerationAction, reason: string) =>
     writeMedia(hash, action, (from) => api.moderateMedia(hash, action, reason, from));
   const deleteFile = (hash: string) =>
     writeMedia(hash, 'DELETE', (from) => api.deleteMedia(hash, 'Permanently deleted by moderator', from));
@@ -417,6 +419,7 @@ export function EventActions({
     },
     onSuccess: showDone,
     onError: (error: Error) => {
+      recheckMedia();
       toast({ title: 'Failed to block media', description: error.message, variant: 'destructive' });
     },
   });
@@ -436,6 +439,7 @@ export function EventActions({
     },
     onSuccess: showDone,
     onError: (error: Error) => {
+      recheckMedia();
       toast({ title: 'Failed to age restrict', description: error.message, variant: 'destructive' });
     },
   });
@@ -472,6 +476,7 @@ export function EventActions({
       error.partial.toast = { ...failure, duration: WARNING_DURATION_MS };
       showDone(error.partial);
     } else {
+      recheckMedia();
       toast(failure);
     }
   };
@@ -557,6 +562,7 @@ export function EventActions({
     },
     onSuccess: showDone,
     onError: (error: Error) => {
+      recheckMedia();
       toast({ title: 'Failed to delete media', description: error.message, variant: 'destructive' });
     },
   });
