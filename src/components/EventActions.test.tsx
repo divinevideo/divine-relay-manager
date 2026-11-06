@@ -1605,8 +1605,14 @@ describe('EventActions: media actions send the state the screen showed', () => {
     'Could not read current media state; refusing to act', 503, 'Service Unavailable', 'state_unreadable',
   );
 
-  const expectStatusRechecked = (invalidate: { mock: { calls: unknown[][] } }) =>
-    expect(invalidate.mock.calls).toContainEqual([{ queryKey: ['media-status'] }]);
+  // How many times the panel itself read the media status again, matched on the
+  // key's first part so a longer key or extra options still count. Once per
+  // failed action: an action that ends in showDone leaves it to onActionComplete.
+  type Invalidate = { mock: { calls: unknown[][] } };
+  const statusReads = (invalidate: Invalidate) => invalidate.mock.calls
+    .filter(([filters]) => (filters as { queryKey?: unknown[] } | undefined)?.queryKey?.[0] === 'media-status')
+    .length;
+  const expectStatusRechecked = (invalidate: Invalidate) => expect(statusReads(invalidate)).toBe(1);
 
   const openPost = [
     { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
@@ -1742,7 +1748,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
       duration: 10000,
     }));
     expect(onActionComplete).toHaveBeenCalledTimes(1);
-    expect(invalidate.mock.calls).not.toContainEqual([{ queryKey: ['media-status'] }]);
+    expect(statusReads(invalidate)).toBe(0);
   });
 
   it('fails an undo in plain words when the state could not be checked, and checks the status again', async () => {
@@ -1849,7 +1855,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
     api.moderateMedia.mockImplementation((hash: string) =>
       (hash === VIDEO_2 ? Promise.reject(changed('QUARANTINE', 'SAFE')) : Promise.resolve({ success: true })));
     const onActionComplete = vi.fn();
-    renderWithProvider(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} hasBlockedMedia={true}
         onActionComplete={onActionComplete}
         mediaHashStatuses={[
@@ -1875,8 +1881,9 @@ describe('EventActions: media actions send the state the screen showed', () => {
       action: 'unblock_media',
       reason: `Unblocked 1 media file(s); ${message}`,
     })));
-    // Something did change, so the status is read again.
+    // Something did change, so the status is read again, once.
     expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
   });
 
   // The event is already gone by the media half, so a refusal here would leave
@@ -1896,6 +1903,28 @@ describe('EventActions: media actions send the state the screen showed', () => {
       [VIDEO, 'Permanently deleted by moderator', 'SAFE'],
       [VIDEO, 'Permanently deleted by moderator', 'DELETE'],
     ]);
+  });
+
+  it('warns in plain words when Delete Event & Media is refused on the video, and checks the status again once', async () => {
+    api.deleteMedia.mockRejectedValueOnce(changed('QUARANTINE', 'DELETE'));
+    const onActionComplete = vi.fn();
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} onActionComplete={onActionComplete}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Partially completed',
+      description: "Event was deleted but media deletion failed: The file's moderation record changed after this screen loaded and now shows it hidden",
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api.deleteMedia).toHaveBeenCalledTimes(1);
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
   });
 
   it('shows any other refusal as the worker gave it, and checks the status again', async () => {
