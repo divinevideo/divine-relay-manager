@@ -668,7 +668,7 @@ export default {
       }
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
-        return handleRelayRpc(request, env, corsHeaders, ctx);
+        return handleRelayRpc(request, env, corsHeaders, ctx, moderator);
       }
 
       if (path === '/api/summarize-user' && request.method === 'POST') {
@@ -1423,7 +1423,7 @@ async function handleModerate(
               params: [pubkey, body.reason || ''],
             }),
           });
-          const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+          const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx, moderator);
           const rpcResult = await rpcResponse.json() as BanPubkeyResult;
           if (!rpcResult.success) {
             // For banpubkey, handleRelayRpc answers 400 without a code only for a
@@ -1483,7 +1483,7 @@ async function handleModerate(
           }),
         });
         // Pass ctx so the unbanpubkey Keycast restore (non-critical) is kept alive.
-        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx);
+        const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders, ctx, moderator);
         if (!rpcResponse.ok) {
           // Forward the inner response rather than re-wrapping at 500. The
           // age-review guard answers a refused unban with a structured 409
@@ -1575,10 +1575,13 @@ async function handleRelayRpc(
   request: Request,
   env: Env,
   corsHeaders: Record<string, string>,
-  ctx?: ExecutionContext
+  ctx?: ExecutionContext,
+  // Verified moderator, named to Keycast as the actor of a status change. Passed
+  // as an argument because internal callers build a fresh Request with no headers.
+  moderator?: string
 ): Promise<Response> {
   const body = (await request.json()) as RelayRpcBody;
-  const response = runRelayRpc(body, env, corsHeaders, ctx);
+  const response = runRelayRpc(body, env, corsHeaders, ctx, moderator);
   // A slow banpubkey now usually ends in success, so its Keycast mirror and DM
   // are registered late; keep the whole ban alive if the caller gives up first.
   return body.method === 'banpubkey' ? surviveDisconnect(response, ctx) : response;
@@ -1588,7 +1591,8 @@ async function runRelayRpc(
   body: RelayRpcBody,
   env: Env,
   corsHeaders: Record<string, string>,
-  ctx?: ExecutionContext
+  ctx?: ExecutionContext,
+  moderator?: string
 ): Promise<Response> {
   if (!body.method) {
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
@@ -1731,18 +1735,18 @@ async function runRelayRpc(
     // DM is tracked in #96.
     switch (body.method) {
       case 'banpubkey':
-        enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env), ctx);
+        enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env, moderator), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
         break;
       case 'unbanpubkey':
-        enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env), ctx);
+        enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
         break;
       case 'suspendpubkey':
-        enforceKeycastState('suspend', pubkey, () => suspendUser(pubkey, 'moderation', env), ctx);
+        enforceKeycastState('suspend', pubkey, () => suspendUser(pubkey, 'moderation', env, moderator), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx);
         break;
       case 'unsuspendpubkey':
-        enforceKeycastState('unsuspend', pubkey, () => unsuspendUser(pubkey, env), ctx);
+        enforceKeycastState('unsuspend', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_RESTORED', reason || 'Account restored by moderator', ctx);
         break;
     }
