@@ -32,6 +32,7 @@ import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
+import { AccountTypeLabel } from "@/components/AccountTypeBadge";
 import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
@@ -531,6 +532,19 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
+      // The reported user's sign-in label reads the shared account-status query,
+      // and the worker mirrors this action into Keycast. Refresh it, or the label
+      // keeps its pre-action answer for the query's minute of staleness. The mirror
+      // runs after the worker responds, so this read can still beat it. Key shape:
+      // ['account-status', apiUrl, pubkey], lowercased as AccountTypeLabel looks it
+      // up. Only this account changed, so only its entry is refreshed.
+      const subject = context.reportedUser.pubkey?.toLowerCase();
+      if (subject) {
+        queryClient.invalidateQueries({
+          queryKey: ['account-status'],
+          predicate: (query) => query.queryKey[2] === subject,
+        });
+      }
     } else {
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.
@@ -829,6 +843,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                             navigate(`/events?pubkey=${pubkey}`);
                           }}
                         />
+                        <AccountTypeLabel pubkey={r.pubkey} />
                       </div>
                       {/* Report details */}
                       <div className="flex items-center gap-2 mb-1 min-w-0">
@@ -872,6 +887,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       navigate(`/events?pubkey=${pubkey}`);
                     }}
                   />
+                  <AccountTypeLabel pubkey={report.pubkey} />
                   <ReportClientText reports={[report]} />
                 </div>
                 {report.content ? (
@@ -1109,6 +1125,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           {(context.reportedUser.pubkey || (!context.isLoading && !isBannedEventLoading)) && (
           <>
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported User</h4>
+          <AccountTypeLabel pubkey={context.reportedUser.pubkey} />
           <UserProfileCard
             key={report.id}
             profile={context.reportedUser.profile}

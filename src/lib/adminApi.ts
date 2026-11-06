@@ -1621,7 +1621,9 @@ export async function getAccountStatus(
 ): Promise<AccountStatusResponse> {
   return apiRequest<AccountStatusResponse>(
     apiUrl,
-    `/api/account-status/${pubkey}`,
+    // Encoded so a report's attacker-authored p tag can't add path segments. This
+    // doesn't stop a bare '..'; the report view only passes 64-hex pubkeys.
+    `/api/account-status/${encodeURIComponent(pubkey)}`,
     'GET',
   );
 }

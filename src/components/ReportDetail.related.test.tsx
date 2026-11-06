@@ -35,6 +35,8 @@ const REPORT: NostrEvent = {
 
 const fetchReportsByTarget = vi.hoisted(() => vi.fn());
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),

@@ -84,6 +84,8 @@ vi.mock('@/hooks/useReportContext', () => ({
     };
   },
 }));
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('@/components/ThreadContext', () => ({ ThreadContext: () => <div data-testid="thread" /> }));
 vi.mock('@/components/AISummary', () => ({ AISummary: () => null }));
 vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));

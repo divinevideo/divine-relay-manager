@@ -599,7 +599,7 @@ describe('AgeReviewDetail', () => {
 
     renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
 
-    expect(await screen.findByText('Self-custody (not in keycast)')).toBeInTheDocument();
+    expect(await screen.findByText('No Divine login account')).toBeInTheDocument();
   });
 
   it('does not show "protected-minor status unavailable" for a self-custody (not_found) account the registry has answered for (review)', async () => {

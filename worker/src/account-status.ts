@@ -1,8 +1,13 @@
 // ABOUTME: Moderator-facing account-status endpoint. Surfaces keycast's durable
-// ABOUTME: verified_minor flag and the D1 protected-minor registry for the age-review view.
+// ABOUTME: verified_minor flag and the D1 protected-minor registry; read by age review and report detail.
 
 import { getUserStatus, HEX_64, type KeycastEnv, type UserStatusResult } from './keycast-client';
 import { resolveByPubkey } from './protected-minors';
+
+// Not measured against Keycast's real latency. Matches STATUS_READ_TIMEOUT_MS in
+// media-server.ts, the other moderator-facing status read from another service,
+// and leaves room for a Keycast cold start under the browser's 30-second limit.
+const ACCOUNT_STATUS_TIMEOUT_MS = 10_000;
 
 function json(
   data: unknown,
@@ -46,7 +51,8 @@ export async function handleAccountStatus(
   const [result, protected_minor] = await Promise.all([
     // getUserStatus resolves its Secrets Store token outside its own try, so a
     // throw there must not cost the moderator the registry answer.
-    getUserStatus(pubkey, env).catch((error): UserStatusResult => {
+    // Bounded, so a hung Keycast reads as "unavailable" in the moderator's view.
+    getUserStatus(pubkey, env, { timeoutMs: ACCOUNT_STATUS_TIMEOUT_MS }).catch((error): UserStatusResult => {
       console.error('[account-status] Keycast status lookup threw:', error);
       return { success: false, error: 'unavailable' };
     }),

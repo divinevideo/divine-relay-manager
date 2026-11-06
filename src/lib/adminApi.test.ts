@@ -115,6 +115,15 @@ describe('adminApi', () => {
   });
 
   describe('getAccountStatus', () => {
+    it('escapes path separators in the pubkey', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: false }) });
+      await getAccountStatus(API_URL, '../info');
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/account-status/..%2Finfo`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
     it('GETs /api/account-status/:pubkey and returns the parsed status', async () => {
       const pubkey = 'a'.repeat(64);
       mockFetch.mockResolvedValueOnce({
