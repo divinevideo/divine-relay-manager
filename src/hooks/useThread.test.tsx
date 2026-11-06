@@ -8,9 +8,18 @@ import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const query = vi.hoisted(() => vi.fn());
+// The REST API and the external relay hint are the other two places an original
+// can come from. Both find nothing unless a test sets them up.
+const fetchRest = vi.hoisted(() => vi.fn());
+const hintQuery = vi.hoisted(() => vi.fn());
 
 vi.mock('@nostrify/react', () => ({
   useNostr: () => ({ nostr: { query } }),
+}));
+vi.mock('@/lib/funnelcakeApi', () => ({ fetchFunnelcakeEvent: fetchRest }));
+vi.mock('@nostrify/nostrify', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@nostrify/nostrify')>()),
+  NRelay1: class { query = hintQuery; close = vi.fn(); },
 }));
 
 // nostr-tools cannot verify under jsdom; this accepts exactly the pre-signed fixtures.
@@ -99,8 +108,32 @@ describe('useThread repost original', () => {
     tags: [['imeta', `url https://media.divine.video/${'e'.repeat(64)}`, 'm video/mp4']],
   };
 
+  const API_URL = 'https://api.example';
+  const RELAY_HINT = 'wss://hint.example';
+
   beforeEach(() => {
     vi.clearAllMocks();
+    fetchRest.mockReset().mockResolvedValue(null);
+    hintQuery.mockReset().mockResolvedValue([]);
+  });
+
+  it.each([
+    ['text', 'not-a-hex-id/../x?y'],
+    ['hex that is too short', 'abc123'],
+    ['empty', ''],
+  ])('looks up nothing for a repost whose e tag is %s', async (_, value) => {
+    // The id goes into a request URL and a relay filter. Only an event id can
+    // be the original, so anything else is never sent anywhere.
+    serve([{ ...makeEvent(REPOST_ID, 6, AUTHOR, [['e', value]]), content: '' }]);
+
+    const { result } = renderHook(() => useThread(REPOST_ID, 3, API_URL, RELAY_HINT), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toBeNull();
+    expect(fetchRest.mock.calls.map(([, id]) => id)).not.toContain(value);
+    expect(requestedIds()).not.toContain(value);
+    expect(hintQuery.mock.calls.flatMap(([filters]) => (filters as NostrFilter[]).flatMap((filter) => filter.ids ?? [])))
+      .not.toContain(value);
   });
 
   it('takes an embedded copy that is the signed event the e tag names', async () => {

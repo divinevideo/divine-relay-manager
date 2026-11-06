@@ -5,6 +5,7 @@ import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { NRelay1 } from "@nostrify/nostrify";
+import { isHex64 } from "@/lib/constants";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
 import { isEventWithId, isRepostKind, verifiedRepostedEvent } from "@/lib/nip18";
 import { buildThreadReplyFilters } from "@/lib/threadFilters";
@@ -114,7 +115,9 @@ export function useThread(
 
       if (isRepost) {
         const originalEventTag = event.tags.find(t => t[0] === 'e');
-        if (originalEventTag) {
+        // The tag is the reposter's writing and its value goes into a request
+        // URL and a relay filter, so only an event id is looked up at all.
+        if (originalEventTag && isHex64(originalEventTag[1])) {
           // The media buttons act on the original's files, so the original counts
           // only when it is the event the e tag names, with a valid signature
           // (#337). The embedded copy is the reposter's writing, and a fetched
