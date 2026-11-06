@@ -146,19 +146,23 @@ export function EventActions({
   // thumbnail, as any failure is, in plain words. Other errors keep the
   // worker's words.
   //
-  // A record that already shows the action asked for is the one change the
-  // write cannot overwrite: another moderator got there first. So the write is
-  // sent again from that state, as it went through before the check, and the
-  // action completes and is logged instead of failing on a file that is already
-  // as the moderator wants it.
+  // A block or delete whose record already shows that action has nothing to
+  // overwrite: another moderator, or the automated checks, got there first. So
+  // it is sent again from that state, as it went through before the check, and
+  // the action completes and is logged instead of failing on a file that is
+  // already as the moderator wants it. A lift (SAFE, AGE_RESTRICTED) is still
+  // refused. The record is all the worker compares, and the media server can
+  // hide a file whose record says otherwise (a status set in its own admin), so
+  // a lift sent again could open a file a fresh screen would not offer to open.
   const writeMedia = async (
     hash: string,
     action: ModerationAction,
     write: (from: ExpectedMediaState | undefined) => Promise<unknown>,
   ) => {
+    const resendable = action === 'PERMANENT_BAN' || action === 'DELETE';
     try {
       await write(expectedStateOf(statusOf(hash))).catch((error: unknown) => {
-        if (error instanceof ApiError && error.code === 'state_mismatch' && error.currentState === action) {
+        if (resendable && error instanceof ApiError && error.code === 'state_mismatch' && error.currentState === action) {
           return write(action);
         }
         throw error;
