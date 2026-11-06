@@ -1146,6 +1146,49 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
       await waitFor(() => expect(result.current).toBe(false));
     });
 
+    // A deny bans first and purges after. The worker reports the relay leg
+    // failed when only the purge was not confirmed (worker/src/age-review.ts,
+    // failUnlessPurgeConfirmed), but the ban is in effect, so the window ends.
+    it('ends a window when a deny banned the account but its content removal was not confirmed', async () => {
+      const pk = '2e'.repeat(32);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({
+        success: false,
+        enforcementComplete: false,
+        enforcement: {
+          relay: 'failed',
+          relayError: 'Ban applied; content removal not confirmed: purge timed out',
+          bulk: 'not_attempted',
+          keycast: 'ok',
+        },
+      });
+      renderDetail(makeCase({ pubkey: pk, suspected_age_band: 'age_13_15', state: 'restricted_pending_user_response' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+
+      await waitFor(() => expect(result.current).toBe(false));
+    });
+
+    // The ban itself failed: the account is not hidden, so the window stays.
+    it('keeps the window when a deny\'s ban did not apply', async () => {
+      const pk = '3f'.repeat(32);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({
+        success: false,
+        enforcementComplete: false,
+        enforcement: { relay: 'failed', relayError: 'banpubkey RPC failed', bulk: 'not_attempted', keycast: 'ok' },
+      });
+      const { queryClient } = renderDetail(makeCase({ pubkey: pk, suspected_age_band: 'age_13_15', state: 'restricted_pending_user_response' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      expect(result.current).toBe(true);
+    });
+
     it("keeps the window when the restrict's relay leg failed", async () => {
       const pk = '9'.repeat(64);
       const { result } = renderHook(() => useJustRestored(pk));

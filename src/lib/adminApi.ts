@@ -434,7 +434,9 @@ function banFailureReason(error: unknown): string {
 async function isPubkeyOnBanList(apiUrl: string, pubkey: string): Promise<boolean> {
   try {
     const list = await listBannedPubkeys(apiUrl, { timeoutMs: BAN_RECHECK_TIMEOUT_MS });
-    return list.some(entry => entry.pubkey === pubkey);
+    // Case-insensitive, as verifyPubkeyBanned: a report's p tag is not
+    // normalized, and funnelcake reads back whatever case banpubkey was handed.
+    return list.some(entry => isListedPubkey(entry.pubkey, pubkey));
   } catch {
     return false;
   }

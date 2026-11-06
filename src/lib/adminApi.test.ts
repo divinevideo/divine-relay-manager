@@ -748,6 +748,30 @@ describe('adminApi', () => {
         expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
       });
 
+      // The re-check matches the list the way verifyPubkeyBanned does: a
+      // report's p tag is not normalized, and funnelcake reads back whatever
+      // case banpubkey was handed. The same-case case is the test above.
+      it('resolves as banned when the relay lists the pubkey in upper case', async () => {
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList([pubkey.toUpperCase()]));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
+      });
+
+      it('resolves as banned when the request was upper case and the relay lists it in lower case', async () => {
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList([pubkey]));
+
+        const outcome = await banPubkey(API_URL, pubkey.toUpperCase(), 'Spam').then(
+          value => ({ value }),
+          error => ({ error }),
+        );
+
+        expect(outcome).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
+      });
+
       it('rethrows a 403 refusal (expired access) without reading the ban list', async () => {
         mockFetch.mockResolvedValueOnce(workerError(403, { success: false, error: 'Forbidden' }));
 
