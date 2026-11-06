@@ -41,7 +41,7 @@ Phase 2 makes the worker work out who acted from the moderator's Divine login, a
 - A record naming a moderator who didn't act, including through an old browser tab, a stale cache entry, or a fallback to an unverified stored value.
 - The staging worker acting on production accounts (see decision 2).
 
-## Decisions (1-7 ratified by Matt 2026-10-30; 8-10 on 2026-11-04)
+## Decisions (1-7 ratified by Matt 2026-10-30; 8-10 on 2026-11-04; the calls in the last section on 2026-11-05)
 
 ### 1. How the worker checks a login
 
@@ -129,6 +129,8 @@ The eight routes on current main (`worker/src/index.ts` unless noted):
 | `PATCH /api/age-review/cases/:id` | `worker/src/age-review.ts` | body `moderator_pubkey`, unvalidated |
 | `POST /api/report-watcher/sexual-quarantine/:eventId` | proxied to `ReportWatcher` | body `actor`, any non-empty string up to 200 characters (decision 8) |
 
+Re-verified on 2026-11-05 against main `278762a6`: the same eight routes and relay-rpc. Nothing merged since the design added or changed one.
+
 `/api/relay-rpc` also verifies the login, so it can pass the moderator to Keycast as the actor (decision 10). It records no moderator itself.
 
 Rules:
@@ -173,7 +175,7 @@ Rules:
 - Error code name for the strict refusal.
 - How the frontend threads the token. Keep it in one place, so a later caller can't forget it (memory: `useAdminApi` wrapper silently dropping new args).
 
-## Calls made in this document that Matt didn't explicitly make
+## Calls Matt ratified on 2026-11-05
 
 - The header name `X-Divine-Login-Token` and the setting name `MODERATOR_LOGIN_URL`.
 - Ignoring, rather than rejecting, a body-supplied moderator, including the format check that today returns 400.
