@@ -1790,9 +1790,9 @@ describe('EventActions: media actions send the state the screen showed', () => {
   // action. Files written before it changed, so the moderator is told how many
   // and the audit log records them, as a partial undo does.
   it.each([
-    ['Block Media (2)', 'moderateMedia', 'Failed to block media', 'blocked', 'block_media', 'Blocked 1 media file(s)', false],
-    ['Age Restrict (2)', 'moderateMedia', 'Failed to age restrict', 'age restricted', 'age_restrict_media', 'Age restricted 1 media file(s)', false],
-    ['Delete Media (2)', 'deleteMedia', 'Failed to delete media', 'deleted', 'delete_media', 'Deleted 1 media file(s)', true],
+    ['Block Media (3)', 'moderateMedia', 'Failed to block media', 'blocked', 'block_media', 'Blocked 1 media file(s)', false],
+    ['Age Restrict (3)', 'moderateMedia', 'Failed to age restrict', 'age restricted', 'age_restrict_media', 'Age restricted 1 media file(s)', false],
+    ['Delete Media (3)', 'deleteMedia', 'Failed to delete media', 'deleted', 'delete_media', 'Deleted 1 media file(s)', true],
   ] as const)('%s says how many were written when a later video fails, and logs those', async (
     button, call, title, verb, auditAction, auditReason, confirm,
   ) => {
@@ -1801,17 +1801,20 @@ describe('EventActions: media actions send the state the screen showed', () => {
       (hash === VIDEO_2 ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true })));
     const onActionComplete = vi.fn();
     const { invalidate } = renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]}
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} thumbnailHashes={[THUMB]}
         onActionComplete={onActionComplete}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
           { hash: VIDEO_2, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'SAFE' },
         ]} />
     );
 
     fireEvent.click(screen.getByRole('button', { name: button }));
     if (confirm) fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
 
+    // Counted over the video files only: the thumbnail comes after them, and is
+    // never reached once a video fails.
     const message = `1 of 2 ${verb}, then: moderation down`;
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title,
@@ -1938,10 +1941,12 @@ describe('EventActions: media actions send the state the screen showed', () => {
       (hash === VIDEO_2 ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true })));
     const onActionComplete = vi.fn();
     const { invalidate } = renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} onActionComplete={onActionComplete}
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} thumbnailHashes={[THUMB]}
+        onActionComplete={onActionComplete}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
           { hash: VIDEO_2, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'SAFE' },
         ]} />
     );
 
@@ -1956,9 +1961,13 @@ describe('EventActions: media actions send the state the screen showed', () => {
     }));
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
       action: 'delete_event_and_media_partial',
-      reason: expect.stringContaining(`completed: event_deleted, media_${VIDEO}`),
+      reason: expect.stringContaining(`completed: event_deleted, media_${VIDEO})`),
     })));
-    expect(api.deleteMedia).toHaveBeenCalledTimes(2);
+    // The event's own row and the partial row, never a second partial or a
+    // full-success row.
+    expect(api.logDecision.mock.calls.map(([entry]) => (entry as { action: string }).action).sort())
+      .toEqual(['delete_event', 'delete_event_and_media_partial']);
+    expect(api.deleteMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, VIDEO_2]);
     expect(onActionComplete).toHaveBeenCalledTimes(1);
     expect(statusReads(invalidate)).toBe(0);
   });
