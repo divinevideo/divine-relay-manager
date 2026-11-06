@@ -35,7 +35,7 @@ export function expectedStateOf(
 export function describeStateRefusal(error: unknown): string | undefined {
   if (!(error instanceof ApiError)) return undefined;
   if (error.code === 'state_unreadable') {
-    return "The file's moderation record could not be checked, so it was left as it is. Try again.";
+    return "The file's moderation record could not be checked just now, so it was left as it is";
   }
   if (error.code !== 'state_mismatch') return undefined;
   const now = error.currentState;

@@ -36,7 +36,22 @@ describe('describeStateRefusal', () => {
 
   it('says the state could not be checked', () => {
     expect(describeStateRefusal(new ApiError('Could not read current media state; refusing to act', 503, 'Service Unavailable', 'state_unreadable')))
-      .toBe("The file's moderation record could not be checked, so it was left as it is. Try again.");
+      .toBe("The file's moderation record could not be checked just now, so it was left as it is");
+  });
+
+  // EventActions joins a refusal with '; ' into thumbnail warnings, notes and
+  // audit reasons, so a sentence of its own would read "...Try again.; ...".
+  it('words every refusal as a fragment, with no closing punctuation', () => {
+    const refusals = [
+      changed('PERMANENT_BAN'),
+      changed('UNKNOWN'),
+      changed(),
+      new ApiError('Could not read current media state; refusing to act', 503, 'Service Unavailable', 'state_unreadable'),
+    ].map(describeStateRefusal);
+    for (const refusal of refusals) {
+      expect(typeof refusal).toBe('string');
+      expect(refusal).not.toMatch(/[.!?]$/);
+    }
   });
 
   it('leaves every other error alone', () => {

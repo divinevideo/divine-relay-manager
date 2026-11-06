@@ -1753,7 +1753,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Failed to unblock media',
-      description: "The file's moderation record could not be checked, so it was left as it is. Try again.",
+      description: "The file's moderation record could not be checked just now, so it was left as it is",
       variant: 'destructive',
     }));
     expectStatusRechecked(invalidate);
