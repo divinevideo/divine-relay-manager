@@ -39,8 +39,13 @@ export async function resetAccountContentReads(queryClient: QueryClient, pubkey:
  * re-read can come back empty, which with the account no longer hidden would
  * print as a plain "0 events". Content that survived the ban (a deferred
  * purge) can come back sooner, and is shown as the relay returns it.
+ *
+ * A minute longer than the refresh period: the refresh runs on fixed
+ * five-minute boundaries and takes time of its own, so a restore that lands
+ * just as one starts waits for the next to finish. A window of exactly five
+ * minutes could close, and run its last re-read, before that.
  */
-export const RESTORE_SETTLE_MS = 5 * 60_000;
+export const RESTORE_SETTLE_MS = 6 * 60_000;
 
 // Session-local: which accounts this tab restored within the window, each with
 // the timer that ends it. Another moderator's action is not seen here; their

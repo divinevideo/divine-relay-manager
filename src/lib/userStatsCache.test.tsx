@@ -81,6 +81,12 @@ describe('resetAccountContentReads key matching', () => {
 // right after an Unsuspend can still come back empty, and with the account no
 // longer suspended that would print as a plain "0 events".
 describe('markRestored', () => {
+  // Funnelcake's read filters refresh every five minutes. The window's last
+  // re-read has to come after that refresh has finished, not on its boundary.
+  it('keeps the window open past the relay\'s five-minute refresh', () => {
+    expect(RESTORE_SETTLE_MS).toBeGreaterThan(5 * 60_000);
+  });
+
   afterEach(() => {
     vi.useRealTimers();
   });
