@@ -939,7 +939,6 @@ describe('relay-rpc account-state side effects', () => {
       action: 'allow_event',
       eventId: VALID_EVENT_ID,
       reason: 'False positive',
-      moderatorPubkey: 'b'.repeat(64),
     }, env, testCtx);
 
     expect(response.status).toBe(200);
@@ -951,7 +950,6 @@ describe('relay-rpc account-state side effects', () => {
       relayAction: 'allow',
       reason: 'False positive',
       humanAction: 'allow_event',
-      moderatorPubkey: 'b'.repeat(64),
     }]);
     expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
 
@@ -992,7 +990,7 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('rejects malformed restore attribution before mutating relay visibility', async () => {
+  it('ignores a malformed body moderator on allow_event instead of refusing the action', async () => {
     const order: string[] = [];
     const fetchSpy = makeOrderedRelaySpy(order);
     const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
@@ -1004,9 +1002,9 @@ describe('relay-rpc account-state side effects', () => {
       moderatorPubkey: { forged: true },
     }, env, testCtx);
 
-    expect(response.status).toBe(400);
-    expect(visibilityOperations).toEqual([]);
-    expect(order).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(visibilityOperations).toHaveLength(1);
+    expect(visibilityOperations[0]).not.toHaveProperty('moderatorPubkey');
     fetchSpy.mockRestore();
   });
 
@@ -1032,7 +1030,6 @@ describe('relay-rpc account-state side effects', () => {
       { reporterPubkey: 'forged' },
       { reportId: ['b'.repeat(64)] },
       { reporterPubkey: ['c'.repeat(64)] },
-      { moderatorPubkey: ['d'.repeat(64)] },
     ]) {
       expect((await request(body)).status).toBe(400);
     }

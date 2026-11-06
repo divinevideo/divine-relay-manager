@@ -59,7 +59,7 @@ import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
-import { MODERATOR_LOGIN_HEADER, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
+import { MODERATOR_LOGIN_HEADER, noteClaimedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -380,7 +380,6 @@ interface UnsignedEvent {
   content: string;
   tags: string[][];
   created_at?: number;
-  moderatorPubkey?: string;
   moderationReason?: string;
 }
 
@@ -654,7 +653,7 @@ export default {
       }
 
       if (path === '/api/publish' && request.method === 'POST') {
-        return handlePublish(request, env, corsHeaders);
+        return handlePublish(request, env, corsHeaders, moderator);
       }
 
       if (path === '/api/admin/protected-minors/backfill' && request.method === 'POST') {
@@ -665,7 +664,7 @@ export default {
       }
 
       if (path === '/api/moderate' && request.method === 'POST') {
-        return handleModerate(request, env, corsHeaders, ctx);
+        return handleModerate(request, env, corsHeaders, ctx, moderator);
       }
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
@@ -685,11 +684,11 @@ export default {
       }
 
       if (path === '/api/decisions' && request.method === 'POST') {
-        return handleLogDecision(request, env, corsHeaders);
+        return handleLogDecision(request, env, corsHeaders, moderator);
       }
 
       if (path === '/api/confirm-auto-hide' && request.method === 'POST') {
-        return handleConfirmAutoHide(request, env, corsHeaders);
+        return handleConfirmAutoHide(request, env, corsHeaders, moderator);
       }
 
       if (path === '/api/decisions' && request.method === 'GET') {
@@ -1106,16 +1105,17 @@ async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promis
 async function handlePublish(
   request: Request,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  moderator: string | undefined,
 ): Promise<Response> {
-  const body = (await request.json()) as UnsignedEvent;
+  const body = (await request.json()) as UnsignedEvent & { moderatorPubkey?: unknown };
+  // The moderator is the verified login, never a body field. A body claim is
+  // only compared, to log a stale or forged client.
+  noteClaimedModerator('/api/publish', body.moderatorPubkey, moderator);
   let resolutionVisibility: EventVisibilityResult | undefined;
 
   if (!body.kind || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
-  }
-  if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
-    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
   if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
     return jsonResponse({ success: false, error: 'Invalid moderationReason' }, 400, corsHeaders);
@@ -1144,7 +1144,7 @@ async function handlePublish(
       resolutionVisibility = env.DB
         ? await coordinateEventVisibility(env, {
           eventId: targetId, relayAction: 'review', humanAction: status,
-          reason: body.moderationReason, moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+          reason: body.moderationReason, moderatorPubkey: moderator,
         })
         : { success: false, recorded: false, error: 'Moderation database is not configured' };
       if (!resolutionVisibility.success || !resolutionVisibility.recorded) {
@@ -1246,15 +1246,16 @@ async function handleModerate(
   request: Request,
   env: Env,
   corsHeaders: Record<string, string>,
-  ctx?: ExecutionContext
+  ctx: ExecutionContext | undefined,
+  moderator: string | undefined,
 ): Promise<Response> {
   const body = (await request.json()) as {
     action: string;
     eventId?: string;
     pubkey?: string;
     reason?: string;
-    moderatorPubkey?: string;
-  };
+  } & { moderatorPubkey?: unknown };
+  noteClaimedModerator('/api/moderate', body.moderatorPubkey, moderator);
 
   if (!body.action) {
     return jsonResponse({ success: false, error: 'Missing action' }, 400, corsHeaders);
@@ -1274,9 +1275,6 @@ async function handleModerate(
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
       }
-      if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
-        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
-      }
 
       try {
         const result = await coordinateEventVisibility(env, {
@@ -1284,6 +1282,7 @@ async function handleModerate(
           relayAction: 'hide',
           reason: body.reason || 'Deleted by relay admin',
           humanAction: body.action,
+          moderatorPubkey: moderator,
         });
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error || 'banevent RPC failed' }, 500, corsHeaders);
@@ -1349,9 +1348,6 @@ async function handleModerate(
       if (body.reason !== undefined && typeof body.reason !== 'string') {
         return jsonResponse({ success: false, error: `Invalid reason for ${body.action}` }, 400, corsHeaders);
       }
-      if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
-        return jsonResponse({ success: false, error: `Invalid moderatorPubkey for ${body.action}` }, 400, corsHeaders);
-      }
 
       try {
         const result = await coordinateEventVisibility(env, {
@@ -1359,7 +1355,7 @@ async function handleModerate(
           relayAction: isHide ? 'hide' : 'allow',
           reason: body.reason || (isHide ? 'Hidden by moderator' : 'Restored by moderator'),
           humanAction: body.action,
-          moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+          moderatorPubkey: moderator,
         });
         if (!result.success) {
           // A quarantine case conflict is terminal for this request. Transient
@@ -1968,7 +1964,8 @@ Respond with JSON only:
 async function handleLogDecision(
   request: Request,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  moderator: string | undefined,
 ): Promise<Response> {
   try {
     if (!env.DB) {
@@ -1980,18 +1977,12 @@ async function handleLogDecision(
       targetId: string;
       action: string;
       reason?: string;
-      moderatorPubkey?: string;
       reportId?: string;
-    };
+    } & { moderatorPubkey?: unknown };
+    noteClaimedModerator('/api/decisions', body.moderatorPubkey, moderator);
 
     if (!body.targetType || !body.targetId || !body.action) {
       return jsonResponse({ success: false, error: 'Missing required fields' }, 400, corsHeaders);
-    }
-    // Absent is allowed (recorded as NULL); anything else must be a pubkey.
-    // Above all not the worker's own 'auto', which would make a person's
-    // decision read as one no person made.
-    if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
-      return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
     }
     if (body.targetType === 'event' && COORDINATED_AUTO_HIDE_ACTIONS.has(body.action)) {
       return jsonResponse({ success: false, error: 'Event auto-hide state must use its coordinated endpoint' }, 400, corsHeaders);
@@ -2003,7 +1994,7 @@ async function handleLogDecision(
       // be bypassed by posting the same review through a different endpoint.
       const review = await coordinateEventVisibility(env, {
         eventId: body.targetId.toLowerCase(), relayAction: 'review', humanAction: 'reviewed',
-        moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+        moderatorPubkey: moderator,
       });
       if (!review.success || !review.recorded) {
         return jsonResponse({ success: false, recorded: review.recorded === true,
@@ -2022,7 +2013,9 @@ async function handleLogDecision(
       body.targetId,
       body.action,
       body.reason || null,
-      body.moderatorPubkey || null,
+      // No verified login records NULL, never the worker's own 'auto', which
+      // would make a person's decision read as one no person made.
+      moderator ?? null,
       body.reportId || null
     ).run();
 
@@ -2048,22 +2041,20 @@ async function handleConfirmAutoHide(
   request: Request,
   env: Env,
   corsHeaders: Record<string, string>,
+  moderator: string | undefined,
 ): Promise<Response> {
   const body = await request.json() as {
     eventId?: string;
     reason?: string;
-    moderatorPubkey?: string;
     reportId?: string;
     reporterPubkey?: string;
-  };
+  } & { moderatorPubkey?: unknown };
+  noteClaimedModerator('/api/confirm-auto-hide', body.moderatorPubkey, moderator);
   if (typeof body.eventId !== 'string' || !/^[a-f0-9]{64}$/i.test(body.eventId)) {
     return jsonResponse({ success: false, error: 'Missing or invalid eventId' }, 400, corsHeaders);
   }
   if (body.reason !== undefined && typeof body.reason !== 'string') {
     return jsonResponse({ success: false, error: 'Invalid reason' }, 400, corsHeaders);
-  }
-  if (body.moderatorPubkey !== undefined && !isHex64(body.moderatorPubkey)) {
-    return jsonResponse({ success: false, error: 'Invalid moderatorPubkey' }, 400, corsHeaders);
   }
   if (body.reportId !== undefined && !isHex64(body.reportId)) {
     return jsonResponse({ success: false, error: 'Invalid reportId' }, 400, corsHeaders);
@@ -2075,7 +2066,7 @@ async function handleConfirmAutoHide(
     eventId: body.eventId.toLowerCase(),
     relayAction: 'confirm',
     reason: body.reason,
-    moderatorPubkey: body.moderatorPubkey?.toLowerCase(),
+    moderatorPubkey: moderator,
     reportId: body.reportId?.toLowerCase(),
     reporterPubkey: body.reporterPubkey?.toLowerCase(),
   });

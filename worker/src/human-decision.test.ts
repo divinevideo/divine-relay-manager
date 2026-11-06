@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import worker from './index';
 import { markHumanReviewed } from './human-decision';
+import { __clearModeratorLoginCache } from './moderator-identity';
 
 // Test nsec (same throwaway key as nip86.test.ts)
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -171,59 +172,6 @@ describe('human decision persistence', () => {
       expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
     });
 
-    // 'auto' is the worker's own marker: a decision posted with it would read
-    // as one no person made.
-    it.each(['auto', '', 'e'.repeat(63), 'g'.repeat(64), null])(
-      'rejects %j as the moderatorPubkey and records nothing',
-      async (moderatorPubkey) => {
-        const { db, sqlLog } = createMockDB();
-        const env = createEnv(db);
-
-        const response = await worker.fetch(new Request('http://localhost/api/decisions', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
-          body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
-        }), env as never, mockCtx);
-
-        expect(response.status).toBe(400);
-        expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
-      },
-    );
-
-    // RegExp.test coerces what it is given, so a one-element array of a valid
-    // pubkey reads as that pubkey. Real D1 then rejects the bind with a 500.
-    it('rejects a moderatorPubkey sent as an array and records nothing', async () => {
-      const { db, sqlLog } = createMockDB();
-      const env = createEnv(db);
-
-      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
-        body: JSON.stringify({
-          targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey: ['e'.repeat(64)],
-        }),
-      }), env as never, mockCtx);
-
-      expect(response.status).toBe(400);
-      expect(sqlLog.some(({ sql }) => sql.includes('INSERT INTO moderation_decisions'))).toBe(false);
-    });
-
-    it("records a moderator's hex pubkey with the decision", async () => {
-      const { db, sqlLog } = createMockDB();
-      const env = createEnv(db);
-      const moderatorPubkey = 'e'.repeat(64);
-
-      const response = await worker.fetch(new Request('http://localhost/api/decisions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
-        body: JSON.stringify({ targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', moderatorPubkey }),
-      }), env as never, mockCtx);
-
-      expect(response.status).toBe(200);
-      const insert = sqlLog.find(({ sql }) => sql.includes('INSERT INTO moderation_decisions'));
-      expect(insert?.bindings).toEqual(['pubkey', 'b'.repeat(64), 'reviewed', null, moderatorPubkey, null]);
-    });
-
     // The repo's scripts post decisions without one.
     it('records a decision sent with no moderatorPubkey as NULL', async () => {
       const { db, sqlLog } = createMockDB();
@@ -273,27 +221,6 @@ describe('human decision persistence', () => {
     });
   });
 
-  describe('POST /api/moderate (handleModerate) moderatorPubkey', () => {
-    // delete_event has its own check; hide_event and allow_event share one.
-    it.each(['delete_event', 'hide_event', 'allow_event'])(
-      'rejects a moderatorPubkey sent as an array for %s, before changing anything',
-      async (action) => {
-        const { db } = createMockDB();
-        const operations: unknown[] = [];
-        const env = createEnv(db, operations);
-
-        const response = await worker.fetch(new Request('http://localhost/api/moderate', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
-          body: JSON.stringify({ action, eventId: 'ab'.repeat(32), moderatorPubkey: ['e'.repeat(64)] }),
-        }), env as never, mockCtx);
-
-        expect(response.status).toBe(400);
-        expect(operations).toEqual([]);
-      },
-    );
-  });
-
   describe('DELETE /api/decisions/:targetId (handleDeleteDecisions)', () => {
     it('should delete decisions but NOT touch moderation_targets', async () => {
       const { db, sqlLog } = createMockDB();
@@ -330,31 +257,6 @@ describe('human decision persistence', () => {
   });
 
   describe('POST /api/publish (handlePublish, kind 1985 resolution labels)', () => {
-    it('rejects a moderatorPubkey sent as an array before marking anything', async () => {
-      const { db, sqlLog } = createMockDB();
-      const operations: unknown[] = [];
-      const env = createEnv(db, operations);
-
-      const response = await worker.fetch(new Request('http://localhost/api/publish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
-        body: JSON.stringify({
-          kind: 1985,
-          content: 'Reviewed',
-          tags: [
-            ['L', 'moderation/resolution'],
-            ['l', 'reviewed', 'moderation/resolution'],
-            ['e', 'ab'.repeat(32)],
-          ],
-          moderatorPubkey: ['e'.repeat(64)],
-        }),
-      }), env as never, mockCtx);
-
-      expect(response.status).toBe(400);
-      expect(operations).toEqual([]);
-      expect(sqlLog.some(s => s.sql.includes('moderation_targets'))).toBe(false);
-    });
-
     it('should call markHumanReviewed for resolution labels', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);
@@ -484,7 +386,6 @@ describe('human decision persistence', () => {
             ['l', 'dismissed', 'moderation/resolution'],
             ['e', eventId],
           ],
-          moderatorPubkey: 'a'.repeat(64),
           moderationReason: 'False positive report',
         }),
       }), env as never, mockCtx);
@@ -495,7 +396,6 @@ describe('human decision persistence', () => {
         relayAction: 'review',
         humanAction: 'dismissed',
         reason: 'False positive report',
-        moderatorPubkey: 'a'.repeat(64),
       }]);
       expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
       const upsert = sqlLog.find(entry => entry.sql.includes('INSERT INTO moderation_targets'));
@@ -720,6 +620,120 @@ describe('human decision persistence', () => {
       expect(body.success).toBe(true);
 
       expect(mockCtx.waitUntil).toHaveBeenCalled();
+    });
+  });
+
+  // #178 phase 2: the recorded moderator is the verified Divine login, never a
+  // body field. Each route is driven three ways: a verified login, no login
+  // (the route's existing fallback), and a body claim with no login (ignored).
+  describe('moderator attribution comes from the verified login', () => {
+    const VERIFIED = 'b'.repeat(64);
+    const FORGED = 'c'.repeat(64);
+    const EVENT_ID = 'ab'.repeat(32);
+    const resolutionTags = [
+      ['L', 'moderation/resolution'],
+      ['l', 'reviewed', 'moderation/resolution'],
+      ['e', EVENT_ID],
+    ];
+
+    type Route = {
+      name: string;
+      path: string;
+      body: Record<string, unknown>;
+      // What the route recorded as the moderator: undefined when it recorded none.
+      recorded: (ctx: { operations: Array<Record<string, unknown>>; sqlLog: { sql: string; bindings: unknown[] }[] }) => unknown;
+      fallback: unknown;
+      // Defaults to the verified pubkey; routes with two sinks give a pair.
+      verified?: unknown;
+    };
+    // A missing op must not read as "op without a moderator": return a sentinel
+    // so a route that skips the DO call cannot pass the fallback cases.
+    const NO_OP = 'no coordinated operation was sent';
+    const opModerator = (operations: Array<Record<string, unknown>>) =>
+      operations.length === 0 ? NO_OP : operations[0].moderatorPubkey;
+    const fromOps = ({ operations }: { operations: Array<Record<string, unknown>> }) => opModerator(operations);
+    const routes: Route[] = [
+      { name: '/api/publish (resolution label)', path: '/api/publish',
+        body: { kind: 1985, content: 'Reviewed', tags: resolutionTags }, recorded: fromOps, fallback: undefined },
+      { name: '/api/decisions', path: '/api/decisions',
+        body: { targetType: 'pubkey', targetId: 'b'.repeat(64), action: 'reviewed', reason: 'r' },
+        recorded: ({ sqlLog }) => sqlLog.find(e => e.sql.includes('INSERT INTO moderation_decisions'))?.bindings[4],
+        fallback: null },
+      { name: '/api/decisions (event target)', path: '/api/decisions',
+        body: { targetType: 'event', targetId: EVENT_ID, action: 'dismiss', reason: 'r' },
+        // Two sinks: the review operation and the decisions row.
+        recorded: ({ operations, sqlLog }) => [
+          opModerator(operations),
+          sqlLog.find(e => e.sql.includes('INSERT INTO moderation_decisions'))?.bindings[4],
+        ],
+        verified: [VERIFIED, VERIFIED], fallback: [undefined, null] },
+      { name: '/api/confirm-auto-hide', path: '/api/confirm-auto-hide',
+        body: { eventId: EVENT_ID }, recorded: fromOps, fallback: undefined },
+      { name: '/api/moderate allow_event', path: '/api/moderate',
+        body: { action: 'allow_event', eventId: EVENT_ID }, recorded: fromOps, fallback: undefined },
+      { name: '/api/moderate delete_event', path: '/api/moderate',
+        body: { action: 'delete_event', eventId: EVENT_ID }, recorded: fromOps, fallback: undefined },
+    ];
+
+    async function call(route: Route, opts: { token?: boolean; extra?: Record<string, unknown> }) {
+      const { db, sqlLog } = createMockDB();
+      const operations: Array<Record<string, unknown>> = [];
+      const env = { ...createEnv(db, operations), MODERATOR_LOGIN_URL: 'https://login.example.test' };
+      const response = await worker.fetch(new Request(`http://localhost${route.path}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Admin-Key': TEST_ADMIN_KEY,
+          ...(opts.token ? { 'X-Divine-Login-Token': 'tok' } : {}),
+        },
+        body: JSON.stringify({ ...route.body, ...opts.extra }),
+      }), env as never, mockCtx);
+      return { response, recorded: route.recorded({ operations, sqlLog }) };
+    }
+
+    const mismatchLines = (spy: { mock: { calls: unknown[][] } }) =>
+      spy.mock.calls.filter(c => String(c[0]).includes('[moderator-identity]'));
+
+    beforeEach(() => {
+      __clearModeratorLoginCache();
+      // Wrap the base stub once per test, not once per call.
+      const baseFetch = mockFetch.getMockImplementation() as (i: unknown, o?: unknown) => Promise<unknown>;
+      mockFetch.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) =>
+        String(input).endsWith('/api/nostr')
+          ? new Response(JSON.stringify({ result: VERIFIED }), { status: 200 })
+          : baseFetch(input, init));
+    });
+
+    describe.each(routes)('$name', (route) => {
+      it('records the verified moderator', async () => {
+        const { response, recorded } = await call(route, { token: true });
+        expect(response.status).toBe(200);
+        expect(recorded).toEqual(route.verified ?? VERIFIED);
+      });
+
+      it('records the fallback without a verified login', async () => {
+        const { response, recorded } = await call(route, {});
+        expect(response.status).toBe(200);
+        expect(recorded).toEqual(route.fallback);
+      });
+
+      it('ignores a body moderator, and logs no mismatch when nothing is verified', async () => {
+        const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+        for (const claim of [FORGED, { forged: true }, ['e'.repeat(64)]]) {
+          const { response, recorded } = await call(route, { extra: { moderatorPubkey: claim } });
+          expect(response.status).toBe(200);
+          expect(recorded).toEqual(route.fallback);
+        }
+        expect(mismatchLines(warn)).toEqual([]);
+      });
+    });
+
+    it('/api/decisions logs one mismatch line and still succeeds when the body claims another moderator', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { response, recorded } = await call(routes.find(r => r.name === '/api/decisions')!, { token: true, extra: { moderatorPubkey: FORGED } });
+      expect(response.status).toBe(200);
+      expect(recorded).toBe(VERIFIED);
+      expect(mismatchLines(warn)).toHaveLength(1);
     });
   });
 });
