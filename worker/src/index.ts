@@ -720,8 +720,9 @@ export default {
           return jsonResponse({ success: false, error: 'Invalid ticket id' }, 400, corsHeaders);
         }
         const ticketId = Number(idStr);
-        const closeBody = await request.json().catch(() => ({})) as { moderatorPubkey?: string };
-        return handleCloseTicket(env, ticketId, closeBody, corsHeaders);
+        // The body is not read: the closer is the verified login, never a pubkey a
+        // client names, so a moderatorPubkey from an old tab is simply ignored.
+        return handleCloseTicket(env, ticketId, moderator, corsHeaders);
       }
 
       if (path.startsWith('/api/decisions/') && request.method === 'GET') {
@@ -3781,11 +3782,11 @@ async function handleGetLinkedTickets(
 async function handleCloseTicket(
   env: Env,
   ticketId: number,
-  body: { moderatorPubkey?: string },
+  moderator: string | undefined,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
   try {
-    const linked = await closeTicketById(env, ticketId, body.moderatorPubkey ?? null);
+    const linked = await closeTicketById(env, ticketId, moderator ?? null);
     if (!linked) {
       return jsonResponse({ success: false, error: 'Linked ticket not found' }, 404, corsHeaders);
     }
