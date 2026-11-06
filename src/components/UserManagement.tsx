@@ -25,7 +25,7 @@ import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
-import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { markRestored, runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -103,18 +103,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
       const env = restoreEnvironment; // the environment the action ran in
-      let outcome: Awaited<ReturnType<typeof banPubkey>>;
-      let hidden = false;
-      try {
-        outcome = await banPubkey(pubkey, reason || 'Account banned by moderator');
-        hidden = true;
-      } finally {
-        // A ban or suspend that landed hides the account again, so a restore
-        // window still open would print "just restored": end it. Otherwise
-        // reset whatever the call did; one that could not be confirmed may have landed.
-        if (hidden) void markHidden(queryClient, pubkey, env);
-        else void resetAccountContentReads(queryClient, pubkey);
-      }
+      const outcome = await runHidingAction(queryClient, pubkey, env, () => banPubkey(pubkey, reason || 'Account banned by moderator'));
       // Log to D1 for audit trail. The ban has already landed, so a failed write
       // must not fail the mutation: that would read as "Failed to ban user" and
       // invite a retry of an applied ban.

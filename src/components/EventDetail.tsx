@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useUserStats } from "@/hooks/useUserStats";
-import { markHidden, markRestored, resetAccountContentReads, useJustRestored, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { markRestored, runHidingAction, useJustRestored, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
@@ -574,18 +574,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       // awaits an audit write that can fail after the relay call. Reset
       // whatever the ban did: one that could not be confirmed may have landed.
       const env = restoreEnvironment; // the environment the action ran in
-      let outcome: Awaited<ReturnType<typeof banPubkey>>;
-      let hidden = false;
-      try {
-        outcome = await banPubkey(pubkey, reason);
-        hidden = true;
-      } finally {
-        // A ban or suspend that landed hides the account again, so a restore
-        // window still open would print "just restored": end it. Otherwise
-        // reset whatever the call did; one that could not be confirmed may have landed.
-        if (hidden) void markHidden(queryClient, pubkey, env);
-        else void resetAccountContentReads(queryClient, pubkey);
-      }
+      const outcome = await runHidingAction(queryClient, pubkey, env, () => banPubkey(pubkey, reason));
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {

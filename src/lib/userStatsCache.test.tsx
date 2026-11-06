@@ -2,7 +2,7 @@ import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, renderHook, screen, waitFor, act } from '@testing-library/react';
 import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { endRestoreWindow, markHidden, markRestored, resetAccountContentReads, RESTORE_SETTLE_MS, useJustRestored } from './userStatsCache';
+import { endRestoreWindow, markHidden, markRestored, resetAccountContentReads, RESTORE_SETTLE_MS, runHidingAction, useJustRestored } from './userStatsCache';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
 import { authoredContentStat } from './historyCount';
 
@@ -189,6 +189,41 @@ describe('markHidden', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+// Every ban and suspend button settles through this one helper.
+describe('runHidingAction', () => {
+  it('ends the restore window and resets the reads once the call landed', async () => {
+    const pk = '3c'.repeat(32);
+    const client = new QueryClient();
+    await markRestored(client, pk, undefined);
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+    const { result } = renderHook(() => useJustRestored(pk));
+
+    let answer: unknown;
+    await act(async () => { answer = await runHidingAction(client, pk, undefined, async () => 'banned'); });
+
+    expect(answer).toBe('banned');
+    expect(result.current).toBe(false);
+    expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
+  });
+
+  it('only resets the reads after a call that failed, and passes the failure on', async () => {
+    const pk = '4d'.repeat(32);
+    const client = new QueryClient();
+    await markRestored(client, pk, undefined);
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+    const { result } = renderHook(() => useJustRestored(pk));
+
+    await act(async () => {
+      await expect(runHidingAction(client, pk, undefined, async () => { throw new Error('relay said no'); }))
+        .rejects.toThrow('relay said no');
+    });
+
+    expect(result.current).toBe(true);
+    expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
+    endRestoreWindow(pk, undefined);
   });
 });
 

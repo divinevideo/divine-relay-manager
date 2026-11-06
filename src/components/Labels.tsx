@@ -32,7 +32,7 @@ import { UserProfilePreview } from "@/components/UserProfilePreview";
 import { ReportedBy } from "@/components/ReporterInfo";
 import { UserIdentifier, UserDisplayName } from "@/components/UserIdentifier";
 import type { NostrEvent } from "@nostrify/nostrify";
-import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 interface LabelsProps {
   relayUrl: string;
@@ -134,18 +134,7 @@ export function Labels({ relayUrl }: LabelsProps) {
       // before the ban describes the other state (lib/userStatsCache). Reset
       // whatever the call did: a ban that could not be confirmed may have landed.
       const env = restoreEnvironment; // the environment the action ran in
-      let outcome: Awaited<ReturnType<typeof banPubkey>>;
-      let hidden = false;
-      try {
-        outcome = await banPubkey(pubkey, reason);
-        hidden = true;
-      } finally {
-        // A ban or suspend that landed hides the account again, so a restore
-        // window still open would print "just restored": end it. Otherwise
-        // reset whatever the call did; one that could not be confirmed may have landed.
-        if (hidden) void markHidden(queryClient, pubkey, env);
-        else void resetAccountContentReads(queryClient, pubkey);
-      }
+      const outcome = await runHidingAction(queryClient, pubkey, env, () => banPubkey(pubkey, reason));
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {

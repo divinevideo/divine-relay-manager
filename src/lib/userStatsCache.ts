@@ -110,6 +110,32 @@ export async function markHidden(queryClient: QueryClient, pubkey: string, envir
   await resetAccountContentReads(queryClient, pubkey);
 }
 
+/**
+ * Runs an action that hides an account (a ban or suspend), then settles what
+ * this tab shows of it, whatever the call did. One that landed hides the
+ * account again, so it ends a restore window an earlier unban or unsuspend
+ * left open (markHidden). Otherwise the reads are only reset: a call that could
+ * not be confirmed may still have landed, and a reset after a failed one only
+ * costs a re-read. Callers pass the account and environment they captured when
+ * the action started, so one that lands after a switch settles the right ones.
+ */
+export async function runHidingAction<T>(
+  queryClient: QueryClient,
+  pubkey: string,
+  environment: string | undefined,
+  call: () => Promise<T>,
+): Promise<T> {
+  let hidden = false;
+  try {
+    const result = await call();
+    hidden = true;
+    return result;
+  } finally {
+    if (hidden) void markHidden(queryClient, pubkey, environment);
+    else void resetAccountContentReads(queryClient, pubkey);
+  }
+}
+
 /** True within RESTORE_SETTLE_MS of this tab restoring the account in the current environment. */
 export function useJustRestored(pubkey: string | null | undefined): boolean {
   const environment = useRestoreEnvironment();

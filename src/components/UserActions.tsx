@@ -7,7 +7,7 @@ import { useAdminApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
-import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from '@/lib/userStatsCache';
+import { markRestored, runHidingAction, useRestoreEnvironment } from '@/lib/userStatsCache';
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from '@/lib/banFeedback';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { isTerminal, useBulkModerateJob } from '@/hooks/useBulkModerateJob';
@@ -172,17 +172,7 @@ export function UserActions({
       const target = pubkey; // the account acted on, whatever is shown when it lands
       const moderator = getModeratorPubkey(); // capture before the authoritative request
       const env = restoreEnvironment; // the environment the action ran in
-      let hidden = false;
-      try {
-        await api.suspendPubkey(target, 'Suspended by moderator');
-        hidden = true;
-      } finally {
-        // A ban or suspend that landed hides the account again, so a restore
-        // window still open would print "just restored": end it. Otherwise
-        // reset whatever the call did; one that could not be confirmed may have landed.
-        if (hidden) void markHidden(queryClient, target, env);
-        else void resetAccountContentReads(queryClient, target);
-      }
+      await runHidingAction(queryClient, target, env, () => api.suspendPubkey(target, 'Suspended by moderator'));
       logAudit(moderator, {
         targetType: 'pubkey',
         targetId: target,
@@ -230,19 +220,8 @@ export function UserActions({
     mutationFn: async () => {
       const target = pubkey; // the account acted on, whatever is shown when it lands
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      let outcome: Awaited<ReturnType<typeof api.banPubkey>>;
       const env = restoreEnvironment; // the environment the action ran in
-      let hidden = false;
-      try {
-        outcome = await api.banPubkey(target, 'Banned by moderator');
-        hidden = true;
-      } finally {
-        // A ban or suspend that landed hides the account again, so a restore
-        // window still open would print "just restored": end it. Otherwise
-        // reset whatever the call did; one that could not be confirmed may have landed.
-        if (hidden) void markHidden(queryClient, target, env);
-        else void resetAccountContentReads(queryClient, target);
-      }
+      const outcome = await runHidingAction(queryClient, target, env, () => api.banPubkey(target, 'Banned by moderator'));
       logAudit(moderator, {
         targetType: 'pubkey',
         targetId: target,
