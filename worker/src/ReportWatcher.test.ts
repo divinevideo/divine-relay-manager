@@ -136,6 +136,13 @@ function getLastMockWebSocket(): MockWebSocket | null {
   return mockWebSockets.length > 0 ? mockWebSockets[mockWebSockets.length - 1] : null;
 }
 
+// A stable 64-character hex id for a short label: intake skips a report whose
+// e tag is not one (#315).
+function hexOf(label: string): string {
+  const hex = Array.from(new TextEncoder().encode(label), b => b.toString(16).padStart(2, '0')).join('');
+  return hex.padEnd(64, '0').slice(0, 64);
+}
+
 describe('ReportWatcher', () => {
   let watcher: ReportWatcher;
   let mockState: DurableObjectState;
@@ -1304,8 +1311,8 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'This is CSAM',
         tags: [
-          ['e', 'target_event_id'],
-          ['p', 'target_pubkey'],
+          ['e', 'a80952b40bc05e4af0d7a9921b47c7a1ba6b5ffda3b05ab76e07443d35b1c26c'],
+          ['p', '719141117552f5841894a674ef0887333d8606abe9c0ffea136bc3e829c12bdc'],
           ['report', 'sexual_minors'],
         ],
         created_at: Math.floor(Date.now() / 1000),
@@ -1337,8 +1344,8 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'This is CSAM (label format)',
         tags: [
-          ['e', 'target_event_id'],
-          ['p', 'target_pubkey'],
+          ['e', 'a80952b40bc05e4af0d7a9921b47c7a1ba6b5ffda3b05ab76e07443d35b1c26c'],
+          ['p', '719141117552f5841894a674ef0887333d8606abe9c0ffea136bc3e829c12bdc'],
           ['L', 'MOD'],
           ['l', 'sexual_minors', 'MOD'],
         ],
@@ -1488,7 +1495,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report',
         tags: [
-          ['e', 'target_event_id'],
+          ['e', 'a80952b40bc05e4af0d7a9921b47c7a1ba6b5ffda3b05ab76e07443d35b1c26c'],
           ['report', 'sexual_minors'],
         ],
         created_at: Math.floor(Date.now() / 1000),
@@ -1498,6 +1505,50 @@ describe('ReportWatcher', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
 
       // Should NOT have called fetch (banevent)
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    // NIP-01 ids are lowercase hex, and the relay bans and the decision log
+    // match ids exactly, so a report's e tag is lowercased once at intake (#315).
+    async function sendCsamReport(tags: string[][]) {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'c5'.repeat(32),
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'CSAM report',
+        tags: [...tags, ['report', 'sexual_minors'], ['client', 'diVine']],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+
+    it('hides an event reported in uppercase hex under its lowercase id', async () => {
+      const eventId = 'ab'.repeat(32);
+      await sendCsamReport([['e', eventId.toUpperCase()]]);
+
+      expect(mockFetch).toHaveBeenCalledTimes(1);
+      const body = JSON.parse(mockFetch.mock.calls[0][1].body);
+      expect(body.method).toBe('banevent');
+      expect(body.params[0]).toBe(eventId);
+      // The human-review check and the decision log read and write the same id.
+      const bindArgs = vi.mocked(mockEnv.DB!.prepare('').bind).mock.calls.flat();
+      expect(bindArgs).toContain(eventId);
+      expect(bindArgs).not.toContain(eventId.toUpperCase());
+    });
+
+    it('skips auto-hide for an e tag that is not a 64-character hex id', async () => {
+      await sendCsamReport([['e', 'not-an-event-id']]);
+
+      expect(mockFetch).not.toHaveBeenCalled();
+    });
+
+    it('does not hide the reported pubkey as an event when the e tag has no value', async () => {
+      // A valueless e tag fell through to the p tag's value, which went to
+      // the relay as an event id to ban.
+      await sendCsamReport([['e', ''], ['p', 'cd'.repeat(32)]]);
+
       expect(mockFetch).not.toHaveBeenCalled();
     });
 
@@ -1512,7 +1563,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Spam report',
         tags: [
-          ['e', 'target_event_id'],
+          ['e', 'a80952b40bc05e4af0d7a9921b47c7a1ba6b5ffda3b05ab76e07443d35b1c26c'],
           ['report', 'spam'],  // Not in auto-hide categories
         ],
         created_at: Math.floor(Date.now() / 1000),
@@ -1536,7 +1587,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report',
         tags: [
-          ['e', 'target_event_id_12345'],
+          ['e', 'd7c15d3fdd387c1da8eaa611dae5dab89da152f80ec43085e9cdf7335bdc4df4'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1555,7 +1606,7 @@ describe('ReportWatcher', () => {
 
       const body = JSON.parse(options.body);
       expect(body.method).toBe('banevent');
-      expect(body.params[0]).toBe('target_event_id_12345');
+      expect(body.params[0]).toBe('d7c15d3fdd387c1da8eaa611dae5dab89da152f80ec43085e9cdf7335bdc4df4');
     });
 
     // A list report goes to human review. Full-length hex, never truncated.
@@ -1573,7 +1624,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'List report',
         tags: [
-          ['e', 'list_event_id'],
+          ['e', '62d9ea6a6a35385252e144be6dfce2b39ec15495d305b3e507bdbe3e2139e753'],
           ['p', LIST_AUTHOR],
           ['a', `30005:${LIST_AUTHOR}:faves`],
           ['report', 'sexual_minors'],
@@ -1607,7 +1658,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'List report',
         tags: [
-          ['e', 'list_event_id'],
+          ['e', '62d9ea6a6a35385252e144be6dfce2b39ec15495d305b3e507bdbe3e2139e753'],
           ['p', LIST_AUTHOR],
           ['a', `30005:${LIST_AUTHOR.toUpperCase()}:faves`],
           ['report', 'sexual_minors'],
@@ -1631,7 +1682,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Video report',
         tags: [
-          ['e', 'video_event_id'],
+          ['e', '314973fab3b9e740732fee280c9857cee03a80f911e35f0718b86aae744b65b7'],
           ['a', `34236:${LIST_AUTHOR}:clip`],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
@@ -1655,7 +1706,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report',
         tags: [
-          ['e', 'target_event_xyz'],
+          ['e', '0580073dff52d1c1925c1d3492121db835808045616e9a65805135efb2454e90'],
           ['l', 'sexual_minors', 'MOD'],
           ['client', 'diVine'],
         ],
@@ -1683,7 +1734,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM',
         tags: [
-          ['e', 'target_event'],
+          ['e', 'e784ab22005c5dc8bd8634c0d098a9eccf19ed842d11017299f451131ebb30d5'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1717,7 +1768,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM',
         tags: [
-          ['e', 'target_event'],
+          ['e', 'e784ab22005c5dc8bd8634c0d098a9eccf19ed842d11017299f451131ebb30d5'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1759,7 +1810,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Duplicate CSAM report',
         tags: [
-          ['e', 'already_hidden_event'],
+          ['e', 'b336c622ef13d6bab9bc878cb5baf79d9d313bd35b22a98cdf552b1e586b26ee'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1789,7 +1840,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report without client tag',
         tags: [
-          ['e', 'target_event'],
+          ['e', 'e784ab22005c5dc8bd8634c0d098a9eccf19ed842d11017299f451131ebb30d5'],
           ['report', 'sexual_minors'],
           // No client tag
         ],
@@ -1817,7 +1868,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Report with no e tag',
         tags: [
-          ['p', 'some_pubkey'],
+          ['p', '3b5b64f2a44b655b0a91898ceae15b1c5c5c3562206d43947d1ba652c936cd9f'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -1842,7 +1893,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report from unknown client',
         tags: [
-          ['e', 'target_event'],
+          ['e', 'e784ab22005c5dc8bd8634c0d098a9eccf19ed842d11017299f451131ebb30d5'],
           ['report', 'sexual_minors'],
           ['client', 'some-random-app'],
         ],
@@ -1875,7 +1926,7 @@ describe('ReportWatcher', () => {
           kind: 1984,
           content: 'CSAM report',
           tags: [
-            ['e', `target_${clientName.trim()}`],
+            ['e', hexOf(`target_${clientName.trim()}`)],
             ['report', 'sexual_minors'],
             ['client', clientName],
           ],
@@ -1902,7 +1953,7 @@ describe('ReportWatcher', () => {
           kind: 1984,
           content: 'CSAM report',
           tags: [
-            ['e', `target_reject_${clientName}`],
+            ['e', hexOf(`target_reject_${clientName}`)],
             ['report', 'sexual_minors'],
             ['client', clientName],
           ],
@@ -1944,7 +1995,7 @@ describe('ReportWatcher', () => {
           kind: 1984,
           content: 'CSAM report',
           tags: [
-            ['e', `target_${clientName}`],
+            ['e', hexOf(`target_${clientName}`)],
             ['report', 'sexual_minors'],
             ['client', clientName],
           ],
@@ -1983,7 +2034,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report on already-reviewed content',
         tags: [
-          ['e', 'previously_reviewed_event'],
+          ['e', '0e30f4e10fbb2305dcd4b0cddeb52c8d8da3bf0bb2c6af22ff69f167267b9e4f'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2019,7 +2070,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report on fresh content',
         tags: [
-          ['e', 'never_reviewed_event'],
+          ['e', '83cc7c6789788372dc50cb4e760351a11ede4c2b871c0e07efae3e0ed01534a4'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2059,7 +2110,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report racing a restore',
         tags: [
-          ['e', 'restored_during_auto_hide'],
+          ['e', 'a3774dd812aca13ba046b51eaf754169ebd582ec24013c9d4992f1017dc7bf75'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2178,7 +2229,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report racing a hide',
         tags: [
-          ['e', 'hidden_during_auto_hide'],
+          ['e', '672ca215bda9c1f17274a4b671cd37f52977df1b96aefef731cede8a98e58ce5'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2281,7 +2332,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report with no DB',
         tags: [
-          ['e', 'target_no_db'],
+          ['e', 'db5fee9349dbfcf17a96110ce04e4e2f2979e739669fe5c927cec835326c5797'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2321,7 +2372,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM report with DB error',
         tags: [
-          ['e', 'target_db_error'],
+          ['e', '1a6ec69bc2ddfc4c093aecafed181fd51a8a8051c0845fd6376eba04318bb322'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2366,7 +2417,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'CSAM',
         tags: [
-          ['e', 'target_event'],
+          ['e', 'e784ab22005c5dc8bd8634c0d098a9eccf19ed842d11017299f451131ebb30d5'],
           ['report', 'sexual_minors'],
           ['client', 'diVine'],
         ],
@@ -2403,8 +2454,8 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'test report',
         tags: [
-          ['e', 'target-event-id-abc123'],
-          ['p', 'target-pubkey-xyz'],
+          ['e', 'f38c246446b2099a7345404d2dc83d85b592777ae4b76e70cdd1f7f7cca62e16'],
+          ['p', '223e255dcbb76985e4188a449ec0d909e4a6326c21dfec8f495ce4b77a60698a'],
           ['l', category, 'social.nos.ontology'],
           ['client', clientName],
         ],
@@ -2852,7 +2903,7 @@ describe('ReportWatcher', () => {
     it('should create age review case for NS-underageUser reports and await completion', async () => {
       mockGetUserStatus.mockResolvedValue({
         success: true,
-        pubkey: 'reported_pubkey_abc',
+        pubkey: 'c44eb89bd15ff001a13e9af88e7112b1294ea60faba747c19d3d30e3fc2911ee',
         status: 'active',
         verified_minor: false,
       });
@@ -2867,7 +2918,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Underage user report',
         tags: [
-          ['p', 'reported_pubkey_abc'],
+          ['p', 'c44eb89bd15ff001a13e9af88e7112b1294ea60faba747c19d3d30e3fc2911ee'],
           ['l', 'NS-underageUser', 'social.nos.ontology'],
           ['client', 'diVine'],
         ],
@@ -2895,7 +2946,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Underage user report',
         tags: [
-          ['p', 'reported_pubkey_abc'],
+          ['p', 'c44eb89bd15ff001a13e9af88e7112b1294ea60faba747c19d3d30e3fc2911ee'],
           ['l', 'NS-underageUser', 'social.nos.ontology'],
           ['l', 'csam', 'MOD'],
           ['client', 'diVine'],
@@ -2967,6 +3018,52 @@ describe('ReportWatcher', () => {
         : { name: call[4], nip05: call[5], vineUsername: call[6], capturedAt: call[7] };
     }
 
+    // Cases are looked up by lowercase pubkey everywhere, so a p tag in
+    // uppercase is lowercased before the duplicate check and the insert (#313).
+    it('opens the case under the lowercase pubkey when the p tag is written in uppercase', async () => {
+      const pubkey = 'cd'.repeat(32);
+      await sendUnderageReport('d1'.repeat(32), pubkey.toUpperCase());
+
+      const insert = bindCallsFor('INSERT INTO age_review_cases').find(binds => binds.length === 14);
+      expect(insert?.[1]).toBe(pubkey);
+      expect(bindCallsFor('age_review_cases').flat()).not.toContain(pubkey.toUpperCase());
+    });
+
+    it('refuses to open a case for a pubkey that is not lowercase hex, whoever calls it', async () => {
+      await (ageWatcher as unknown as {
+        createAgeReviewCase(event: ReportEvent, reportedPubkey: string): Promise<void>;
+      }).createAgeReviewCase({
+        id: 'd3'.repeat(32), pubkey: 'reporter_pubkey', kind: 1984, content: '',
+        tags: [['l', 'NS-underageUser', 'social.nos.ontology']], created_at: Math.floor(Date.now() / 1000),
+      }, 'CD'.repeat(32));
+
+      expect(bindCallsFor('age_review_cases')).toEqual([]);
+    });
+
+    it('opens no case for a p tag that is not a 64-character hex id, and says why', async () => {
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
+      await ageWatcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      getLastMockWebSocket()!.simulateMessage(JSON.stringify(['EVENT', 'auto-hide-reports', {
+        id: 'd2'.repeat(32),
+        pubkey: 'reporter_pubkey',
+        kind: 1984,
+        content: 'Underage user report',
+        tags: [['p', 'not-a-pubkey'], ['l', 'NS-underageUser', 'social.nos.ontology'], ['client', 'diVine']],
+        created_at: Math.floor(Date.now() / 1000),
+      }]));
+      await new Promise(resolve => setTimeout(resolve, 50));
+
+      expect(bindCallsFor('age_review_cases')).toEqual([]);
+      // Intake skips it; the case-opening backstop is never reached.
+      expect(consoleError).not.toHaveBeenCalledWith(expect.stringMatching(/Refusing to open an age review case/));
+      // The drop is recorded, as the e-tag skip is.
+      expect(consoleLog).toHaveBeenCalledWith(expect.stringMatching(/p tag is not a 64-character hex id, skipping age review/));
+      consoleError.mockRestore();
+      consoleLog.mockRestore();
+    });
+
     it('records the captured handle on the case', async () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({
@@ -2974,9 +3071,9 @@ describe('ReportWatcher', () => {
         profile: { name: 'Some One', nip05: 'x@y.z', isVineImport: false, vineUsername: undefined },
       });
 
-      await sendUnderageReport('identity_report_1', 'reported_identity_1');
+      await sendUnderageReport('identity_report_1', '11'.repeat(32));
 
-      expect(fetchAccountIdentity).toHaveBeenCalledWith('reported_identity_1', expect.anything());
+      expect(fetchAccountIdentity).toHaveBeenCalledWith('11'.repeat(32), expect.anything());
       const { name, nip05 } = identityBinds();
       expect(name).toBe('Some One');
       expect(nip05).toBe('x@y.z');
@@ -2986,7 +3083,7 @@ describe('ReportWatcher', () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: true, profile: null });
 
-      await sendUnderageReport('identity_report_2', 'reported_identity_2');
+      await sendUnderageReport('identity_report_2', '22'.repeat(32));
 
       const insertSql = (ageEnv.DB!.prepare as ReturnType<typeof vi.fn>).mock.calls
         .map((c: unknown[]) => String(c[0]))
@@ -3010,7 +3107,7 @@ describe('ReportWatcher', () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
 
-      await sendUnderageReport('identity_report_5', 'reported_identity_5');
+      await sendUnderageReport('identity_report_5', '55'.repeat(32));
 
       expect(identityBinds().capturedAt).toBeNull();
     });
@@ -3019,7 +3116,7 @@ describe('ReportWatcher', () => {
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });
       vi.mocked(fetchAccountIdentity).mockRejectedValue(new Error('relay down'));
 
-      await sendUnderageReport('identity_report_3', 'reported_identity_3');
+      await sendUnderageReport('identity_report_3', '33'.repeat(32));
 
       expect(mockDbRun).toHaveBeenCalled();
       expect(identityBinds().capturedAt).toBeNull();
@@ -3031,14 +3128,14 @@ describe('ReportWatcher', () => {
     // main path stayed covered, so it gets the same positional treatment.
     it('records the captured identity on the auto-clear path too', async () => {
       mockGetUserStatus.mockResolvedValue({
-        success: true, pubkey: 'reported_identity_4', status: 'active', verified_minor: true,
+        success: true, pubkey: '44'.repeat(32), status: 'active', verified_minor: true,
       });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({
         completed: true,
         profile: { name: 'Cleared Person', nip05: 'x@y.z', isVineImport: false, vineUsername: 'ogname' },
       });
 
-      await sendUnderageReport('identity_report_4', 'reported_identity_4');
+      await sendUnderageReport('identity_report_4', '44'.repeat(32));
 
       const { name, nip05, vineUsername, capturedAt } = identityBinds(8);
       expect(name).toBe('Cleared Person');
@@ -3049,11 +3146,11 @@ describe('ReportWatcher', () => {
 
     it('leaves identity_captured_at null on the auto-clear path when the lookup never completed', async () => {
       mockGetUserStatus.mockResolvedValue({
-        success: true, pubkey: 'reported_identity_6', status: 'active', verified_minor: true,
+        success: true, pubkey: '66'.repeat(32), status: 'active', verified_minor: true,
       });
       vi.mocked(fetchAccountIdentity).mockResolvedValue({ completed: false, profile: null });
 
-      await sendUnderageReport('identity_report_6', 'reported_identity_6');
+      await sendUnderageReport('identity_report_6', '66'.repeat(32));
 
       expect(identityBinds(8).capturedAt).toBeNull();
     });
@@ -3128,7 +3225,7 @@ describe('ReportWatcher', () => {
     it('should auto-clear age review case for verified minors', async () => {
       mockGetUserStatus.mockResolvedValue({
         success: true,
-        pubkey: 'verified_minor_pubkey',
+        pubkey: '5c7a5a5147fa4c2e43bfd47ae36628ea72c2c21a1ddc27ea8508c15b7158033e',
         status: 'active',
         verified_minor: true,
       });
@@ -3143,7 +3240,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Underage user report',
         tags: [
-          ['p', 'verified_minor_pubkey'],
+          ['p', '5c7a5a5147fa4c2e43bfd47ae36628ea72c2c21a1ddc27ea8508c15b7158033e'],
           ['l', 'NS-underageUser', 'social.nos.ontology'],
           ['client', 'diVine'],
         ],
@@ -3165,7 +3262,7 @@ describe('ReportWatcher', () => {
     it('should attach message handler work to DO lifecycle via waitUntil', async () => {
       mockGetUserStatus.mockResolvedValue({
         success: true,
-        pubkey: 'lifecycle_pubkey',
+        pubkey: '994850da99c932c4af038e8ea378db25bd91d4b485532bb829b8cb504f72a9f7',
         status: 'active',
         verified_minor: false,
       });
@@ -3180,7 +3277,7 @@ describe('ReportWatcher', () => {
         kind: 1984,
         content: 'Underage user report',
         tags: [
-          ['p', 'lifecycle_pubkey'],
+          ['p', '994850da99c932c4af038e8ea378db25bd91d4b485532bb829b8cb504f72a9f7'],
           ['l', 'NS-underageUser', 'social.nos.ontology'],
           ['client', 'diVine'],
         ],

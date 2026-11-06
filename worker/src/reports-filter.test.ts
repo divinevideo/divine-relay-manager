@@ -14,17 +14,24 @@ describe('reportsMode', () => {
     expect(reportsMode(params('needs_attention=true')).kind).toBe('legacy-bulk');
   });
 
-  it('builds an unlimited lookup for one event, lowercased', () => {
-    expect(reportsMode(params(`event=${'AB'.repeat(32)}`))).toEqual({
+  it('builds an unlimited lookup for one event, in its lowercase and uppercase spellings', () => {
+    expect(reportsMode(params(`event=${'Ab'.repeat(32)}`))).toEqual({
       kind: 'target',
-      filter: { kinds: [REPORT_KIND], '#e': ['ab'.repeat(32)] },
+      filter: { kinds: [REPORT_KIND], '#e': ['ab'.repeat(32), 'AB'.repeat(32)] },
     });
   });
 
-  it('builds an unlimited lookup for one pubkey, lowercased', () => {
+  it('builds an unlimited lookup for one pubkey, in its lowercase and uppercase spellings', () => {
     expect(reportsMode(params(`pubkey=${'CD'.repeat(32)}`))).toEqual({
       kind: 'target',
-      filter: { kinds: [REPORT_KIND], '#p': ['cd'.repeat(32)] },
+      filter: { kinds: [REPORT_KIND], '#p': ['cd'.repeat(32), 'CD'.repeat(32)] },
+    });
+  });
+
+  it('looks up a value that is not a hex id as written, the spelling the queue lists it under', () => {
+    expect(reportsMode(params('event=NOT-HEX'))).toEqual({
+      kind: 'target',
+      filter: { kinds: [REPORT_KIND], '#e': ['NOT-HEX'] },
     });
   });
 
@@ -36,7 +43,7 @@ describe('reportsMode', () => {
   it('prefers event over pubkey when both are present', () => {
     expect(reportsMode(params(`event=${'a'.repeat(64)}&pubkey=${'b'.repeat(64)}`))).toEqual({
       kind: 'target',
-      filter: { kinds: [REPORT_KIND], '#e': ['a'.repeat(64)] },
+      filter: { kinds: [REPORT_KIND], '#e': ['a'.repeat(64), 'A'.repeat(64)] },
     });
   });
 });

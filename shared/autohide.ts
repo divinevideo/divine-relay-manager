@@ -83,6 +83,10 @@ export interface AutoHideStateRowLike {
 export function pendingReviewTargetStates(rows: readonly AutoHideStateRowLike[]): Map<string, string> {
   const actionsByTarget = new Map<string, string[]>();
   for (const row of rows) {
+    // Keyed as written, as every stored record is (see reportTargetKey): an
+    // auto-hide row in a report's uppercase spelling predates #315, and its
+    // relay ban named an id no event has. Re-keyed in lowercase it would mark
+    // content that was never hidden as hidden, pending review.
     const key = `${row.target_type}:${row.target_id}`;
     const actions = actionsByTarget.get(key);
     if (actions) actions.push(row.action);

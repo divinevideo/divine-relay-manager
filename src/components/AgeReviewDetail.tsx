@@ -109,8 +109,9 @@ interface Props {
 }
 
 // The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
-// worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
-// mixed-case tag is possible and could never be approved.
+// worker/src/keycast-client.ts). A case opened before #313 stored the report's p
+// tag verbatim, so a mixed-case pubkey is possible there and could never be
+// approved; cases are opened in lowercase now.
 const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
 
 // The active-case lookup's cache keys for a case's pubkey: its own first,
@@ -378,10 +379,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // Protected-minor status from keycast (verified_minor) and the D1 registry
   // (protected_minor). Best-effort: a keycast blip resolves to success:false, and
   // without a registry answer we show status unavailable.
-  // Normalized once here: the case pubkey is stored verbatim from the report's
-  // `p` tag, which is untrusted, while relays and the worker both require
-  // lowercase hex. Passing it raw makes a mixed-case tag look like an account
-  // with no content and no available enforcement.
+  // Normalized once here: a case opened before #313 stored the pubkey verbatim
+  // from the report's untrusted `p` tag, while relays and the worker both
+  // require lowercase hex. Passing it raw makes a mixed-case tag look like an
+  // account with no content and no available enforcement.
   const subjectPubkey = c.pubkey.toLowerCase();
   const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading, refetch: refetchAccountStatus } = useAccountStatus(subjectPubkey);
   const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(subjectPubkey);

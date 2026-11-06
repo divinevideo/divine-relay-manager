@@ -51,6 +51,7 @@ import { coordinateEventVisibility, type EventVisibilityResult } from './event-v
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAccountRestrictedAgeReviewState, type AgeReviewState } from '../../shared/age-review';
+import { canonicalHex64 } from '../../shared/hex-id';
 import { getResolvedTargets, getAutoHideStates } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
@@ -715,13 +716,17 @@ export default {
         return handleCloseTicket(env, ticketId, closeBody, corsHeaders);
       }
 
+      // A hex id in the path is canonicalized, the form decisions are now
+      // written in: an older frontend can still ask with a report's uppercase
+      // tag (#313, #315). The match itself stays exact.
       if (path.startsWith('/api/decisions/') && request.method === 'GET') {
-        const targetId = path.replace('/api/decisions/', '');
-        return handleGetDecisions(targetId, env, corsHeaders);
+        const rawId = path.replace('/api/decisions/', '');
+        return handleGetDecisions(canonicalHex64(rawId) ?? rawId, env, corsHeaders);
       }
 
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
-        const targetId = path.replace('/api/decisions/', '');
+        const rawId = path.replace('/api/decisions/', '');
+        const targetId = canonicalHex64(rawId) ?? rawId;
         // Optional: an older frontend omits it, and then both tags are checked.
         // A present-but-unrecognised value takes the same safe path, but that
         // means a client-side typo is invisible in production, so it is logged.
@@ -1112,6 +1117,15 @@ async function handlePublish(
   }
 
   const secretKey = await getSecretKey(env);
+
+  // A resolution label names its target by the lowercase id every reader keys
+  // it by (#313, #315): an older frontend can still send a report's tag as
+  // written. Only the label's e and p values change, before it is signed.
+  if (body.kind === 1985 && body.tags?.some(tag => tag[0] === 'L' && tag[1] === 'moderation/resolution')) {
+    body.tags = body.tags.map(tag => (tag[0] === 'e' || tag[0] === 'p')
+      ? [tag[0], canonicalHex64(tag[1]) ?? tag[1], ...tag.slice(2)]
+      : tag);
+  }
 
   const event = finalizeEvent(
     {
@@ -1509,11 +1523,15 @@ async function handleModerate(
         if (!rpcResult.success) {
           return jsonResponse({ success: false, error: rpcResult.error || 'unbanpubkey RPC failed' }, 500, corsHeaders);
         }
+        // The unban above used the spelling given, so a ban stored in uppercase
+        // stays removable. The mark and the ticket sync key the lowercase id
+        // every reader uses (#313, #315).
+        const markedPubkey = canonicalHex64(body.pubkey) ?? body.pubkey;
         if (env.DB) {
-          await markHumanAction(env.DB, 'pubkey', body.pubkey, body.action);
+          await markHumanAction(env.DB, 'pubkey', markedPubkey, body.action);
         }
         try {
-          await syncZendeskAfterAction(env, body.action, 'pubkey', body.pubkey, getPublicKey(secretKey));
+          await syncZendeskAfterAction(env, body.action, 'pubkey', markedPubkey, getPublicKey(secretKey));
         } catch (err) {
           console.error('[handleModerate] Zendesk sync error:', err);
         }
@@ -1635,9 +1653,9 @@ async function runRelayRpc(
   // the ban list with no way out of the UI. Nothing is risked by allowing it: a
   // non-canonical request value reaches only the relay rows written with that same
   // value (Keycast refuses it outright), so it lifts nothing on the account an
-  // age-review case holds, which is why the guard also lets it through. A stored
-  // case can still carry an uppercase pubkey until #313; for a lowercase reversal
-  // the guard's lookup finds it (see getActiveAgeReviewCase).
+  // age-review case holds, which is why the guard also lets it through. A case
+  // opened before #313 can still carry an uppercase pubkey; for a lowercase
+  // reversal the guard's lookup finds it (see getActiveAgeReviewCase).
   if (
     (body.method === 'banpubkey' || body.method === 'suspendpubkey')
     && !/^[0-9a-f]{64}$/.test(target)
@@ -2004,12 +2022,19 @@ async function handleLogDecision(
 
     await ensureSchemaOnce(env.DB);
 
+    // A 64-character hex value of any target type (event id, pubkey or media
+    // sha256) is stored lowercase, the form the queue, the report's history
+    // and Reopen look it up in. (The Zendesk sidebar's read is exact; it
+    // assumes the app sends the ids its tickets store, which are lowercase.)
+    // An older frontend can post a report's tag as written (#313, #315). Any
+    // other value is kept as written.
+    const targetId = canonicalHex64(body.targetId) ?? body.targetId;
     await env.DB.prepare(`
       INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey, report_id)
       VALUES (?, ?, ?, ?, ?, ?)
     `).bind(
       body.targetType,
-      body.targetId,
+      targetId,
       body.action,
       body.reason || null,
       body.moderatorPubkey || null,
@@ -2018,7 +2043,7 @@ async function handleLogDecision(
 
     // This endpoint is an append-only audit write. Detached clients can deliver it
     // after a newer enforcement action, so it must not redefine visibility intent.
-    if (body.targetType !== 'event') await markHumanReviewed(env.DB, body.targetType, body.targetId);
+    if (body.targetType !== 'event') await markHumanReviewed(env.DB, body.targetType, targetId);
 
     return new Response(JSON.stringify({ success: true }), {
       status: 200,
@@ -2196,7 +2221,14 @@ async function handleGetDecisions(
 
     await ensureSchemaOnce(env.DB);
 
-    // Get all decisions for this target (could be event ID, pubkey, or media hash)
+    // Get all decisions for this target (could be event ID, pubkey, or media hash).
+    // Exact match, the way the queue keys every stored record: a row counts
+    // only under the spelling it was stored in, so the queue, this history and
+    // Reopen agree, and a row in another spelling leaves its report in front
+    // of a person. Every path that writes a decision now stores a hex id
+    // lowercase (#313). Widening it would also fold in a machine auto-hide row
+    // written in uppercase before #315, which never hid the lowercase target
+    // (see pendingReviewTargetStates).
     const decisions = await env.DB.prepare(`
       SELECT * FROM moderation_decisions
       WHERE target_id = ?
@@ -2342,6 +2374,7 @@ async function handleDeleteDecisions(
     }
 
     // Delete all decisions for this target from D1 (reopens the report).
+    // Exact match, as in handleGetDecisions and the label cleanup above.
     // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
     const result = await env.DB.prepare(`
       DELETE FROM moderation_decisions

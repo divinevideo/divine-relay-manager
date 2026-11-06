@@ -39,6 +39,14 @@ describe('pendingReviewTargetKeys', () => {
 });
 
 describe('pendingReviewTargetStates', () => {
+  it('keys an auto-hide row as written, so an uppercase one never marks its lowercase target hidden', () => {
+    // Before #315 an uppercase report's auto-hide banned an id no event has:
+    // the content stayed visible, and must not read as hidden pending review.
+    const id = 'ab'.repeat(32);
+    const pending = pendingReviewTargetStates([row(id.toUpperCase(), AUTO_HIDE_ACTION.hidden)]);
+    expect(pending.has(`event:${id}`)).toBe(false);
+  });
+
   // The queue labels a target whose hide or restore may not have landed
   // differently from one that is hidden, so it needs the latest state, not just
   // that the target is pending.

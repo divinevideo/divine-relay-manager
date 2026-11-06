@@ -31,14 +31,13 @@ export function isConsolidatedReportResolved(
   bannedPubkeys: Set<string>,
 ): boolean {
   if (resolvedTargets.has(reportTargetKey(report.target))) return true;
-  // Both sides of this comparison are lowercased, because neither one is canonical.
-  // authorPubkey is a reporter-authored `p` tag, validated as hex without being
-  // case-normalized. The relay's side is no better: funnelcake's hex check accepts
-  // A-F, stores what `banpubkey` was handed and reads it back verbatim, so an
-  // uppercase ban really does come back uppercase from `listbannedpubkeys`. The
-  // caller lowercases the set it passes in (Reports.tsx `bannedPubkeySet`); this
-  // lowercases the tag. Drop either half and the ban that clears an account's own
-  // event reports stops clearing them.
+  // Only the report's side is lowercased. authorPubkey comes from a
+  // reporter-authored `p` tag; consolidateReports lowercases it, and this is a
+  // backstop for any other caller. The relay's side is kept
+  // as written on purpose (Reports.tsx `bannedPubkeySet`): funnelcake stores what
+  // `banpubkey` was handed but matches bans exactly, so an uppercase entry never
+  // banned the lowercase account, and the reports on its posts still need a
+  // person. Lowercasing the set would let such a ban clear them.
   if (
     report.target.type === 'event' &&
     report.authorPubkey &&

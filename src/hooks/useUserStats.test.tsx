@@ -131,6 +131,18 @@ describe('useUserStats', () => {
     expect(result.current.data?.reportsTruncated).toBe(true);
   });
 
+  // A reporter's client can spell the account in uppercase (#313), and the
+  // relay matches tag filters exactly.
+  it('asks for reports against the account in both spellings', async () => {
+    req.mockImplementation(relayWith(1));
+    const { result } = show();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const reportFilters = req.mock.calls
+      .map(call => (call[0] as Array<{ kinds?: number[]; '#p'?: string[] }>)[0])
+      .filter(f => f.kinds?.includes(1984));
+    expect(reportFilters[0]['#p']).toEqual([PUBKEY, PUBKEY.toUpperCase()]);
+  });
+
   it('asks each page for the page size it treats as full', async () => {
     req.mockImplementation(relayWith(1));
     const { result } = show();

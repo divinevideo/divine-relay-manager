@@ -286,9 +286,10 @@ describe('what the pane knows of the selected target', () => {
     expect(incomplete()).toBe('false');
   });
 
-  // A feed target can still get a complete targeted read: an uppercase ?event= link
-  // misses the listed row (the lookup is case-sensitive), so the read runs.
-  it('shows the plain count for a feed target read in full by an uppercase link, though the feed stopped early', async () => {
+  // An uppercase ?event= link names the same target as its lowercase twin, so
+  // it opens the listed row without a targeted read, and a feed that stopped
+  // early leaves the count a floor, as a lowercase link would.
+  it('opens the listed row for a deep link written in uppercase hex, as for a lowercase one', async () => {
     const MIXED_EVENT = 'abcdef'.repeat(10) + 'abcd';
     const MIXED_REPORT = report('e'.repeat(64), 1751000073, [['e', MIXED_EVENT, 'spam'], ['p', '9'.repeat(64), 'spam']]);
     stubWorker({ feed: [MIXED_REPORT], feedTruncated: true, history: [], targeted: { [MIXED_EVENT]: [MIXED_REPORT] } });
@@ -296,11 +297,27 @@ describe('what the pane knows of the selected target', () => {
 
     await screen.findByTestId('detail');
     await waitFor(() => expect(window.location.pathname).toBe(`/reports/${MIXED_REPORT.id}`));
-    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('false');
-    // The open row says the same as the pane: a count read in full is plain.
+    const targetedReads = vi.mocked(fetch).mock.calls
+      .map(([input]) => String(input instanceof Request ? input.url : input))
+      .filter(url => url.includes('/api/reports?') && !url.includes('needs_attention=1'));
+    expect(targetedReads).toEqual([]);
+    expect(screen.getByTestId('detail').getAttribute('data-reports-truncated')).toBe('true');
     const row = document.querySelector(`[data-row-key="event:${MIXED_EVENT}"]`) as HTMLElement;
-    expect(row).toHaveTextContent('1 report');
-    expect(row).not.toHaveTextContent('1+');
+    expect(row).toHaveTextContent('1+ report');
+  });
+
+  it('opens the listed row for a ?pubkey= link written in uppercase hex', async () => {
+    const PUBKEY = 'abcdef'.repeat(10) + 'abcd';
+    const ACCOUNT_REPORT = report('d'.repeat(64), 1751000075, [['p', PUBKEY, 'spam']]);
+    stubWorker({ feed: [ACCOUNT_REPORT], history: [] });
+    renderAt(`/reports?pubkey=${PUBKEY.toUpperCase()}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${ACCOUNT_REPORT.id}`));
+    const targetedReads = vi.mocked(fetch).mock.calls
+      .map(([input]) => String(input instanceof Request ? input.url : input))
+      .filter(url => url.includes('/api/reports?') && !url.includes('needs_attention=1'));
+    expect(targetedReads).toEqual([]);
   });
 
   // The queue failed cold, the deep link's read ran in full, and then the queue
@@ -338,7 +355,22 @@ describe('what the pane knows of the selected target', () => {
     expect(incomplete()).toBe('true');
   });
 
-  it('gives an uppercase-tag target no credit for a lowercase link that never fetched it', async () => {
+  // A value that is not a hex id is listed as written (TODO(#160)), and the
+  // targeted read asks for it as written, so its report was read in full.
+  it('credits a non-hex target, which the targeted read asks for as written', async () => {
+    const odd = report('e'.repeat(64), 1751000073, [['e', 'NOT-HEX', 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    // The stub matches the lowercased request URL.
+    stubWorker({ feed: [], history: [], targeted: { 'not-hex': [odd] } });
+    renderAt('/reports?event=NOT-HEX');
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${odd.id}`));
+    expect(incomplete()).toBe('false');
+  });
+
+  // The read asks for the lowercase and the all-uppercase spelling, so a report
+  // spelled either way was read for this target; one in mixed case was not.
+  it('credits an all-uppercase-tag target, whose spelling the targeted read asks for', async () => {
     const UPPER = 'ABCDEF'.repeat(10) + 'ABCD';
     const upper = report('e'.repeat(64), 1751000072, [['e', UPPER, 'spam'], ['p', '9'.repeat(64), 'spam']]);
     stubWorker({ feed: [], history: [], targeted: { [UPPER.toLowerCase()]: [upper] } });
@@ -346,6 +378,17 @@ describe('what the pane knows of the selected target', () => {
 
     await screen.findByTestId('detail');
     await waitFor(() => expect(window.location.pathname).toBe(`/reports/${upper.id}`));
+    expect(incomplete()).toBe('false');
+  });
+
+  it('gives a mixed-case-tag target no credit, since the targeted read never asks for that spelling', async () => {
+    const MIXED = 'AbCdEf'.repeat(10) + 'AbCd';
+    const mixed = report('e'.repeat(64), 1751000072, [['e', MIXED, 'spam'], ['p', '9'.repeat(64), 'spam']]);
+    stubWorker({ feed: [], history: [], targeted: { [MIXED.toLowerCase()]: [mixed] } });
+    renderAt(`/reports?event=${MIXED.toLowerCase()}`);
+
+    await screen.findByTestId('detail');
+    await waitFor(() => expect(window.location.pathname).toBe(`/reports/${mixed.id}`));
     expect(incomplete()).toBe('true');
   });
 

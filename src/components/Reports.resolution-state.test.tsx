@@ -77,12 +77,13 @@ interface SourceState {
   // below (#221 fix 1: it fails BEFORE the resolution-unavailable pane gets
   // a chance to, since it's the more fundamental failure).
   reports?: 'ok' | 'error';
-  labels?: 'resolves' | 'empty' | 'error';
-  // 'resolves-uppercase' returns the same ban written in uppercase hex, which the
-  // relay accepts and stores verbatim.
+  // 'resolves-uppercase' returns the same resolution written in uppercase hex:
+  // the relay accepts and stores a ban verbatim, and labels and decisions
+  // written before #315 can hold a report's uppercase spelling.
+  labels?: 'resolves' | 'resolves-uppercase' | 'empty' | 'error';
   bannedPubkeys?: 'resolves' | 'resolves-uppercase' | 'empty' | 'error';
-  bannedEvents?: 'resolves' | 'empty' | 'error';
-  decisions?: 'resolves' | 'empty' | 'error';
+  bannedEvents?: 'resolves' | 'resolves-uppercase' | 'empty' | 'error';
+  decisions?: 'resolves' | 'resolves-uppercase' | 'empty' | 'error';
   slow?: Array<'labels' | 'bannedPubkeys' | 'bannedEvents' | 'decisions'>;
   // banned-events resolves EVENT targets, not pubkey targets, so exercising
   // it for real needs a second fixture report with an `e` tag in the queue.
@@ -129,8 +130,8 @@ function stubFetch(state: SourceState) {
       if (state.labels === 'error') return jsonResponse({ success: false, error: 'relay timeout' }, 502);
       return jsonResponse({
         success: true,
-        targets: state.labels === 'resolves'
-          ? [{ type: 'pubkey', value: REPORTED_PUBKEY }]
+        targets: state.labels === 'resolves' || state.labels === 'resolves-uppercase'
+          ? [{ type: 'pubkey', value: state.labels === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase() }]
           : [],
         truncated: false,
         oldest_covered: null,
@@ -144,8 +145,8 @@ function stubFetch(state: SourceState) {
       if (state.decisions === 'error') return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
       return jsonResponse({
         success: true,
-        resolved: state.decisions === 'resolves'
-          ? [{ target_type: 'pubkey', target_id: REPORTED_PUBKEY }]
+        resolved: state.decisions === 'resolves' || state.decisions === 'resolves-uppercase'
+          ? [{ target_type: 'pubkey', target_id: state.decisions === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase() }]
           : [],
         states: [],
       });
@@ -165,7 +166,7 @@ function stubFetch(state: SourceState) {
         ? []
         : method === 'bannedPubkeys'
           ? [{ pubkey: mode === 'resolves-uppercase' ? REPORTED_PUBKEY.toUpperCase() : REPORTED_PUBKEY }]
-          : [{ id: REPORTED_EVENT_ID }];
+          : [{ id: mode === 'resolves-uppercase' ? REPORTED_EVENT_ID.toUpperCase() : REPORTED_EVENT_ID }];
       return jsonResponse({ success: true, result });
     }
 
@@ -227,6 +228,37 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
 
     await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
     expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
+  // A stored record counts only under the spelling it was stored in: the
+  // pane builds Reopen from decisions, so a label folded into the lowercase
+  // target would hide the report with no Reopen to undo it.
+  it('keeps a target whose only resolution label is written in uppercase hex', async () => {
+    stubFetch({ labels: 'resolves-uppercase', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  // A stored decision counts only under the spelling it was stored in, as the
+  // report's history reads it: one in another spelling brings the report back
+  // to a person instead of hiding it where Reopen can't reach.
+  it('keeps a target whose only decision is stored in uppercase hex', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'resolves-uppercase' });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  // A ban is relay state, not a record of intent: the relay matches bans
+  // exactly, so an uppercase entry (a pre-#315 auto-hide, say) never hid the
+  // real, lowercase event, and its report still needs a person.
+  it('keeps an event target whose ban the relay lists in uppercase, which never hid it', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'resolves-uppercase', decisions: 'empty', includeEventReport: true });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/2 pending/i)).toBeInTheDocument());
+    expect(screen.getByText(REPORTED_NOTE)).toBeInTheDocument();
   });
 
   it('shows the target when no source resolves it', async () => {
@@ -301,21 +333,19 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
   });
 
   // The other side of the same mismatch. The relay does not canonicalise its ban
-  // list -- funnelcake's hex check accepts A-F and stores what it was given -- so
-  // an uppercase entry must still clear the reports that ban was meant to clear.
-  it('hides an event target when the relay reports the ban in uppercase', async () => {
+  // list -- funnelcake stores what it was given -- but it matches bans exactly,
+  // so an uppercase entry never banned the lowercase account. Its reports, and
+  // the reports on its posts, still need a person; a lowercase ban (the only
+  // kind the worker sends now) clears them.
+  it('keeps an account and its posts when the relay lists the ban in uppercase, which never applied', async () => {
     stubFetch({
       labels: 'empty', bannedPubkeys: 'resolves-uppercase', bannedEvents: 'empty', decisions: 'empty',
       authoredEventReportP: REPORTED_PUBKEY,
     });
     renderReports();
 
-    // The pubkey-target report stays: resolvedTargets keys on the relay's string
-    // as-is, so an uppercase ban does not match a lowercase `pubkey:` target.
-    // That is pre-existing and untouched here -- waiting on it also proves the
-    // queue has actually rendered before the absence below is asserted.
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
-    expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
   });
 
   // Anyone can publish a kind-1984, and cross-resolution hides a whole consolidated
