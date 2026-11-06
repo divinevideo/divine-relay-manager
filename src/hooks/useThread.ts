@@ -7,7 +7,7 @@ import type { NostrEvent } from "@nostrify/nostrify";
 import { NRelay1 } from "@nostrify/nostrify";
 import { isHex64 } from "@/lib/constants";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
-import { isEventWithId, isRepostKind, verifiedRepostedEvent } from "@/lib/nip18";
+import { checkedEventWithId, isRepostKind, verifiedRepostedEvent } from "@/lib/nip18";
 import { buildThreadReplyFilters } from "@/lib/threadFilters";
 import { isListKind } from "../../shared/list-report";
 
@@ -125,8 +125,7 @@ export function useThread(
           // reporter's.
           // Lower-case, as ids are on the wire: a relay matches them exactly.
           const targetId = originalEventTag[1].toLowerCase();
-          const checked = (candidate: NostrEvent | null | undefined) =>
-            (candidate && isEventWithId(candidate, targetId) ? { ...candidate, id: candidate.id.toLowerCase() } : null);
+          const checked = (candidate: NostrEvent | null | undefined) => checkedEventWithId(candidate, targetId);
           repostedEvent = verifiedRepostedEvent(event);
 
           if (!repostedEvent) {

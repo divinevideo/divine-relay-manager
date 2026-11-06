@@ -3,7 +3,7 @@
 // Node, not jsdom, so the signature checks below run nostr-tools for real.
 
 import { describe, it, expect } from 'vitest';
-import { getRepostTargetId, isRepostKind, parseRepostedEvent, describeRepostTarget, getRepostTargetCoordinate, parseRepostForDisplay, isEventWithId, verifiedRepostedEvent } from './nip18';
+import { getRepostTargetId, isRepostKind, parseRepostedEvent, describeRepostTarget, getRepostTargetCoordinate, parseRepostForDisplay, isEventWithId, checkedEventWithId, verifiedRepostedEvent } from './nip18';
 import { SIGNED_NOTE, SIGNED_VIDEO } from '@/test/signedEvents';
 import { verifyEvent } from 'nostr-tools';
 
@@ -73,6 +73,24 @@ describe('isEventWithId', () => {
     expect(isEventWithId({ ...event, content: 'changed' }, event.id)).toBe(false);
     expect(isEventWithId(null, event.id)).toBe(false);
     expect(isEventWithId({ ...event, tags: 'not tags' }, event.id)).toBe(false);
+  });
+});
+
+// The one place a candidate original is checked and normalized: both an embedded
+// copy and a fetched event go through it before anything reads their files.
+describe('checkedEventWithId', () => {
+  it('returns the event, with its id in lower case, when it is the signed event the id names', () => {
+    const upper = { ...SIGNED_VIDEO, id: SIGNED_VIDEO.id.toUpperCase() };
+    expect(checkedEventWithId(upper, SIGNED_VIDEO.id)).toEqual(SIGNED_VIDEO);
+    expect(checkedEventWithId(SIGNED_VIDEO, SIGNED_VIDEO.id.toUpperCase())).toEqual(SIGNED_VIDEO);
+  });
+
+  it('returns null for an event with its files changed, another event, or something that is not one', () => {
+    const forged = { ...SIGNED_VIDEO, tags: [['imeta', 'url https://media.divine.video/' + 'b'.repeat(64), 'm video/mp4']] };
+    expect(checkedEventWithId(forged, SIGNED_VIDEO.id)).toBeNull();
+    expect(checkedEventWithId(SIGNED_NOTE, SIGNED_VIDEO.id)).toBeNull();
+    expect(checkedEventWithId(null, SIGNED_VIDEO.id)).toBeNull();
+    expect(checkedEventWithId('not an event', SIGNED_VIDEO.id)).toBeNull();
   });
 });
 

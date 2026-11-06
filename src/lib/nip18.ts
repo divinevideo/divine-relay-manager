@@ -82,6 +82,16 @@ export function isEventWithId(event: unknown, id: string): event is NostrEvent {
 }
 
 /**
+ * The candidate as the event `id` names, id in lower case, or null when
+ * isEventWithId does not accept it. Whatever stands in for a repost's original,
+ * its embedded copy or a fetched event, goes through this before anything reads
+ * its files.
+ */
+export function checkedEventWithId(candidate: unknown, id: string): NostrEvent | null {
+  return isEventWithId(candidate, id) ? { ...candidate, id: candidate.id.toLowerCase() } : null;
+}
+
+/**
  * The event a repost names, read from its embedded copy only when the copy is
  * that event: its id is the repost's `e` tag and its signature verifies. The
  * copy is the reposter's own writing, so unchecked it would let the reposter
@@ -96,7 +106,7 @@ export function verifiedRepostedEvent(repost: { content: string; tags: string[][
   } catch {
     return null;
   }
-  return isEventWithId(copy, target) ? { ...copy, id: copy.id.toLowerCase() } : null;
+  return checkedEventWithId(copy, target);
 }
 
 /**
