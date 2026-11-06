@@ -29,6 +29,7 @@ import {
   publishLabelAndBan,
   markAsReviewed,
   moderateMedia,
+  deleteMedia,
   checkMediaStatus,
   readMediaStatus,
   getAgeReviewBulkNotesJob,
@@ -1303,6 +1304,25 @@ describe('adminApi', () => {
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody).toEqual({ sha256: 'hash123', action: 'SAFE', reason: 'Restriction removed by moderator', from: 'QUARANTINE' });
+    });
+
+    // A file with no moderation record: the worker reads its state as UNKNOWN.
+    it('sends UNKNOWN for a file expected to have no moderation record', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await moderateMedia(API_URL, 'hash123', 'PERMANENT_BAN', 'Blocked by moderator', 'UNKNOWN');
+
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({ action: 'PERMANENT_BAN', from: 'UNKNOWN' });
+    });
+
+    // A delete names no state: it can't open a file or weaken its state.
+    it('sends a delete with no expected state', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await deleteMedia(API_URL, 'hash123', 'Permanently deleted by moderator');
+
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body))
+        .toEqual({ sha256: 'hash123', action: 'DELETE', reason: 'Permanently deleted by moderator' });
     });
 
     it("sends the account the file belongs to when given one, for the worker's account check", async () => {

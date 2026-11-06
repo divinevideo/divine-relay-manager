@@ -10,6 +10,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useToast } from '@/hooks/useToast';
 import { ApiError, type BulkNote } from '@/lib/adminApi';
 import { describeBulkFailure, mediaServerShows } from '@/lib/bulkFailures';
+import { stateInWords as inWords } from '@/lib/mediaState';
 import { countIssues } from '../../shared/bulk-moderation';
 import type { AgeReviewState } from '../../shared/age-review';
 
@@ -68,17 +69,6 @@ function asSentence(fragment: string): string {
   const text = fragment.charAt(0).toUpperCase() + fragment.slice(1);
   return /[.!?]$/.test(text) ? text : `${text}.`;
 }
-
-// A recorded state in plain words (moderation-service's names).
-const STATE_WORDS: Record<string, string> = {
-  SAFE: 'public',
-  QUARANTINE: 'hidden',
-  PERMANENT_BAN: 'blocked',
-  AGE_RESTRICTED: 'behind the 18+ gate',
-  REVIEW: 'waiting for review',
-  DELETE: 'deleted',
-};
-const inWords = (state: string) => STATE_WORDS[state] ?? state.toLowerCase().replace(/_/g, ' ');
 
 // `final`: a permanent refusal (the file is no longer hidden as the note said,
 // the media server still hides a file its record calls public, or now blocks,

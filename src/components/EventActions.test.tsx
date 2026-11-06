@@ -41,13 +41,19 @@ beforeEach(() => {
   api.logDecision.mockResolvedValue(undefined);
 });
 
+// `invalidate` spies on the client's invalidateQueries, for tests that check
+// what the panel reads again.
 function renderWithProvider(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(
-    <QueryClientProvider client={qc}>
-      <TooltipProvider>{ui}</TooltipProvider>
-    </QueryClientProvider>
-  );
+  const invalidate = vi.spyOn(qc, 'invalidateQueries');
+  return {
+    ...render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>{ui}</TooltipProvider>
+      </QueryClientProvider>
+    ),
+    invalidate,
+  };
 }
 
 describe('EventActions', () => {
@@ -200,7 +206,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
     expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, THUMB]);
-    expect(api.moderateMedia).toHaveBeenCalledWith(THUMB, 'AGE_RESTRICTED', 'Age restricted by moderator');
+    expect(api.moderateMedia).toHaveBeenCalledWith(THUMB, 'AGE_RESTRICTED', 'Age restricted by moderator', undefined);
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 2 media file(s)' }));
   });
 
@@ -262,7 +268,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
       description: 'moderation down',
     })));
     expect(api.moderateMedia).toHaveBeenCalledTimes(1);
-    expect(api.moderateMedia).toHaveBeenCalledWith(VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator');
+    expect(api.moderateMedia).toHaveBeenCalledWith(VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator', undefined);
   });
 
   it('still reports Block Media done when the thumbnail fails', async () => {
@@ -329,7 +335,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
       title: 'Restriction removed',
       description: 'Thumbnail left restricted',
     }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Restriction removed by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'SAFE', 'Restriction removed by moderator']]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
       action: 'remove_restriction',
       reason: 'Removed restriction from 1 media file(s); thumbnail left restricted',
@@ -354,7 +360,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
       title: 'Media unblocked',
       description: 'Thumbnail left blocked',
     }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
   });
 
   it.each([
@@ -374,7 +380,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
     fireEvent.click(screen.getByRole('button', { name: button }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title }));
-    expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', apiReason]]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[THUMB, 'SAFE', apiReason]]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action, reason })));
     expect(api.logDecision).toHaveBeenCalledTimes(1);
   });
@@ -513,7 +519,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
     fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
   });
 
   it('reports the thumbnail failure in the words the worker sends', async () => {
@@ -901,7 +907,8 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
         hasRestrictedMedia={true}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
-          { hash: THUMB, isBlocked: false, isRestricted: false },
+          // No moderation record, as useMediaStatus reports one.
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
         ]} />
     );
 
@@ -910,9 +917,10 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Age Restrict again (2)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
+    // Each file with the state this screen showed for it (#336).
     expect(api.moderateMedia.mock.calls).toEqual([
-      [VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator'],
-      [THUMB, 'AGE_RESTRICTED', 'Age restricted by moderator'],
+      [VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator', 'AGE_RESTRICTED'],
+      [THUMB, 'AGE_RESTRICTED', 'Age restricted by moderator', 'UNKNOWN'],
     ]);
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 2 media file(s)' }));
   });
@@ -932,9 +940,10 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Block again (2)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
+    // Each file with the state this screen showed for it (#336).
     expect(api.moderateMedia.mock.calls).toEqual([
-      [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator'],
-      [THUMB, 'PERMANENT_BAN', 'Blocked by moderator'],
+      [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator', 'PERMANENT_BAN'],
+      [THUMB, 'PERMANENT_BAN', 'Blocked by moderator', 'AGE_RESTRICTED'],
     ]);
   });
 
@@ -965,7 +974,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator', 'SAFE']]);
   });
 
   it('offers no Block again on a video age review hid, so a hide never becomes a permanent ban', () => {
@@ -1169,7 +1178,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       title: 'Media unblocked',
       description: 'Thumbnail left blocked',
     }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'SAFE', 'Unblocked by moderator']]);
   });
 
   it('offers the thumbnail button only for the thumbnails this screen gates, and lifts only those', async () => {
@@ -1186,7 +1195,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Unblock thumbnail (1)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', 'Unblocked by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[THUMB, 'SAFE', 'Unblocked by moderator']]);
   });
 
   it('removes the restriction from the restricted thumbnail only, never a blocked one', async () => {
@@ -1202,7 +1211,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Remove thumbnail restriction (1)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', 'Restriction removed by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[THUMB, 'SAFE', 'Restriction removed by moderator']]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
   });
 
@@ -1220,7 +1229,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Remove Restriction' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'SAFE', 'Restriction removed by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'SAFE', 'Restriction removed by moderator']]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
   });
 
@@ -1306,7 +1315,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Blocked 1 media file(s)' }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
   });
 
   it('skips a thumbnail whose status could not be read when blocking, and warns it may be open', async () => {
@@ -1327,7 +1336,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       variant: 'destructive',
       duration: 10000,
     }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
       reason: 'Blocked 1 media file(s); thumbnail skipped: its status could not be read',
     })));
@@ -1497,7 +1506,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
       variant: 'destructive',
       duration: 10000,
     }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
       reason: 'Age restricted 1 media file(s); thumbnail skipped: its status could not be read',
     })));
@@ -1558,7 +1567,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (1)' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 1 media file(s)' }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
   });
 
   it('never age restricts a thumbnail that was deleted', async () => {
@@ -1575,7 +1584,437 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (1)' }));
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 1 media file(s)' }));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
+    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator']]);
+  });
+});
+
+// #336: every media write names the state the moderator saw, so a file that
+// changed since the screen loaded is refused instead of overwritten.
+describe('EventActions: media actions send the state the screen showed', () => {
+  // Full-length 64-char hex hashes, never truncated.
+  const VIDEO = '81661ca024bec2be842557ff7e07c833660038f134203f10293568f5ea11863f';
+  const THUMB = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068';
+  const PUBKEY = 'a'.repeat(64);
+
+  // The worker's refusals (handleModerateMedia's `from` check), as apiRequest
+  // turns them into errors.
+  const changed = (current: string, action = 'PERMANENT_BAN') => new ApiError(
+    `Refusing ${action}: expected current state SAFE, found ${current}`, 409, 'Conflict', 'state_mismatch', undefined, current,
+  );
+  const unreadable = () => new ApiError(
+    'Could not read current media state; refusing to act', 503, 'Service Unavailable', 'state_unreadable',
+  );
+
+  // How many times the panel itself read the media status again, matched on the
+  // key's first part so a longer key or extra options still count. Once per
+  // failed action: an action that ends in showDone leaves it to onActionComplete.
+  type Invalidate = { mock: { calls: unknown[][] } };
+  const statusReads = (invalidate: Invalidate) => invalidate.mock.calls
+    .filter(([filters]) => (filters as { queryKey?: unknown[] } | undefined)?.queryKey?.[0] === 'media-status')
+    .length;
+  const expectStatusRechecked = (invalidate: Invalidate) => expect(statusReads(invalidate)).toBe(1);
+
+  const openPost = [
+    { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+    // No moderation record: the worker reads that as UNKNOWN.
+    { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
+  ];
+
+  it.each([
+    ['Block Media (2)', 'PERMANENT_BAN', 'Blocked by moderator'],
+    ['Age Restrict (2)', 'AGE_RESTRICTED', 'Age restricted by moderator'],
+  ] as const)('%s sends each file the state it was decided on', async (button, action, reason) => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={openPost} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+
+    await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, action, reason, 'SAFE'],
+      [THUMB, action, reason, 'UNKNOWN'],
+    ]);
+  });
+
+  it('sends the hide it lifts when Unblock Media lifts an age-review hide', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} hasBlockedMedia={true}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: true, isRestricted: false, action: 'QUARANTINE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
+
+    await waitFor(() => expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'SAFE', 'Unblocked by moderator', 'QUARANTINE'],
+    ]));
+  });
+
+  it('sends AGE_RESTRICTED when Remove Restriction lifts the 18+ gate', async () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} hasRestrictedMedia={true}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Remove Restriction' }));
+
+    await waitFor(() => expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'SAFE', 'Restriction removed by moderator', 'AGE_RESTRICTED'],
+    ]));
+  });
+
+  it.each([
+    ['Unblock thumbnail (1)', 'PERMANENT_BAN', 'Unblocked by moderator', true],
+    ['Remove thumbnail restriction (1)', 'AGE_RESTRICTED', 'Restriction removed by moderator', false],
+  ] as const)('%s sends the gate it lifts', async (button, action, reason, blocked) => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: blocked, isRestricted: !blocked, action },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+
+    await waitFor(() => expect(api.moderateMedia.mock.calls).toEqual([[THUMB, 'SAFE', reason, action]]));
+  });
+
+  it.each([
+    ['Delete Media (2)'],
+    ['Delete Event & Media'],
+  ] as const)('%s names no state, so a delete goes ahead whatever the record shows', async (button) => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'AGE_RESTRICTED' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(api.deleteMedia).toHaveBeenCalledTimes(2));
+    expect(api.deleteMedia.mock.calls).toEqual([
+      [VIDEO, 'Permanently deleted by moderator'],
+      [THUMB, 'Permanently deleted by moderator'],
+    ]);
+    expect(api.deleteMedia.mock.calls.every((call) => call[2] === undefined)).toBe(true);
+  });
+
+  it('fails the action in plain words when the video changed, and checks the status again', async () => {
+    api.moderateMedia.mockImplementation((hash: string) =>
+      (hash === VIDEO ? Promise.reject(changed('QUARANTINE')) : Promise.resolve({ success: true })));
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        mediaHashStatuses={openPost} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to block media',
+      description: "The file's moderation record changed after this screen loaded and now shows it hidden",
+      variant: 'destructive',
+    }));
+    expect(api.moderateMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO]);
+    expectStatusRechecked(invalidate);
+  });
+
+  // The action still completes, so the status is read again through
+  // onActionComplete (ReportDetail's handleActionComplete), once, and not by the
+  // panel as well.
+  it('warns when the thumbnail changed, and checks the status again once the action ends', async () => {
+    api.moderateMedia.mockImplementation((hash: string) =>
+      (hash === THUMB ? Promise.reject(changed('UNKNOWN')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'SAFE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (2)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Video age restricted; thumbnail NOT age restricted',
+      description: "The file's moderation record was removed after this screen loaded",
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
+  });
+
+  it('fails an undo in plain words when the state could not be checked, and checks the status again', async () => {
+    api.moderateMedia.mockRejectedValue(unreadable());
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} hasBlockedMedia={true}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to unblock media',
+      description: "The file's moderation record could not be checked just now, so it was left as it is",
+      variant: 'destructive',
+    }));
+    expectStatusRechecked(invalidate);
+  });
+
+  it('fails Delete Media with the worker\'s words, and checks the status again', async () => {
+    api.deleteMedia.mockRejectedValue(new Error('moderation down'));
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Media (1)' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to delete media',
+      description: 'moderation down',
+      variant: 'destructive',
+    }));
+    expectStatusRechecked(invalidate);
+  });
+
+  // Video files are written one after another and the first failure stops the
+  // action. Files written before it changed, so the moderator is told how many
+  // and the audit log records them, as a partial undo does.
+  it.each([
+    ['Block Media (3)', 'moderateMedia', 'Failed to block media', 'blocked', 'block_media', 'Blocked 1 media file(s)', false],
+    ['Age Restrict (3)', 'moderateMedia', 'Failed to age restrict', 'age restricted', 'age_restrict_media', 'Age restricted 1 media file(s)', false],
+    ['Delete Media (3)', 'deleteMedia', 'Failed to delete media', 'deleted', 'delete_media', 'Deleted 1 media file(s)', true],
+  ] as const)('%s says how many were written when a later video fails, and logs those', async (
+    button, call, title, verb, auditAction, auditReason, confirm,
+  ) => {
+    const VIDEO_2 = 'c'.repeat(64);
+    api[call].mockImplementation((hash: string) =>
+      (hash === VIDEO_2 ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} thumbnailHashes={[THUMB]}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: VIDEO_2, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'SAFE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    // Counted over the video files only: the thumbnail comes after them, and is
+    // never reached once a video fails.
+    const message = `1 of 2 ${verb}, then: moderation down`;
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title,
+      description: message,
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api[call].mock.calls.map((c) => c[0])).toEqual([VIDEO, VIDEO_2]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: auditAction,
+      reason: `${auditReason}; ${message}`,
+    })));
+    expect(api.logDecision).toHaveBeenCalledTimes(1);
+    // Something did change, so the status is read again, once, by the host.
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
+  });
+
+  // Another moderator got there first: the record already shows the block, so
+  // the write has nothing to overwrite and goes again from that state.
+  it('blocks from the new state when the record already shows it blocked', async () => {
+    api.moderateMedia.mockRejectedValueOnce(changed('PERMANENT_BAN'));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Blocked 1 media file(s)' }));
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator', 'SAFE'],
+      [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator', 'PERMANENT_BAN'],
+    ]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'block_media' })));
+  });
+
+  it('fails a block sent again when the record changed once more', async () => {
+    api.moderateMedia
+      .mockRejectedValueOnce(changed('PERMANENT_BAN'))
+      .mockRejectedValueOnce(changed('QUARANTINE'));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to block media',
+      description: "The file's moderation record changed after this screen loaded and now shows it hidden",
+      variant: 'destructive',
+    }));
+    expect(api.moderateMedia).toHaveBeenCalledTimes(2);
+    expect(api.logDecision).not.toHaveBeenCalled();
+  });
+
+  // A lift is never sent again: the record can read as the lift asked while the
+  // media server hides the file (a status set in its own admin), and a second
+  // SAFE or AGE_RESTRICTED would open it.
+  it.each([
+    ['Unblock Media', 'SAFE', 'Failed to unblock media', 'public',
+      { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' }, { hasBlockedMedia: true }],
+    ['Age Restrict (1)', 'AGE_RESTRICTED', 'Failed to age restrict', 'behind the 18+ gate',
+      { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }, {}],
+  ] as const)('%s is refused, not sent again, when the record already shows it', async (button, action, title, words, status, flags) => {
+    api.moderateMedia.mockRejectedValueOnce(changed(action, action));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} {...flags}
+        mediaHashStatuses={[status]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title,
+      description: `The file's moderation record changed after this screen loaded and now shows it ${words}`,
+      variant: 'destructive',
+    }));
+    expect(api.moderateMedia).toHaveBeenCalledTimes(1);
+  });
+
+  it('says how many were lifted when a later video is refused, and logs those', async () => {
+    const VIDEO_2 = 'c'.repeat(64);
+    api.moderateMedia.mockImplementation((hash: string) =>
+      (hash === VIDEO_2 ? Promise.reject(changed('QUARANTINE', 'SAFE')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} hasBlockedMedia={true}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: VIDEO_2, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
+
+    const message = "1 of 2 lifted, then: The file's moderation record changed after this screen loaded and now shows it hidden";
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to unblock media',
+      description: message,
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'SAFE', 'Unblocked by moderator', 'PERMANENT_BAN'],
+      [VIDEO_2, 'SAFE', 'Unblocked by moderator', 'PERMANENT_BAN'],
+    ]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'unblock_media',
+      reason: `Unblocked 1 media file(s); ${message}`,
+    })));
+    // Something did change, so the status is read again, once.
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
+  });
+
+  // The event is already gone by the media half, so the warning says how many
+  // video files went with it.
+  it('says how many videos Delete Event & Media deleted when a later one fails, and checks the status again once', async () => {
+    const VIDEO_2 = 'c'.repeat(64);
+    api.deleteMedia.mockImplementation((hash: string) =>
+      (hash === VIDEO_2 ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} thumbnailHashes={[THUMB]}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: VIDEO_2, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'SAFE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Partially completed',
+      description: 'Event was deleted but media deletion failed: 1 of 2 deleted, then: moderation down',
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'delete_event_and_media_partial',
+      reason: expect.stringContaining(`completed: event_deleted, media_${VIDEO})`),
+    })));
+    // The event's own row and the partial row, never a second partial or a
+    // full-success row.
+    expect(api.logDecision.mock.calls.map(([entry]) => (entry as { action: string }).action).sort())
+      .toEqual(['delete_event', 'delete_event_and_media_partial']);
+    expect(api.deleteMedia.mock.calls.map((call) => call[0])).toEqual([VIDEO, VIDEO_2]);
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
+  });
+
+  it('shows any other refusal as the worker gave it, and checks the status again', async () => {
+    api.moderateMedia.mockRejectedValue(new ApiError(
+      'Another account owns this file; refusing to act for this one', 409, 'Conflict', 'owner_mismatch',
+    ));
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to block media',
+      description: 'Another account owns this file; refusing to act for this one',
+      variant: 'destructive',
+    }));
+    expectStatusRechecked(invalidate);
+  });
+
+  // The lift guard (worker/src/index.ts mediaLiftGuard) answers a SAFE or an
+  // AGE_RESTRICTED before the `from` check does. So when age review hides a
+  // video this screen still shows public, Age Restrict is refused as an open
+  // age review, not as a changed state, and the status this screen shows is
+  // just as out of date.
+  it('checks the status again when the lift guard refuses Age Restrict for an open age review', async () => {
+    api.moderateMedia.mockRejectedValue(new ApiError(
+      "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+      409, 'Conflict', 'age_review_active',
+    ));
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to age restrict',
+      description: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+      variant: 'destructive',
+    }));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator', 'SAFE']]);
+    expectStatusRechecked(invalidate);
   });
 });
 

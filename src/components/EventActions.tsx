@@ -6,6 +6,8 @@ import { getToasts, useToast } from '@/hooks/useToast';
 import type { toast as showToast } from '@/hooks/useToast';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
+import type { ExpectedMediaState, ModerationAction } from '@/lib/adminApi';
+import { describeStateRefusal, expectedStateOf } from '@/lib/mediaState';
 import { DeleteConfirmDialog } from './DeleteConfirmDialog';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { ApiError } from '@/lib/adminApi';
@@ -83,6 +85,25 @@ export function EventActions({
   const thumbnails = thumbnailHashes.filter((hash) => !mediaHashes.includes(hash));
   const fileCount = mediaHashes.length + thumbnails.length;
 
+  // Writes files one after another; the first that fails stops the run. Any
+  // written before it did change, so the error then says how many: "1 of 2
+  // blocked, then: <why>", with `written`, the count logPartial logs.
+  const writeInTurn = async (hashes: string[], write: (hash: string) => Promise<unknown>, verb: string) => {
+    let written = 0;
+    try {
+      for (const hash of hashes) {
+        await write(hash);
+        written++;
+      }
+    } catch (error) {
+      if (written === 0) throw error;
+      throw Object.assign(
+        new Error(`${written} of ${hashes.length} ${verb}, then: ${error instanceof Error ? error.message : 'unknown error'}`),
+        { written },
+      );
+    }
+  };
+
   // Videos first: a failure there fails the action, as before. Thumbnails after,
   // and a thumbnail failure never fails the action, because #66 found that a
   // thumbnail the media server has no record of failed the whole button.
@@ -92,9 +113,13 @@ export function EventActions({
   // service's 502 and the worker's error text. That stays a note. Any other
   // thumbnail failure leaves a file the media server does hold unchanged, so it
   // comes back as a warning.
+  //
+  // The video files are written in turn (writeInTurn), and the first that fails
+  // stops the action, for the caller to log what went before it (logPartial).
   const actOnFiles = async (
     hashes: string[],
     act: (hash: string) => Promise<unknown>,
+    verb: string,
   ): Promise<{
     changed: number;
     thumbnailNote?: string;
@@ -104,7 +129,7 @@ export function EventActions({
   }> => {
     const isThumbnail = (hash: string) => thumbnails.includes(hash);
     const videos = hashes.filter((h) => !isThumbnail(h));
-    for (const hash of videos) await act(hash);
+    await writeInTurn(videos, act, verb);
     let changed = videos.length;
     const errors: { message: string; notFound: boolean }[] = [];
     for (const hash of hashes.filter(isThumbnail)) {
@@ -138,6 +163,54 @@ export function EventActions({
   };
   const allFiles = [...mediaHashes, ...thumbnails];
   const statusOf = (hash: string) => mediaHashStatuses.find((s) => s.hash === hash);
+  // Every media write but a delete names the state this screen showed for the
+  // file (#336), so the worker refuses it if another moderator or the automated
+  // checks changed the file since. A refusal fails a video's action and is a
+  // warning for a thumbnail, as any failure is, in plain words. Other errors
+  // keep the worker's words.
+  //
+  // A block whose record already shows a block has nothing to overwrite:
+  // another moderator, or the automated checks, got there first. So it is sent
+  // again from that state, as it went through before the check, and the action
+  // completes and is logged instead of failing on a file that is already as the
+  // moderator wants it. A lift (SAFE, AGE_RESTRICTED) is still refused. The
+  // record is all the worker compares, and the media server can hide a file
+  // whose record says otherwise (a status set in its own admin), so a lift sent
+  // again could open a file a fresh screen would not offer to open.
+  const writeMedia = async (
+    hash: string,
+    action: ModerationAction,
+    write: (from: ExpectedMediaState | undefined) => Promise<unknown>,
+  ) => {
+    const resendable = action === 'PERMANENT_BAN';
+    try {
+      await write(expectedStateOf(statusOf(hash))).catch((error: unknown) => {
+        if (resendable && error instanceof ApiError && error.code === 'state_mismatch' && error.currentState === action) {
+          return write(action);
+        }
+        throw error;
+      });
+    } catch (error) {
+      const refusal = describeStateRefusal(error);
+      if (refusal === undefined) throw error;
+      throw new Error(refusal);
+    }
+  };
+  // Any failed write puts this screen's status in doubt, not only a refused
+  // `from`: the worker's lift guard answers a SAFE or AGE_RESTRICTED first, so a
+  // file age review hid since this screen loaded comes back as an open age
+  // review, and a write that timed out may have landed. So the status is read
+  // again once, when the action ends: an action that ends in showDone (a
+  // thumbnail's failure, or a partial one) gets that from onActionComplete, and
+  // one that fails outright reads it here.
+  const recheckMedia = () => queryClient.invalidateQueries({ queryKey: ['media-status'] });
+  const moderateFile = (hash: string, action: ModerationAction, reason: string) =>
+    writeMedia(hash, action, (from) => api.moderateMedia(hash, action, reason, from));
+  // A delete names no state. `from` is there so a write made on a stale screen
+  // can't open a file or weaken its state, and a delete can do neither. Named,
+  // any change to the record would refuse it, and in Delete Event & Media the
+  // event is gone by then, so the video would stay up by its URL.
+  const deleteFile = (hash: string) => api.deleteMedia(hash, 'Permanently deleted by moderator');
   // Any status but DELETE moves a deleted file out of Deleted on the media server
   // (divine-blossom handle_admin_moderate and handle_admin_moderate_action both),
   // so no status is ever sent to a deleted file: a deleted video gets no Block or
@@ -361,10 +434,50 @@ export function EventActions({
     },
   });
 
+  // A run of writes that stopped after some went through (writeInTurn): the
+  // audit log records those, and the error carries the toast holder, so the
+  // failure toast can take a failed audit write the way a warning does. Any
+  // other error passes through untouched.
+  const logPartial = (
+    moderator: Promise<string | undefined>,
+    audit: { action: string; reason: (count: number) => string },
+  ) => (error: unknown): never => {
+    const written = (error as { written?: number } | undefined)?.written ?? 0;
+    if (!(error instanceof Error) || written === 0) throw error;
+    const partial: ShownToast = {};
+    logAudit(moderator, { targetType: 'event', targetId: eventId, action: audit.action, reason: `${audit.reason(written)}; ${error.message}` }, partial);
+    throw Object.assign(error, { partial });
+  };
+
+  // Lifts files in turn; a failure after some were lifted is logged and
+  // reported as a partial, as a forward action's is.
+  const liftEach = (
+    hashes: string[],
+    apiReason: string,
+    moderator: Promise<string | undefined>,
+    audit: { action: string; reason: (count: number) => string },
+  ) => writeInTurn(hashes, (hash) => moderateFile(hash, 'SAFE', apiReason), 'lifted').catch(logPartial(moderator, audit));
+
+  // A media action's failure. After a partial write something did change, so it
+  // ends through showDone, as the combined delete does on a partial: a failed
+  // audit write joins its warning, and onActionComplete reads the media status
+  // again. With nothing written, the status is read again here (see recheckMedia).
+  const actionFailed = (title: string) => (error: Error & { partial?: ShownToast }) => {
+    const failure: DoneToast = { title, description: error.message, variant: 'destructive' };
+    if (error.partial) {
+      error.partial.toast = { ...failure, duration: WARNING_DURATION_MS };
+      showDone(error.partial);
+    } else {
+      recheckMedia();
+      toast(failure);
+    }
+  };
+
   const blockMediaMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = withUnreadSkipped(await actOnFiles(filesToBlock, (hash) => api.moderateMedia(hash, 'PERMANENT_BAN', 'Blocked by moderator')));
+      const result = withUnreadSkipped(await actOnFiles(filesToBlock, (hash) => moderateFile(hash, 'PERMANENT_BAN', 'Blocked by moderator'), 'blocked')
+        .catch(logPartial(moderator, { action: 'block_media', reason: (count) => `Blocked ${count} media file(s)` })));
       const shown: ShownToast = { toast: doneToast(`Blocked ${result.changed} media file(s)`, (what) => `Video blocked; ${what} NOT blocked`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -375,15 +488,14 @@ export function EventActions({
       return shown;
     },
     onSuccess: showDone,
-    onError: (error: Error) => {
-      toast({ title: 'Failed to block media', description: error.message, variant: 'destructive' });
-    },
+    onError: actionFailed('Failed to block media'),
   });
 
   const ageRestrictMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = withUnreadSkipped(await actOnFiles(filesToRestrict, (hash) => api.moderateMedia(hash, 'AGE_RESTRICTED', 'Age restricted by moderator')));
+      const result = withUnreadSkipped(await actOnFiles(filesToRestrict, (hash) => moderateFile(hash, 'AGE_RESTRICTED', 'Age restricted by moderator'), 'age restricted')
+        .catch(logPartial(moderator, { action: 'age_restrict_media', reason: (count) => `Age restricted ${count} media file(s)` })));
       const shown: ShownToast = { toast: doneToast(`Age restricted ${result.changed} media file(s)`, (what) => `Video age restricted; ${what} NOT age restricted`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -394,46 +506,8 @@ export function EventActions({
       return shown;
     },
     onSuccess: showDone,
-    onError: (error: Error) => {
-      toast({ title: 'Failed to age restrict', description: error.message, variant: 'destructive' });
-    },
+    onError: actionFailed('Failed to age restrict'),
   });
-
-  // Lifts files one after another. When one fails after others were lifted, the
-  // audit log records those, and the error says so and carries the toast holder,
-  // so the failure toast can take a failed audit write the way a warning does.
-  const liftEach = async (
-    hashes: string[],
-    apiReason: string,
-    moderator: Promise<string | undefined>,
-    audit: { action: string; reason: (count: number) => string },
-  ) => {
-    let lifted = 0;
-    try {
-      for (const hash of hashes) {
-        await api.moderateMedia(hash, 'SAFE', apiReason);
-        lifted++;
-      }
-    } catch (error) {
-      if (lifted === 0) throw error;
-      const message = `${lifted} of ${hashes.length} lifted, then: ${error instanceof Error ? error.message : 'unknown error'}`;
-      const partial: ShownToast = {};
-      logAudit(moderator, { targetType: 'event', targetId: eventId, action: audit.action, reason: `${audit.reason(lifted)}; ${message}` }, partial);
-      throw Object.assign(new Error(message), { partial });
-    }
-  };
-
-  // An undo's failure. After a partial lift something did change, so the screen
-  // checks the media status again, as the combined delete does on a partial.
-  const undoFailed = (title: string) => (error: Error & { partial?: ShownToast }) => {
-    const failure: DoneToast = { title, description: error.message, variant: 'destructive' };
-    if (error.partial) {
-      error.partial.toast = { ...failure, duration: WARNING_DURATION_MS };
-      showDone(error.partial);
-    } else {
-      toast(failure);
-    }
-  };
 
   // Undo of the video files. Thumbnails keep their gate (see gatedVideos), and the
   // toast says how many did.
@@ -477,34 +551,35 @@ export function EventActions({
     mutationFn: () => undoVideos((s) => s.isBlocked, 'blocked', 'Media unblocked', 'Unblocked by moderator',
       { action: 'unblock_media', reason: (count) => `Unblocked ${count} media file(s)` }),
     onSuccess: showDone,
-    onError: undoFailed('Failed to unblock media'),
+    onError: actionFailed('Failed to unblock media'),
   });
 
   const removeRestrictionMutation = useMutation({
     mutationFn: () => undoVideos((s) => s.isRestricted, 'restricted', 'Restriction removed', 'Restriction removed by moderator',
       { action: 'remove_restriction', reason: (count) => `Removed restriction from ${count} media file(s)` }),
     onSuccess: showDone,
-    onError: undoFailed('Failed to remove restriction'),
+    onError: actionFailed('Failed to remove restriction'),
   });
 
   const unblockThumbnailMutation = useMutation({
     mutationFn: () => undoThumbnails(thumbnailsToUnblock, 'Unblocked by moderator', (what) => `${what} unblocked`,
       { action: 'unblock_media', reason: (count) => `Unblocked ${count} thumbnail(s)` }),
     onSuccess: showDone,
-    onError: undoFailed('Failed to unblock thumbnail'),
+    onError: actionFailed('Failed to unblock thumbnail'),
   });
 
   const unrestrictThumbnailMutation = useMutation({
     mutationFn: () => undoThumbnails(thumbnailsToUnrestrict, 'Restriction removed by moderator', (what) => `Restriction removed from ${what}`,
       { action: 'remove_restriction', reason: (count) => `Removed restriction from ${count} thumbnail(s)` }),
     onSuccess: showDone,
-    onError: undoFailed('Failed to remove thumbnail restriction'),
+    onError: actionFailed('Failed to remove thumbnail restriction'),
   });
 
   const deleteMediaMutation = useMutation({
     mutationFn: async () => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const result = await actOnFiles(allFiles, (hash) => api.deleteMedia(hash, 'Permanently deleted by moderator'));
+      const result = await actOnFiles(allFiles, deleteFile, 'deleted')
+        .catch(logPartial(moderator, { action: 'delete_media', reason: (count) => `Deleted ${count} media file(s)` }));
       const shown: ShownToast = { toast: doneToast(`Deleted ${result.changed} media file(s)`, (what) => `Video deleted; ${what} NOT deleted`, result) };
       logAudit(moderator, {
         targetType: 'event',
@@ -515,9 +590,7 @@ export function EventActions({
       return shown;
     },
     onSuccess: showDone,
-    onError: (error: Error) => {
-      toast({ title: 'Failed to delete media', description: error.message, variant: 'destructive' });
-    },
+    onError: actionFailed('Failed to delete media'),
   });
 
   const deleteEventAndMediaMutation = useMutation({
@@ -532,9 +605,9 @@ export function EventActions({
         logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' }, shown);
 
         const result = await actOnFiles(allFiles, async (hash) => {
-          await api.deleteMedia(hash, 'Permanently deleted by moderator');
+          await deleteFile(hash);
           completed.push(`media_${hash}`);
-        });
+        }, 'deleted');
         shown.toast = doneToast('Event and media permanently deleted', (what) => `Event and video deleted; ${what} NOT deleted`, result);
         logAudit(moderator, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: withNote(`Permanently deleted event + ${result.changed} media file(s)`, result.thumbnailNote) }, shown);
         return shown;
