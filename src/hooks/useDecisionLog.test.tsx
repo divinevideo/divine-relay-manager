@@ -1,4 +1,4 @@
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query';
 import { renderHook, waitFor } from '@testing-library/react';
 import type { ReactNode } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -188,4 +188,27 @@ describe('useDecisionLog handling decisions', () => {
       expect(result.current.latestHandlingDecision?.action).toBe(action);
     },
   );
+});
+
+// ReportDetail reads isPending to tell "no decisions read yet" from "nothing
+// recorded". A read held back offline is pending without fetching, so
+// isLoading is false there and would let an unread log pass for an empty one.
+describe('useDecisionLog read state', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('stays pending while its first read is held back offline', async () => {
+    onlineManager.setOnline(false);
+    try {
+      getDecisions.mockResolvedValue([]);
+      const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+
+      await waitFor(() => expect(result.current.isLoading).toBe(false));
+      expect(result.current.isPending).toBe(true);
+      expect(getDecisions).not.toHaveBeenCalled();
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
 });

@@ -25,6 +25,12 @@ export interface ModerationStatus {
   isUserSuspendedStale: boolean;
   /** Event ID is in the relay's ban list */
   isEventBanned: boolean | null;
+  /**
+   * `isEventBanned` is `true` only because a copy of the banned-events list
+   * whose latest refresh failed said so. listMembership keeps that presence on
+   * purpose, but it is last known, not confirmed: the ban may have been lifted.
+   */
+  isEventBannedStale: boolean;
   /** Event is not queryable from the relay (deleted, banned, or never existed) */
   isEventGone: boolean | null;
   /** Ban list data is still loading */
@@ -48,6 +54,14 @@ export interface ModerationStatus {
    * Always false with no pubkey.
    */
   isUserBanChecking: boolean;
+  /**
+   * A read of the suspended list is in flight (first load, retry or re-read).
+   * Narrower than isAccountStatusLoading: once it is false, a suspension that is
+   * still unknown could not be read, rather than not read yet.
+   */
+  isUserSuspensionChecking: boolean;
+  /** As isUserSuspensionChecking, for the banned-events list. */
+  isEventBanChecking: boolean;
   /**
    * The live check (verifyPubkeyBanned / verifyEventDeleted) is running. Does
    * not cover the list re-reads it asks for; those are in
@@ -222,6 +236,7 @@ export function useModerationStatus(
   // that is what is being shown.
   const isUserSuspendedStale = isUserSuspendedFromList === true && !suspendedReRead.current;
   const bannedFromStaleList = isUserBannedFromList === true && !bannedReRead.current;
+  const isEventBannedStale = isEventBannedFromList === true && bannedEvents.isError;
 
   const banListsLoading = bannedPubkeys.isLoading || bannedEvents.isLoading || suspendedPubkeys.isLoading;
 
@@ -403,6 +418,7 @@ export function useModerationStatus(
     isUserSuspendedStale,
     // Event in ban list (separate from "gone" — banned events can be retrieved via admin API)
     isEventBanned: isEventBannedFromList,
+    isEventBannedStale,
     // Event gone from relay (WebSocket verified, or known from ban list)
     isEventGone: wsResult.eventGone === undefined
       ? (isEventBannedFromList === true ? true : null)
@@ -424,6 +440,8 @@ export function useModerationStatus(
       || wsResult.isChecking
       || bannedReRead.rereading
     ),
+    isUserSuspensionChecking: !!pubkey && suspendedPubkeys.fetchStatus === 'fetching',
+    isEventBanChecking: !!eventId && bannedEvents.fetchStatus === 'fetching',
     isChecking: wsResult.isChecking,
     checkedAt: wsResult.checkedAt,
     recheck,

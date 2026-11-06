@@ -9,7 +9,7 @@ import { isAutomatedDecision } from "../../shared/automated-decision";
 export function useDecisionLog(targetId: string | null | undefined) {
   const { getDecisions } = useAdminApi();
 
-  const { data, isLoading, error, refetch } = useQuery({
+  const { data, isLoading, isPending, error, refetch } = useQuery({
     queryKey: ['decisions', targetId],
     queryFn: async () => {
       if (!targetId) return [];
@@ -77,6 +77,11 @@ export function useDecisionLog(targetId: string | null | undefined) {
     isAutoHideUnresolved,
     isPendingReview,
     isLoading,
+    /**
+     * No decisions have been read yet: loading, retrying, or held back offline
+     * (where isLoading is false). Until then "nothing recorded" is not known.
+     */
+    isPending,
     error,
     refetch,
   };

@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
 import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
@@ -173,6 +174,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const daysRemaining = getDaysRemaining(c);
   const claimLinkExpired = c.claim_link_expires_at != null && new Date(c.claim_link_expires_at).getTime() < Date.now();
 
+  // The environment an update started in, for the restore window (lib/userStatsCache).
+  const restoreEnvironment = useRestoreEnvironment();
+
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
       pendingStateRef.current = updates.state as string | undefined;
@@ -182,7 +186,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // fire with the LATEST render's closure, so after a mid-flight case
     // switch a closure-read c would misroute every cache write below
     // (review: wrong case's keys written, the acted-on case left stale)
-    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey }),
+    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey, environment: restoreEnvironment }),
     onSuccess: (data, updates, ctx) => {
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
@@ -336,7 +340,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // leaves both statuses alone, unless it lost a version conflict, since the
     // winning write may have been a decision. Key shape:
     // ['account-status', apiUrl, pubkey], lowercased as useAccountStatus is called.
-    onSettled: (_data, error, updates, ctx) => {
+    onSettled: (data, error, updates, ctx) => {
       if (!ctx) return;
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
@@ -345,6 +349,23 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         queryKey: ['account-status'],
         predicate: (query) => query.queryKey[2] === subject,
       });
+      // Restrict suspends the account, clear unsuspends it and deny bans it,
+      // so the shared authored-content reads describe the other state
+      // (lib/userStatsCache). Settled for the same reason as above: the reset
+      // is harmless whatever happened. The restore window says the account was
+      // just restored, so it opens only for a clear whose relay unsuspend the
+      // worker confirmed in its response: a rejected update (a version
+      // conflict comes before enforcement) has none, and a failed relay leg
+      // says so. Another leg failing does not change what the relay shows.
+      // A restrict (suspend) or deny (ban) whose relay leg landed hides the
+      // account again, so it ends a window an earlier restore left open.
+      // The environment is the one the update started in (onMutate).
+      const relayOk = data?.enforcement?.relay === 'ok';
+      const state = typeof updates.state === 'string' ? updates.state : undefined;
+      const hidesAccount = state === 'denied_closed' || (state?.startsWith('restricted_') ?? false);
+      if (state === 'cleared' && relayOk) void markRestored(queryClient, subject, ctx.environment);
+      else if (hidesAccount && relayOk) void markHidden(queryClient, subject, ctx.environment);
+      else void resetAccountContentReads(queryClient, subject);
     },
     onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed

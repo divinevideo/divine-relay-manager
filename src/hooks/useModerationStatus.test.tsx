@@ -437,6 +437,51 @@ describe('useModerationStatus', () => {
     expect(result.current.isUserSuspendedStale).toBe(true);
   });
 
+  // The banned-events list keeps a positive after a failed refresh too
+  // (listMembership). Report detail must not treat that as a confirmed event
+  // ban, which would explain a missing post as removed.
+  it('marks a kept event ban as stale when a later refresh fails', async () => {
+    listBannedEvents.mockResolvedValueOnce([{ id: EVENT_ID }]);
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper });
+    await waitFor(() => expect(result.current.isEventBanned).toBe(true), { timeout: 5000 });
+    expect(result.current.isEventBannedStale).toBe(false);
+
+    listBannedEvents.mockRejectedValue(new Error('relay unreachable'));
+    await act(async () => {
+      result.current.recheck();
+    });
+    await waitFor(() => expect(result.current.isEventBannedStale).toBe(true), { timeout: 5000 });
+    expect(result.current.isEventBanned).toBe(true);
+  });
+
+  // Per-list "still checking" flags, so a screen can say "still checking" for
+  // the one read still out and "couldn't check" for the one that failed.
+  it('says the suspension is being checked only while the suspended list is being read', async () => {
+    let answer: (v: unknown) => void = () => {};
+    listSuspendedPubkeys.mockImplementation(() => new Promise(r => { answer = r; }));
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper });
+    // The other lists answer at once; the suspended list is still out.
+    await waitFor(() => expect(result.current.isEventBanChecking).toBe(false));
+    expect(result.current.isUserSuspensionChecking).toBe(true);
+
+    await act(async () => { answer([]); });
+    await waitFor(() => expect(result.current.isUserSuspensionChecking).toBe(false));
+  });
+
+  it('says the event ban is being checked only while the banned-events list is being read', async () => {
+    let answer: (v: unknown) => void = () => {};
+    listBannedEvents.mockImplementation(() => new Promise(r => { answer = r; }));
+
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper });
+    await waitFor(() => expect(result.current.isUserSuspensionChecking).toBe(false));
+    expect(result.current.isEventBanChecking).toBe(true);
+
+    await act(async () => { answer([]); });
+    await waitFor(() => expect(result.current.isEventBanChecking).toBe(false));
+  });
+
   it('marks a kept ban as stale when a later refresh fails and the live check could not answer', async () => {
     listBannedPubkeys.mockResolvedValueOnce([{ pubkey: PUBKEY }]);
     verifyPubkeyBanned.mockResolvedValue(null);

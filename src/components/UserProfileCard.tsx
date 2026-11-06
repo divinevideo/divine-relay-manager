@@ -14,14 +14,15 @@ import { InlineMediaPreview } from "@/components/MediaPreview";
 import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { RECENT_AUTHORED_LIMIT, RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
 import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
-import { historyCount, historyStat } from "@/lib/historyCount";
+import { authoredContentStat, historyCount, historyStat } from "@/lib/historyCount";
+import { useJustRestored } from "@/lib/userStatsCache";
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -61,9 +62,23 @@ interface UserProfileCardProps {
    * meanwhile is forgotten.
    */
   hideMediaByDefault?: boolean | null;
+  /**
+   * The account is in the relay's suspended list (useModerationStatus's
+   * isUserSuspended), so the relay hides its content and an empty read is not
+   * an empty account. null or omitted when the list has not confirmed it.
+   */
+  isSuspended?: boolean | null;
+  /** The suspension is from a copy of the list that could not be refreshed. */
+  isSuspendedStale?: boolean;
+  /**
+   * A read of the suspended list is in flight (useModerationStatus's
+   * isUserSuspensionChecking), so a null isSuspended may yet settle: picks
+   * "checking" over "couldn't check".
+   */
+  isSuspensionChecking?: boolean;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false, isSuspended = null, isSuspendedStale = false, isSuspensionChecking = false }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
   const mediaShownByDefault = hideMediaByDefault === null ? null : !hideMediaByDefault;
   // The hook forgets a reveal when the account changes or the default turns
@@ -72,6 +87,8 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   // render, so the avatar is never mounted meanwhile.
   const [showAvatar, toggleAvatar] = useMediaVisibility(mediaShownByDefault, pubkey ?? "");
   const apiUrl = useApiUrl();
+  // This tab restored the account moments ago (unsuspend, unban, allow); the relay can lag (userStatsCache).
+  const justRestored = useJustRestored(pubkey);
 
   // Convert hex pubkey to npub
   let npub = "";
@@ -226,15 +243,25 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
         <div className="flex flex-wrap items-center gap-4 text-sm">
           <div className="flex items-center gap-1">
             <FileText className="h-4 w-4 text-muted-foreground" />
-            <span>{stats?.postCount || 0} events</span>
+            <span>{authoredContentStat({
+              count: stats?.postCount,
+              incomplete: stats?.authoredContentIncomplete ?? false,
+              suspended: isSuspended,
+              suspendedStale: isSuspendedStale,
+              suspensionChecking: isSuspensionChecking,
+              justRestored,
+              noun: 'events',
+              limit: RECENT_AUTHORED_LIMIT,
+            })}</span>
           </div>
           <div className="flex items-center gap-1">
             <Flag className="h-4 w-4 text-muted-foreground" />
-            <span>{historyStat(stats?.reportCount || 0, stats?.reportsTruncated ?? false, stats?.reportsIncomplete ?? false, 'reports')}</span>
+            {/* No stats yet is a read still out, not zero reports. */}
+            <span>{stats ? historyStat(stats.reportCount, stats.reportsTruncated, stats.reportsIncomplete, 'reports') : 'checking reports'}</span>
           </div>
           <div className="flex items-center gap-1">
             <Tag className="h-4 w-4 text-muted-foreground" />
-            <span>{historyStat(stats?.labelCount || 0, stats?.labelsTruncated ?? false, stats?.labelsIncomplete ?? false, 'labels')}</span>
+            <span>{stats ? historyStat(stats.labelCount, stats.labelsTruncated, stats.labelsIncomplete, 'labels') : 'checking labels'}</span>
           </div>
           {onViewActivity && (
             <Button

@@ -32,6 +32,7 @@ import { UserProfilePreview } from "@/components/UserProfilePreview";
 import { ReportedBy } from "@/components/ReporterInfo";
 import { UserIdentifier, UserDisplayName } from "@/components/UserIdentifier";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 interface LabelsProps {
   relayUrl: string;
@@ -89,6 +90,7 @@ export function Labels({ relayUrl }: LabelsProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const restoreEnvironment = useRestoreEnvironment();
   const { banPubkey, verifyPubkeyBanned } = useAdminApi();
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
@@ -128,7 +130,22 @@ export function Labels({ relayUrl }: LabelsProps) {
   // Ban mutation with proper loading state and error handling
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
-      const outcome = await banPubkey(pubkey, reason);
+      // The relay hides a banned account's content, so a stats read from
+      // before the ban describes the other state (lib/userStatsCache). Reset
+      // whatever the call did: a ban that could not be confirmed may have landed.
+      const env = restoreEnvironment; // the environment the action ran in
+      let outcome: Awaited<ReturnType<typeof banPubkey>>;
+      let hidden = false;
+      try {
+        outcome = await banPubkey(pubkey, reason);
+        hidden = true;
+      } finally {
+        // A ban or suspend that landed hides the account again, so a restore
+        // window still open would print "just restored": end it. Otherwise
+        // reset whatever the call did; one that could not be confirmed may have landed.
+        if (hidden) void markHidden(queryClient, pubkey, env);
+        else void resetAccountContentReads(queryClient, pubkey);
+      }
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {

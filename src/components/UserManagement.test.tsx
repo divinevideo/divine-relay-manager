@@ -2,7 +2,9 @@
 // The shared hook's own tests pin the predicate; these pin that each mutation
 // actually calls it, which is the failure mode that shipped once.
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import type { UserActionChange } from '@/components/UserActions';
+import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -38,14 +40,21 @@ vi.mock('@nostrify/react', () => ({
 }));
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: {}, updateConfig: vi.fn() }) }));
 // Children are irrelevant here and drag in their own dependencies.
-vi.mock('@/components/UserActions', () => ({ UserActions: () => null }));
+const userActionsProps = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }));
+vi.mock('@/components/UserActions', () => ({
+  UserActions: (props: Record<string, unknown>) => {
+    userActionsProps.last = props;
+    return null;
+  },
+}));
 // Render the action affordances it is handed, so the remove/unsuspend wiring
 // is reachable; everything else about the card is irrelevant here.
 vi.mock('@/components/BannedUserCard', () => ({
-  BannedUserCard: ({ actionButton, onUnban }: { actionButton?: React.ReactNode; onUnban?: () => void }) => (
+  BannedUserCard: ({ actionButton, onUnban, suspended }: { actionButton?: React.ReactNode; onUnban?: () => void; suspended?: boolean }) => (
     <div>
       {actionButton}
       {onUnban ? <button onClick={onUnban}>Unban</button> : null}
+      <span>{suspended ? 'card says suspended' : 'card says not suspended'}</span>
     </div>
   ),
 }));
@@ -54,8 +63,7 @@ const PUBKEY = 'a'.repeat(64);
 
 const guardRefusal = () => new ApiError('under age review', 409, 'Conflict', 'age_review_active');
 
-function renderWithProvider() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+function renderWithProvider(client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) {
   return render(
     <QueryClientProvider client={client}>
       <TooltipProvider>
@@ -121,6 +129,33 @@ describe('UserManagement age-review guard wiring', () => {
     fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+
+  // The relay hides a suspended account's content, so the card must know which
+  // list it was rendered from to say why it shows none.
+  it('tells a card on the Suspended tab that the account is suspended', async () => {
+    api.callRelayRpc.mockImplementation((method: string) => {
+      if (method === 'listsuspendedpubkeys') return Promise.resolve([{ pubkey: PUBKEY, reason: 'spam' }]);
+      return Promise.resolve([]);
+    });
+
+    renderWithProvider();
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+
+    expect(await screen.findByText('card says suspended')).toBeInTheDocument();
+  });
+
+  it('does not tell a card on the Banned tab that the account is suspended', async () => {
+    api.callRelayRpc.mockImplementation((method: string) => {
+      if (method === 'listbannedpubkeys') return Promise.resolve([{ pubkey: PUBKEY, reason: 'spam' }]);
+      return Promise.resolve([]);
+    });
+
+    renderWithProvider();
+    await screen.findByRole('button', { name: /^Unban$/i });
+
+    expect(screen.getByText('card says not suspended')).toBeInTheDocument();
+    expect(screen.queryByText('card says suspended')).not.toBeInTheDocument();
   });
 
   it('canonicalises an uppercase hex pubkey before it reaches the relay', async () => {
@@ -218,5 +253,322 @@ describe('UserManagement age-review guard wiring', () => {
       expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to allow user' })),
     );
     expect(navigate).not.toHaveBeenCalledWith(expect.stringContaining('/age-review'));
+  });
+});
+
+// The relay hides a banned or suspended account's content, so a stats read
+// cached before the action describes the other state. ReportDetail and
+// EventDetail would show it for useUserStats' 2 minute staleTime.
+describe('UserManagement drops cached authored-content reads after an account action', () => {
+  const STATS_KEY = ['user-stats', 'wss://relay.test', PUBKEY];
+
+  function clientWithStats() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(STATS_KEY, { postCount: 0 });
+    return client;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    userActionsProps.last = null;
+    api.callRelayRpc.mockResolvedValue([]);
+    api.banPubkey.mockResolvedValue({ unconfirmed: null });
+    api.logDecision.mockResolvedValue(undefined);
+    api.verifyPubkeyBanned.mockResolvedValue(true);
+    api.unbanPubkey.mockResolvedValue(undefined);
+    api.unsuspendPubkey.mockResolvedValue(undefined);
+  });
+
+  it('after an unsuspend', async () => {
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listsuspendedpubkeys' ? [{ pubkey: PUBKEY }] : []));
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  it('after an unban', async () => {
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: PUBKEY, reason: 'spam' }] : []));
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  it('after an allow', async () => {
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  // A ban after a restore hides the account again: the window must end.
+  it('ends the restore window after a ban', async () => {
+    const pk = 'f6'.repeat(32);
+    const { result } = renderHook(() => useJustRestored(pk));
+    await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+    expect(result.current).toBe(true);
+
+    renderWithProvider(clientWithStats());
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), { target: { value: pk } });
+    fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
+
+    await waitFor(() => expect(result.current).toBe(false));
+  });
+
+  // The ban may have landed even though it could not be confirmed.
+  it('after a ban that could not be confirmed', async () => {
+    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), { target: { value: PUBKEY } });
+    fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  it('after a ban', async () => {
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), { target: { value: PUBKEY } });
+    fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  // These mutations await the audit write after the relay call, so a failed
+  // write fails the mutation after the account status already changed.
+  it('after an unsuspend whose audit write failed', async () => {
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listsuspendedpubkeys' ? [{ pubkey: PUBKEY }] : []));
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  it('after an unban whose audit write failed', async () => {
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: PUBKEY, reason: 'spam' }] : []));
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  it('after an allow whose audit write failed', async () => {
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  // Funnelcake's ban filter can lag an Unban the same way.
+  it('starts the restore window after an unban', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const UNBANNED = '6'.repeat(64);
+      api.callRelayRpc.mockImplementation((method: string) =>
+        Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: UNBANNED, reason: 'spam' }] : []));
+      renderWithProvider(clientWithStats());
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+
+      const { result } = renderHook(() => useJustRestored(UNBANNED));
+      await waitFor(() => expect(result.current).toBe(true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('starts the restore window after an allow', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      renderWithProvider(clientWithStats());
+      fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+
+      const { result } = renderHook(() => useJustRestored(PUBKEY));
+      await waitFor(() => expect(result.current).toBe(true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // Its own pubkey per test: an earlier test's window would still be open.
+  function renderFor(pk: string, client = clientWithStats()) {
+    return render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider><UserManagement selectedPubkey={pk} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+  const suspendedListOf = (pk: string) => (method: string) =>
+    Promise.resolve(method === 'listsuspendedpubkeys' ? [{ pubkey: pk }] : []);
+  const bannedListOf = (pk: string) => (method: string) =>
+    Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: pk, reason: 'spam' }] : []);
+  const never = () => new Promise(() => {});
+  const windowOpen = (pk: string) => renderHook(() => useJustRestored(pk)).result.current;
+
+  // A failed or still-pending restore leaves the account hidden. The pending
+  // cases fail if the window is opened before the relay call is awaited.
+  it('does not start the restore window while the unsuspend is pending', async () => {
+    const pk = '1'.repeat(64);
+    api.callRelayRpc.mockImplementation(suspendedListOf(pk));
+    api.unsuspendPubkey.mockImplementation(never);
+    renderWithProvider(clientWithStats());
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+
+    await waitFor(() => expect(api.unsuspendPubkey).toHaveBeenCalled());
+    expect(windowOpen(pk)).toBe(false);
+  });
+
+  it('does not start the restore window when the unsuspend failed', async () => {
+    const pk = '2'.repeat(64);
+    api.callRelayRpc.mockImplementation(suspendedListOf(pk));
+    api.unsuspendPubkey.mockRejectedValue(new Error('relay unreachable'));
+    renderWithProvider(clientWithStats());
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(windowOpen(pk)).toBe(false);
+  });
+
+  it('does not start the restore window while the unban is pending', async () => {
+    const pk = '3'.repeat(64);
+    api.callRelayRpc.mockImplementation(bannedListOf(pk));
+    api.unbanPubkey.mockImplementation(never);
+    renderWithProvider(clientWithStats());
+    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalled());
+    expect(windowOpen(pk)).toBe(false);
+  });
+
+  it('does not start the restore window while the allow is pending', async () => {
+    const pk = '4'.repeat(64);
+    api.callRelayRpc.mockImplementation((method: string) => (method === 'unbanpubkey' ? never() : Promise.resolve([])));
+    renderFor(pk);
+    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+
+    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('unbanpubkey', expect.anything()));
+    expect(windowOpen(pk)).toBe(false);
+  });
+
+  it('does not start the restore window when the allow failed', async () => {
+    const pk = '5'.repeat(64);
+    api.callRelayRpc.mockImplementation((method: string) =>
+      (method === 'unbanpubkey' ? Promise.reject(new Error('relay unreachable')) : Promise.resolve([])));
+    renderFor(pk);
+    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(windowOpen(pk)).toBe(false);
+  });
+
+  // Positive control: the relay call landed, so the account is restored even
+  // though the awaited audit write after it failed the mutation.
+  it.each([
+    ['unsuspend', '6'.repeat(64)],
+    ['unban', '7'.repeat(64)],
+    ['allow', '8'.repeat(64)],
+  ] as const)('starts the restore window after an %s whose audit write failed', async (name, pk) => {
+    // Real timers: under fake ones a waitFor that never passes hangs rather
+    // than failing. The window stays open on a pubkey no other test uses.
+    {
+      // Rendered once, before the action: a renderHook inside waitFor's
+      // callback mounts a root per retry, which re-triggers waitFor, so a
+      // failing assertion would loop until the heap runs out.
+      const { result } = renderHook(() => useJustRestored(pk));
+      api.logDecision.mockRejectedValue(new Error('audit down'));
+      if (name === 'unsuspend') {
+        api.callRelayRpc.mockImplementation(suspendedListOf(pk));
+        renderWithProvider(clientWithStats());
+        fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+        fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+      } else if (name === 'unban') {
+        api.callRelayRpc.mockImplementation(bannedListOf(pk));
+        renderWithProvider(clientWithStats());
+        fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      } else {
+        renderFor(pk);
+        fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+      }
+
+      await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
+      await waitFor(() => expect(result.current).toBe(true));
+    }
+  });
+
+  // A failed unban leaves the account banned, so "just restored" would be wrong.
+  it('does not start the restore window when the unban failed', async () => {
+    const FAILED = '5'.repeat(64);
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: FAILED, reason: 'spam' }] : []));
+    api.unbanPubkey.mockRejectedValue(new Error('relay unreachable'));
+    renderWithProvider(clientWithStats());
+    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalled());
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const { result } = renderHook(() => useJustRestored(FAILED));
+    expect(result.current).toBe(false);
+  });
+
+  // The relay's read filter can lag an Unsuspend by a few minutes.
+  it('starts the unsuspend window after an unsuspend', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      api.callRelayRpc.mockImplementation((method: string) =>
+        Promise.resolve(method === 'listsuspendedpubkeys' ? [{ pubkey: PUBKEY }] : []));
+      const client = clientWithStats();
+
+      renderWithProvider(client);
+      fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+      fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
+
+      const { result } = renderHook(() => useJustRestored(PUBKEY));
+      await waitFor(() => expect(result.current).toBe(true));
+      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('keeps them after a content action that leaves the account status as it was', async () => {
+    const client = clientWithStats();
+
+    renderWithProvider(client);
+    await waitFor(() => expect(userActionsProps.last).not.toBeNull());
+    const onActionComplete = userActionsProps.last?.onActionComplete as (c: UserActionChange) => void;
+    await act(async () => { onActionComplete({ accountStatusChanged: false }); });
+
+    expect(client.getQueryData(STATS_KEY)).toEqual({ postCount: 0 });
   });
 });
