@@ -907,7 +907,8 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
         hasRestrictedMedia={true}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: true, action: 'AGE_RESTRICTED' },
-          { hash: THUMB, isBlocked: false, isRestricted: false },
+          // No moderation record, as useMediaStatus reports one.
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: null },
         ]} />
     );
 
@@ -916,9 +917,10 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Age Restrict again (2)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
-    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([
-      [VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator'],
-      [THUMB, 'AGE_RESTRICTED', 'Age restricted by moderator'],
+    // Each file with the state this screen showed for it (#336).
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator', 'AGE_RESTRICTED'],
+      [THUMB, 'AGE_RESTRICTED', 'Age restricted by moderator', 'UNKNOWN'],
     ]);
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Age restricted 2 media file(s)' }));
   });
@@ -938,9 +940,10 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Block again (2)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(2));
-    expect(api.moderateMedia.mock.calls.map((call) => call.slice(0, 3))).toEqual([
-      [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator'],
-      [THUMB, 'PERMANENT_BAN', 'Blocked by moderator'],
+    // Each file with the state this screen showed for it (#336).
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'PERMANENT_BAN', 'Blocked by moderator', 'PERMANENT_BAN'],
+      [THUMB, 'PERMANENT_BAN', 'Blocked by moderator', 'AGE_RESTRICTED'],
     ]);
   });
 
@@ -1813,6 +1816,41 @@ describe('EventActions: media actions send the state the screen showed', () => {
       [VIDEO, 'SAFE', 'Unblocked by moderator', 'PERMANENT_BAN'],
       [VIDEO, 'SAFE', 'Unblocked by moderator', 'SAFE'],
     ]);
+  });
+
+  it('says how many were lifted when a later video is refused, and logs those', async () => {
+    const VIDEO_2 = 'c'.repeat(64);
+    api.moderateMedia.mockImplementation((hash: string) =>
+      (hash === VIDEO_2 ? Promise.reject(changed('QUARANTINE', 'SAFE')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} hasBlockedMedia={true}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+          { hash: VIDEO_2, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
+
+    const message = "1 of 2 lifted, then: The file's moderation record changed after this screen loaded and now shows it hidden";
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to unblock media',
+      description: message,
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'SAFE', 'Unblocked by moderator', 'PERMANENT_BAN'],
+      [VIDEO_2, 'SAFE', 'Unblocked by moderator', 'PERMANENT_BAN'],
+    ]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'unblock_media',
+      reason: `Unblocked 1 media file(s); ${message}`,
+    })));
+    // Something did change, so the status is read again.
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
   });
 
   // The event is already gone by the media half, so a refusal here would leave
