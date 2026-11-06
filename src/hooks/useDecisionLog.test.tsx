@@ -190,6 +190,37 @@ describe('useDecisionLog handling decisions', () => {
   );
 });
 
+// Report detail ranks a recorded delete first among the reasons a post is
+// gone, so a delete a moderator has since undone must not still count: a
+// restored post that later goes missing for another reason (a suspension)
+// would read as "Removed by Moderation".
+describe('useDecisionLog delete state', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('counts a delete', async () => {
+    getDecisions.mockResolvedValue([{ action: 'delete_event' }]);
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isDeleted).toBe(true);
+  });
+
+  it('does not count a delete followed by a restore', async () => {
+    getDecisions.mockResolvedValue([{ action: 'restore_event' }, { action: 'delete_event' }]);
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isDeleted).toBe(false);
+  });
+
+  it('counts a delete made after a restore', async () => {
+    getDecisions.mockResolvedValue([{ action: 'delete_event' }, { action: 'restore_event' }, { action: 'delete_event' }]);
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    expect(result.current.isDeleted).toBe(true);
+  });
+});
+
 // ReportDetail reads isPending to tell "no decisions read yet" from "nothing
 // recorded". A read held back offline is pending without fetching, so
 // isLoading is false there and would let an unread log pass for an empty one.

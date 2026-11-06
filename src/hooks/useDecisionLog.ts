@@ -42,7 +42,16 @@ export function useDecisionLog(targetId: string | null | undefined) {
 
   // Check for specific action types
   const isBanned = data?.some(d => d.action === 'ban_user' || d.action === 'ban');
-  const isDeleted = data?.some(d => d.action === 'delete_event' || d.action === 'delete');
+  // A delete counts until a later restore_event row: EventActions' and
+  // EventDetail's Restore Event log one beside the relay call. Decisions come
+  // newest first, so the first of these wins. Other restores (report detail's
+  // Undo toast, the events list) write no decision row, and the worker records
+  // allow_event only in moderation_targets, so after those a delete still counts.
+  const latestDeleteOrRestore = data?.find(d =>
+    d.action === 'delete_event' || d.action === 'delete' || d.action === 'restore_event');
+  const isDeleted = data === undefined
+    ? undefined
+    : latestDeleteOrRestore?.action === 'delete_event' || latestDeleteOrRestore?.action === 'delete';
   const isMediaBlocked = data?.some(d => d.action === 'block_media' || d.action === 'PERMANENT_BAN');
   const isReviewed = data?.some(d => d.action === 'reviewed' || d.action === 'mark_ok');
   const isFalsePositive = data?.some(d => d.action === 'false_positive' || d.action === 'false-positive');
