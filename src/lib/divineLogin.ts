@@ -71,7 +71,38 @@ export async function completeLogin(callbackHref: string): Promise<{ returnPath:
 // tabs the calls run one at a time under a Web Lock: the next one re-reads
 // storage, finds the session the previous one saved, and does not refresh again.
 const SESSION_LOCK = 'divine-login:session';
+// Longest wait for another tab's hold on the lock. A holder that never lets go
+// (a hung tab) would otherwise leave this tab resolving forever, with every
+// action unattributed. Above the 15 s OAuth timeout, so a healthy holder's
+// refresh always finishes first. Past it, read without the lock.
+const LOCK_WAIT_MS = 20_000;
 let inFlight: Promise<StoredCredentials | null> | null = null;
+
+function readUnderLock(
+  locks: LockManager,
+  read: () => Promise<StoredCredentials | null>,
+): Promise<StoredCredentials | null> {
+  // A timer and an AbortController rather than AbortSignal.timeout, so the wait
+  // runs on the page's timers (and the tests' fake ones).
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), LOCK_WAIT_MS);
+  const locked: Promise<StoredCredentials | null> = locks.request(
+    SESSION_LOCK,
+    { signal: controller.signal },
+    () => {
+      clearTimeout(timer);
+      return read();
+    },
+  );
+  return locked.catch((err: unknown) => {
+    // Only a wait that timed out falls back; a failure inside read() does not.
+    if (controller.signal.aborted && err instanceof DOMException && err.name === 'AbortError') {
+      console.warn('[divine-login] session lock not granted in time; reading without it');
+      return read();
+    }
+    throw err;
+  });
+}
 
 /** Current session with automatic refresh (SDK-managed). Null when signed out. */
 export function getSession(): Promise<StoredCredentials | null> {
@@ -80,9 +111,7 @@ export function getSession(): Promise<StoredCredentials | null> {
   // Web Locks need a secure context; without them, fall back to this tab's
   // single flight only.
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
-  const call: Promise<StoredCredentials | null> = locks
-    ? locks.request(SESSION_LOCK, read)
-    : read();
+  const call = locks ? readUnderLock(locks, read) : read();
   const shared = call.finally(() => {
     if (inFlight === shared) inFlight = null;
   });

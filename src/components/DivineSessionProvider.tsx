@@ -23,6 +23,9 @@ const MIN_REFRESH_DELAY_MS = 30_000;
 // setTimeout runs at once for any delay above 2^31-1 ms (about 24.8 days).
 const MAX_TIMER_MS = 2 ** 31 - 1;
 const timerDelay = (ms: number) => Math.min(Math.max(ms, 0), MAX_TIMER_MS);
+// How long after expiresAt the one retry runs when the expiry refresh got the
+// same token back (see the expiry timer).
+const EXPIRY_RETRY_MARGIN_MS = 1_000;
 
 export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);
@@ -60,7 +63,9 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // refresh throws, so a network blip during a refresh signs the moderator out
   // and they sign in again. That surfaces as the attribution notice rather than
   // as silent unattributed actions. Only a refresh near expiry can hit it.
-  const refresh = useCallback(async () => {
+  // Resolves to the credentials it applied, or undefined when it applied
+  // nothing (unmounted, or a logout won the race). The expiry timer reads it.
+  const loadSession = useCallback(async (): Promise<StoredCredentials | null | undefined> => {
     const gen = generationRef.current;
     let creds: StoredCredentials | null = null;
     try {
@@ -70,16 +75,20 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       // rather than hanging on the loading state forever.
       creds = null;
     }
-    if (!mountedRef.current) return;
+    if (!mountedRef.current) return undefined;
     if (gen !== generationRef.current) {
       // A logout landed while this resolve was in flight; getSessionWithRefresh
       // may have re-persisted a refreshed session, so clear it again and bail.
       sdkLogout();
-      return;
+      return undefined;
     }
     setCredentials(creds);
     setCredentialsResolved(true);
+    return creds;
   }, []);
+  const refresh = useCallback(async () => {
+    await loadSession();
+  }, [loadSession]);
 
   useEffect(() => {
     void refresh();
@@ -156,15 +165,29 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     const refreshTimer = setTimeout(() => {
       void refresh();
     }, timerDelay(Math.max(untilExpiry - REFRESH_LEAD_MS, MIN_REFRESH_DELAY_MS)));
+    // If this timer runs a moment before the SDK's clock reaches expiresAt, a
+    // session with no refresh token comes back unchanged and still marked
+    // expired, and nothing else would reschedule. So when the same token comes
+    // back, retry once just after expiresAt: the SDK then reports it expired
+    // and the session settles to signed out (or a fresh token).
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
     const expiryTimer = setTimeout(() => {
       setExpiredToken(accessToken);
-      void refresh();
+      void loadSession().then((creds) => {
+        if (cancelled || creds?.accessToken !== accessToken) return;
+        retryTimer = setTimeout(() => {
+          void refresh();
+        }, timerDelay(expiresAt + EXPIRY_RETRY_MARGIN_MS - Date.now()));
+      });
     }, timerDelay(untilExpiry));
     return () => {
+      cancelled = true;
       clearTimeout(refreshTimer);
       clearTimeout(expiryTimer);
+      clearTimeout(retryTimer);
     };
-  }, [accessToken, expiresAt, refresh]);
+  }, [accessToken, expiresAt, refresh, loadSession]);
 
   useEffect(() => {
     let cancelled = false;

@@ -137,17 +137,61 @@ describe('divineLogin', () => {
 
   it('getSession runs under a cross-tab Web Lock when one is available', async () => {
     let grant!: () => void;
-    const request = vi.fn((name: string, cb: () => Promise<unknown>) =>
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
       new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
     Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
     try {
       oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
       const pending = getSession();
-      expect(request).toHaveBeenCalledWith('divine-login:session', expect.any(Function));
+      expect(request).toHaveBeenCalledWith(
+        'divine-login:session', { signal: expect.any(AbortSignal) }, expect.any(Function),
+      );
       // Another tab holds the lock: nothing reads or refreshes until it is granted.
       expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
       grant();
       expect(await pending).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
+  // A tab that holds the lock and never lets go must not leave this one
+  // resolving forever, with every action unattributed.
+  it('getSession reads without the lock once the wait for it times out', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Never grants; rejects as the platform does when the signal aborts.
+    const request = vi.fn((_name: string, opts: LockOptions) => new Promise((_resolve, reject) => {
+      opts.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      let settled: unknown = 'pending';
+      void getSession().then((v) => { settled = v; });
+
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(settled).toBe('pending');
+      expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith('[divine-login] session lock not granted in time; reading without it');
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('getSession does not fall back when the read under the lock fails', async () => {
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) => cb());
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockRejectedValue(new Error('storage disabled'));
+      await expect(getSession()).rejects.toThrow('storage disabled');
       expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
     } finally {
       delete (navigator as { locks?: unknown }).locks;

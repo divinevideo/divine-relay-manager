@@ -368,6 +368,37 @@ describe('login token expiry', () => {
     expect(getSession).toHaveBeenCalledTimes(1);
   });
 
+  // The expiry timer can run a moment before the SDK's clock reaches expiresAt.
+  // A session with no refresh token then comes back unchanged, and without a
+  // retry it would stay marked expired until the next focus.
+  it('retries once just after expiry when the expiry refresh returns the same token', async () => {
+    const same = () => ({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 10 * MIN });
+    getSession.mockImplementation(async () => same());
+    renderTokenProbe();
+    await flush();
+
+    // Pre-expiry refresh (6 min) and expiry refresh (10 min) both get tok-a back.
+    await flush(10 * MIN);
+    expect(getSession).toHaveBeenCalledTimes(3);
+    expect(screen.getByTestId('token')).toHaveTextContent('tok-a');
+
+    // Just after expiresAt the SDK reports the session expired: signed out.
+    getSession.mockResolvedValue(null);
+    await flush(1_000);
+    expect(getSession).toHaveBeenCalledTimes(4);
+    expect(screen.getByTestId('token')).toHaveTextContent('none');
+  });
+
+  it('retries only once, even if the retry also gets the same token back', async () => {
+    getSession.mockImplementation(async () => ({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 10 * MIN }));
+    renderTokenProbe();
+    await flush();
+    await flush(10 * MIN + 1_000);
+    expect(getSession).toHaveBeenCalledTimes(4);
+    await flush(60 * MIN);
+    expect(getSession).toHaveBeenCalledTimes(4);
+  });
+
   it('stops the schedule on unmount', async () => {
     getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 10 * MIN });
     const { unmount } = render(
