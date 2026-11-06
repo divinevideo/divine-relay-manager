@@ -361,23 +361,22 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // so the moderator sees what the buttons act on. A copy that does not check
   // out is the reposter's writing, and gets neither.
   const isRepostEvent = !!displayEvent && isRepostKind(displayEvent.kind);
+  // Content that looks like JSON is taken as the repost's copy of the original,
+  // well formed or not: only a copy that checks out is read, so a malformed or
+  // cut-off one cannot pass its files on as text. Decided once, here, so the
+  // card, the preview and the buttons below cannot disagree about it.
+  const repostHasCopy = isRepostEvent && !!displayEvent && looksLikeEventCopy(displayEvent.content);
   const checkedOriginal = useMemo(
     () => context.thread?.repostedEvent ?? (displayEvent && isRepostEvent ? verifiedRepostedEvent(displayEvent) : null),
     [context.thread?.repostedEvent, displayEvent, isRepostEvent],
   );
-  // Content that looks like JSON is taken as the repost's copy of the original,
-  // well formed or not: only a copy that checks out is read, so a malformed or
-  // cut-off one cannot pass its files on as text.
-  const repostCopyUnchecked = isRepostEvent && !checkedOriginal && !!displayEvent
-    && looksLikeEventCopy(displayEvent.content);
+  const repostCopyUnchecked = repostHasCopy && !checkedOriginal;
   // The reported repost as its own media preview shows it: without a copy of
   // the original in its content, so the preview never shows files the buttons
   // were refused. A checked original has its own preview, in the repost card.
   const displayPreviewEvent = useMemo(
-    () => (displayEvent && isRepostEvent && looksLikeEventCopy(displayEvent.content)
-      ? { ...displayEvent, content: '' }
-      : displayEvent),
-    [displayEvent, isRepostEvent],
+    () => (displayEvent && repostHasCopy ? { ...displayEvent, content: '' } : displayEvent),
+    [displayEvent, repostHasCopy],
   );
 
   // Extract media hashes from the reported event AND reposted event if it's a repost.
@@ -397,12 +396,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     // well formed or not. Some out-of-spec reposts carry a media URL as plain
     // text instead, which the preview shows, so that is read too, as any post's
     // text is.
-    if (displayEvent && isRepostKind(displayEvent.kind)) {
+    if (displayEvent && isRepostEvent) {
       add('', displayEvent.tags);
       // An original that is itself a repost has the same JSON in its content, and
       // read as text it would give up its inner event's id and author key as files.
       if (checkedOriginal) add(isRepostKind(checkedOriginal.kind) ? '' : checkedOriginal.content, checkedOriginal.tags);
-      if (!looksLikeEventCopy(displayEvent.content)) add(displayEvent.content, []);
+      if (!repostHasCopy) add(displayEvent.content, []);
     } else if (displayEvent) {
       add(displayEvent.content, displayEvent.tags);
     }
@@ -413,7 +412,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       mediaHashes: Array.from(media).filter(h => !thumbnails.has(h)),
       thumbnailHashes: Array.from(thumbnails),
     };
-  }, [displayEvent, checkedOriginal]);
+  }, [displayEvent, isRepostEvent, repostHasCopy, checkedOriginal]);
 
   // Check media status from moderation service. Thumbnails are included, so a
   // gated thumbnail gets its own undo button and Age Restrict skips a blocked one.
