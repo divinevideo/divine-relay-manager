@@ -199,6 +199,39 @@ describe('useThread repost original', () => {
     expect(result.current.data?.ancestors).toEqual([]);
   });
 
+  // Each place the original can be fetched from, holding only the event it is given.
+  const SOURCES: Array<[string, (held: NostrEvent) => void]> = [
+    ['the REST API', (held) => {
+      fetchRest.mockImplementation(async (_url: string, id: string) => (id === SIGNED_VIDEO.id ? held : null));
+    }],
+    ['the external relay hint', (held) => {
+      hintQuery.mockImplementation(async (filters: NostrFilter[]) =>
+        (filters.some((filter) => filter.ids?.includes(SIGNED_VIDEO.id)) ? [held] : []));
+    }],
+  ];
+
+  it.each(SOURCES)('takes an original fetched from %s when it checks out', async (_, hold) => {
+    serve([repostWith('')]);
+    hold(SIGNED_VIDEO);
+
+    const { result } = renderHook(() => useThread(REPOST_ID, 3, API_URL, RELAY_HINT), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toEqual(SIGNED_VIDEO);
+  });
+
+  it.each(SOURCES)('refuses an original fetched from %s whose files were changed', async (_, hold) => {
+    // The hint comes from the reporter, and the REST API and relays are only as
+    // honest as what they hold: a fetched original is checked like a copy.
+    serve([repostWith('')]);
+    hold(forged);
+
+    const { result } = renderHook(() => useThread(REPOST_ID, 3, API_URL, RELAY_HINT), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toBeNull();
+  });
+
   it('accepts a fetched original whose id arrives in upper case', async () => {
     serve([repostWith('')]);
     query.mockImplementation(async (filters: NostrFilter[]) => {
@@ -210,7 +243,7 @@ describe('useThread repost original', () => {
     const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
-    expect(result.current.data?.repostedEvent?.content).toBe(SIGNED_VIDEO.content);
-    expect(result.current.data?.repostedEvent).not.toBeNull();
+    // The whole event, so the id comes back in lower case.
+    expect(result.current.data?.repostedEvent).toEqual(SIGNED_VIDEO);
   });
 });
