@@ -85,13 +85,24 @@ export function EventActions({
   const thumbnails = thumbnailHashes.filter((hash) => !mediaHashes.includes(hash));
   const fileCount = mediaHashes.length + thumbnails.length;
 
-  // A run of writes stopped by a failure after `written` of `total` went through:
-  // "1 of 2 blocked, then: <why>". `written` is the count logPartial logs.
-  const partialError = (written: number, total: number, verb: string, error: unknown) =>
-    Object.assign(
-      new Error(`${written} of ${total} ${verb}, then: ${error instanceof Error ? error.message : 'unknown error'}`),
-      { written },
-    );
+  // Writes files one after another; the first that fails stops the run. Any
+  // written before it did change, so the error then says how many: "1 of 2
+  // blocked, then: <why>", with `written`, the count logPartial logs.
+  const writeInTurn = async (hashes: string[], write: (hash: string) => Promise<unknown>, verb: string) => {
+    let written = 0;
+    try {
+      for (const hash of hashes) {
+        await write(hash);
+        written++;
+      }
+    } catch (error) {
+      if (written === 0) throw error;
+      throw Object.assign(
+        new Error(`${written} of ${hashes.length} ${verb}, then: ${error instanceof Error ? error.message : 'unknown error'}`),
+        { written },
+      );
+    }
+  };
 
   // Videos first: a failure there fails the action, as before. Thumbnails after,
   // and a thumbnail failure never fails the action, because #66 found that a
@@ -103,9 +114,8 @@ export function EventActions({
   // thumbnail failure leaves a file the media server does hold unchanged, so it
   // comes back as a warning.
   //
-  // The video files are written one after another, and the first that fails
-  // stops the action. Any written before it did change, so the error then says
-  // how many (partialError), for the caller to log (logPartial).
+  // The video files are written in turn (writeInTurn), and the first that fails
+  // stops the action, for the caller to log what went before it (logPartial).
   const actOnFiles = async (
     hashes: string[],
     act: (hash: string) => Promise<unknown>,
@@ -119,16 +129,7 @@ export function EventActions({
   }> => {
     const isThumbnail = (hash: string) => thumbnails.includes(hash);
     const videos = hashes.filter((h) => !isThumbnail(h));
-    let written = 0;
-    try {
-      for (const hash of videos) {
-        await act(hash);
-        written++;
-      }
-    } catch (error) {
-      if (written === 0) throw error;
-      throw partialError(written, videos.length, verb, error);
-    }
+    await writeInTurn(videos, act, verb);
     let changed = videos.length;
     const errors: { message: string; notFound: boolean }[] = [];
     for (const hash of hashes.filter(isThumbnail)) {
@@ -433,7 +434,7 @@ export function EventActions({
     },
   });
 
-  // A run of writes that stopped after some went through (partialError): the
+  // A run of writes that stopped after some went through (writeInTurn): the
   // audit log records those, and the error carries the toast holder, so the
   // failure toast can take a failed audit write the way a warning does. Any
   // other error passes through untouched.
@@ -448,25 +449,14 @@ export function EventActions({
     throw Object.assign(error, { partial });
   };
 
-  // Lifts files one after another; a failure after some were lifted is logged
-  // and reported as a partial, as a forward action's is.
-  const liftEach = async (
+  // Lifts files in turn; a failure after some were lifted is logged and
+  // reported as a partial, as a forward action's is.
+  const liftEach = (
     hashes: string[],
     apiReason: string,
     moderator: Promise<string | undefined>,
     audit: { action: string; reason: (count: number) => string },
-  ) => {
-    let lifted = 0;
-    try {
-      for (const hash of hashes) {
-        await moderateFile(hash, 'SAFE', apiReason);
-        lifted++;
-      }
-    } catch (error) {
-      if (lifted === 0) throw error;
-      logPartial(moderator, audit)(partialError(lifted, hashes.length, 'lifted', error));
-    }
-  };
+  ) => writeInTurn(hashes, (hash) => moderateFile(hash, 'SAFE', apiReason), 'lifted').catch(logPartial(moderator, audit));
 
   // A media action's failure. After a partial write something did change, so it
   // ends through showDone, as the combined delete does on a partial: a failed
