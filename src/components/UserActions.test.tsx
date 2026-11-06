@@ -961,16 +961,14 @@ describe('UserActions drops cached authored-content reads after its account acti
     expect(qc.getQueryData(statsKey(OTHER))).toEqual({ postCount: 0 });
   });
 
-  // The relay's read filters can lag an Unsuspend or Unban by a few minutes.
-  it.each([
-    ['unsuspend', '1'.repeat(64), { isSuspended: true }, /Unsuspend User/i],
-    ['unban', '2'.repeat(64), { isBanned: true }, /Unban User/i],
-  ] as const)('starts the restore window after an %s', async (_name, pk, props, button) => {
+  // The relay's suspension filter can lag an Unsuspend by a few minutes.
+  it('starts the restore window after an unsuspend', async () => {
+    const pk = '1'.repeat(64);
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       const qc = clientWithStats(pk);
-      renderWithProvider(<UserActions pubkey={pk} {...props} />, qc);
-      fireEvent.click(screen.getByRole('button', { name: button }));
+      renderWithProvider(<UserActions pubkey={pk} isSuspended />, qc);
+      fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
 
       const { result } = renderHook(() => useJustRestored(pk));
       await waitFor(() => expect(result.current).toBe(true));
@@ -981,11 +979,24 @@ describe('UserActions drops cached authored-content reads after its account acti
     }
   });
 
+  // A ban usually purged the posts (funnelcake's inline purge), so "posts can
+  // take a few minutes to reappear" would mislead. An unban resets the reads
+  // and opens no window.
+  it('resets the reads after an unban, but opens no restore window', async () => {
+    const pk = '2'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(pk));
+    const qc = clientWithStats(pk);
+    renderWithProvider(<UserActions pubkey={pk} isBanned />, qc);
+    fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
+
+    await waitFor(() => expect(qc.getQueryData(statsKey(pk))).toBeUndefined());
+    expect(result.current).toBe(false);
+  });
+
   // Positive control: the relay call landed and only the audit write (which
   // UserActions does not await) failed. The account is restored.
   it.each([
     ['unsuspend', 'a1'.repeat(32), { isSuspended: true }, /Unsuspend User/i],
-    ['unban', 'b2'.repeat(32), { isBanned: true }, /Unban User/i],
   ] as const)('starts the restore window after an %s whose audit write failed', async (_name, pk, props, button) => {
     // Rendered once, before the action: a renderHook inside waitFor's callback
     // would loop on a failing assertion. Real timers; a pubkey nothing else uses.
@@ -1003,7 +1014,6 @@ describe('UserActions drops cached authored-content reads after its account acti
   // before the relay call is awaited.
   it.each([
     ['unsuspend', '4'.repeat(64), { isSuspended: true }, /Unsuspend User/i, () => api.unsuspendPubkey],
-    ['unban', '8'.repeat(64), { isBanned: true }, /Unban User/i, () => api.unbanPubkey],
   ] as const)('does not start the restore window while the %s is still pending', async (_name, pk, props, button, call) => {
     call().mockImplementation(() => new Promise(() => {}));
     renderWithProvider(<UserActions pubkey={pk} {...props} />, clientWithStats(pk));
@@ -1023,17 +1033,6 @@ describe('UserActions drops cached authored-content reads after its account acti
     expect(renderHook(() => useJustRestored(pk)).result.current).toBe(false);
   });
 
-  // A failed unban leaves the account banned, so "just restored" would be wrong.
-  it('does not start the restore window when the unban failed', async () => {
-    const pk = '3'.repeat(64);
-    api.unbanPubkey.mockRejectedValue(new Error('relay unreachable'));
-    renderWithProvider(<UserActions pubkey={pk} isBanned />, clientWithStats(pk));
-    fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' })));
-    const { result } = renderHook(() => useJustRestored(pk));
-    expect(result.current).toBe(false);
-  });
 });
 
 // A ban or suspend after a restore hides the account again: the window must end.
@@ -1051,6 +1050,26 @@ describe('UserActions ends the restore window when it hides the account', () => 
     if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
 
     await waitFor(() => expect(result.current).toBe(false));
+  });
+
+  // A refused ban or suspend did not hide the account: the reads reset (that
+  // the failure settled), and the window an earlier unsuspend opened stays.
+  it.each([
+    ['suspend', 'e6'.repeat(32), /Suspend User/i, false, () => api.suspendPubkey],
+    ['ban', 'f7'.repeat(32), /Ban User/i, true, () => api.banPubkey],
+  ] as const)('keeps the window when the %s was refused', async (_name, pk, button, confirm, call) => {
+    call().mockRejectedValue(new ApiError('refused', 403, 'Forbidden'));
+    const { result } = renderHook(() => useJustRestored(pk));
+    await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    qc.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+
+    renderWithProvider(<UserActions pubkey={pk} />, qc);
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+
+    await waitFor(() => expect(qc.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+    expect(result.current).toBe(true);
   });
 });
 

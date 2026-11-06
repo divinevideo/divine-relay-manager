@@ -1036,9 +1036,10 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
   it('after a clear, which also starts the unsuspend window', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
-      // The window needs the relay's unsuspend confirmed in the response.
+      // The window needs the relay's unsuspend confirmed in the response, and
+      // a case that had suspended the account (a restricted state).
       updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
-      const { queryClient } = renderDetail(makeCase());
+      const { queryClient } = renderDetail(makeCase({ state: 'restricted_pending_user_response' }));
       queryClient.setQueryData(STATS_KEY, { postCount: 0 });
 
       fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
@@ -1076,8 +1077,9 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
   // The window says the account was just restored. Only a clear whose relay
   // unsuspend the worker confirmed restored it; the reset is harmless either way.
   describe('opens the restore window only when the relay restoration is confirmed', () => {
-    const clearCase = async (pk: string) => {
-      const { queryClient } = renderDetail(makeCase({ pubkey: pk }));
+    // A restricted case by default: restricting is what suspends the account.
+    const clearCase = async (pk: string, state: AgeReviewState = 'restricted_pending_user_response') => {
+      const { queryClient } = renderDetail(makeCase({ pubkey: pk, state }));
       queryClient.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
       fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
       await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
@@ -1156,6 +1158,19 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
       await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
       await waitFor(() => expect(queryClient.isMutating()).toBe(0));
       expect(result.current).toBe(true);
+    });
+
+    // The worker calls unsuspendpubkey on every clear, but only entering a
+    // restricted state suspends. A case cleared from review never suspended
+    // the account, so nothing was lifted: reset the reads, open no window.
+    it('not after a clear of a case that never restricted the account', async () => {
+      const pk = '1d'.repeat(32);
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+
+      const queryClient = await clearCase(pk, 'under_moderator_review');
+
+      await waitFor(() => expect(queryClient.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+      expect(renderHook(() => useJustRestored(pk)).result.current).toBe(false);
     });
 
     it('when the relay leg succeeded and another leg failed', async () => {

@@ -4,6 +4,7 @@ import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-quer
 import type { ReactNode } from 'react';
 import { endRestoreWindow, markHidden, markRestored, resetAccountContentReads, RESTORE_SETTLE_MS, runHidingAction, useJustRestored } from './userStatsCache';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
+import { BanNotConfirmedError } from './adminApi';
 import { authoredContentStat } from './historyCount';
 
 const PUBKEY = 'a'.repeat(64);
@@ -224,6 +225,24 @@ describe('runHidingAction', () => {
     expect(result.current).toBe(true);
     expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
     endRestoreWindow(pk, undefined);
+  });
+
+  // A ban that could not be confirmed may have landed. "Just restored" would
+  // then be wrong, so the window ends; the failure still reaches the caller.
+  it('ends the restore window after a ban that could not be confirmed, and passes the failure on', async () => {
+    const pk = '5e'.repeat(32);
+    const client = new QueryClient();
+    await markRestored(client, pk, undefined);
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+    const { result } = renderHook(() => useJustRestored(pk));
+
+    await act(async () => {
+      await expect(runHidingAction(client, pk, undefined, async () => { throw new BanNotConfirmedError('timed out'); }))
+        .rejects.toBeInstanceOf(BanNotConfirmedError);
+    });
+
+    expect(result.current).toBe(false);
+    expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
   });
 });
 

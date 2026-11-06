@@ -87,7 +87,7 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
   // render, so the avatar is never mounted meanwhile.
   const [showAvatar, toggleAvatar] = useMediaVisibility(mediaShownByDefault, pubkey ?? "");
   const apiUrl = useApiUrl();
-  // This tab restored the account moments ago (unsuspend, unban, allow); the relay can lag (userStatsCache).
+  // This tab unsuspended the account moments ago; the relay can lag (userStatsCache).
   const justRestored = useJustRestored(pubkey);
 
   // Convert hex pubkey to npub

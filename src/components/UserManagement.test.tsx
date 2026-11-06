@@ -326,6 +326,25 @@ describe('UserManagement drops cached authored-content reads after an account ac
     await waitFor(() => expect(result.current).toBe(false));
   });
 
+  // A refused ban did not hide the account: the reads reset (the failure
+  // settled), and an earlier unsuspend's window stays.
+  it('keeps the restore window when the ban was refused', async () => {
+    const pk = 'a7'.repeat(32);
+    api.banPubkey.mockRejectedValue(new ApiError('refused', 403, 'Forbidden'));
+    const { result } = renderHook(() => useJustRestored(pk));
+    await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /Add User/i }));
+    fireEvent.change(await screen.findByPlaceholderText(/hex pubkey or npub1/i), { target: { value: pk } });
+    fireEvent.click(screen.getByRole('button', { name: /^Ban User$/i }));
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+    expect(result.current).toBe(true);
+  });
+
   // The ban may have landed even though it could not be confirmed.
   it('after a ban that could not be confirmed', async () => {
     api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
@@ -387,50 +406,42 @@ describe('UserManagement drops cached authored-content reads after an account ac
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
   });
 
-  // Funnelcake's ban filter can lag an Unban the same way.
-  it('starts the restore window after an unban', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      const UNBANNED = '6'.repeat(64);
-      api.callRelayRpc.mockImplementation((method: string) =>
-        Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: UNBANNED, reason: 'spam' }] : []));
-      renderWithProvider(clientWithStats());
-      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+  // A ban usually purged the posts (funnelcake's inline purge), so "posts can
+  // take a few minutes to reappear" would mislead after an unban or allow.
+  // Both reset the account's reads and open no window.
+  it('resets the reads after an unban, but opens no restore window', async () => {
+    const UNBANNED = '6'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(UNBANNED));
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: UNBANNED, reason: 'spam' }] : []));
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', UNBANNED], { postCount: 0 });
+    renderWithProvider(client);
+    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
 
-      const { result } = renderHook(() => useJustRestored(UNBANNED));
-      await waitFor(() => expect(result.current).toBe(true));
-      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
-    } finally {
-      vi.useRealTimers();
-    }
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', UNBANNED])).toBeUndefined());
+    expect(result.current).toBe(false);
   });
 
-  it('starts the restore window after an allow', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      renderWithProvider(clientWithStats());
-      fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
-
-      const { result } = renderHook(() => useJustRestored(PUBKEY));
-      await waitFor(() => expect(result.current).toBe(true));
-      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
-    } finally {
-      vi.useRealTimers();
-    }
-  });
-
-  // Its own pubkey per test: an earlier test's window would still be open.
-  function renderFor(pk: string, client = clientWithStats()) {
-    return render(
+  it('resets the reads after an allow, but opens no restore window', async () => {
+    const ALLOWED = '5'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(ALLOWED));
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', ALLOWED], { postCount: 0 });
+    render(
       <QueryClientProvider client={client}>
-        <TooltipProvider><UserManagement selectedPubkey={pk} /></TooltipProvider>
+        <TooltipProvider><UserManagement selectedPubkey={ALLOWED} /></TooltipProvider>
       </QueryClientProvider>,
     );
-  }
+    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', ALLOWED])).toBeUndefined());
+    expect(result.current).toBe(false);
+  });
+
+  // Each test uses its own pubkey: an earlier test's window would still be open.
   const suspendedListOf = (pk: string) => (method: string) =>
     Promise.resolve(method === 'listsuspendedpubkeys' ? [{ pubkey: pk }] : []);
-  const bannedListOf = (pk: string) => (method: string) =>
-    Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: pk, reason: 'spam' }] : []);
   const never = () => new Promise(() => {});
   const windowOpen = (pk: string) => renderHook(() => useJustRestored(pk)).result.current;
 
@@ -460,45 +471,10 @@ describe('UserManagement drops cached authored-content reads after an account ac
     expect(windowOpen(pk)).toBe(false);
   });
 
-  it('does not start the restore window while the unban is pending', async () => {
-    const pk = '3'.repeat(64);
-    api.callRelayRpc.mockImplementation(bannedListOf(pk));
-    api.unbanPubkey.mockImplementation(never);
-    renderWithProvider(clientWithStats());
-    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
-
-    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalled());
-    expect(windowOpen(pk)).toBe(false);
-  });
-
-  it('does not start the restore window while the allow is pending', async () => {
-    const pk = '4'.repeat(64);
-    api.callRelayRpc.mockImplementation((method: string) => (method === 'unbanpubkey' ? never() : Promise.resolve([])));
-    renderFor(pk);
-    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
-
-    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('unbanpubkey', expect.anything()));
-    expect(windowOpen(pk)).toBe(false);
-  });
-
-  it('does not start the restore window when the allow failed', async () => {
-    const pk = '5'.repeat(64);
-    api.callRelayRpc.mockImplementation((method: string) =>
-      (method === 'unbanpubkey' ? Promise.reject(new Error('relay unreachable')) : Promise.resolve([])));
-    renderFor(pk);
-    fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(windowOpen(pk)).toBe(false);
-  });
-
   // Positive control: the relay call landed, so the account is restored even
   // though the awaited audit write after it failed the mutation.
-  it.each([
-    ['unsuspend', '6'.repeat(64)],
-    ['unban', '7'.repeat(64)],
-    ['allow', '8'.repeat(64)],
-  ] as const)('starts the restore window after an %s whose audit write failed', async (name, pk) => {
+  it('starts the restore window after an unsuspend whose audit write failed', async () => {
+    const pk = '6'.repeat(64);
     // Real timers: under fake ones a waitFor that never passes hangs rather
     // than failing. The window stays open on a pubkey no other test uses.
     {
@@ -507,38 +483,14 @@ describe('UserManagement drops cached authored-content reads after an account ac
       // failing assertion would loop until the heap runs out.
       const { result } = renderHook(() => useJustRestored(pk));
       api.logDecision.mockRejectedValue(new Error('audit down'));
-      if (name === 'unsuspend') {
-        api.callRelayRpc.mockImplementation(suspendedListOf(pk));
-        renderWithProvider(clientWithStats());
-        fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
-        fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
-      } else if (name === 'unban') {
-        api.callRelayRpc.mockImplementation(bannedListOf(pk));
-        renderWithProvider(clientWithStats());
-        fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
-      } else {
-        renderFor(pk);
-        fireEvent.click(await screen.findByRole('button', { name: /^Allow$/i }));
-      }
+      api.callRelayRpc.mockImplementation(suspendedListOf(pk));
+      renderWithProvider(clientWithStats());
+      fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+      fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
 
       await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
       await waitFor(() => expect(result.current).toBe(true));
     }
-  });
-
-  // A failed unban leaves the account banned, so "just restored" would be wrong.
-  it('does not start the restore window when the unban failed', async () => {
-    const FAILED = '5'.repeat(64);
-    api.callRelayRpc.mockImplementation((method: string) =>
-      Promise.resolve(method === 'listbannedpubkeys' ? [{ pubkey: FAILED, reason: 'spam' }] : []));
-    api.unbanPubkey.mockRejectedValue(new Error('relay unreachable'));
-    renderWithProvider(clientWithStats());
-    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
-
-    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalled());
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    const { result } = renderHook(() => useJustRestored(FAILED));
-    expect(result.current).toBe(false);
   });
 
   // The relay's read filter can lag an Unsuspend by a few minutes.

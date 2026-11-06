@@ -50,6 +50,7 @@ import {
   AGE_BANDS,
   TERMINAL_STATES,
   getDaysRemaining,
+  isAccountRestrictedAgeReviewState,
   type AgeReviewCase,
   type AgeReviewState,
   type AgeBand,
@@ -186,7 +187,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // fire with the LATEST render's closure, so after a mid-flight case
     // switch a closure-read c would misroute every cache write below
     // (review: wrong case's keys written, the acted-on case left stale)
-    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey, environment: restoreEnvironment }),
+    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey, environment: restoreEnvironment, priorState: c.state }),
     onSuccess: (data, updates, ctx) => {
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
@@ -353,17 +354,25 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       // so the shared authored-content reads describe the other state
       // (lib/userStatsCache). Settled for the same reason as above: the reset
       // is harmless whatever happened. The restore window says the account was
-      // just restored, so it opens only for a clear whose relay unsuspend the
-      // worker confirmed in its response: a rejected update (a version
-      // conflict comes before enforcement) has none, and a failed relay leg
-      // says so. Another leg failing does not change what the relay shows.
+      // just restored, so it opens only for a clear that lifted a suspension:
+      // the worker confirmed its relay unsuspend in the response (a rejected
+      // update, such as a version conflict before enforcement, has none, and a
+      // failed relay leg says so), and the case was in a restricted state when
+      // the clear started. The worker calls unsuspendpubkey on every clear, but
+      // only entering a restricted state suspends, so a case cleared from
+      // review never suspended the account. A case restricted earlier and
+      // since moved on (submitted for review, needs follow-up, back to review)
+      // is still suspended, but nothing on the case says it was restricted, so
+      // that clear opens no window rather than guessing. Another leg failing
+      // does not change what the relay shows.
       // A restrict (suspend) or deny (ban) whose relay leg landed hides the
       // account again, so it ends a window an earlier restore left open.
       // The environment is the one the update started in (onMutate).
       const relayOk = data?.enforcement?.relay === 'ok';
       const state = typeof updates.state === 'string' ? updates.state : undefined;
       const hidesAccount = state === 'denied_closed' || (state?.startsWith('restricted_') ?? false);
-      if (state === 'cleared' && relayOk) void markRestored(queryClient, subject, ctx.environment);
+      const liftedSuspension = isAccountRestrictedAgeReviewState(ctx.priorState);
+      if (state === 'cleared' && relayOk && liftedSuspension) void markRestored(queryClient, subject, ctx.environment);
       else if (hidesAccount && relayOk) void markHidden(queryClient, subject, ctx.environment);
       else void resetAccountContentReads(queryClient, subject);
     },

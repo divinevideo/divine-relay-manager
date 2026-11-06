@@ -132,12 +132,25 @@ describe.each([
     expect(client.getQueryData(STATS_KEY)).toBeUndefined();
   });
 
-  // The ban may have landed even though it could not be confirmed: reset the
-  // reads, but do not claim the account is hidden again.
-  it('only resets the reads when the ban could not be confirmed', async () => {
+  // The ban may have landed even though it could not be confirmed, so "just
+  // restored" could be wrong: the window ends and the reads reset. Nothing
+  // else claims the account is hidden.
+  it('ends the window when the ban could not be confirmed', async () => {
     const { result } = renderHook(() => useJustRestored(TARGET));
     await act(async () => { await markRestored(new QueryClient(), TARGET, undefined); });
     api.publishLabelAndBan.mockResolvedValue(published({ banError: new BanNotConfirmedError('timed out') }));
+
+    const { client } = await labelAndBan();
+
+    await waitFor(() => expect(result.current).toBe(false));
+    expect(client.getQueryData(STATS_KEY)).toBeUndefined();
+  });
+
+  // A ban the relay refused did not land: the reads reset, the window stays.
+  it('only resets the reads when the ban was refused', async () => {
+    const { result } = renderHook(() => useJustRestored(TARGET));
+    await act(async () => { await markRestored(new QueryClient(), TARGET, undefined); });
+    api.publishLabelAndBan.mockResolvedValue(published({ banError: new ApiError('refused', 403, 'Forbidden') }));
 
     const { client } = await labelAndBan();
 

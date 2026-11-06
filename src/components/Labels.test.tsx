@@ -130,4 +130,19 @@ describe('Labels ban ends the restore window', () => {
 
     await waitFor(() => expect(result.current).toBe(false));
   });
+
+  // A refused ban did not hide the account: the reads reset (the failure
+  // settled), and an earlier unsuspend's window stays.
+  it('keeps the window when the ban was refused', async () => {
+    api.banPubkey.mockRejectedValue(new Error('relay refused'));
+    const { result } = renderHook(() => useJustRestored(PUBKEY));
+    await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(['user-stats', 'wss://relay.test', PUBKEY], { postCount: 0 });
+
+    await banFromLabels(client);
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', PUBKEY])).toBeUndefined());
+    expect(result.current).toBe(true);
+  });
 });

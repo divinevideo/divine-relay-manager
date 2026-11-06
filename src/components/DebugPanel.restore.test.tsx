@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DebugPanel } from './DebugPanel';
 import { markRestored, useJustRestored } from '@/lib/userStatsCache';
+import { BanNotConfirmedError } from '@/lib/adminApi';
 
 const api = vi.hoisted(() => ({
   getWorkerInfo: vi.fn(),
@@ -62,6 +63,21 @@ describe('DebugPanel Ban Pubkey and the restore window', () => {
     expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
   });
 
+  // It may have landed, so "just restored" could be wrong: the window ends.
+  it('ends the window when the ban could not be confirmed', async () => {
+    const pk = '5c'.repeat(32);
+    const { result } = renderHook(() => useJustRestored(pk));
+    await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+    api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'));
+    const client = renderPanel();
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+
+    await banFromPanel(pk);
+
+    await waitFor(() => expect(result.current).toBe(false));
+    expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
+  });
+
   it('only resets the reads when the ban failed', async () => {
     const pk = '2f'.repeat(32);
     const { result } = renderHook(() => useJustRestored(pk));
@@ -76,23 +92,25 @@ describe('DebugPanel Ban Pubkey and the restore window', () => {
     expect(result.current).toBe(true);
   });
 
-  // The relay's ban filter can lag an unban, so a successful one opens the
-  // restore window before the audit write; a failed one only resets. The audit
-  // is held pending so the window has to be open before it settles: one opened
-  // after the audit (or its catch) would fail here.
-  it('opens the restore window after a successful unban, before the audit write settles', async () => {
+  // A ban usually purged the posts, so "posts can take a few minutes to
+  // reappear" would mislead: a successful unban resets the reads and opens no
+  // restore window. The audit is held pending, so the reset has to come
+  // before it settles.
+  it('resets the reads after a successful unban, before the audit write settles, and opens no window', async () => {
     const pk = '3a'.repeat(32);
     const { result } = renderHook(() => useJustRestored(pk));
     api.unbanPubkey.mockResolvedValue({ success: true });
     let settleAudit: (v: unknown) => void = () => {};
     api.logDecision.mockImplementation(() => new Promise(r => { settleAudit = r; }));
-    renderPanel();
+    const client = renderPanel();
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
 
     fireEvent.change(screen.getByPlaceholderText('Enter 64-character hex pubkey...'), { target: { value: pk } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Unban Pubkey' })); });
 
     await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
-    expect(result.current).toBe(true);
+    expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
+    expect(result.current).toBe(false);
     await act(async () => { settleAudit({ success: true }); });
   });
 

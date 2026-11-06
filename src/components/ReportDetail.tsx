@@ -588,7 +588,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
         });
       }
       // UserActions drops the acted-on account's authored-content reads itself
-      // (and opens the restore window after an unsuspend or unban).
+      // (and opens the restore window after an unsuspend).
     } else {
       queryClient.invalidateQueries({ queryKey: userStatsQueryKey(config.relayUrl, context.reportedUser.pubkey) });
       // A content action leaves the account status as it was, so the previous

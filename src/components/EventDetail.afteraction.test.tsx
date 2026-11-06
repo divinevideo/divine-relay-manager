@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
-import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
+import { markRestored, useJustRestored } from '@/lib/userStatsCache';
 import { BanNotConfirmedError } from '@/lib/adminApi';
 
 // The real useModerationStatus, over mocked relay calls. Right after an Unban
@@ -247,65 +247,49 @@ describe('EventDetail drops cached authored-content reads after an account actio
     await waitFor(() => expect(result.current).toBe(false));
   });
 
-  // An author of its own per case: earlier tests here leave REPORTED_PUBKEY's
-  // window open. The pending case fails if the window opens before the unban
-  // is awaited.
-  it.each([
-    ['still pending', '1'.repeat(64), () => api.unbanPubkey.mockImplementation(hang)],
-    ['failed', '2'.repeat(64), () => api.unbanPubkey.mockRejectedValue(new Error('relay unreachable'))],
-  ])('does not start the restore window while the unban is %s', async (_name, author, arrange) => {
-    api.listBannedPubkeys.mockResolvedValue([{ pubkey: author }]);
-    arrange();
-    renderDetail(clientWithStats(), { ...EVENT, pubkey: author });
-    expect(await screen.findByText(BANNED)).toBeInTheDocument();
+  // A refused ban did not hide the author: the reads reset (the failure
+  // settled), and an earlier unsuspend's window stays.
+  it('keeps the restore window when the ban was refused', async () => {
+    const author = '5'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(author));
+    await act(async () => { await markRestored(new QueryClient(), author, undefined); });
+    api.listBannedPubkeys.mockResolvedValue([]);
+    api.banPubkey.mockRejectedValue(new Error('relay refused'));
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', author], { postCount: 0 });
+
+    renderDetail(client, { ...EVENT, pubkey: author });
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /^Unban User$/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /^Ban User$/ }));
+    });
+    const dialog = await screen.findByRole('alertdialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /^Ban User$/ }));
     });
 
-    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalled());
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
-    expect(renderHook(() => useJustRestored(author)).result.current).toBe(false);
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', author])).toBeUndefined());
+    expect(result.current).toBe(true);
   });
 
-  // Positive control: the unban landed; the audit write after it failed.
-  // Real timers (under fake ones a waitFor that never passes hangs rather
-  // than failing), and an author no other test uses, so its window can stay.
-  it('starts the restore window after an unban whose audit write failed', async () => {
+  // A ban usually purged the posts (funnelcake's inline purge), so "posts can
+  // take a few minutes to reappear" would mislead. An unban resets the reads,
+  // also when its audit write fails, and opens no restore window. An author no
+  // other test uses, so no earlier window can be mistaken for one.
+  it('resets the reads after an unban, but opens no restore window', async () => {
     const author = '3'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(author));
     api.listBannedPubkeys.mockResolvedValue([{ pubkey: author }]);
     api.unbanPubkey.mockResolvedValue(undefined);
-    api.logDecision.mockRejectedValue(new Error('audit down'));
-    // Rendered once, before the action: a renderHook inside waitFor's callback
-    // mounts a root per retry, which re-triggers waitFor, so a failing
-    // assertion would loop until the heap runs out instead of failing.
-    const { result } = renderHook(() => useJustRestored(author));
-    renderDetail(clientWithStats(), { ...EVENT, pubkey: author });
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', author], { postCount: 0 });
+    renderDetail(client, { ...EVENT, pubkey: author });
     expect(await screen.findByText(BANNED)).toBeInTheDocument();
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /^Unban User$/ }));
     });
 
-    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
-    await waitFor(() => expect(result.current).toBe(true));
-  });
-
-  it('starts the restore window after an unban', async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
-    try {
-      api.listBannedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
-      api.unbanPubkey.mockResolvedValue(undefined);
-      renderDetail(clientWithStats());
-      expect(await screen.findByText(BANNED)).toBeInTheDocument();
-      await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /^Unban User$/ }));
-      });
-
-      const { result } = renderHook(() => useJustRestored(REPORTED_PUBKEY));
-      await waitFor(() => expect(result.current).toBe(true));
-      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
-    } finally {
-      vi.useRealTimers();
-    }
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', author])).toBeUndefined());
+    expect(result.current).toBe(false);
   });
 
   it.each([

@@ -15,7 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import type { LabelAndBanResult, LabelParams } from "@/lib/adminApi";
+import { BanNotConfirmedError, type LabelAndBanResult, type LabelParams } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
 import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 
@@ -118,9 +118,10 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
         const env = restoreEnvironment;
         const result = await publishLabelAndBan(params);
         // A ban that landed hides the account again, so a restore window still
-        // open would print "just restored" (lib/userStatsCache): end it. A ban
-        // error (one that could not be confirmed may have landed) only resets.
-        if (result.banned) void markHidden(queryClient, target, env);
+        // open would print "just restored" (lib/userStatsCache): end it. So does
+        // one that could not be confirmed, which may have landed. A refused or
+        // failed ban only resets.
+        if (result.banned || result.banError instanceof BanNotConfirmedError) void markHidden(queryClient, target, env);
         else if (result.banError) void resetAccountContentReads(queryClient, target);
         return result;
       } else {
@@ -371,9 +372,10 @@ export function LabelPublisherInline({
         const env = restoreEnvironment;
         const result = await publishLabelAndBan(params);
         // A ban that landed hides the account again, so a restore window still
-        // open would print "just restored" (lib/userStatsCache): end it. A ban
-        // error (one that could not be confirmed may have landed) only resets.
-        if (result.banned) void markHidden(queryClient, target, env);
+        // open would print "just restored" (lib/userStatsCache): end it. So does
+        // one that could not be confirmed, which may have landed. A refused or
+        // failed ban only resets.
+        if (result.banned || result.banError instanceof BanNotConfirmedError) void markHidden(queryClient, target, env);
         else if (result.banError) void resetAccountContentReads(queryClient, target);
         return result;
       } else {

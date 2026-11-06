@@ -7,7 +7,7 @@ import { useAdminApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
-import { markRestored, runHidingAction, useRestoreEnvironment } from '@/lib/userStatsCache';
+import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from '@/lib/userStatsCache';
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from '@/lib/banFeedback';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { isTerminal, useBulkModerateJob } from '@/hooks/useBulkModerateJob';
@@ -70,9 +70,11 @@ interface UserActionsProps {
 // user management, age review): the relay hides a banned or suspended
 // account's content, so a count read before the action describes the other
 // state (lib/userStatsCache). Suspend and ban reset whatever the call did; a
-// reset after a failed call only costs a re-read. Unsuspend and unban open the
-// restore window, and only once the call succeeded: after a failed one the
-// account is still hidden, and "just restored" would be wrong.
+// reset after a failed call only costs a re-read. Unsuspend opens the restore
+// window, and only once the call succeeded: after a failed one the account is
+// still hidden, and "just restored" would be wrong. Unban only resets: a ban
+// usually purged the posts, so "posts can take a few minutes to reappear"
+// would mislead.
 export type UserActionChange =
   | { accountStatusChanged: false }
   | { accountStatusChanged: true; pubkey: string; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' };
@@ -244,9 +246,9 @@ export function UserActions({
     mutationFn: async () => {
       const target = pubkey; // the account acted on, whatever is shown when it lands
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const env = restoreEnvironment; // captured before the call, like target
       await api.unbanPubkey(target);
-      void markRestored(queryClient, target, env);
+      // A ban usually purged the posts, so no restore window: reset only.
+      void resetAccountContentReads(queryClient, target);
       logAudit(moderator, {
         targetType: 'pubkey',
         targetId: target,

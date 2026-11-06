@@ -25,7 +25,7 @@ import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
-import { markRestored, runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -75,10 +75,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // after it) cannot skip it. A ban resets whatever the call did: one whose
   // confirmation failed may still have landed, and a reset after a failed call
   // only costs a re-read. A ban that landed also ends a restore window an
-  // earlier unban or unsuspend left open (markHidden). Unban, allow and unsuspend open the restore window
-  // only once the call succeeded: after a failed one the account is still
-  // hidden, and "just restored" would be wrong. The selected user's
-  // UserActions does the same for its own actions.
+  // earlier unsuspend left open (markHidden). Unsuspend opens the restore
+  // window only once the call succeeded: after a failed one the account is
+  // still hidden, and "just restored" would be wrong. Unban and allow only reset
+  // the reads: a ban usually purged the posts, so "posts can take a few minutes
+  // to reappear" would mislead. The selected user's UserActions does the same
+  // for its own actions.
 
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
@@ -150,9 +152,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const allowUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const env = restoreEnvironment; // captured before the call
       await callRelayRpc('unbanpubkey', [pubkey, reason]);
-      void markRestored(queryClient, pubkey, env);
+      // A ban usually purged the posts, so no restore window: reset only.
+      void resetAccountContentReads(queryClient, pubkey);
       // Log to D1 for audit trail
       await logDecision({
         targetType: 'pubkey',
@@ -229,9 +231,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const unbanUserMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const env = restoreEnvironment; // captured before the call
       await unbanPubkey(pubkey);
-      void markRestored(queryClient, pubkey, env);
+      // A ban usually purged the posts, so no restore window: reset only.
+      void resetAccountContentReads(queryClient, pubkey);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,

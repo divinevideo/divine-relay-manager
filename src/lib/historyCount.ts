@@ -37,9 +37,9 @@ export function historyStat(
  * `suspended` is null while the suspended list has not confirmed either way.
  * An empty read then proves nothing, so it says why (`suspensionChecking`: a
  * read of the suspended list is in flight, otherwise it could not be read).
- * `justRestored`: this tab unsuspended, unbanned or allowed the account moments
- * ago, and the relay's read filters can lag those lists by a few minutes, so an
- * empty read is not yet an empty account (lib/userStatsCache, markRestored).
+ * `justRestored`: this tab unsuspended the account moments ago, and the relay's
+ * read filter can lag the suspended list by a few minutes, so an empty read is
+ * not yet an empty account (lib/userStatsCache, markRestored).
  * `lastKnown`: the count is from an earlier read whose refresh failed, which
  * React Query keeps as `data`. Marked on a printed count only.
  */

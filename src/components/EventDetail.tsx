@@ -6,7 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useUserStats } from "@/hooks/useUserStats";
-import { markRestored, runHidingAction, useJustRestored, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { resetAccountContentReads, runHidingAction, useJustRestored, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
@@ -485,7 +485,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // last known, not in the destructive banner. Right after an Unban it can be
   // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
   const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
-  // This tab restored the author moments ago (unsuspend, unban, allow); the relay can lag (userStatsCache).
+  // This tab unsuspended the author moments ago; the relay can lag (userStatsCache).
   const justRestored = useJustRestored(event.pubkey);
   // One label for both stats rows (author card and ban dialog), so they cannot
   // disagree. The relay hides a suspended account's content from the stats read.
@@ -679,12 +679,11 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const unbanMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const env = restoreEnvironment; // captured before the call
       await unbanPubkey(pubkey);
-      // As for a ban, above: not held up by the audit write below. Opens the
-      // restore window, since the relay's ban filter can lag the unban, and
-      // only once the unban succeeded.
-      void markRestored(queryClient, pubkey, env);
+      // As for a ban, above: not held up by the audit write below. No restore
+      // window: a ban usually purged the posts, so "posts can take a few
+      // minutes to reappear" would mislead. Reset only.
+      void resetAccountContentReads(queryClient, pubkey);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,

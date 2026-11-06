@@ -20,8 +20,8 @@ import {
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import type { BannedPubkeyEntry } from "@/lib/adminApi";
-import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { BanNotConfirmedError, type BannedPubkeyEntry } from "@/lib/adminApi";
+import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 import {
   Bug,
   CheckCircle,
@@ -200,12 +200,14 @@ export function DebugPanel() {
         const banResult = await banPubkey(pubkey, "Debug test ban");
         results.banResult = banResult;
         // The ban landed: the account is hidden again, so end a restore
-        // window an earlier unban or unsuspend left open.
+        // window an earlier unsuspend left open.
         void markHidden(queryClient, pubkey, env);
       } catch (error) {
         results.banError = String(error);
-        // Failed or not confirmed (it may still have landed): only reset.
-        void resetAccountContentReads(queryClient, pubkey);
+        // Not confirmed: it may still have landed, so end the restore window
+        // as for one that did. Refused or failed: only reset.
+        if (error instanceof BanNotConfirmedError) void markHidden(queryClient, pubkey, env);
+        else void resetAccountContentReads(queryClient, pubkey);
       }
 
       // Log to our database regardless
@@ -302,15 +304,13 @@ export function DebugPanel() {
       const start = Date.now();
       const results: { unbanResult?: unknown; unbanError?: string; logResult?: unknown; logError?: string } = {};
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      // Captured before the request, for the restore window (lib/userStatsCache).
-      const env = restoreEnvironment;
 
       try {
         const unbanResult = await unbanPubkey(pubkey);
         results.unbanResult = unbanResult;
-        // The relay's ban filter can lag the unban: open the restore window
-        // now, before the audit write below can fail.
-        void markRestored(queryClient, pubkey, env);
+        // Reset now, before the audit write below can fail. No restore window:
+        // a ban usually purged the posts (lib/userStatsCache).
+        void resetAccountContentReads(queryClient, pubkey);
       } catch (error) {
         results.unbanError = String(error);
         // Unban was not confirmed; only reset the reads.
