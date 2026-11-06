@@ -1595,8 +1595,8 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
   // The worker's refusals (handleModerateMedia's `from` check), as apiRequest
   // turns them into errors.
-  const changed = (current: string) => new ApiError(
-    `Refusing PERMANENT_BAN: expected current state SAFE, found ${current}`, 409, 'Conflict', 'state_mismatch', undefined, current,
+  const changed = (current: string, action = 'PERMANENT_BAN') => new ApiError(
+    `Refusing ${action}: expected current state SAFE, found ${current}`, 409, 'Conflict', 'state_mismatch', undefined, current,
   );
   const unreadable = () => new ApiError(
     'Could not read current media state; refusing to act', 503, 'Service Unavailable', 'state_unreadable',
@@ -1769,6 +1769,63 @@ describe('EventActions: media actions send the state the screen showed', () => {
       variant: 'destructive',
     }));
     expectStatusRechecked(invalidate);
+  });
+
+  // Another moderator got there first: the record already shows the action, so
+  // the write has nothing to overwrite and goes again from that state.
+  it.each([
+    ['Block Media (1)', 'PERMANENT_BAN', 'Blocked by moderator', 'Blocked 1 media file(s)', 'block_media'],
+    ['Age Restrict (1)', 'AGE_RESTRICTED', 'Age restricted by moderator', 'Age restricted 1 media file(s)', 'age_restrict_media'],
+  ] as const)('%s goes ahead from the new state when the record already shows it', async (button, action, reason, title, audit) => {
+    api.moderateMedia.mockRejectedValueOnce(changed(action, action));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title }));
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, action, reason, 'SAFE'],
+      [VIDEO, action, reason, action],
+    ]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: audit })));
+  });
+
+  it('lifts from the new state when the record already shows the file public', async () => {
+    api.moderateMedia.mockRejectedValueOnce(changed('SAFE', 'SAFE'));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} hasBlockedMedia={true}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Unblock Media' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Media unblocked' }));
+    expect(api.moderateMedia.mock.calls).toEqual([
+      [VIDEO, 'SAFE', 'Unblocked by moderator', 'PERMANENT_BAN'],
+      [VIDEO, 'SAFE', 'Unblocked by moderator', 'SAFE'],
+    ]);
+  });
+
+  // The event is already gone by the media half, so a refusal here would leave
+  // the video online behind a "Partially completed" warning.
+  it('finishes Delete Event & Media when the record already shows the video deleted', async () => {
+    api.deleteMedia.mockRejectedValueOnce(changed('DELETE', 'DELETE'));
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Event and media permanently deleted' }));
+    expect(api.deleteMedia.mock.calls).toEqual([
+      [VIDEO, 'Permanently deleted by moderator', 'SAFE'],
+      [VIDEO, 'Permanently deleted by moderator', 'DELETE'],
+    ]);
   });
 
   it('shows any other refusal as the worker gave it, and checks the status again', async () => {

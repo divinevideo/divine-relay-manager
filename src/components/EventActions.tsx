@@ -150,9 +150,24 @@ export function EventActions({
   // review hid since this screen loaded comes back as an open age review, and a
   // write that timed out may have landed. Either way the buttons were decided
   // on a status that may no longer hold. Other errors keep the worker's words.
-  const writeMedia = async (hash: string, write: (from: ExpectedMediaState | undefined) => Promise<unknown>) => {
+  //
+  // A record that already shows the action asked for is the one change the
+  // write cannot overwrite: another moderator got there first. So the write is
+  // sent again from that state, as it went through before the check, and the
+  // action completes and is logged instead of failing on a file that is already
+  // as the moderator wants it.
+  const writeMedia = async (
+    hash: string,
+    action: ModerationAction,
+    write: (from: ExpectedMediaState | undefined) => Promise<unknown>,
+  ) => {
     try {
-      await write(expectedStateOf(statusOf(hash)));
+      await write(expectedStateOf(statusOf(hash))).catch((error: unknown) => {
+        if (error instanceof ApiError && error.code === 'state_mismatch' && error.currentState === action) {
+          return write(action);
+        }
+        throw error;
+      });
     } catch (error) {
       queryClient.invalidateQueries({ queryKey: ['media-status'] });
       const refusal = describeStateRefusal(error);
@@ -161,9 +176,9 @@ export function EventActions({
     }
   };
   const moderateFile = (hash: string, action: ModerationAction, reason: string) =>
-    writeMedia(hash, (from) => api.moderateMedia(hash, action, reason, from));
+    writeMedia(hash, action, (from) => api.moderateMedia(hash, action, reason, from));
   const deleteFile = (hash: string) =>
-    writeMedia(hash, (from) => api.deleteMedia(hash, 'Permanently deleted by moderator', from));
+    writeMedia(hash, 'DELETE', (from) => api.deleteMedia(hash, 'Permanently deleted by moderator', from));
   // Any status but DELETE moves a deleted file out of Deleted on the media server
   // (divine-blossom handle_admin_moderate and handle_admin_moderate_action both),
   // so no status is ever sent to a deleted file: a deleted video gets no Block or
