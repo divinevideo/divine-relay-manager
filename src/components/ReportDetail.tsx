@@ -810,24 +810,20 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     </Badge>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    {goneCause.kind !== 'explained' ? (
-                      <p className="text-xs">{goneCause.line}</p>
-                    ) : goneCause.by === 'delete' ? (
+                    {goneCause.kind === 'explained' && goneCause.by === 'delete' ? (
                       <p className="text-xs">
                         Deleted via relay admin
                         {decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')?.created_at &&
                           ` on ${new Date(decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')!.created_at).toLocaleDateString()}`
                         }
                       </p>
-                    ) : goneCause.by === 'auto-hide' ? (
-                      // isAutoHidden covers the states that need a check too:
-                      // the worker writes those only after the relay ban landed,
-                      // so the content is hidden either way.
-                      <p className="text-xs">Hidden automatically</p>
-                    ) : goneCause.by === 'ban' ? (
-                      <p className="text-xs">User is banned — event removed as part of ban</p>
                     ) : (
-                      <p className="text-xs">Event is in the relay ban list</p>
+                      // goneCause's own line, which the thread panel shows too,
+                      // so the two give the same reason. An auto-hide covers the
+                      // states that need a check as well: the worker writes those
+                      // only after the relay ban landed, so the content is hidden
+                      // either way.
+                      <p className="text-xs">{goneCause.line}</p>
                     )}
                   </TooltipContent>
                 </Tooltip>

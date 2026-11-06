@@ -449,7 +449,7 @@ describe('ReportDetail post hidden by a suspension', () => {
 
     renderDetail();
 
-    expect(await removedBadgeTooltip('User Banned')).toBe('User is banned — event removed as part of ban');
+    expect(await removedBadgeTooltip('User Banned')).toBe('The account is banned; its posts were removed as part of the ban');
   });
 
   it('names a confirmed event ban over a stale account ban, in the badge and its tooltip', async () => {
@@ -460,7 +460,7 @@ describe('ReportDetail post hidden by a suspension', () => {
     renderDetail();
 
     const tip = await removedBadgeTooltip('Event Banned');
-    expect(tip).toBe('Event is in the relay ban list');
+    expect(tip).toBe("The event is in the relay's ban list");
     expect((threadContextProps.last?.goneCause as { kind: string } | undefined)?.kind).toBe('explained');
   });
 
