@@ -41,13 +41,19 @@ beforeEach(() => {
   api.logDecision.mockResolvedValue(undefined);
 });
 
+// `invalidate` spies on the client's invalidateQueries, for tests that check
+// what the panel reads again.
 function renderWithProvider(ui: React.ReactElement) {
   const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-  return render(
-    <QueryClientProvider client={qc}>
-      <TooltipProvider>{ui}</TooltipProvider>
-    </QueryClientProvider>
-  );
+  const invalidate = vi.spyOn(qc, 'invalidateQueries');
+  return {
+    ...render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>{ui}</TooltipProvider>
+      </QueryClientProvider>
+    ),
+    invalidate,
+  };
 }
 
 describe('EventActions', () => {
@@ -1596,16 +1602,6 @@ describe('EventActions: media actions send the state the screen showed', () => {
     'Could not read current media state; refusing to act', 503, 'Service Unavailable', 'state_unreadable',
   );
 
-  function renderWithClient(ui: React.ReactElement) {
-    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    const invalidate = vi.spyOn(qc, 'invalidateQueries');
-    render(
-      <QueryClientProvider client={qc}>
-        <TooltipProvider>{ui}</TooltipProvider>
-      </QueryClientProvider>
-    );
-    return { invalidate };
-  }
   const expectStatusRechecked = (invalidate: { mock: { calls: unknown[][] } }) =>
     expect(invalidate.mock.calls).toContainEqual([{ queryKey: ['media-status'] }]);
 
@@ -1702,7 +1698,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
   it('fails the action in plain words when the video changed, and checks the status again', async () => {
     api.moderateMedia.mockImplementation((hash: string) =>
       (hash === VIDEO ? Promise.reject(changed('QUARANTINE')) : Promise.resolve({ success: true })));
-    const { invalidate } = renderWithClient(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         mediaHashStatuses={openPost} />
     );
@@ -1721,7 +1717,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
   it('warns when the thumbnail changed, and checks the status again', async () => {
     api.moderateMedia.mockImplementation((hash: string) =>
       (hash === THUMB ? Promise.reject(changed('UNKNOWN')) : Promise.resolve({ success: true })));
-    const { invalidate } = renderWithClient(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
@@ -1742,7 +1738,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
   it('fails an undo in plain words when the state could not be checked, and checks the status again', async () => {
     api.moderateMedia.mockRejectedValue(unreadable());
-    const { invalidate } = renderWithClient(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} hasBlockedMedia={true}
         mediaHashStatuses={[{ hash: VIDEO, isBlocked: true, isRestricted: false, action: 'PERMANENT_BAN' }]} />
     );
@@ -1759,7 +1755,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
   it('fails Delete Media in plain words when a file changed, and checks the status again', async () => {
     api.deleteMedia.mockRejectedValue(changed('PERMANENT_BAN'));
-    const { invalidate } = renderWithClient(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
         mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
     );
@@ -1779,7 +1775,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
     api.moderateMedia.mockRejectedValue(new ApiError(
       'Another account owns this file; refusing to act for this one', 409, 'Conflict', 'owner_mismatch',
     ));
-    const { invalidate } = renderWithClient(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
         mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
     );
@@ -1804,7 +1800,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
       "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
       409, 'Conflict', 'age_review_active',
     ));
-    const { invalidate } = renderWithClient(
+    const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
         mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
     );
