@@ -761,7 +761,7 @@ export default {
 
       // Report watcher management endpoints
       if (path.startsWith('/api/report-watcher/')) {
-        return handleReportWatcherRoutes(request, path, env, corsHeaders);
+        return handleReportWatcherRoutes(request, path, env, corsHeaders, moderator);
       }
 
       // Funnelcake REST API proxy -- fast ClickHouse-backed reads
@@ -3635,7 +3635,8 @@ async function handleReportWatcherRoutes(
   request: Request,
   path: string,
   env: Env,
-  corsHeaders: Record<string, string>
+  corsHeaders: Record<string, string>,
+  moderator: string | undefined
 ): Promise<Response> {
   if (!env.REPORT_WATCHER) {
     return jsonResponse(
@@ -3652,17 +3653,67 @@ async function handleReportWatcherRoutes(
   if (doUrl.pathname === '/internal' || doUrl.pathname.startsWith('/internal/')) {
     return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
   }
+  // The DO's /event-visibility route records a moderatorPubkey taken from the
+  // request body into moderation_decisions. Its only real caller,
+  // coordinateEventVisibility, uses the DO binding directly, so the proxy has no
+  // legitimate use for it and would let a caller name any moderator.
+  if (doUrl.pathname === '/event-visibility' || doUrl.pathname.startsWith('/event-visibility/')) {
+    return jsonResponse({ success: false, error: 'Not found' }, 404, corsHeaders);
+  }
 
   // Get the singleton DO instance (using a fixed ID)
   const id = env.REPORT_WATCHER.idFromName('singleton');
   const stub = env.REPORT_WATCHER.get(id);
 
   try {
-    // Forward the request to the DO
+    // Forward the request to the DO. The login token is for this worker only:
+    // it is dropped from every forwarded request (Headers.delete is
+    // case-insensitive), so the Durable Object never sees it.
+    const headers = new Headers(request.headers);
+    headers.delete(MODERATOR_LOGIN_HEADER);
+
+    let body: BodyInit | null = null;
+    if (request.method !== 'GET' && request.method !== 'HEAD') {
+      body = await request.arrayBuffer();
+      // A sexual-quarantine decision is attributed to the moderator this worker
+      // verified, never to an actor named in the body. The Durable Object gets
+      // that pubkey or 'unattributed', and nothing else.
+      // The match is the DO's own entry test for the whole prefix, not a strict
+      // /<id> shape: the DO splits the path loosely, so /<id>/, /<id>//x and
+      // /<id>/. all reach its decision handler and must be rewritten too.
+      const isDecision = request.method === 'POST'
+        && (doUrl.pathname === '/sexual-quarantine' || doUrl.pathname.startsWith('/sexual-quarantine/'));
+      if (isDecision) {
+        // Refuse anything that is not a JSON object here, with the DO's own
+        // 400 texts, rather than forwarding it. Forwarding would be safe only
+        // if this parse and the DO's always read the same bytes the same way.
+        const refuse = (error: string) => new Response(JSON.stringify({ error }), {
+          status: 400,
+          headers: { 'Content-Type': 'application/json', ...corsHeaders, 'Cache-Control': 'private, no-store' },
+        });
+        let input: unknown;
+        try {
+          input = JSON.parse(new TextDecoder().decode(body));
+        } catch {
+          return refuse('Invalid JSON');
+        }
+        if (!input || typeof input !== 'object' || Array.isArray(input)) {
+          return refuse('Revision, decision, reviewer and reason are required');
+        }
+        const decision = input as Record<string, unknown>;
+        noteClaimedModerator('/api/report-watcher/sexual-quarantine', decision.actor, moderator);
+        decision.actor = moderator ?? 'unattributed';
+        body = JSON.stringify(decision);
+        headers.set('Content-Type', 'application/json');
+        // The rewritten body has a new length; drop the client's stale one.
+        headers.delete('Content-Length');
+      }
+    }
+
     const doRequest = new Request(doUrl, {
       method: request.method,
-      headers: request.headers,
-      body: request.body,
+      headers,
+      body,
     });
 
     const response = await stub.fetch(doRequest);
