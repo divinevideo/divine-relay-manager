@@ -136,6 +136,19 @@ describe('useThread repost original', () => {
       .not.toContain(value);
   });
 
+  it('asks for the original by its lower-case id when the e tag is in upper case', async () => {
+    // Event ids are lower-case hex and a relay matches them exactly, so an id
+    // sent as the tag wrote it finds nothing. The tag still names the event.
+    const upper = SIGNED_VIDEO.id.toUpperCase();
+    serve([{ ...makeEvent(REPOST_ID, 6, AUTHOR, [['e', upper]]), content: '' }, SIGNED_VIDEO]);
+
+    const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toEqual(SIGNED_VIDEO);
+    expect(requestedIds()).not.toContain(upper);
+  });
+
   it('takes an embedded copy that is the signed event the e tag names', async () => {
     serve([repostWith(JSON.stringify(SIGNED_VIDEO))]);
 

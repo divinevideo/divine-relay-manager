@@ -123,7 +123,8 @@ export function useThread(
           // (#337). The embedded copy is the reposter's writing, and a fetched
           // event is checked too, since the external relay hint is the
           // reporter's.
-          const targetId = originalEventTag[1];
+          // Lower-case, as ids are on the wire: a relay matches them exactly.
+          const targetId = originalEventTag[1].toLowerCase();
           const checked = (candidate: NostrEvent | null | undefined) =>
             (candidate && isEventWithId(candidate, targetId) ? { ...candidate, id: candidate.id.toLowerCase() } : null);
           repostedEvent = verifiedRepostedEvent(event);
