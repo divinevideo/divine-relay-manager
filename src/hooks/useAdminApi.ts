@@ -9,22 +9,32 @@ import * as adminApi from '@/lib/adminApi';
  * Hook that provides admin API functions pre-bound to the current environment's apiUrl.
  * Components using this hook automatically use the correct worker based on the selected environment.
  *
+ * The plain result has the reads only. Every call that records who acted
+ * (ban, delete, label, decision log, and the rest) is reachable only through
+ * `asModerator(token)`, so tsc rejects a moderation action made without the
+ * moderator's login. callRelayRpc stays on the plain result for reads such as
+ * RelaySettings' relay-config methods; an account action through it still
+ * goes through asModerator.
+ *
  * @example
  * ```tsx
- * const { banPubkey, listBannedPubkeys } = useAdminApi();
+ * const api = useAdminApi();
+ * const { getModeratorToken } = useCurrentUser();
  *
- * // No need to pass apiUrl - it's automatically included
- * await banPubkey(pubkey, reason);
- * const banned = await listBannedPubkeys();
+ * const banned = await api.listBannedPubkeys();
+ * // At the click: take the login once and use it for the whole action.
+ * await api.asModerator(getModeratorToken()).banPubkey(pubkey, reason);
  * ```
  */
-export function useAdminApi() {
+export function useAdminApi(): PlainAdminApi {
   const { config } = useAppContext();
   const { apiUrl, relayUrl } = config;
 
   // Memoize bound functions to prevent unnecessary re-renders
   return useMemo(() => ({
-    ...buildAdminApi(apiUrl, relayUrl),
+    ...buildReadApi(apiUrl, relayUrl),
+    // Sends no login header. Kept for reads; see the hook doc.
+    callRelayRpc: buildAttributionApi(apiUrl).callRelayRpc,
     /**
      * The same API with the moderator's login token bound to every call that
      * records who acted. Take the token once at the click
@@ -36,25 +46,37 @@ export function useAdminApi() {
   }), [apiUrl, relayUrl]);
 }
 
+type ReadApi = ReturnType<typeof buildReadApi>;
+type AttributionApi = ReturnType<typeof buildAttributionApi>;
+
 /** The admin API as `asModerator(token)` returns it: one moderator's action. */
-export type ModeratorApi = ReturnType<typeof buildAdminApi>;
+export type ModeratorApi = ReadApi & AttributionApi;
+
+/** What `useAdminApi()` returns: the reads, callRelayRpc, and asModerator. */
+export type PlainAdminApi = ReadApi & Pick<AttributionApi, 'callRelayRpc'> & {
+  asModerator: (loginToken: string | undefined) => ModeratorApi;
+};
 
 /**
- * The admin API bound to one environment and, optionally, one moderator login.
- * Every call that writes an attribution passes `{ loginToken }` on here, in one
- * place, so a caller cannot forget it. useAdminApi.attribution.test.ts holds a
- * row per such call; a new one belongs there too.
+ * The full admin API bound to one environment and, optionally, one moderator
+ * login. Exported for tests; components get it through `asModerator`.
  */
-function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
+export function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string): ModeratorApi {
+  return { ...buildReadApi(apiUrl, relayUrl), ...buildAttributionApi(apiUrl, loginToken) };
+}
+
+/**
+ * Every call that writes an attribution. They pass `{ loginToken }` on here, in
+ * one place, so a caller cannot forget it, and `login` is in scope nowhere else,
+ * so a new call that needs it has to be added here, which also keeps it off the
+ * plain api. useAdminApi.attribution.test.ts holds a row per call; a new one
+ * belongs there too.
+ */
+function buildAttributionApi(apiUrl: string, loginToken?: string) {
   const login: adminApi.LoginOpts = { loginToken };
   return {
-    getSexualQuarantineCases: (cursor?: string) => adminApi.getSexualQuarantineCases(apiUrl, cursor),
-    getSexualQuarantineCase: (eventId: string) => adminApi.getSexualQuarantineCase(apiUrl, eventId),
-    getSexualQuarantineHistory: (eventId: string) => adminApi.getSexualQuarantineHistory(apiUrl, eventId),
     decideSexualQuarantine: (eventId: string, body: Parameters<typeof adminApi.decideSexualQuarantine>[2]) =>
       adminApi.decideSexualQuarantine(apiUrl, eventId, body, login),
-    // Info
-    getWorkerInfo: () => adminApi.getWorkerInfo(apiUrl),
 
     // Event publishing
     publishEvent: (event: adminApi.UnsignedEvent) => adminApi.publishEvent(apiUrl, event, login),
@@ -83,6 +105,52 @@ function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
       adminApi.allowEvent(apiUrl, eventId, login),
     unbanPubkey: (pubkey: string) =>
       adminApi.unbanPubkey(apiUrl, pubkey, login),
+    suspendPubkey: (pubkey: string, reason?: string) =>
+      adminApi.suspendPubkey(apiUrl, pubkey, reason, login),
+    unsuspendPubkey: (pubkey: string) =>
+      adminApi.unsuspendPubkey(apiUrl, pubkey, login),
+
+    // Labels
+    publishLabel: (params: adminApi.LabelParams) =>
+      adminApi.publishLabel(apiUrl, params, login),
+    publishLabelAndBan: (params: adminApi.LabelParams & { shouldBan?: boolean }) =>
+      adminApi.publishLabelAndBan(apiUrl, params, login),
+    markAsReviewed: (
+      targetType: 'event' | 'pubkey',
+      targetValue: string,
+      status?: adminApi.ResolutionStatus,
+      comment?: string,
+    ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment, login),
+
+    // Decision log
+    logDecision: (params: Parameters<typeof adminApi.logDecision>[1]) =>
+      adminApi.logDecision(apiUrl, params, login),
+    confirmAutoHide: (params: Parameters<typeof adminApi.confirmAutoHide>[1]) =>
+      adminApi.confirmAutoHide(apiUrl, params, login),
+
+    // Age review
+    updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>
+      adminApi.updateAgeReviewCase(apiUrl, caseId, updates, login),
+
+    // Bulk moderation
+    bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
+      adminApi.bulkModerate(apiUrl, pubkey, action, reason, options, login),
+
+    // Zendesk tickets linked to a report target
+    closeTicket: (ticketId: number) =>
+      adminApi.closeTicket(apiUrl, ticketId, login),
+  };
+}
+
+/** Every call that records no moderator: reads, and writes the worker does not attribute. */
+function buildReadApi(apiUrl: string, relayUrl: string) {
+  return {
+    getSexualQuarantineCases: (cursor?: string) => adminApi.getSexualQuarantineCases(apiUrl, cursor),
+    getSexualQuarantineCase: (eventId: string) => adminApi.getSexualQuarantineCase(apiUrl, eventId),
+    getSexualQuarantineHistory: (eventId: string) => adminApi.getSexualQuarantineHistory(apiUrl, eventId),
+    // Info
+    getWorkerInfo: () => adminApi.getWorkerInfo(apiUrl),
+
     // opts threads a per-call timeout through. The reports queue's resolution
     // reads, and every read of the relay lists through useRelayBanLists, pass
     // RESOLUTION_READ_TIMEOUT_MS; other callers omit it and keep the default
@@ -91,10 +159,6 @@ function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
       adminApi.listBannedPubkeys(apiUrl, opts),
     listBannedEvents: (opts?: { timeoutMs?: number }) =>
       adminApi.listBannedEvents(apiUrl, opts),
-    suspendPubkey: (pubkey: string, reason?: string) =>
-      adminApi.suspendPubkey(apiUrl, pubkey, reason, login),
-    unsuspendPubkey: (pubkey: string) =>
-      adminApi.unsuspendPubkey(apiUrl, pubkey, login),
     listSuspendedPubkeys: (opts?: { timeoutMs?: number }) =>
       adminApi.listSuspendedPubkeys(apiUrl, opts),
 
@@ -112,18 +176,6 @@ function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
     fetchResolutionLabelTargets: (opts?: { timeoutMs?: number }) =>
       adminApi.fetchResolutionLabelTargets(apiUrl, opts),
 
-    // Labels
-    publishLabel: (params: adminApi.LabelParams) =>
-      adminApi.publishLabel(apiUrl, params, login),
-    publishLabelAndBan: (params: adminApi.LabelParams & { shouldBan?: boolean }) =>
-      adminApi.publishLabelAndBan(apiUrl, params, login),
-    markAsReviewed: (
-      targetType: 'event' | 'pubkey',
-      targetValue: string,
-      status?: adminApi.ResolutionStatus,
-      comment?: string,
-    ) => adminApi.markAsReviewed(apiUrl, targetType, targetValue, status, comment, login),
-
     // Media moderation
     moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string, from?: adminApi.ExpectedMediaState, pubkey?: string) =>
       adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey),
@@ -133,10 +185,6 @@ function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
       adminApi.unblockMedia(apiUrl, sha256, reason),
 
     // Decision log
-    logDecision: (params: Parameters<typeof adminApi.logDecision>[1]) =>
-      adminApi.logDecision(apiUrl, params, login),
-    confirmAutoHide: (params: Parameters<typeof adminApi.confirmAutoHide>[1]) =>
-      adminApi.confirmAutoHide(apiUrl, params, login),
     getDecisions: (targetId: string) =>
       adminApi.getDecisions(apiUrl, targetId),
     getAllDecisions: (opts?: { timeoutMs?: number }) =>
@@ -181,12 +229,8 @@ function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
       adminApi.getActiveAgeReviewCase(apiUrl, pubkey),
     getAccountStatus: (pubkey: string) =>
       adminApi.getAccountStatus(apiUrl, pubkey),
-    updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>
-      adminApi.updateAgeReviewCase(apiUrl, caseId, updates, login),
 
     // Bulk moderation
-    bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
-      adminApi.bulkModerate(apiUrl, pubkey, action, reason, options, login),
     getBulkJobStatus: (jobId: string) => adminApi.getBulkJobStatus(apiUrl, jobId),
     getBulkJobNotes: (jobId: string, after?: string) => adminApi.getBulkJobNotes(apiUrl, jobId, after),
     getAgeReviewBulkNotesJob: (caseId: string) => adminApi.getAgeReviewBulkNotesJob(apiUrl, caseId),
@@ -207,8 +251,6 @@ function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: string) {
     // Zendesk tickets linked to a report target
     getLinkedTickets: (target: { eventId?: string; pubkey?: string }) =>
       adminApi.getLinkedTickets(apiUrl, target),
-    closeTicket: (ticketId: number) =>
-      adminApi.closeTicket(apiUrl, ticketId, login),
   };
 }
 

@@ -1,8 +1,8 @@
 // ABOUTME: Pins that every attribution call made through asModerator(token) sends
-// ABOUTME: the X-Divine-Login-Token header, and the plain api sends none (#178).
+// ABOUTME: the X-Divine-Login-Token header, and the plain useAdminApi() has none of them (#178).
 import { renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { useAdminApi } from './useAdminApi';
+import { buildAdminApi, useAdminApi, type ModeratorApi, type PlainAdminApi } from './useAdminApi';
 
 // The worker records the moderator it verifies from this header, and nothing
 // else. Each useAdminApi wrapper rewrites its argument list by hand, so a
@@ -17,13 +17,12 @@ const PK = 'a'.repeat(64);
 const HEADER = 'X-Divine-Login-Token';
 
 vi.mock('@/hooks/useAppContext', () => ({
-  useAppContext: () => ({ config: { apiUrl: API_URL, relayUrl: 'wss://relay.example' } }),
+  useAppContext: () => ({ config: { apiUrl: API_URL, relayUrl: RELAY_URL } }),
 }));
 
-type Api = ReturnType<typeof useAdminApi>;
-type Scoped = Omit<Api, 'asModerator'>;
+const RELAY_URL = 'wss://relay.example';
 
-const ATTRIBUTION_CALLS: Array<[string, (api: Scoped) => Promise<unknown>]> = [
+const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]> = [
   ['publishEvent', (a) => a.publishEvent({ kind: 1, content: 'x' })],
   ['publishLabel', (a) => a.publishLabel({ targetType: 'event', targetValue: 'e1', namespace: 'ns', labels: ['l'] })],
   ['publishLabelAndBan', (a) => a.publishLabelAndBan({ targetType: 'pubkey', targetValue: PK, namespace: 'ns', labels: ['l'], shouldBan: true })],
@@ -82,10 +81,30 @@ describe('useAdminApi attribution header', () => {
     for (const headers of sentHeaders()) expect(headers[HEADER]).toBe(TOKEN);
   });
 
-  it.each(ATTRIBUTION_CALLS)('the plain api.%s sends no login header', async (_name, invoke) => {
+  // With no login bound, a call sends no header. buildAdminApi directly, because
+  // the plain useAdminApi() no longer has these calls at all (see below).
+  it.each(ATTRIBUTION_CALLS)('buildAdminApi with no token: %s sends no login header', async (_name, invoke) => {
+    await invoke(buildAdminApi(API_URL, RELAY_URL));
+
+    expect(mockFetch).toHaveBeenCalled();
+    for (const headers of sentHeaders()) expect(headers).not.toHaveProperty(HEADER);
+  });
+
+  // An action has to take the login at the click to record a moderator, so the
+  // plain api leaves every attribution call out, at runtime as well as in its
+  // type. callRelayRpc stays for reads (RelaySettings' relay-config methods).
+  it.each(ATTRIBUTION_CALLS.filter(([name]) => name !== 'callRelayRpc'))(
+    'the plain api has no %s', (name) => {
+      const { result } = renderHook(() => useAdminApi());
+      expect(result.current).not.toHaveProperty(name);
+      expect(result.current.asModerator(TOKEN)).toHaveProperty(name);
+    },
+  );
+
+  it('the plain api.callRelayRpc sends no login header', async () => {
     const { result } = renderHook(() => useAdminApi());
 
-    await invoke(result.current);
+    await result.current.callRelayRpc('listbannedpubkeys');
 
     expect(mockFetch).toHaveBeenCalled();
     for (const headers of sentHeaders()) expect(headers).not.toHaveProperty(HEADER);
@@ -111,3 +130,53 @@ describe('useAdminApi attribution header', () => {
     expect(sentHeaders()[0][HEADER]).toBe('token-a');
   });
 });
+
+// Type-level: tsc (run by `npm run test`) fails if any of these becomes
+// reachable on the plain api again. Never called; it only has to type-check.
+export function plainApiHasNoAttributionCalls(api: PlainAdminApi): void {
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.decideSexualQuarantine;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.publishEvent;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.moderateAction;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.deleteEvent;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.hideEvent;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.restoreEvent;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.banPubkey;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.allowPubkey;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.banEvent;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.allowEvent;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.unbanPubkey;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.suspendPubkey;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.unsuspendPubkey;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.publishLabel;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.publishLabelAndBan;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.markAsReviewed;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.logDecision;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.confirmAutoHide;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.updateAgeReviewCase;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.bulkModerate;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.closeTicket;
+  // Reads stay, and so does callRelayRpc.
+  void api.listBannedPubkeys;
+  void api.callRelayRpc;
+}

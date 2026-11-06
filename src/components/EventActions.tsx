@@ -324,7 +324,7 @@ export function EventActions({
   // store when the write settles, so this holds after the panel unmounts too.
   const logAudit = (
     act: ModeratorApi,
-    params: Parameters<typeof api.logDecision>[0],
+    params: Parameters<ModeratorApi['logDecision']>[0],
     shown?: ShownToast,
   ) =>
     // Started from a resolved promise so that even a synchronous throw lands in

@@ -35,7 +35,9 @@ export interface DivineSessionValue {
    * Snapshot the moderator's login token, synchronously. Call it at the click
    * and keep using that value for the whole action: a later logout or account
    * switch changes what this returns, never the string already taken. Undefined
-   * when signed out (or the session has no access token).
+   * when signed out (or the session has no access token), and when the token is
+   * past its expiresAt: that call also starts a refresh and marks the identity
+   * unattributed until a new token arrives.
    */
   getModeratorToken: () => string | undefined;
   startLogin: (returnPath?: string) => Promise<void>;

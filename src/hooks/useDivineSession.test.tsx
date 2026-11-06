@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 
 const { getSession, logout, startLogin, getPublicKey, DivineRpcSigner } = vi.hoisted(() => {
@@ -259,5 +259,161 @@ describe('getModeratorToken (synchronous login-token snapshot)', () => {
     }
     render(<Bare />);
     expect(got).toBeUndefined();
+  });
+});
+
+// The worker verifies the login token on every action (#178 phase 2), so an
+// expired token records nobody. These pin that the session refreshes before
+// expiry and never hands an expired token to an action.
+describe('login token expiry', () => {
+  const T0 = new Date('2026-11-06T12:00:00Z').getTime();
+  const MIN = 60_000;
+
+  function TokenProbe({ onReady }: { onReady: (get: () => string | undefined) => void }) {
+    const { getModeratorToken, credentials } = useDivineSession();
+    onReady(getModeratorToken);
+    return <span data-testid="token">{credentials?.accessToken ?? 'none'}</span>;
+  }
+
+  function renderTokenProbe() {
+    const handle: { get: () => string | undefined } = { get: () => 'unset' };
+    render(
+      <DivineSessionProvider>
+        <TokenProbe onReady={(get) => { handle.get = get; }} />
+      </DivineSessionProvider>,
+    );
+    return handle;
+  }
+
+  // waitFor polls on real timers, so flush with the fake clock instead.
+  async function flush(ms = 0) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('an expired token: getModeratorToken returns undefined and starts a refresh', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 10 * MIN });
+    const handle = renderTokenProbe();
+    await flush();
+    expect(handle.get()).toBe('tok-a');
+    expect(getSession).toHaveBeenCalledTimes(1);
+
+    // The clock passes expiresAt with no timer having run (a slept laptop).
+    vi.setSystemTime(T0 + 11 * MIN);
+    getSession.mockReturnValue(new Promise(() => {})); // the refresh is still in flight
+    let taken: string | undefined = 'unset';
+    act(() => {
+      taken = handle.get();
+    });
+
+    expect(taken).toBeUndefined();
+    expect(getSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('a token whose expiry is not known is handed out as before', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a' });
+    const handle = renderTokenProbe();
+    await flush();
+    vi.setSystemTime(T0 + 365 * 24 * 60 * MIN);
+    expect(handle.get()).toBe('tok-a');
+    expect(getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('refreshes on a timer before the token expires', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 10 * MIN });
+    const handle = renderTokenProbe();
+    await flush();
+    expect(getSession).toHaveBeenCalledTimes(1);
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-b', expiresAt: T0 + 70 * MIN });
+
+    // Four minutes before expiry, not at it.
+    await flush(6 * MIN - 1);
+    expect(getSession).toHaveBeenCalledTimes(1);
+    await flush(1);
+    expect(getSession).toHaveBeenCalledTimes(2);
+    expect(Date.now()).toBeLessThan(T0 + 10 * MIN);
+    expect(screen.getByTestId('token')).toHaveTextContent('tok-b');
+    expect(handle.get()).toBe('tok-b');
+  });
+
+  it('a token issued with less than the lead left refreshes at most every 30 seconds', async () => {
+    let n = 0;
+    getSession.mockImplementation(async () => {
+      n += 1;
+      return { bunkerUrl: 'bunker://x', accessToken: `tok-${n}`, expiresAt: Date.now() + 2 * MIN };
+    });
+    renderTokenProbe();
+    await flush();
+    await flush(29_999);
+    expect(getSession).toHaveBeenCalledTimes(1);
+    await flush(1);
+    expect(getSession).toHaveBeenCalledTimes(2);
+  });
+
+  it('a token that expires beyond the timer range does not refresh at once', async () => {
+    // setTimeout fires immediately for a delay over 2^31-1 ms (about 24.8 days).
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 30 * 24 * 60 * MIN });
+    renderTokenProbe();
+    await flush();
+    await flush(60_000);
+    expect(getSession).toHaveBeenCalledTimes(1);
+  });
+
+  it('stops the schedule on unmount', async () => {
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 10 * MIN });
+    const { unmount } = render(
+      <DivineSessionProvider>
+        <span />
+      </DivineSessionProvider>,
+    );
+    await flush();
+    unmount();
+    await flush(20 * MIN);
+    expect(getSession).toHaveBeenCalledTimes(1);
+  });
+
+  describe('visibilitychange', () => {
+    let visibility: DocumentVisibilityState = 'visible';
+    beforeEach(() => {
+      Object.defineProperty(document, 'visibilityState', { configurable: true, get: () => visibility });
+    });
+    afterEach(() => {
+      // Drop the own-property override so the prototype getter applies again.
+      delete (document as { visibilityState?: unknown }).visibilityState;
+    });
+
+    it('refreshes when the tab becomes visible', async () => {
+      getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 60 * MIN });
+      renderTokenProbe();
+      await flush();
+      expect(getSession).toHaveBeenCalledTimes(1);
+
+      visibility = 'visible';
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      expect(getSession).toHaveBeenCalledTimes(2);
+    });
+
+    it('does not refresh when the tab is hidden', async () => {
+      getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-a', expiresAt: T0 + 60 * MIN });
+      renderTokenProbe();
+      await flush();
+
+      visibility = 'hidden';
+      await act(async () => {
+        document.dispatchEvent(new Event('visibilitychange'));
+      });
+      expect(getSession).toHaveBeenCalledTimes(1);
+    });
   });
 });

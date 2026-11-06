@@ -5,6 +5,11 @@ export const MODERATOR_LOGIN_HEADER = 'X-Divine-Login-Token';
 export const MODERATOR_LOGIN_REQUIRED = 'moderator_login_required';
 
 export interface ModeratorLoginEnv {
+  /**
+   * Must name the same Keycast the frontend signs in at (VITE_DIVINE_LOGIN_URL,
+   * src/lib/divineLogin.ts). A token issued by one Keycast fails verification at
+   * another, and every decision then records no moderator, with no error shown.
+   */
   MODERATOR_LOGIN_URL?: string;
 }
 

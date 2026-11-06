@@ -117,6 +117,43 @@ describe('divineLogin', () => {
     expect(await getSession()).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
   });
 
+  // Keycast refresh tokens are single use, so two overlapping refreshes sign the
+  // moderator out: the second is refused and the SDK deletes the session.
+  it('getSession shares one in-flight call between concurrent callers', async () => {
+    let release!: (v: { bunkerUrl: string; accessToken: string }) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    const first = getSession();
+    const second = getSession();
+    release({ bunkerUrl: 'bunker://x', accessToken: 't' });
+    expect(await first).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+    expect(await second).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+    expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+
+    // Once it settles, the next call reads again.
+    oauth.getSessionWithRefresh.mockResolvedValue(null);
+    expect(await getSession()).toBeNull();
+    expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('getSession runs under a cross-tab Web Lock when one is available', async () => {
+    let grant!: () => void;
+    const request = vi.fn((name: string, cb: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      const pending = getSession();
+      expect(request).toHaveBeenCalledWith('divine-login:session', expect.any(Function));
+      // Another tab holds the lock: nothing reads or refreshes until it is granted.
+      expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+      grant();
+      expect(await pending).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
   it('logout delegates to the SDK', () => {
     logout();
     expect(oauth.logout).toHaveBeenCalled();

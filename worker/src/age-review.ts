@@ -2863,7 +2863,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   for (const retry of subjectClearRetries) {
     const result = await clearSubject(
-      env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId,
+      // No moderator: see pendingSubjectClears for why a retry records null.
+      env.DB, retry.pubkey, undefined, retry.reason, retry.subjectId, retry.denialCaseId,
     );
     if (!result.success) {
       console.error(`[age-review] Protected-subject clear retry failed: ${result.error}`);

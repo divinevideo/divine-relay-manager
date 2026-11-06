@@ -119,7 +119,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Never blocks the action.
   const logAudit = (
     act: ModeratorApi,
-    params: Parameters<typeof api.logDecision>[0],
+    params: Parameters<ModeratorApi['logDecision']>[0],
   ) =>
     // Started from a resolved promise so that even a synchronous throw lands in
     // the catch below rather than failing the action.

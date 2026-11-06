@@ -132,7 +132,7 @@ export function UserActions({
   // time: the warning would otherwise replace a note the action just showed.
   const logAudit = (
     act: ModeratorApi,
-    params: Parameters<typeof api.logDecision>[0],
+    params: Parameters<ModeratorApi['logDecision']>[0],
     note?: string,
   ) =>
     // Started from a resolved promise so that even a synchronous throw lands in

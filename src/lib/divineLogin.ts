@@ -3,6 +3,10 @@
 // this module only configures the client and exposes the flow relay-admin uses.
 import { createDivineClient, type StoredCredentials } from '@divinevideo/login';
 
+// Must name the same Keycast as the worker's MODERATOR_LOGIN_URL
+// (worker/wrangler.staging.toml and wrangler.prod.toml), which verifies this
+// login's token. If they differ, verification fails and attribution silently
+// records no moderator.
 export const DIVINE_LOGIN_SERVER_URL =
   import.meta.env.VITE_DIVINE_LOGIN_URL || 'https://login.divine.video';
 export const DIVINE_LOGIN_CLIENT_ID = 'divine-relay-admin';
@@ -59,9 +63,31 @@ export async function completeLogin(callbackHref: string): Promise<{ returnPath:
   return { returnPath };
 }
 
+// Keycast refresh tokens are single use: a second refresh with the same token
+// is refused, and the SDK then deletes the stored session, signing the
+// moderator out. Refreshes can overlap within a tab (focus and visibilitychange
+// fire together when a tab comes back) and across tabs (each tab schedules one
+// before expiry). So within a tab, concurrent callers share one call, and across
+// tabs the calls run one at a time under a Web Lock: the next one re-reads
+// storage, finds the session the previous one saved, and does not refresh again.
+const SESSION_LOCK = 'divine-login:session';
+let inFlight: Promise<StoredCredentials | null> | null = null;
+
 /** Current session with automatic refresh (SDK-managed). Null when signed out. */
 export function getSession(): Promise<StoredCredentials | null> {
-  return getClient().oauth.getSessionWithRefresh();
+  if (inFlight) return inFlight;
+  const read = () => getClient().oauth.getSessionWithRefresh();
+  // Web Locks need a secure context; without them, fall back to this tab's
+  // single flight only.
+  const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
+  const call: Promise<StoredCredentials | null> = locks
+    ? locks.request(SESSION_LOCK, read)
+    : read();
+  const shared = call.finally(() => {
+    if (inFlight === shared) inFlight = null;
+  });
+  inFlight = shared;
+  return shared;
 }
 
 /** Clear all session data (SDK-managed). */

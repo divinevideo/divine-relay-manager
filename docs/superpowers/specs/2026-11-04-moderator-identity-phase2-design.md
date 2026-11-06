@@ -152,10 +152,16 @@ Rules:
 
 ## Rollout
 
-1. Staging first. Set `MODERATOR_LOGIN_URL` in the staging toml (it ships with the code; no secret).
-2. Deploy the worker, then the frontend right after. Between the two, old frontends send a claimed pubkey and no token, so actions record nobody. That's the expected brief gap.
-3. On staging: sign in with Divine, take one harmless action, and check that the recorded moderator is the signed-in pubkey. Sign out, act again, and check that it records null. Check the logs for a mismatch line from an old tab, if you can make one.
-4. Repeat for prod, with the previous worker version ID ready for rollback.
+> **Correction (2026-11-06, final review):** this section used to deploy staging's worker and frontend, then prod's. There is one Pages frontend for both environments, so that order put the new frontend in front of the old prod worker, which breaks actions (see step 2). Corrected to both workers first, then the frontend, with rollback in the reverse order.
+
+1. Set `MODERATOR_LOGIN_URL` in the staging and prod tomls (it ships with the code; no secret).
+2. Deploy the staging worker, then the prod worker, then the single frontend. Note each previous worker version ID first. The order matters:
+   - New worker, old frontend (the gap this order accepts): old tabs send a claimed pubkey and no token, so their actions record nobody. Nothing fails.
+   - New frontend, old worker (the gap this order avoids): the frontend sends no `actor`, so the old Durable Object answers 400 to every sexual-quarantine decision, and the old CORS allow-list lacks `X-Divine-Login-Token`, so the browser's preflight blocks every request that carries the token, which is every attribution request from a signed-in moderator.
+3. Between the two worker deploys, check on staging that an action from the current frontend still succeeds (it records nobody, as expected).
+4. After the frontend deploy, ask moderators to reload. A tab opened before it sends no token, so its actions stay unattributed until reloaded.
+5. On staging, then prod: sign in with Divine, take one harmless action, and check that the recorded moderator is the signed-in pubkey. Sign out, act again, and check that it records null. Check the logs for a mismatch line from an old tab, if you can make one.
+6. Rollback runs in reverse: the frontend first, then the workers. Rolling a worker back while the new frontend is live recreates the new-frontend, old-worker break in step 2.
 
 ## Testing the builder must cover
 

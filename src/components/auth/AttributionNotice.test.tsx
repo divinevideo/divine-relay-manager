@@ -6,8 +6,8 @@
 // session. Without a replacement, a moderator sees a fully working tool, never
 // signs in, and every decision they write lands moderator_pubkey = null --
 // silently defeating the audit trail #181 exists to build.
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
 import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 import { useDivineSession } from '@/hooks/useDivineSession';
@@ -151,5 +151,54 @@ describe('AttributionNotice', () => {
     await waitFor(() => expect(session.getSession).toHaveBeenCalled());
     expect(screen.getByTestId('state')).toHaveTextContent('resolving');
     expect(screen.queryByText(/without attribution/i)).toBeNull();
+  });
+});
+
+// The worker records nobody for an expired login token, so the notice has to
+// come back when the token expires and is not replaced (#178 phase 2). Before
+// this, the pubkey stayed cached and the moderator kept looking attributed.
+describe('AttributionNotice after the login token expires', () => {
+  const T0 = new Date('2026-11-06T12:00:00Z').getTime();
+  const MIN = 60_000;
+
+  async function flush(ms = 0) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms);
+    });
+  }
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+    vi.setSystemTime(T0);
+    session.getSession.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'tok-abc', expiresAt: T0 + 10 * MIN });
+    getPublicKey.mockResolvedValue(PUBKEY);
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('shows once the refresh before expiry fails', async () => {
+    renderNotice();
+    await flush();
+    expect(screen.getByTestId('state')).toHaveTextContent('settled:true');
+    expect(screen.queryByText(/without attribution/i)).toBeNull();
+
+    // The scheduled refresh fails: the SDK answers null (and drops the session).
+    session.getSession.mockResolvedValue(null);
+    await flush(6 * MIN);
+
+    expect(screen.getByText(/without attribution/i)).toBeInTheDocument();
+  });
+
+  it('shows at expiry while the refresh has not replaced the token', async () => {
+    renderNotice();
+    await flush();
+    expect(screen.queryByText(/without attribution/i)).toBeNull();
+
+    // Every refresh hangs, so the expired token stays in the session.
+    session.getSession.mockReturnValue(new Promise(() => {}));
+    await flush(10 * MIN);
+
+    expect(screen.getByText(/without attribution/i)).toBeInTheDocument();
   });
 });
