@@ -18,7 +18,7 @@ export type GoneCause =
   /** The live check found the post, or has not said it is gone. */
   | { kind: 'not-gone' }
   /** Gone for a reason the badge states itself. */
-  | { kind: 'explained'; by: ExplainedBy; badge: string; tone: GoneTone }
+  | { kind: 'explained'; by: ExplainedBy; line: string; badge: string; tone: GoneTone }
   /** The relay withholds the post because the account is suspended. */
   | { kind: 'suspended'; stale: boolean; line: string; badge: string; tone: GoneTone }
   /** A status that would explain it has not answered. The post may still exist. */
@@ -62,6 +62,15 @@ const EXPLAINED_BADGE: Record<ExplainedBy, string> = {
   'event-ban': 'Event Banned',
 };
 
+// The thread panel's line for each: "deleted" only for a recorded delete. An
+// auto-hide and an event ban hide the post; an account ban removed it.
+const EXPLAINED_LINE: Record<ExplainedBy, string> = {
+  delete: 'Event has been deleted from the relay',
+  'auto-hide': 'Hidden automatically by AI classification',
+  ban: 'The account is banned; its posts were removed as part of the ban',
+  'event-ban': "The event is in the relay's ban list",
+};
+
 export function deriveGoneCause(input: GoneCauseInput): GoneCause {
   const {
     eventGone, recordedDelete, autoHidden, decisionsUnread,
@@ -83,7 +92,7 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
     : confirmedBan ? 'ban'
     : confirmedEventBan ? 'event-ban'
     : null;
-  if (by) return { kind: 'explained', by, badge: EXPLAINED_BADGE[by], tone: 'removal' };
+  if (by) return { kind: 'explained', by, line: EXPLAINED_LINE[by], badge: EXPLAINED_BADGE[by], tone: 'removal' };
 
   if (suspended === true && userBanned === false && eventBanned === false && decisionsUnread === null) {
     return {

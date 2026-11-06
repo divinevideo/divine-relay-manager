@@ -223,7 +223,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       eventBan: moderationStatus.isEventBanChecking,
     },
   });
-  const isHiddenBySuspension = goneCause.kind === 'suspended';
   const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
   // The banner names what handled the report, not a skip logged after it.
   const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
@@ -1396,11 +1395,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 mediaHashes={mediaHashes}
                 thumbnailHashes={thumbnailHashes}
                 mediaHashStatuses={mediaStatus.results}
-                // A post the relay withholds for a suspension was not banned, and
-                // neither is one where every status answered, the event ban
-                // among them, and none explains it. So no "Restore Event /
-                // reverses the ban", and Ban and Delete stay.
-                isEventBanned={isHiddenBySuspension || goneCause.kind === 'none-found' ? false : (isEventDeleted ?? undefined)}
+                // The banned-events list confirmed this post is not banned (a
+                // false is never stale), whatever else explains it being gone:
+                // a suspension, nothing at all, or a cause still unknown because
+                // another read failed. So no "Restore Event / reverses the
+                // ban", and Ban and Delete stay. Only an unknown event-ban
+                // status keeps the old fallback.
+                isEventBanned={moderationStatus.isEventBanned === false ? false : (isEventDeleted ?? undefined)}
                 hasBlockedMedia={videoIsBlocked}
                 hasRestrictedMedia={videoIsRestricted}
                 // Not isLoading, which covers only a first load that is fetching. A

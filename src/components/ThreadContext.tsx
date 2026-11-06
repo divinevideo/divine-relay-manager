@@ -373,10 +373,12 @@ export function ThreadContext({
               </div>
             )}
             {isEventDeleted === true && (goneCause === undefined || goneCause.kind === 'explained') && (
+              // A cause the badge states itself, in its own words: "deleted"
+              // only for a recorded delete (and when no cause is passed).
               <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                 <ShieldX className="h-4 w-4 text-green-600 shrink-0" />
                 <span className="text-sm font-medium text-green-700 dark:text-green-400">
-                  Event has been deleted from the relay
+                  {goneCause?.line ?? 'Event has been deleted from the relay'}
                 </span>
               </div>
             )}

@@ -75,4 +75,33 @@ describe('DebugPanel Ban Pubkey and the restore window', () => {
     await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
     expect(result.current).toBe(true);
   });
+
+  // The relay's ban filter can lag an unban, so a successful one opens the
+  // restore window (before the audit write); a failed one only resets.
+  it('opens the restore window after a successful unban', async () => {
+    const pk = '3a'.repeat(32);
+    const { result } = renderHook(() => useJustRestored(pk));
+    api.unbanPubkey.mockResolvedValue({ success: true });
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderPanel();
+
+    fireEvent.change(screen.getByPlaceholderText('Enter 64-character hex pubkey...'), { target: { value: pk } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Unban Pubkey' })); });
+
+    await waitFor(() => expect(result.current).toBe(true));
+  });
+
+  it('only resets the reads when the unban failed', async () => {
+    const pk = '4b'.repeat(32);
+    const { result } = renderHook(() => useJustRestored(pk));
+    api.unbanPubkey.mockRejectedValue(new Error('relay unreachable'));
+    const client = renderPanel();
+    client.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+
+    fireEvent.change(screen.getByPlaceholderText('Enter 64-character hex pubkey...'), { target: { value: pk } });
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Unban Pubkey' })); });
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+    expect(result.current).toBe(false);
+  });
 });

@@ -179,7 +179,9 @@ describe('ReportDetail missing post, real moderation status', () => {
     api.listBannedEvents.mockResolvedValue([{ id: EVENT_ID }]);
 
     renderDetail();
-    expect(await screen.findByText(DELETED, {}, { timeout: 4000 })).toBeInTheDocument();
+    // A confirmed event ban is a hide, not a deletion.
+    expect(await screen.findByText("The event is in the relay's ban list", {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
 
     api.listBannedEvents.mockRejectedValue(new Error('relay unreachable'));
     fireEvent.click(screen.getByRole('button', { name: /Re-check/ }));

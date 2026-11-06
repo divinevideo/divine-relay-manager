@@ -186,6 +186,19 @@ describe('deriveGoneCause unknown-cause wording', () => {
   });
 });
 
+// The thread panel states an explained cause in its own words: "deleted" only
+// for a recorded delete. An auto-hide or event ban is a hide, not a deletion.
+describe('deriveGoneCause explained-cause wording', () => {
+  it.each([
+    [{ recordedDelete: true }, 'Event has been deleted from the relay'],
+    [{ autoHidden: true }, 'Hidden automatically by AI classification'],
+    [{ userBanned: true }, 'The account is banned; its posts were removed as part of the ban'],
+    [{ eventBanned: true }, "The event is in the relay's ban list"],
+  ] as const)('words %o as %s', (over, expected) => {
+    expect(line(over)).toBe(expected);
+  });
+});
+
 // The badge label and tone come from the same derivation as the line, so the
 // badge, its tooltip and the thread panel cannot disagree.
 describe('deriveGoneCause badge', () => {

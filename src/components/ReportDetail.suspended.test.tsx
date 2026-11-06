@@ -234,6 +234,14 @@ describe('ReportDetail post hidden by a suspension', () => {
     expect((threadContextProps.last?.goneCause as { kind: string } | undefined)?.kind).not.toBe('suspended');
   });
 
+  it('tells the thread panel an auto-hidden post was hidden, not deleted', () => {
+    decisionFlags.isAutoHidden = true;
+
+    renderDetail();
+
+    expect((threadContextProps.last?.goneCause as { line?: string } | undefined)?.line).toBe('Hidden automatically by AI classification');
+  });
+
   it('lets an auto-hide outrank the suspension', () => {
     decisionFlags.isAutoHidden = true;
 
@@ -488,6 +496,18 @@ describe('ReportDetail post hidden by a suspension', () => {
     renderDetail();
 
     expect(eventActionsProps.last?.isEventBanned).toBe(true);
+  });
+
+  // The cause is unknown only because the decision log failed, but the event
+  // ban list confirmed the post is not banned: no "Restore Event / reverses
+  // the ban", and Ban and Delete stay.
+  it('does not tell the post actions a post is banned when the event ban is confirmed absent and the cause is unknown', () => {
+    decisionFlags.error = new Error('worker unreachable');
+
+    renderDetail();
+
+    expect((threadContextProps.last?.goneCause as { kind: string } | undefined)?.kind).toBe('unknown');
+    expect(eventActionsProps.last?.isEventBanned).toBe(false);
   });
 
   // Every status answered, the event ban among them, and none explains it.

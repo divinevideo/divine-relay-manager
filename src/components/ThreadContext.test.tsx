@@ -195,8 +195,15 @@ describe('ThreadContext missing post with a cause from ReportDetail', () => {
     expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
   });
 
-  it('keeps the deleted line for a cause the badge states itself', () => {
-    renderThread({ ...base, goneCause: { kind: 'explained', by: 'delete', badge: 'b', tone: 'removal' } });
+  it('states an explained cause in its own words, not as a deletion', () => {
+    renderThread({ ...base, goneCause: { kind: 'explained', by: 'event-ban', line: 'in the ban list', badge: 'b', tone: 'removal' } });
+
+    expect(screen.getByText('in the ban list')).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  it('keeps the deleted line when no cause is passed', () => {
+    renderThread({ ...base });
 
     expect(screen.getByText(DELETED)).toBeInTheDocument();
   });

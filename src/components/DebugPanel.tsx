@@ -21,7 +21,7 @@ import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
-import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 import {
   Bug,
   CheckCircle,
@@ -302,12 +302,19 @@ export function DebugPanel() {
       const start = Date.now();
       const results: { unbanResult?: unknown; unbanError?: string; logResult?: unknown; logError?: string } = {};
       const moderator = getModeratorPubkey(); // capture before the authoritative request
+      // Captured before the request, for the restore window (lib/userStatsCache).
+      const env = restoreEnvironment;
 
       try {
         const unbanResult = await unbanPubkey(pubkey);
         results.unbanResult = unbanResult;
+        // The relay's ban filter can lag the unban: open the restore window
+        // now, before the audit write below can fail.
+        void markRestored(queryClient, pubkey, env);
       } catch (error) {
         results.unbanError = String(error);
+        // The account is still banned: only reset the reads.
+        void resetAccountContentReads(queryClient, pubkey);
       }
 
       try {
