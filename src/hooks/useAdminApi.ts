@@ -169,8 +169,8 @@ export function useAdminApi() {
     getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
 
     // Delete operations
-    deleteMedia: (sha256: string, reason?: string, from?: adminApi.ExpectedMediaState) =>
-      adminApi.deleteMedia(apiUrl, sha256, reason, from),
+    deleteMedia: (sha256: string, reason?: string) =>
+      adminApi.deleteMedia(apiUrl, sha256, reason),
 
     // Age review config
     getAgeReviewConfig: () =>

@@ -1736,8 +1736,8 @@ export async function getBulkKindCounts(apiUrl: string, pubkey: string): Promise
 }
 
 // Delete media (convenience wrapper)
-export async function deleteMedia(apiUrl: string, sha256: string, reason?: string, from?: ExpectedMediaState): Promise<ApiResponse> {
-  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator', from);
+export async function deleteMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator');
 }
 
 // Age review config

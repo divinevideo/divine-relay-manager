@@ -140,26 +140,26 @@ export function EventActions({
   };
   const allFiles = [...mediaHashes, ...thumbnails];
   const statusOf = (hash: string) => mediaHashStatuses.find((s) => s.hash === hash);
-  // Every media write names the state this screen showed for the file (#336), so
-  // the worker refuses it if another moderator or the automated checks changed
-  // the file since. A refusal fails a video's action and is a warning for a
-  // thumbnail, as any failure is, in plain words. Other errors keep the
-  // worker's words.
+  // Every media write but a delete names the state this screen showed for the
+  // file (#336), so the worker refuses it if another moderator or the automated
+  // checks changed the file since. A refusal fails a video's action and is a
+  // warning for a thumbnail, as any failure is, in plain words. Other errors
+  // keep the worker's words.
   //
-  // A block or delete whose record already shows that action has nothing to
-  // overwrite: another moderator, or the automated checks, got there first. So
-  // it is sent again from that state, as it went through before the check, and
-  // the action completes and is logged instead of failing on a file that is
-  // already as the moderator wants it. A lift (SAFE, AGE_RESTRICTED) is still
-  // refused. The record is all the worker compares, and the media server can
-  // hide a file whose record says otherwise (a status set in its own admin), so
-  // a lift sent again could open a file a fresh screen would not offer to open.
+  // A block whose record already shows a block has nothing to overwrite:
+  // another moderator, or the automated checks, got there first. So it is sent
+  // again from that state, as it went through before the check, and the action
+  // completes and is logged instead of failing on a file that is already as the
+  // moderator wants it. A lift (SAFE, AGE_RESTRICTED) is still refused. The
+  // record is all the worker compares, and the media server can hide a file
+  // whose record says otherwise (a status set in its own admin), so a lift sent
+  // again could open a file a fresh screen would not offer to open.
   const writeMedia = async (
     hash: string,
     action: ModerationAction,
     write: (from: ExpectedMediaState | undefined) => Promise<unknown>,
   ) => {
-    const resendable = action === 'PERMANENT_BAN' || action === 'DELETE';
+    const resendable = action === 'PERMANENT_BAN';
     try {
       await write(expectedStateOf(statusOf(hash))).catch((error: unknown) => {
         if (resendable && error instanceof ApiError && error.code === 'state_mismatch' && error.currentState === action) {
@@ -183,8 +183,11 @@ export function EventActions({
   const recheckMedia = () => queryClient.invalidateQueries({ queryKey: ['media-status'] });
   const moderateFile = (hash: string, action: ModerationAction, reason: string) =>
     writeMedia(hash, action, (from) => api.moderateMedia(hash, action, reason, from));
-  const deleteFile = (hash: string) =>
-    writeMedia(hash, 'DELETE', (from) => api.deleteMedia(hash, 'Permanently deleted by moderator', from));
+  // A delete names no state. `from` is there so a write made on a stale screen
+  // can't open a file or weaken its state, and a delete can do neither. Named,
+  // any change to the record would refuse it, and in Delete Event & Media the
+  // event is gone by then, so the video would stay up by its URL.
+  const deleteFile = (hash: string) => api.deleteMedia(hash, 'Permanently deleted by moderator');
   // Any status but DELETE moves a deleted file out of Deleted on the media server
   // (divine-blossom handle_admin_moderate and handle_admin_moderate_action both),
   // so no status is ever sent to a deleted file: a deleted video gets no Block or

@@ -1306,13 +1306,14 @@ describe('adminApi', () => {
       expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({ action: 'PERMANENT_BAN', from: 'UNKNOWN' });
     });
 
-    it('sends the expected state with a delete', async () => {
+    // A delete names no state: it can't open a file or weaken its state.
+    it('sends a delete with no expected state', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
 
-      await deleteMedia(API_URL, 'hash123', 'Permanently deleted by moderator', 'AGE_RESTRICTED');
+      await deleteMedia(API_URL, 'hash123', 'Permanently deleted by moderator');
 
       expect(JSON.parse(mockFetch.mock.calls[0][1].body))
-        .toEqual({ sha256: 'hash123', action: 'DELETE', reason: 'Permanently deleted by moderator', from: 'AGE_RESTRICTED' });
+        .toEqual({ sha256: 'hash123', action: 'DELETE', reason: 'Permanently deleted by moderator' });
     });
 
     it("sends the account the file belongs to when given one, for the worker's account check", async () => {

@@ -1684,13 +1684,12 @@ describe('EventActions: media actions send the state the screen showed', () => {
   it.each([
     ['Delete Media (2)'],
     ['Delete Event & Media'],
-  ] as const)('%s sends each file its state, and none for a file whose status could not be read', async (button) => {
+  ] as const)('%s names no state, so a delete goes ahead whatever the record shows', async (button) => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} thumbnailHashes={[THUMB]}
         mediaHashStatuses={[
           { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
-          // Nothing to name, so the delete goes ahead unchecked, as before.
-          { hash: THUMB, isBlocked: false, isRestricted: false, action: null, unreadable: true },
+          { hash: THUMB, isBlocked: false, isRestricted: false, action: 'AGE_RESTRICTED' },
         ]} />
     );
 
@@ -1699,9 +1698,10 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
     await waitFor(() => expect(api.deleteMedia).toHaveBeenCalledTimes(2));
     expect(api.deleteMedia.mock.calls).toEqual([
-      [VIDEO, 'Permanently deleted by moderator', 'SAFE'],
-      [THUMB, 'Permanently deleted by moderator', undefined],
+      [VIDEO, 'Permanently deleted by moderator'],
+      [THUMB, 'Permanently deleted by moderator'],
     ]);
+    expect(api.deleteMedia.mock.calls.every((call) => call[2] === undefined)).toBe(true);
   });
 
   it('fails the action in plain words when the video changed, and checks the status again', async () => {
@@ -1768,8 +1768,8 @@ describe('EventActions: media actions send the state the screen showed', () => {
     expectStatusRechecked(invalidate);
   });
 
-  it('fails Delete Media in plain words when a file changed, and checks the status again', async () => {
-    api.deleteMedia.mockRejectedValue(changed('PERMANENT_BAN'));
+  it('fails Delete Media with the worker\'s words, and checks the status again', async () => {
+    api.deleteMedia.mockRejectedValue(new Error('moderation down'));
     const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
         mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
@@ -1780,7 +1780,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Failed to delete media',
-      description: "The file's moderation record changed after this screen loaded and now shows it blocked",
+      description: 'moderation down',
       variant: 'destructive',
     }));
     expectStatusRechecked(invalidate);
@@ -1886,27 +1886,8 @@ describe('EventActions: media actions send the state the screen showed', () => {
     expect(statusReads(invalidate)).toBe(0);
   });
 
-  // The event is already gone by the media half, so a refusal here would leave
-  // the video online behind a "Partially completed" warning.
-  it('finishes Delete Event & Media when the record already shows the video deleted', async () => {
-    api.deleteMedia.mockRejectedValueOnce(changed('DELETE', 'DELETE'));
-    renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
-        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
-    );
-
-    fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
-    fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
-
-    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Event and media permanently deleted' }));
-    expect(api.deleteMedia.mock.calls).toEqual([
-      [VIDEO, 'Permanently deleted by moderator', 'SAFE'],
-      [VIDEO, 'Permanently deleted by moderator', 'DELETE'],
-    ]);
-  });
-
-  it('warns in plain words when Delete Event & Media is refused on the video, and checks the status again once', async () => {
-    api.deleteMedia.mockRejectedValueOnce(changed('QUARANTINE', 'DELETE'));
+  it('warns when Delete Event & Media fails on the video, and checks the status again once', async () => {
+    api.deleteMedia.mockRejectedValueOnce(new Error('moderation down'));
     const onActionComplete = vi.fn();
     const { invalidate } = renderWithProvider(
       <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} onActionComplete={onActionComplete}
@@ -1918,7 +1899,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Partially completed',
-      description: "Event was deleted but media deletion failed: The file's moderation record changed after this screen loaded and now shows it hidden",
+      description: 'Event was deleted but media deletion failed: moderation down',
       variant: 'destructive',
       duration: 10000,
     }));
