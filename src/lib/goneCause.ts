@@ -63,10 +63,12 @@ const EXPLAINED_BADGE: Record<ExplainedBy, string> = {
 };
 
 // The thread panel's line for each: "deleted" only for a recorded delete. An
-// auto-hide and an event ban hide the post; an account ban removed it.
+// auto-hide and an event ban hide the post; an account ban removed it. The
+// auto-hide line claims no provenance: ReportWatcher auto-hides on AI
+// classification, user reports and reporter thresholds alike.
 const EXPLAINED_LINE: Record<ExplainedBy, string> = {
   delete: 'Event has been deleted from the relay',
-  'auto-hide': 'Hidden automatically by AI classification',
+  'auto-hide': 'Hidden automatically',
   ban: 'The account is banned; its posts were removed as part of the ban',
   'event-ban': "The event is in the relay's ban list",
 };

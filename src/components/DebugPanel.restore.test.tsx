@@ -77,18 +77,23 @@ describe('DebugPanel Ban Pubkey and the restore window', () => {
   });
 
   // The relay's ban filter can lag an unban, so a successful one opens the
-  // restore window (before the audit write); a failed one only resets.
-  it('opens the restore window after a successful unban', async () => {
+  // restore window before the audit write; a failed one only resets. The audit
+  // is held pending so the window has to be open before it settles: one opened
+  // after the audit (or its catch) would fail here.
+  it('opens the restore window after a successful unban, before the audit write settles', async () => {
     const pk = '3a'.repeat(32);
     const { result } = renderHook(() => useJustRestored(pk));
     api.unbanPubkey.mockResolvedValue({ success: true });
-    api.logDecision.mockRejectedValue(new Error('audit down'));
+    let settleAudit: (v: unknown) => void = () => {};
+    api.logDecision.mockImplementation(() => new Promise(r => { settleAudit = r; }));
     renderPanel();
 
     fireEvent.change(screen.getByPlaceholderText('Enter 64-character hex pubkey...'), { target: { value: pk } });
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Unban Pubkey' })); });
 
-    await waitFor(() => expect(result.current).toBe(true));
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
+    expect(result.current).toBe(true);
+    await act(async () => { settleAudit({ success: true }); });
   });
 
   it('only resets the reads when the unban failed', async () => {

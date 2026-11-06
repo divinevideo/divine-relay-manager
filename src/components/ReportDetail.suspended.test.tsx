@@ -239,7 +239,17 @@ describe('ReportDetail post hidden by a suspension', () => {
 
     renderDetail();
 
-    expect((threadContextProps.last?.goneCause as { line?: string } | undefined)?.line).toBe('Hidden automatically by AI classification');
+    expect((threadContextProps.last?.goneCause as { line?: string } | undefined)?.line).toBe('Hidden automatically');
+  });
+
+  // Not "by AI classification": ReportWatcher also auto-hides on user reports.
+  it('does not attribute an auto-hide to AI classification in the tooltip', async () => {
+    decisionFlags.isAutoHidden = true;
+
+    renderDetail();
+
+    const tip = await removedBadgeTooltip('Hidden automatically');
+    expect(tip).toBe('Hidden automatically');
   });
 
   it('lets an auto-hide outrank the suspension', () => {

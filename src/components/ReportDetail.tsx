@@ -823,7 +823,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       // isAutoHidden covers the states that need a check too:
                       // the worker writes those only after the relay ban landed,
                       // so the content is hidden either way.
-                      <p className="text-xs">Auto-hidden by AI classification</p>
+                      <p className="text-xs">Hidden automatically</p>
                     ) : goneCause.by === 'ban' ? (
                       <p className="text-xs">User is banned — event removed as part of ban</p>
                     ) : (

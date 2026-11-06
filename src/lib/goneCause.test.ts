@@ -191,7 +191,9 @@ describe('deriveGoneCause unknown-cause wording', () => {
 describe('deriveGoneCause explained-cause wording', () => {
   it.each([
     [{ recordedDelete: true }, 'Event has been deleted from the relay'],
-    [{ autoHidden: true }, 'Hidden automatically by AI classification'],
+    // No provenance claim: ReportWatcher also auto-hides on user reports and
+    // reporter thresholds, recorded as the same auto-hide state.
+    [{ autoHidden: true }, 'Hidden automatically'],
     [{ userBanned: true }, 'The account is banned; its posts were removed as part of the ban'],
     [{ eventBanned: true }, "The event is in the relay's ban list"],
   ] as const)('words %o as %s', (over, expected) => {

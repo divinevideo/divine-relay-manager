@@ -313,7 +313,7 @@ export function DebugPanel() {
         void markRestored(queryClient, pubkey, env);
       } catch (error) {
         results.unbanError = String(error);
-        // The account is still banned: only reset the reads.
+        // Unban was not confirmed; only reset the reads.
         void resetAccountContentReads(queryClient, pubkey);
       }
 
