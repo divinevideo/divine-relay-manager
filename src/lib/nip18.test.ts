@@ -1,7 +1,80 @@
+// @vitest-environment node
 // ABOUTME: Tests NIP-18 repost parsing edge cases (empty/malformed/non-event JSON)
+// Node, not jsdom, so the signature checks below run nostr-tools for real.
 
 import { describe, it, expect } from 'vitest';
-import { getRepostTargetId, isRepostKind, parseRepostedEvent, describeRepostTarget, getRepostTargetCoordinate, parseRepostForDisplay } from './nip18';
+import { getRepostTargetId, isRepostKind, parseRepostedEvent, describeRepostTarget, getRepostTargetCoordinate, parseRepostForDisplay, isEventWithId, verifiedRepostedEvent } from './nip18';
+import { SIGNED_NOTE, SIGNED_VIDEO } from '@/test/signedEvents';
+import { verifyEvent } from 'nostr-tools';
+
+// A repost's embedded copy is written by the reposter. The media buttons act on
+// its files, so it counts only when it is the event the repost names (#337).
+describe('verifiedRepostedEvent', () => {
+  const original = SIGNED_VIDEO;
+  const repostOf = (content: string, target = original.id) => ({
+    content,
+    tags: [['e', target], ['p', original.pubkey]],
+  });
+
+  it('returns the copy when it is the signed event the e tag names', () => {
+    expect(verifiedRepostedEvent(repostOf(JSON.stringify(original)))).toEqual(original);
+  });
+
+  it('refuses a copy whose files were changed after signing', () => {
+    const forged = { ...original, tags: [['imeta', 'url https://media.divine.video/' + 'b'.repeat(64), 'm video/mp4']] };
+    expect(verifiedRepostedEvent(repostOf(JSON.stringify(forged)))).toBeNull();
+  });
+
+  it('refuses a correctly signed event that is not the one the e tag names', () => {
+    expect(verifiedRepostedEvent(repostOf(JSON.stringify(SIGNED_NOTE)))).toBeNull();
+  });
+
+  it('refuses a copy with no signature, and content that is not an event', () => {
+    const { sig: _sig, ...unsigned } = original;
+    expect(verifiedRepostedEvent(repostOf(JSON.stringify(unsigned)))).toBeNull();
+    expect(verifiedRepostedEvent(repostOf('not json'))).toBeNull();
+    expect(verifiedRepostedEvent(repostOf(JSON.stringify([original])))).toBeNull();
+  });
+
+  it('refuses a copy when the repost names no event', () => {
+    expect(verifiedRepostedEvent({ content: JSON.stringify(original), tags: [['p', original.pubkey]] })).toBeNull();
+  });
+});
+
+describe('isEventWithId', () => {
+  const event = SIGNED_NOTE;
+
+  it('refuses an event whose fields and id are intact but whose signature is not', () => {
+    // The id is the hash of the fields, so only the signature says who wrote it.
+    const forgedSig = { ...SIGNED_VIDEO, sig: SIGNED_NOTE.sig };
+    expect(isEventWithId(forgedSig, SIGNED_VIDEO.id)).toBe(false);
+    expect(verifiedRepostedEvent({ content: JSON.stringify(forgedSig), tags: [['e', SIGNED_VIDEO.id]] })).toBeNull();
+  });
+
+  it('refuses a copy of an event it already verified, once its files are changed', () => {
+    // nostr-tools marks an event it verified and trusts that mark next time, and
+    // a spread copies the mark. The check must not let a changed copy ride on it.
+    const verified = { ...SIGNED_VIDEO };
+    expect(isEventWithId(verified, SIGNED_VIDEO.id)).toBe(true);
+    expect(verifyEvent(verified)).toBe(true);
+    const changed = { ...verified, tags: [['imeta', `url https://media.divine.video/${'e'.repeat(64)}`, 'm video/mp4']] };
+
+    expect(isEventWithId(changed, SIGNED_VIDEO.id)).toBe(false);
+  });
+
+  it('accepts a signed event whose id is in upper case, from either side', () => {
+    expect(isEventWithId({ ...event, id: event.id.toUpperCase() }, event.id)).toBe(true);
+    expect(isEventWithId(event, event.id.toUpperCase())).toBe(true);
+  });
+
+  it('accepts a signed event with the expected id, and nothing else', () => {
+    expect(isEventWithId(event, event.id)).toBe(true);
+    expect(isEventWithId(event, 'f'.repeat(64))).toBe(false);
+    expect(isEventWithId({ ...event, content: 'changed' }, event.id)).toBe(false);
+    expect(isEventWithId(null, event.id)).toBe(false);
+    expect(isEventWithId({ ...event, tags: 'not tags' }, event.id)).toBe(false);
+  });
+});
 
 describe('isRepostKind', () => {
   it('matches kinds 6 and 16 only', () => {

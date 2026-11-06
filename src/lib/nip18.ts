@@ -1,6 +1,9 @@
 // ABOUTME: NIP-18 repost helpers — kind 6/16 events carry the reposted event
 // ABOUTME: as stringified JSON in their content field (or empty content)
 
+import type { NostrEvent } from '@nostrify/nostrify';
+import { verifyEvent } from 'nostr-tools';
+
 // Local, not exported: PR #161 adds a shared isHex64 to lib/constants and
 // #160 tracks consolidating hex-id validation — this stays private until
 // that lands to avoid two exported definitions colliding at merge time.
@@ -49,6 +52,54 @@ export function describeRepostTarget(tags: string[][]): string | undefined {
 }
 
 /**
+ * True only for a whole, signed Nostr event whose id is `id`: the shape, the id
+ * hash and the signature all check. Anything a repost or a fetch hands over as
+ * "the original" is weighed with this before the media buttons act on its
+ * files (#337).
+ */
+export function isEventWithId(event: unknown, id: string): event is NostrEvent {
+  if (!event || typeof event !== 'object') return false;
+  const e = event as Record<string, unknown>;
+  // Ids are compared and verified in lower case: an id is a hex hash, and a
+  // source that upper-cases it has not changed the event.
+  const wanted = id.toLowerCase();
+  if (typeof e.id !== 'string' || e.id.toLowerCase() !== wanted) return false;
+  if (typeof e.pubkey !== 'string' || typeof e.sig !== 'string' || typeof e.content !== 'string') return false;
+  if (typeof e.kind !== 'number' || typeof e.created_at !== 'number') return false;
+  if (!Array.isArray(e.tags) || !e.tags.every(t => Array.isArray(t) && t.every(x => typeof x === 'string'))) return false;
+  // A fresh object: verifyEvent marks what it checks as verified and trusts that
+  // mark next time, and a spread copies it, so a copy of a verified event with
+  // its files changed would otherwise pass unchecked.
+  const fields = {
+    id: wanted, pubkey: e.pubkey, created_at: e.created_at, kind: e.kind,
+    tags: e.tags as string[][], content: e.content, sig: e.sig,
+  };
+  try {
+    return verifyEvent(fields);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The event a repost names, read from its embedded copy only when the copy is
+ * that event: its id is the repost's `e` tag and its signature verifies. The
+ * copy is the reposter's own writing, so unchecked it would let the reposter
+ * choose which files a moderator's buttons act on, Delete Media included.
+ */
+export function verifiedRepostedEvent(repost: { content: string; tags: string[][] }): NostrEvent | null {
+  const target = getRepostTargetId(repost.tags);
+  if (!target || !HEX_64.test(target)) return null;
+  let copy: unknown;
+  try {
+    copy = JSON.parse(repost.content);
+  } catch {
+    return null;
+  }
+  return isEventWithId(copy, target) ? { ...copy, id: copy.id.toLowerCase() } : null;
+}
+
+/**
  * Parse the inner (reposted) event out of a NIP-18 repost's content.
  * Returns null when content is empty, malformed JSON, or not event-shaped —
  * callers should treat that as "no inner content to show".
@@ -87,6 +138,16 @@ export interface RepostDisplay {
 /** True when the string parses to a JSON *object* — a serialized-event
  * envelope. Arrays, primitives, and plain text are not envelopes: they may
  * carry human-readable text a moderator needs, so they are shown, not blanked. */
+/**
+ * True when a repost's content looks like JSON, and so is taken as its copy of
+ * the original, well formed or not. The media buttons read such a copy only
+ * once it checks out (verifiedRepostedEvent): a cut-off or malformed one would
+ * otherwise slip the reposter's files past the check as plain text (#337).
+ */
+export function looksLikeEventCopy(content: string): boolean {
+  return /^\s*[[{]/.test(content);
+}
+
 function isJsonObjectEnvelope(content: string): boolean {
   try {
     const value: unknown = JSON.parse(content);

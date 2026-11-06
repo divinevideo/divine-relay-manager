@@ -6,7 +6,7 @@ import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { NRelay1 } from "@nostrify/nostrify";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
-import { isRepostKind } from "@/lib/nip18";
+import { isEventWithId, isRepostKind, verifiedRepostedEvent } from "@/lib/nip18";
 import { buildThreadReplyFilters } from "@/lib/threadFilters";
 import { isListKind } from "../../shared/list-report";
 
@@ -115,31 +115,30 @@ export function useThread(
       if (isRepost) {
         const originalEventTag = event.tags.find(t => t[0] === 'e');
         if (originalEventTag) {
-          if (event.content) {
-            try {
-              const parsed = JSON.parse(event.content);
-              if (parsed && parsed.id && parsed.pubkey && parsed.kind !== undefined) {
-                repostedEvent = parsed as NostrEvent;
-              }
-            } catch {
-              // Content is not JSON, fetch the event
-            }
-          }
+          // The media buttons act on the original's files, so the original counts
+          // only when it is the event the e tag names, with a valid signature
+          // (#337). The embedded copy is the reposter's writing, and a fetched
+          // event is checked too, since the external relay hint is the
+          // reporter's.
+          const targetId = originalEventTag[1];
+          const checked = (candidate: NostrEvent | null | undefined) =>
+            (candidate && isEventWithId(candidate, targetId) ? { ...candidate, id: candidate.id.toLowerCase() } : null);
+          repostedEvent = verifiedRepostedEvent(event);
 
           if (!repostedEvent) {
             if (apiUrl) {
-              repostedEvent = await fetchFunnelcakeEvent(apiUrl, originalEventTag[1]) || null;
+              repostedEvent = checked(await fetchFunnelcakeEvent(apiUrl, targetId));
             }
             if (!repostedEvent) {
               const [fetchedOriginal] = await nostr.query(
-                [{ ids: [originalEventTag[1]], limit: 1 }],
+                [{ ids: [targetId], limit: 1 }],
                 { signal: combinedSignal }
               );
-              repostedEvent = fetchedOriginal || null;
+              repostedEvent = checked(fetchedOriginal);
             }
             // Try external relay for repost original too
             if (!repostedEvent && relayHint) {
-              repostedEvent = await fetchFromExternalRelay(relayHint, originalEventTag[1]);
+              repostedEvent = checked(await fetchFromExternalRelay(relayHint, targetId));
             }
           }
         }
@@ -169,6 +168,12 @@ export function useThread(
           ancestorIds.push(upperETags[0][1]);
         }
       }
+
+      // A repost is not a reply, however its tags are marked: its e or E tag is
+      // what it reposts, read above only once it checks out. Fetching it here as
+      // a parent would bring back an original that did not, shown with the
+      // author it claims.
+      if (isRepost) ancestorIds.length = 0;
 
       // Fetch ancestors: REST → local WS → external relay for any still missing
       let ancestorEvents: NostrEvent[] = [];

@@ -1,13 +1,20 @@
 // ABOUTME: Pins how a reported video's own thumbnail reaches the single-post
 // ABOUTME: media buttons: listed apart from the video, and never driving which buttons show.
 
-import { render } from '@testing-library/react';
+import { render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
+import { SIGNED_VIDEO } from '@/test/signedEvents';
+
+// nostr-tools cannot verify under jsdom; this accepts exactly the pre-signed fixtures.
+vi.mock('nostr-tools', async (importOriginal) => {
+  const { verifyKnownSignedEvent } = await import('@/test/signedEvents');
+  return { ...(await importOriginal<typeof import('nostr-tools')>()), verifyEvent: verifyKnownSignedEvent };
+});
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
@@ -124,7 +131,15 @@ vi.mock('@/components/UserProfileCard', () => ({ UserProfileCard: () => null }))
 vi.mock('@/components/AISummary', () => ({ AISummary: () => null }));
 vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
-vi.mock('@/components/MediaPreview', () => ({ MediaPreview: () => null }));
+// Records each event a media preview is given, so a test can see what the
+// moderator would be shown.
+const previewedEvents = vi.hoisted(() => ({ value: [] as NostrEvent[] }));
+vi.mock('@/components/MediaPreview', () => ({
+  MediaPreview: ({ event }: { event: NostrEvent }) => {
+    previewedEvents.value.push(event);
+    return null;
+  },
+}));
 vi.mock('@/components/ThreadModal', () => ({ ThreadModal: () => null }));
 const eventActionsProps = vi.hoisted(() => ({ value: null as Record<string, unknown> | null }));
 vi.mock('@/components/EventActions', () => ({
@@ -166,6 +181,7 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     vi.clearAllMocks();
     mediaStatusCalls.value = [];
     eventActionsProps.value = null;
+    previewedEvents.value = [];
     repost.value = null;
     repost.resolved = true;
     mediaStatusLoading.loading = false;
@@ -232,23 +248,54 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
   });
 
-  it("reads an unresolved repost's files from its content, not from its JSON text", () => {
+  it("reads an unresolved repost's files from its copy of the original when the copy checks out", () => {
     // useThread had no original for it: a banned repost shown from the ban list,
-    // or one whose e-tag fetch missed. The repost still carries it as JSON.
+    // or one whose e-tag fetch missed. The repost still carries it as JSON, and
+    // the copy is the signed event its e tag names.
     repost.resolved = false;
     repost.value = {
       id: '9'.repeat(64),
       pubkey: '8'.repeat(64),
       created_at: 1751000100,
       kind: 6,
-      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
-      content: JSON.stringify(VIDEO_EVENT.value),
+      tags: [['e', SIGNED_VIDEO.id], ['p', SIGNED_VIDEO.pubkey]],
+      content: JSON.stringify(SIGNED_VIDEO),
       sig: 'b'.repeat(128),
     };
 
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [VIDEO], thumbnailHashes: [THUMB] });
+    // The repost card previews the same checked original the buttons act on.
+    expect(previewedEvents.value.some((event) => event.id === SIGNED_VIDEO.id)).toBe(true);
+  });
+
+  it.each([
+    ['is not signed', JSON.stringify({ ...SIGNED_VIDEO, sig: undefined }), SIGNED_VIDEO.id],
+    ['has its files changed', JSON.stringify({ ...SIGNED_VIDEO, tags: [['imeta', `url https://media.divine.video/${OTHER_VIDEO}`, 'm video/mp4']] }), SIGNED_VIDEO.id],
+    ['is not the event the repost names', JSON.stringify(SIGNED_VIDEO), VIDEO_EVENT_ID],
+    ['is malformed, with no string content', JSON.stringify({ ...SIGNED_VIDEO, content: 5, tags: [['imeta', `url https://media.divine.video/${OTHER_VIDEO}`, 'm video/mp4']] }), SIGNED_VIDEO.id],
+    ['is cut off', JSON.stringify({ ...SIGNED_VIDEO, tags: [['imeta', `url https://media.divine.video/${OTHER_VIDEO}`, 'm video/mp4']] }).slice(0, -1), SIGNED_VIDEO.id],
+  ])("offers none of an unresolved repost's files, and says why, when its copy %s", (_, content, target) => {
+    // The copy is the reposter's writing (#337): unchecked, it would let them
+    // choose which files the buttons act on, Delete Media included.
+    repost.resolved = false;
+    repost.value = {
+      id: '9'.repeat(64),
+      pubkey: '8'.repeat(64),
+      created_at: 1751000100,
+      kind: 6,
+      tags: [['e', target], ['p', REPORTED_PUBKEY]],
+      content,
+      sig: 'b'.repeat(128),
+    };
+
+    renderDetail();
+
+    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
+    expect(screen.getByText(/copy of the original doesn't match the event it names/)).toBeInTheDocument();
+    // Nor does any preview show the copy's files, in its text or its tags.
+    expect(JSON.stringify(previewedEvents.value)).not.toMatch(/media\.divine\.video/);
   });
 
   it.each([
@@ -271,28 +318,6 @@ describe('ReportDetail for a reported video with its own thumbnail', () => {
     renderDetail();
 
     expect(eventActionsProps.value).toMatchObject({ mediaHashes: [], thumbnailHashes: [] });
-  });
-
-  it.each([
-    ['cut off', `{"content":"https://media.divine.video/${OTHER_VIDEO}.mp4","id":"${VIDEO_EVENT_ID}"`],
-    ['whose content is not a string', JSON.stringify({ id: VIDEO_EVENT_ID, content: 5, note: `https://media.divine.video/${OTHER_VIDEO}.mp4` })],
-  ])('reads the media URLs, and only those, of a repost whose content is JSON %s', (_, content) => {
-    // The preview still shows the video, so the buttons must reach it, but a bare
-    // id or key in the JSON is never read as a file.
-    repost.resolved = false;
-    repost.value = {
-      id: '9'.repeat(64),
-      pubkey: '8'.repeat(64),
-      created_at: 1751000100,
-      kind: 6,
-      tags: [['e', VIDEO_EVENT_ID], ['p', REPORTED_PUBKEY]],
-      content,
-      sig: 'b'.repeat(128),
-    };
-
-    renderDetail();
-
-    expect(eventActionsProps.value).toMatchObject({ mediaHashes: [OTHER_VIDEO], thumbnailHashes: [] });
   });
 
   it("keeps the original's thumbnail a thumbnail when the repost's text links it too", () => {

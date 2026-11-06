@@ -13,7 +13,14 @@ vi.mock('@nostrify/react', () => ({
   useNostr: () => ({ nostr: { query } }),
 }));
 
+// nostr-tools cannot verify under jsdom; this accepts exactly the pre-signed fixtures.
+vi.mock('nostr-tools', async (importOriginal) => {
+  const { verifyKnownSignedEvent } = await import('@/test/signedEvents');
+  return { ...(await importOriginal<typeof import('nostr-tools')>()), verifyEvent: verifyKnownSignedEvent };
+});
+
 import { useThread } from './useThread';
+import { SIGNED_VIDEO } from '@/test/signedEvents';
 
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -74,5 +81,90 @@ describe('useThread ancestors', () => {
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
 
     expect(result.current.data?.ancestors.map((event) => event.id)).toEqual([FIRST_ITEM_ID]);
+  });
+});
+
+// The repost's embedded copy is the reposter's writing, and the media buttons
+// act on the original's files, so the original counts only once it checks out
+// as the event the repost's e tag names (#337).
+describe('useThread repost original', () => {
+  const REPOST_ID = '9'.repeat(64);
+  const repostWith = (content: string): NostrEvent => ({
+    ...makeEvent(REPOST_ID, 6, AUTHOR, [['e', SIGNED_VIDEO.id], ['p', SIGNED_VIDEO.pubkey]]),
+    content,
+  });
+  // The copy with its files swapped, keeping the original's id and signature.
+  const forged: NostrEvent = {
+    ...SIGNED_VIDEO,
+    tags: [['imeta', `url https://media.divine.video/${'e'.repeat(64)}`, 'm video/mp4']],
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('takes an embedded copy that is the signed event the e tag names', async () => {
+    serve([repostWith(JSON.stringify(SIGNED_VIDEO))]);
+
+    const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toEqual(SIGNED_VIDEO);
+  });
+
+  it('fetches the original when the embedded copy does not check out', async () => {
+    serve([repostWith(JSON.stringify(forged)), SIGNED_VIDEO]);
+
+    const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toEqual(SIGNED_VIDEO);
+  });
+
+  it('has no original when the fetched one does not check out either', async () => {
+    serve([repostWith(JSON.stringify(forged)), forged]);
+
+    const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toBeNull();
+    expect(result.current.data?.isRepost).toBe(true);
+    // A repost is not a reply: its e tag names what it reposts, so the rejected
+    // original must not come back in, unchecked, as the post it replies to.
+    expect(result.current.data?.ancestors).toEqual([]);
+  });
+
+  it.each([
+    ['marked root', ['e', 'TARGET', '', 'root']],
+    ['marked reply', ['e', 'TARGET', '', 'reply']],
+    ['as an upper-case E tag', ['E', 'TARGET']],
+  ])('collects no ancestors from a repost whose e tag is %s', async (_, shape) => {
+    const tag = (shape as string[]).map((part) => (part === 'TARGET' ? SIGNED_VIDEO.id : part));
+    const repost: NostrEvent = {
+      ...makeEvent(REPOST_ID, 6, AUTHOR, [tag, ['e', SIGNED_VIDEO.id], ['p', SIGNED_VIDEO.pubkey]]),
+      content: JSON.stringify(forged),
+    };
+    serve([repost, forged]);
+
+    const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent).toBeNull();
+    expect(result.current.data?.ancestors).toEqual([]);
+  });
+
+  it('accepts a fetched original whose id arrives in upper case', async () => {
+    serve([repostWith('')]);
+    query.mockImplementation(async (filters: NostrFilter[]) => {
+      const ids = filters.flatMap((filter) => filter.ids ?? []);
+      const events: NostrEvent[] = [repostWith(''), { ...SIGNED_VIDEO, id: SIGNED_VIDEO.id.toUpperCase() }];
+      return events.filter((event) => ids.includes(event.id.toLowerCase()));
+    });
+
+    const { result } = renderHook(() => useThread(REPOST_ID), { wrapper });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+
+    expect(result.current.data?.repostedEvent?.content).toBe(SIGNED_VIDEO.content);
+    expect(result.current.data?.repostedEvent).not.toBeNull();
   });
 });
