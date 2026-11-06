@@ -145,9 +145,6 @@ export interface RepostDisplay {
   targetDescription?: string;
 }
 
-/** True when the string parses to a JSON *object* — a serialized-event
- * envelope. Arrays, primitives, and plain text are not envelopes: they may
- * carry human-readable text a moderator needs, so they are shown, not blanked. */
 /**
  * True when a repost's content looks like JSON, and so is taken as its copy of
  * the original, well formed or not. The media buttons read such a copy only
@@ -158,6 +155,9 @@ export function looksLikeEventCopy(content: string): boolean {
   return /^\s*[[{]/.test(content);
 }
 
+/** True when the string parses to a JSON *object* — a serialized-event
+ * envelope. Arrays, primitives, and plain text are not envelopes: they may
+ * carry human-readable text a moderator needs, so they are shown, not blanked. */
 function isJsonObjectEnvelope(content: string): boolean {
   try {
     const value: unknown = JSON.parse(content);

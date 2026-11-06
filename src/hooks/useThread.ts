@@ -17,6 +17,11 @@ export interface ThreadResult {
   ancestors: NostrEvent[];  // ordered from root to parent
   event: NostrEvent | null;
   replies: NostrEvent[];
+  /**
+   * The original a repost names, set only once it checks out: the event its e
+   * tag names, with a valid signature (checkedEventWithId). Callers act on its
+   * files without checking again, so nothing else may be put here (#337).
+   */
   repostedEvent: NostrEvent | null;
   isRepost: boolean;
   /** Where the main event was fetched from, or null if not found */
@@ -172,10 +177,10 @@ export function useThread(
         }
       }
 
-      // A repost is not a reply, however its tags are marked: its e or E tag is
-      // what it reposts, read above only once it checks out. Fetching it here as
-      // a parent would bring back an original that did not, shown with the
-      // author it claims.
+      // A repost is not a reply, however its tags are marked: its e tag is what
+      // it reposts, read above only once it checks out. A marked e tag or an
+      // upper-case E tag is no parent either, and fetching one here would bring
+      // back an original that did not check out, shown with the author it claims.
       if (isRepost) ancestorIds.length = 0;
 
       // Fetch ancestors: REST → local WS → external relay for any still missing
