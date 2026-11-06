@@ -59,6 +59,7 @@ import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
+import { MODERATOR_LOGIN_HEADER, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -72,7 +73,7 @@ async function ensureSchemaOnce(db: D1Database): Promise<void> {
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
 
-interface Env extends KeycastEnv, ConsentVideoEnv {
+interface Env extends KeycastEnv, ConsentVideoEnv, ModeratorLoginEnv {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
@@ -361,7 +362,7 @@ function hostnameMatchesWildcard(hostname: string, suffix: string): boolean {
 function buildCorsHeaders(allowedOrigin: string | null): Record<string, string> {
   const headers: Record<string, string> = {
     'Access-Control-Allow-Methods': 'GET, POST, PUT, PATCH, DELETE, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret, X-Divine-Login-Token',
     'Access-Control-Expose-Headers': 'Content-Range, Accept-Ranges, X-Admin-Proxy, X-Moderation-Status',
     'Access-Control-Max-Age': '86400',
   };
@@ -603,6 +604,15 @@ export default {
         const { status, error, code } = adminAuthError;
         return jsonResponse({ success: false, error, ...(code ? { code } : {}) }, status, corsHeaders);
       }
+
+      // The moderator's verified pubkey, from their Divine login. Checked once
+      // per request and only past the access gate, so an unauthenticated caller
+      // cannot make the worker call Keycast. undefined means no header or a
+      // failed check; a failed check never blocks an action, it only leaves the
+      // action unattributed.
+      const moderator: string | undefined = request.headers.has(MODERATOR_LOGIN_HEADER)
+        ? await verifyModeratorLogin(env, request.headers.get(MODERATOR_LOGIN_HEADER))
+        : undefined;
 
       // Standalone media viewer, linked from a Coop review card. Behind the same
       // CF Access + verifyAdminAccess gate as everything above, so only an
