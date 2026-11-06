@@ -965,7 +965,7 @@ describe('EventActions: a thumbnail left open is a warning, and can be redone', 
     fireEvent.click(screen.getByRole('button', { name: 'Block Media (1)' }));
 
     await waitFor(() => expect(api.moderateMedia).toHaveBeenCalledTimes(1));
-    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator']]);
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'PERMANENT_BAN', 'Blocked by moderator', 'SAFE']]);
   });
 
   it('offers no Block again on a video age review hid, so a hide never becomes a permanent ban', () => {
@@ -1775,7 +1775,7 @@ describe('EventActions: media actions send the state the screen showed', () => {
     expectStatusRechecked(invalidate);
   });
 
-  it('shows any other refusal as the worker gave it, without checking the status again', async () => {
+  it('shows any other refusal as the worker gave it, and checks the status again', async () => {
     api.moderateMedia.mockRejectedValue(new ApiError(
       'Another account owns this file; refusing to act for this one', 409, 'Conflict', 'owner_mismatch',
     ));
@@ -1791,7 +1791,33 @@ describe('EventActions: media actions send the state the screen showed', () => {
       description: 'Another account owns this file; refusing to act for this one',
       variant: 'destructive',
     }));
-    expect(invalidate.mock.calls).not.toContainEqual([{ queryKey: ['media-status'] }]);
+    expectStatusRechecked(invalidate);
+  });
+
+  // The lift guard (worker/src/index.ts mediaLiftGuard) answers a SAFE or an
+  // AGE_RESTRICTED before the `from` check does. So when age review hides a
+  // video this screen still shows public, Age Restrict is refused as an open
+  // age review, not as a changed state, and the status this screen shows is
+  // just as out of date.
+  it('checks the status again when the lift guard refuses Age Restrict for an open age review', async () => {
+    api.moderateMedia.mockRejectedValue(new ApiError(
+      "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+      409, 'Conflict', 'age_review_active',
+    ));
+    const { invalidate } = renderWithClient(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]}
+        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: 'Age Restrict (1)' }));
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title: 'Failed to age restrict',
+      description: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+      variant: 'destructive',
+    }));
+    expect(api.moderateMedia.mock.calls).toEqual([[VIDEO, 'AGE_RESTRICTED', 'Age restricted by moderator', 'SAFE']]);
+    expectStatusRechecked(invalidate);
   });
 });
 

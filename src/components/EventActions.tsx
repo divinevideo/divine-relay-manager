@@ -143,15 +143,20 @@ export function EventActions({
   // Every media write names the state this screen showed for the file (#336), so
   // the worker refuses it if another moderator or the automated checks changed
   // the file since. A refusal fails a video's action and is a warning for a
-  // thumbnail, as any failure is, in plain words, and the status is read again
-  // so the buttons match the file.
+  // thumbnail, as any failure is, in plain words.
+  //
+  // Any failed write reads the status again, not only a refused `from`: the
+  // worker's lift guard answers a SAFE or AGE_RESTRICTED first, so a file age
+  // review hid since this screen loaded comes back as an open age review, and a
+  // write that timed out may have landed. Either way the buttons were decided
+  // on a status that may no longer hold. Other errors keep the worker's words.
   const writeMedia = async (hash: string, write: (from: ExpectedMediaState | undefined) => Promise<unknown>) => {
     try {
       await write(expectedStateOf(statusOf(hash)));
     } catch (error) {
+      queryClient.invalidateQueries({ queryKey: ['media-status'] });
       const refusal = describeStateRefusal(error);
       if (refusal === undefined) throw error;
-      queryClient.invalidateQueries({ queryKey: ['media-status'] });
       throw new Error(refusal);
     }
   };
