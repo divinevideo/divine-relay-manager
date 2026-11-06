@@ -1786,6 +1786,50 @@ describe('EventActions: media actions send the state the screen showed', () => {
     expectStatusRechecked(invalidate);
   });
 
+  // Video files are written one after another and the first failure stops the
+  // action. Files written before it changed, so the moderator is told how many
+  // and the audit log records them, as a partial undo does.
+  it.each([
+    ['Block Media (2)', 'moderateMedia', 'Failed to block media', 'blocked', 'block_media', 'Blocked 1 media file(s)', false],
+    ['Age Restrict (2)', 'moderateMedia', 'Failed to age restrict', 'age restricted', 'age_restrict_media', 'Age restricted 1 media file(s)', false],
+    ['Delete Media (2)', 'deleteMedia', 'Failed to delete media', 'deleted', 'delete_media', 'Deleted 1 media file(s)', true],
+  ] as const)('%s says how many were written when a later video fails, and logs those', async (
+    button, call, title, verb, auditAction, auditReason, confirm,
+  ) => {
+    const VIDEO_2 = 'c'.repeat(64);
+    api[call].mockImplementation((hash: string) =>
+      (hash === VIDEO_2 ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true })));
+    const onActionComplete = vi.fn();
+    const { invalidate } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]}
+        onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: VIDEO_2, isBlocked: false, isRestricted: false, action: 'SAFE' },
+        ]} />
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+
+    const message = `1 of 2 ${verb}, then: moderation down`;
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({
+      title,
+      description: message,
+      variant: 'destructive',
+      duration: 10000,
+    }));
+    expect(api[call].mock.calls.map((c) => c[0])).toEqual([VIDEO, VIDEO_2]);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: auditAction,
+      reason: `${auditReason}; ${message}`,
+    })));
+    expect(api.logDecision).toHaveBeenCalledTimes(1);
+    // Something did change, so the status is read again, once, by the host.
+    expect(onActionComplete).toHaveBeenCalledTimes(1);
+    expect(statusReads(invalidate)).toBe(0);
+  });
+
   // Another moderator got there first: the record already shows the block, so
   // the write has nothing to overwrite and goes again from that state.
   it('blocks from the new state when the record already shows it blocked', async () => {
@@ -1886,12 +1930,19 @@ describe('EventActions: media actions send the state the screen showed', () => {
     expect(statusReads(invalidate)).toBe(0);
   });
 
-  it('warns when Delete Event & Media fails on the video, and checks the status again once', async () => {
-    api.deleteMedia.mockRejectedValueOnce(new Error('moderation down'));
+  // The event is already gone by the media half, so the warning says how many
+  // video files went with it.
+  it('says how many videos Delete Event & Media deleted when a later one fails, and checks the status again once', async () => {
+    const VIDEO_2 = 'c'.repeat(64);
+    api.deleteMedia.mockImplementation((hash: string) =>
+      (hash === VIDEO_2 ? Promise.reject(new Error('moderation down')) : Promise.resolve({ success: true })));
     const onActionComplete = vi.fn();
     const { invalidate } = renderWithProvider(
-      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO]} onActionComplete={onActionComplete}
-        mediaHashStatuses={[{ hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' }]} />
+      <EventActions eventId="event-1" pubkey={PUBKEY} mediaHashes={[VIDEO, VIDEO_2]} onActionComplete={onActionComplete}
+        mediaHashStatuses={[
+          { hash: VIDEO, isBlocked: false, isRestricted: false, action: 'SAFE' },
+          { hash: VIDEO_2, isBlocked: false, isRestricted: false, action: 'SAFE' },
+        ]} />
     );
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
@@ -1899,11 +1950,15 @@ describe('EventActions: media actions send the state the screen showed', () => {
 
     await waitFor(() => expect(toast).toHaveBeenCalledWith({
       title: 'Partially completed',
-      description: 'Event was deleted but media deletion failed: moderation down',
+      description: 'Event was deleted but media deletion failed: 1 of 2 deleted, then: moderation down',
       variant: 'destructive',
       duration: 10000,
     }));
-    expect(api.deleteMedia).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'delete_event_and_media_partial',
+      reason: expect.stringContaining(`completed: event_deleted, media_${VIDEO}`),
+    })));
+    expect(api.deleteMedia).toHaveBeenCalledTimes(2);
     expect(onActionComplete).toHaveBeenCalledTimes(1);
     expect(statusReads(invalidate)).toBe(0);
   });
