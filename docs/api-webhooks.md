@@ -393,10 +393,10 @@ of two ways, as its other relay-admin calls do:
   unavailable, with its Cloudflare Access service token
   (`CF-Access-Client-Id` and `CF-Access-Client-Secret`) and no `X-Admin-Key`.
   Access admits the token and adds a `Cf-Access-Jwt-Assertion`, which the gate
-  verifies against the API's Access application (`API_ACCESS_AUD`). This path
-  falls under the hostname-wide Access application, since the only path-scoped
-  one covers `/api/internal/protected-minors/*`, so that application's policy
-  must allow the token, as relay-rpc's fallback already requires.
+  verifies against the API's Access application (`API_ACCESS_AUD`). No
+  path-scoped Access application covers this path, so it falls under the
+  hostname-wide one, whose policy must allow the token, as relay-rpc's
+  fallback already requires.
 
 `ADMIN_API_KEY` and a moderator's Access login are accepted too, as on every
 admin route.
