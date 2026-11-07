@@ -153,7 +153,11 @@ export const RELAY_PROFILE_BADGE = {
 export const ACCOUNT_TYPE_BADGE = {
   divine: {
     label: 'Divine login account',
-    title: 'Keycast has an account for this pubkey, so it signs in through Divine login.',
+    // Divine also creates Keycast accounts before anyone has claimed them: archived
+    // Vine creators are imported that way, and age review's create-minor-account
+    // makes one with a claim link. Keycast's status read doesn't return claim
+    // state, so this can't say which kind an account is.
+    title: "Keycast has an account for this pubkey, which signs in through Divine login. Divine also creates accounts before anyone claims them (archived Vine creators, and minor accounts set up in age review). This lookup can't tell those apart, so a person may not control this account yet.",
   },
   self_custody: {
     label: 'No Divine login account',
