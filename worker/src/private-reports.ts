@@ -32,8 +32,6 @@ interface PrivateReport {
 
 interface IntakeRow {
   reported_pubkey: string;
-  // Null once retention has cleared the reporter link.
-  reporter_pubkey: string | null;
   report_type: string;
   outcome: PrivateReportOutcome | null;
   completed_at: string | null;
@@ -107,9 +105,21 @@ function parseReport(raw: unknown): { report: PrivateReport } | { error: string 
   };
 }
 
-async function readRow(db: D1Database, reportId: string): Promise<IntakeRow | null> {
-  return db.prepare(`SELECT reported_pubkey, reporter_pubkey, report_type, outcome, completed_at
-    FROM private_report_intake WHERE report_id = ?`).bind(reportId).first<IntakeRow>();
+async function readRow(db: D1Database, report: PrivateReport): Promise<IntakeRow | null> {
+  return db.prepare(`SELECT reported_pubkey, report_type, outcome, completed_at
+    FROM private_report_intake WHERE reporter_pubkey = ? AND report_id = ?`)
+    .bind(report.reporterPubkey, report.reportId).first<IntakeRow>();
+}
+
+// A row retention redacted no longer names its reporter, so it answers a late
+// resend of the same reportId, account and type from whoever sends it.
+async function readRedactedOutcome(db: D1Database, report: PrivateReport): Promise<PrivateReportOutcome | null> {
+  const row = await db.prepare(`SELECT outcome FROM private_report_intake
+    WHERE report_id = ? AND reporter_pubkey IS NULL AND reported_pubkey = ? AND report_type = ?
+      AND completed_at IS NOT NULL
+    LIMIT 1`)
+    .bind(report.reportId, report.reportedPubkey, report.reportType).first<{ outcome: PrivateReportOutcome }>();
+  return row?.outcome ?? null;
 }
 
 async function logDecision(db: D1Database, decision: ReportedAgeReviewDecision): Promise<boolean> {
@@ -213,35 +223,39 @@ async function intake(
   const unavailable = (code: string) =>
     json({ success: false, error: 'The report could not be handed over now; retry later', code }, 503, corsHeaders);
 
-  await db.prepare(`INSERT INTO private_report_intake
-    (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at, first_received_at)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    ON CONFLICT(report_id) DO NOTHING`)
-    .bind(report.reportId, report.reportedPubkey, report.reporterPubkey, report.reportType, report.giftWrapId,
-      report.hasExcerpt ? 1 : 0, report.reportedAt, new Date().toISOString())
-    .run();
-
-  const stored = await readRow(db, report.reportId);
-  if (!stored) throw new Error('intake row missing after insert');
+  let stored = await readRow(db, report);
+  if (!stored) {
+    // Answered before the insert, so a resend never writes the link back.
+    const redacted = await readRedactedOutcome(db, report);
+    if (redacted) return done(redacted, true);
+    await db.prepare(`INSERT INTO private_report_intake
+      (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at, first_received_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(reporter_pubkey, report_id) DO NOTHING`)
+      .bind(report.reportId, report.reportedPubkey, report.reporterPubkey, report.reportType, report.giftWrapId,
+        report.hasExcerpt ? 1 : 0, report.reportedAt, new Date().toISOString())
+      .run();
+    stored = await readRow(db, report);
+    if (!stored) throw new Error('intake row missing after insert');
+  }
   // A resend carries a new gift wrap and possibly a new timestamp, but never a
-  // different account, reporter or reason. One that does is a caller bug, and
-  // answering `duplicate` would drop it unseen. A reporter retention cleared
-  // can no longer be compared, and is not written back.
-  if (stored.reported_pubkey !== report.reportedPubkey || stored.report_type !== report.reportType
-    || (stored.reporter_pubkey !== null && stored.reporter_pubkey !== report.reporterPubkey)) {
-    console.error(`[private-reports] reportId ${report.reportId} already names a different report; refused`);
-    return json({ success: false, error: 'reportId already names a different report', code: 'report_id_conflict' }, 400, corsHeaders);
+  // different account or reason. One that does is a caller bug, and answering
+  // `duplicate` would drop it unseen.
+  if (stored.reported_pubkey !== report.reportedPubkey || stored.report_type !== report.reportType) {
+    console.error(`[private-reports] reportId ${report.reportId} already names a different report from this reporter; refused`);
+    return json({ success: false, error: 'This reporter already used reportId for a different report', code: 'report_id_conflict' }, 400, corsHeaders);
   }
   if (stored.completed_at) return done(stored.outcome, true);
 
   const startedAt = Date.now();
   const claim = await db.prepare(`UPDATE private_report_intake
     SET attempts = attempts + 1, last_attempt_at = ?, lease_until = ?
-    WHERE report_id = ? AND completed_at IS NULL AND lease_until <= ?`)
-    .bind(new Date(startedAt).toISOString(), startedAt + ATTEMPT_LEASE_MS, report.reportId, startedAt)
+    WHERE reporter_pubkey = ? AND report_id = ? AND completed_at IS NULL AND lease_until <= ?`)
+    .bind(new Date(startedAt).toISOString(), startedAt + ATTEMPT_LEASE_MS, report.reporterPubkey, report.reportId,
+      startedAt)
     .run();
   if (claim.meta.changes !== 1) {
-    const current = await readRow(db, report.reportId);
+    const current = await readRow(db, report);
     if (current?.completed_at) return done(current.outcome, true);
     return unavailable('attempt_in_progress');
   }
@@ -251,15 +265,16 @@ async function intake(
     : await queueInCoop(env, report);
 
   if (!result.ok) {
-    await db.prepare(`UPDATE private_report_intake SET last_error = ?, lease_until = 0 WHERE report_id = ?`)
-      .bind(result.code, report.reportId).run();
+    await db.prepare(`UPDATE private_report_intake SET last_error = ?, lease_until = 0
+      WHERE reporter_pubkey = ? AND report_id = ?`)
+      .bind(result.code, report.reporterPubkey, report.reportId).run();
     return unavailable(result.code);
   }
   // If this write fails after Coop accepted the item, the retry submits it again.
   await db.prepare(`UPDATE private_report_intake
     SET outcome = ?, case_id = ?, completed_at = ?, last_error = NULL, lease_until = 0
-    WHERE report_id = ?`)
-    .bind(result.outcome, result.caseId, new Date().toISOString(), report.reportId).run();
+    WHERE reporter_pubkey = ? AND report_id = ?`)
+    .bind(result.outcome, result.caseId, new Date().toISOString(), report.reporterPubkey, report.reportId).run();
   console.log(`[private-reports] ${report.reportId}: ${result.outcome} (${report.reportType})`);
   return done(result.outcome, false);
 }
@@ -274,9 +289,9 @@ async function intake(
  * The caller authorizes the request first (index.ts opens this route to
  * moderation-service's MOD_RELAY_ADMIN_KEY).
  *
- * Answers 200 with the outcome, `duplicate: true` when this reportId already
- * completed; 400 for a body that will never succeed; 503 when the handoff
- * cannot complete now, which moderation-service retries.
+ * Answers 200 with the outcome, `duplicate: true` when this reporter's
+ * reportId already completed; 400 for a body that will never succeed; 503
+ * when the handoff cannot complete now, which moderation-service retries.
  */
 export async function handlePrivateReport(
   request: Request,

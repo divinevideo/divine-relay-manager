@@ -1,10 +1,12 @@
 -- Private DM reports handed over by moderation-service (POST /api/internal/private-reports).
--- One row per reportId, its idempotency key. Production schema is also healed by ensureSchema().
+-- One row per reporter and reportId, the idempotency key. Production schema is also healed by
+-- ensureSchema(). A surrogate id, because redaction nulls reporter_pubkey.
 -- Retention: an under-16 row's reporter link is cleared once its age-review case is redacted
 -- or deleted (retention.ts, private-report-redaction). A Coop handoff is kept like
 -- moderation_decisions. See the DDL comment in src/db.ts.
 CREATE TABLE IF NOT EXISTS private_report_intake (
-  report_id TEXT PRIMARY KEY,
+  id INTEGER PRIMARY KEY,
+  report_id TEXT NOT NULL,
   reported_pubkey TEXT NOT NULL,
   reporter_pubkey TEXT,
   report_type TEXT NOT NULL,
@@ -21,7 +23,8 @@ CREATE TABLE IF NOT EXISTS private_report_intake (
   completed_at TEXT,
   redacted_at TEXT,
   CHECK ((outcome IS NULL) = (completed_at IS NULL)),
-  CHECK (redacted_at IS NOT NULL OR (reporter_pubkey IS NOT NULL AND gift_wrap_id IS NOT NULL))
+  CHECK (redacted_at IS NOT NULL OR (reporter_pubkey IS NOT NULL AND gift_wrap_id IS NOT NULL)),
+  UNIQUE (reporter_pubkey, report_id)
 );
 CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_case
   ON private_report_intake (case_id) WHERE redacted_at IS NULL AND case_id IS NOT NULL;

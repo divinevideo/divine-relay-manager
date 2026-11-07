@@ -306,10 +306,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   }
 
   // Private DM reports handed over by moderation-service (POST
-  // /api/internal/private-reports), one row per reportId, its idempotency key:
-  // a completed row answers a retry with the stored outcome instead of queueing
-  // the account twice. Identifiers only; the reported message and the
-  // reporter's note stay in moderation-service.
+  // /api/internal/private-reports), one row per reporter and reportId, the
+  // idempotency key moderation-service keeps too: a completed row answers a
+  // retry with the stored outcome instead of queueing the account twice, and
+  // one reporter's row never stands in for another's. Identifiers only; the
+  // reported message and the reporter's note stay in moderation-service.
+  // A surrogate id rather than a primary key over the pair, because redaction
+  // nulls reporter_pubkey; a redacted row then answers a late resend by
+  // reportId, account and type.
   // Retention: an under-16 row follows its age-review case. retention.ts's
   // private-report-redaction stage clears the reporter link (reporter_pubkey,
   // gift_wrap_id) once that case is redacted or deleted, legal holds included.
@@ -318,7 +322,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // no disposal stage either. The rest of a row is what answers a late retry.
   // Keep this DDL in sync with migration 0019.
   await db.prepare(`CREATE TABLE IF NOT EXISTS private_report_intake (
-    report_id TEXT PRIMARY KEY,
+    id INTEGER PRIMARY KEY,
+    report_id TEXT NOT NULL,
     reported_pubkey TEXT NOT NULL,
     reporter_pubkey TEXT,
     report_type TEXT NOT NULL,
@@ -335,7 +340,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     completed_at TEXT,
     redacted_at TEXT,
     CHECK ((outcome IS NULL) = (completed_at IS NULL)),
-    CHECK (redacted_at IS NOT NULL OR (reporter_pubkey IS NOT NULL AND gift_wrap_id IS NOT NULL))
+    CHECK (redacted_at IS NOT NULL OR (reporter_pubkey IS NOT NULL AND gift_wrap_id IS NOT NULL)),
+    UNIQUE (reporter_pubkey, report_id)
   )`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_case
     ON private_report_intake (case_id) WHERE redacted_at IS NULL AND case_id IS NOT NULL`).run();

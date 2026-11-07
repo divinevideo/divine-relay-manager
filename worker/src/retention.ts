@@ -367,7 +367,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
   await runStage('private-report-redaction', async () => {
     const redacted = await db.prepare(`UPDATE private_report_intake
       SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
-      WHERE report_id IN (SELECT i.report_id FROM private_report_intake i
+      WHERE id IN (SELECT i.id FROM private_report_intake i
         WHERE i.redacted_at IS NULL AND i.case_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = i.case_id AND c.redacted_at IS NULL)
         LIMIT ${BATCH_LIMIT})`).run();

@@ -399,8 +399,11 @@ pass through Cloudflare Access. That key still opens no other route.
 Identifiers are stored and sent lowercase. `reportType` is moderation-service's
 lowercase report type.
 
-**Idempotency.** `reportId` is the key. A report that completed answers again
-with its stored outcome and `duplicate: true`, and nothing is redone. One that
+**Idempotency.** The key is the reporter and `reportId` together, as
+moderation-service keys its own intake. A report that completed answers again
+with its stored outcome and `duplicate: true`, and nothing is redone. Another
+reporter's report under the same `reportId` is a report of its own: it gets a
+Coop submission, or `age_review_exists` when the account already has a case. One that
 failed is retried by the next request. A request for a report another request is
 still handling answers `503` `attempt_in_progress`, and the attempt's lease
 lapses after two minutes if it never finishes. One gap remains: if Coop accepts
@@ -413,7 +416,7 @@ the item and the write recording that then fails, the retry submits it again.
 | 200 | `{ "success": true, "outcome": "queued_in_coop" \| "age_review_opened" \| "age_review_exists", "duplicate": false }` | Handed over. `age_review_opened` includes an approved minor's case, opened already cleared. |
 | 200 | the same, with `"duplicate": true` | This `reportId` already completed; the stored outcome. |
 | 400 | `code: "invalid_body"` | The body is not a JSON object, or a field is missing or malformed. Do not retry. |
-| 400 | `code: "report_id_conflict"` | This `reportId` is already recorded for a different account, reporter or type. Do not retry. |
+| 400 | `code: "report_id_conflict"` | This reporter already used this `reportId` for a different account or type. Do not retry. |
 | 401 | | Missing or wrong key. |
 | 503 | `code: "coop_not_configured"` | A Coop setting below is missing, or its credentials cannot be used. Retry. |
 | 503 | `code: "coop_unreachable"`, `"coop_status_<n>"` | Coop could not be reached, or did not answer 2xx (a redirect is not followed). Retry. |
@@ -428,7 +431,7 @@ both are bound. These are the settings the sexual-quarantine handoff uses (see
 [sexual-quarantine-rollout.md](sexual-quarantine-rollout.md)), plus
 `COOP_USER_TYPE_ID`. Under-16 reports need none of them.
 
-**Storage.** One `private_report_intake` row per `reportId`: the reported and
+**Storage.** One `private_report_intake` row per reporter and `reportId`: the reported and
 reporting accounts, the type, the gift wrap id, whether an excerpt exists, the
 outcome and case id, and attempt timestamps.
 
@@ -439,8 +442,9 @@ outcome and case id, and attempt timestamps.
   (`reporter_pubkey` and `gift_wrap_id`) once the case is redacted, 30 days
   after it closes, or no longer exists. A legal hold that keeps the case's
   detail keeps the link too. The row keeps `reportId`, the reported account,
-  the type and the outcome, so a late resend still answers `duplicate: true`;
-  the reporter is not compared or written back.
+  the type and the outcome. A late resend of that `reportId`, account and type
+  still answers `duplicate: true`, from whoever sends it, since the row no
+  longer names a reporter; nothing is written back.
 - *A Coop handoff is kept like `moderation_decisions`.* It has no case in this
   worker to follow: the review item is in Coop. The row is the only record of
   which report put the account in Coop. `moderation_decisions` holds the same

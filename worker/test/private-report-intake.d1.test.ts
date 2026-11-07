@@ -88,9 +88,19 @@ async function post(body: unknown, env: Record<string, unknown> = testEnv()) {
   }), env as never, ctx);
 }
 
-async function intakeRow(reportId: string) {
-  return DB.prepare('SELECT * FROM private_report_intake WHERE report_id = ?').bind(reportId)
-    .first<Record<string, unknown>>();
+// The reporter's row for this reportId, or, once retention cleared the
+// reporter, the redacted one.
+async function intakeRow(reportId: string, reporter: string | null = REPORTER) {
+  return reporter === null
+    ? DB.prepare('SELECT * FROM private_report_intake WHERE report_id = ? AND reporter_pubkey IS NULL')
+      .bind(reportId).first<Record<string, unknown>>()
+    : DB.prepare('SELECT * FROM private_report_intake WHERE report_id = ? AND reporter_pubkey = ?')
+      .bind(reportId, reporter).first<Record<string, unknown>>();
+}
+
+async function rowCount(reportId: string) {
+  return (await DB.prepare('SELECT COUNT(*) AS n FROM private_report_intake WHERE report_id = ?')
+    .bind(reportId).first<{ n: number }>())!.n;
 }
 
 function coopCalls() {
@@ -243,16 +253,35 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it('refuses, without calling Coop, a reportId already recorded for a different report', async () => {
+  it('refuses, without calling Coop, a reporter reusing a reportId for a different account or type', async () => {
     const body = report({ reportType: 'spam' });
     expect((await post(body)).status).toBe(200);
 
-    for (const changed of [{ reportedPubkey: 'd4'.repeat(32) }, { reporterPubkey: 'e5'.repeat(32) }, { reportType: 'csam' }]) {
+    for (const changed of [{ reportedPubkey: 'd4'.repeat(32) }, { reportType: 'csam' }]) {
       const res = await post({ ...body, ...changed });
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ success: false, code: 'report_id_conflict' });
     }
     expect(coopCalls()).toHaveLength(1);
+    expect(await rowCount(body.reportId)).toBe(1);
+  });
+
+  it('queues a second reporter\'s report under the same reportId as a report of its own', async () => {
+    // Keyed per reporter: another reporter's report can never be answered as
+    // this one's duplicate, or refused because of it.
+    const first = report({ reportType: 'harassment' });
+    const second = { ...first, reporterPubkey: 'e5'.repeat(32) };
+    expect(await (await post(first)).json()).toMatchObject({ outcome: 'queued_in_coop', duplicate: false });
+
+    const res = await post(second);
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: false });
+    expect(coopCalls()).toHaveLength(2);
+    expect(await intakeRow(first.reportId)).toMatchObject({ outcome: 'queued_in_coop', attempts: 1 });
+    expect(await intakeRow(first.reportId, 'e5'.repeat(32))).toMatchObject({ outcome: 'queued_in_coop', attempts: 1 });
+
+    expect(await (await post(second)).json()).toMatchObject({ duplicate: true });
+    expect(coopCalls()).toHaveLength(2);
   });
 
   it('stores and sends lowercase identifiers', async () => {
@@ -320,7 +349,7 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     const count = await DB.prepare('SELECT COUNT(*) AS n FROM age_review_cases WHERE pubkey = ?').bind(REPORTED)
       .first<{ n: number }>();
     expect(count!.n).toBe(1);
-    expect(await intakeRow(second.reportId)).toMatchObject({ outcome: 'age_review_exists' });
+    expect(await intakeRow(second.reportId, 'f6'.repeat(32))).toMatchObject({ outcome: 'age_review_exists' });
   });
 
   it('records an approved minor as already cleared, as a kind-1984 report does', async () => {
@@ -363,8 +392,30 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
 
     const again = await post(body);
     expect(await again.json()).toEqual({ success: true, outcome: 'age_review_opened', duplicate: true });
-    // The resend does not restore the link retention cleared.
-    expect(await intakeRow(body.reportId)).toMatchObject({ reporter_pubkey: null, gift_wrap_id: null });
+    // The resend does not write the reporter link back, as a row of its own or otherwise.
+    expect(await rowCount(body.reportId)).toBe(1);
+    expect(await intakeRow(body.reportId, null)).toMatchObject({ reporter_pubkey: null, gift_wrap_id: null });
+  });
+
+  it('opens a report of another account normally, after a redacted row used the same reportId', async () => {
+    const body = report({ reportType: 'underage_user' });
+    expect((await post(body)).status).toBe(200);
+    await DB.prepare(`UPDATE private_report_intake SET reporter_pubkey = NULL, gift_wrap_id = NULL,
+      redacted_at = datetime('now') WHERE report_id = ?`).bind(body.reportId).run();
+
+    const other = { ...body, reportedPubkey: 'd4'.repeat(32) };
+    expect(await (await post(other)).json()).toEqual({ success: true, outcome: 'age_review_opened', duplicate: false });
+    expect(await rowCount(body.reportId)).toBe(2);
+  });
+
+  it('answers age_review_exists to a second reporter\'s under-16 report under the same reportId', async () => {
+    const first = report({ reportType: 'underage_user' });
+    expect((await post(first)).status).toBe(200);
+    const res = await post({ ...first, reporterPubkey: 'e5'.repeat(32) });
+    expect(await res.json()).toEqual({ success: true, outcome: 'age_review_exists', duplicate: false });
+    const count = await DB.prepare('SELECT COUNT(*) AS n FROM age_review_cases WHERE pubkey = ?').bind(REPORTED)
+      .first<{ n: number }>();
+    expect(count!.n).toBe(1);
   });
 
   it('keeps the row incomplete when the case cannot be written, and the retry opens it', async () => {

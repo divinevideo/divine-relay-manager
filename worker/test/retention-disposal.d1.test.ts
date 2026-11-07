@@ -531,12 +531,13 @@ describe('private-report intake rows follow their age-review case', () => {
     await DB.prepare('DELETE FROM private_report_intake').run();
   });
 
-  async function intake(reportId: string, caseId: string | null, outcome: string, reportType = 'underage_user') {
+  async function intake(reportId: string, caseId: string | null, outcome: string, reportType = 'underage_user',
+    reporter = REPORTER) {
     await DB.prepare(`INSERT INTO private_report_intake
       (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at,
        outcome, case_id, attempts, first_received_at, completed_at)
       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)`)
-      .bind(reportId, PUBKEY_A, REPORTER, reportType, GIFT_WRAP, OLD_30, outcome, caseId, OLD_30, OLD_30).run();
+      .bind(reportId, PUBKEY_A, reporter, reportType, GIFT_WRAP, OLD_30, outcome, caseId, OLD_30, OLD_30).run();
   }
 
   async function intakeRow(reportId: string) {
@@ -596,6 +597,21 @@ describe('private-report intake rows follow their age-review case', () => {
 
     expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
     expect(await intakeRow('report-held')).toMatchObject({ reporter_pubkey: REPORTER, redacted_at: null });
+  });
+
+  it('redacts only the due row when another reporter used the same reportId', async () => {
+    const other = 'e5'.repeat(32);
+    await closedCase('case-shared-id', RETENTION_DAYS.ageReviewDetail + 1);
+    await intake('report-shared', 'case-shared-id', 'age_review_opened');
+    await intake('report-shared', null, 'queued_in_coop', 'csam', other);
+
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(1);
+    const rows = await DB.prepare(`SELECT reporter_pubkey, outcome FROM private_report_intake
+      WHERE report_id = 'report-shared' ORDER BY outcome`).all<Record<string, unknown>>();
+    expect(rows.results).toEqual([
+      { reporter_pubkey: null, outcome: 'age_review_opened' },
+      { reporter_pubkey: other, outcome: 'queued_in_coop' },
+    ]);
   });
 
   it('keeps a Coop handoff, which has no case, like a moderation_decisions row', async () => {
