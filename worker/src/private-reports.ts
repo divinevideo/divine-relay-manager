@@ -56,9 +56,12 @@ const COOP_REPORT_REASON = new Map<string, string>([
   ['ai_generated', 'ai_generated'],
 ]);
 
-// Longer than one attempt can take (Coop's timeout below, or the age-review
-// identity lookup and keycast read), so a second delivery of the same report
-// does not run beside one still in flight. An attempt that died mid-way is
+// Long enough that a second delivery of the same report does not run beside
+// one still in flight: a Coop attempt is bounded by COOP_TIMEOUT_MS, and the
+// age-review identity lookup by its own 3s timeout. The age-review keycast read
+// has no timeout, so a slow keycast can outlast the lease and let a second
+// attempt start. That attempt cannot open a second case (one active case per
+// account), and answers age_review_exists. An attempt that died mid-way is
 // retried once its lease lapses.
 const ATTEMPT_LEASE_MS = 120_000;
 const COOP_TIMEOUT_MS = 10_000;
