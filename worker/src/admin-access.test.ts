@@ -227,6 +227,61 @@ describe('verifyAdminAccess: X-Admin-Key paths unchanged', () => {
   // MOD_RELAY_ADMIN_KEY on /api/relay-rpc is covered in index.test.ts.
 });
 
+describe('private-report intake: open to MOD_RELAY_ADMIN_KEY on POST, and no further', () => {
+  const PRIVATE_REPORTS = 'https://api.test/api/internal/private-reports';
+  const modEnv = { ...baseEnv, MOD_RELAY_ADMIN_KEY: { get: async () => 'mod-relay-key' } };
+  const send = (url: string, method: string, headers: Record<string, string>) =>
+    worker.fetch(new Request(url, {
+      method, headers: { 'Content-Type': 'application/json', ...headers },
+      ...(method === 'GET' ? {} : { body: 'not json' }),
+    }), modEnv as never, ctx);
+
+  // Authorized requests reach the handler, which refuses the malformed body
+  // with 400; a 401 means the gate refused them.
+  it('accepts moderation-service\'s key on POST', async () => {
+    expect((await send(PRIVATE_REPORTS, 'POST', { 'X-Admin-Key': 'mod-relay-key' })).status).toBe(400);
+  });
+
+  it('accepts ADMIN_API_KEY too, as every admin route does', async () => {
+    expect((await send(PRIVATE_REPORTS, 'POST', { 'X-Admin-Key': 'admin-key' })).status).toBe(400);
+  });
+
+  it('accepts a verified Access token, the moderator credential', async () => {
+    const signer = await makeAccessJwtSigner();
+    vi.stubGlobal('fetch', signer.fetchFn);
+    expect((await send(PRIVATE_REPORTS, 'POST', { 'Cf-Access-Jwt-Assertion': await signer.sign() })).status).toBe(400);
+  });
+
+  it('sits behind the admin gate: a merely present Access header is refused', async () => {
+    const signer = await makeAccessJwtSigner();
+    vi.stubGlobal('fetch', signer.fetchFn);
+    expect((await send(PRIVATE_REPORTS, 'POST', { 'Cf-Access-Jwt-Assertion': 'test' })).status).toBe(401);
+  });
+
+  it.each(['GET', 'PUT', 'DELETE'])('does not accept moderation-service\'s key on %s', async (method) => {
+    expect((await send(PRIVATE_REPORTS, method, { 'X-Admin-Key': 'mod-relay-key' })).status).toBe(401);
+  });
+
+  it('refuses a wrong key', async () => {
+    expect((await send(PRIVATE_REPORTS, 'POST', { 'X-Admin-Key': 'wrong' })).status).toBe(401);
+  });
+
+  it.each([
+    '/api/moderate',
+    '/api/moderate-media',
+    '/api/decisions',
+    '/api/confirm-auto-hide',
+    '/api/publish',
+    '/api/bulk-moderate',
+    '/api/summarize-user',
+    '/api/age-review/create-minor-account',
+    '/api/admin/protected-minors/backfill',
+    '/api/internal/private-reports/extra',
+  ])('still refuses moderation-service\'s key on POST %s', async (path) => {
+    expect((await send(`https://api.test${path}`, 'POST', { 'X-Admin-Key': 'mod-relay-key' })).status).toBe(401);
+  });
+});
+
 describe('verifyAdminAccess: X-Admin-Key comparisons are constant-time', () => {
   // Timing can't be measured in a unit test; secret-compare.test.ts pins the
   // helper's behaviour, and these pin that both key checks go through it.

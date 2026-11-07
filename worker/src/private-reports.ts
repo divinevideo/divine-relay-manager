@@ -1,0 +1,300 @@
+// ABOUTME: POST /api/internal/private-reports: moderation-service hands over a private DM report,
+// ABOUTME: which becomes a Coop review item, or an age-review case for an under-16 report.
+
+import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
+import { coopHeaders, type CoopEnv } from './coop';
+import { errorNameOnly } from './error-name';
+import { isHex64 } from './hex';
+import {
+  openReportedAgeReviewCase,
+  type ReportedAgeReviewDecision,
+  type ReportedAgeReviewEnv,
+} from './reported-age-review';
+
+export interface PrivateReportEnv extends CoopEnv, ReportedAgeReviewEnv {
+  DB?: D1Database;
+  // Coop's id for the nostr_user item type (Osprey's DIVINE_COOP_USER_TYPE_ID).
+  COOP_USER_TYPE_ID?: string;
+}
+
+type PrivateReportOutcome = 'queued_in_coop' | 'age_review_opened' | 'age_review_exists';
+
+interface PrivateReport {
+  reportId: string;
+  reportedPubkey: string;
+  reporterPubkey: string;
+  reportType: string;
+  reportedAt: string;
+  hasExcerpt: boolean;
+  giftWrapId: string;
+}
+
+interface IntakeRow {
+  reported_pubkey: string;
+  reporter_pubkey: string;
+  report_type: string;
+  outcome: PrivateReportOutcome | null;
+  completed_at: string | null;
+}
+
+type AttemptResult =
+  | { ok: true; outcome: PrivateReportOutcome; caseId: string | null }
+  | { ok: false; code: string };
+
+const UNDERAGE_REPORT_TYPE = 'underage_user';
+
+// moderation-service's report type -> Coop's report_reason routing token. Coop
+// routes these five to their own queues, CSAM and Child Safety first, and the
+// rest of its tokens, `other` included, to General Review.
+const COOP_REPORT_REASON = new Map<string, string>([
+  ['csam', 'csam'],
+  ['child_safety', 'child_safety'],
+  ['sexual_content', 'nudity'],
+  ['violence', 'violence'],
+  ['harassment', 'harassment'],
+  ['spam', 'spam'],
+  ['ai_generated', 'ai_generated'],
+]);
+
+// Longer than one attempt can take (Coop's timeout below, or the age-review
+// identity lookup and keycast read), so a second delivery of the same report
+// does not run beside one still in flight. An attempt that died mid-way is
+// retried once its lease lapses.
+const ATTEMPT_LEASE_MS = 120_000;
+const COOP_TIMEOUT_MS = 10_000;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const REPORT_TYPE_RE = /^[a-z_]{1,64}$/;
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}T/;
+
+function json(body: unknown, status: number, corsHeaders: Record<string, string>): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  });
+}
+
+function parseReport(raw: unknown): { report: PrivateReport } | { error: string } {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { error: 'body must be a JSON object' };
+  const body = raw as Record<string, unknown>;
+  const { reportId, reportedPubkey, reporterPubkey, reportType, reportedAt, hasExcerpt, giftWrapId } = body;
+  if (typeof reportId !== 'string' || !(UUID_RE.test(reportId) || isHex64(reportId))) {
+    return { error: 'reportId must be a UUID or 64 hex characters' };
+  }
+  if (!isHex64(reportedPubkey)) return { error: 'reportedPubkey must be 64 hex characters' };
+  if (!isHex64(reporterPubkey)) return { error: 'reporterPubkey must be 64 hex characters' };
+  if (!isHex64(giftWrapId)) return { error: 'giftWrapId must be 64 hex characters' };
+  if (typeof reportType !== 'string' || !REPORT_TYPE_RE.test(reportType)) {
+    return { error: 'reportType must be a lowercase report type' };
+  }
+  if (typeof reportedAt !== 'string' || reportedAt.length > 64 || !ISO_DATE_RE.test(reportedAt)
+    || !Number.isFinite(Date.parse(reportedAt))) {
+    return { error: 'reportedAt must be an ISO-8601 timestamp' };
+  }
+  if (typeof hasExcerpt !== 'boolean') return { error: 'hasExcerpt must be a boolean' };
+  return {
+    report: {
+      reportId: reportId.toLowerCase(),
+      reportedPubkey: (reportedPubkey as string).toLowerCase(),
+      reporterPubkey: (reporterPubkey as string).toLowerCase(),
+      reportType,
+      reportedAt: new Date(reportedAt).toISOString(),
+      hasExcerpt,
+      giftWrapId: (giftWrapId as string).toLowerCase(),
+    },
+  };
+}
+
+async function readRow(db: D1Database, reportId: string): Promise<IntakeRow | null> {
+  return db.prepare(`SELECT reported_pubkey, reporter_pubkey, report_type, outcome, completed_at
+    FROM private_report_intake WHERE report_id = ?`).bind(reportId).first<IntakeRow>();
+}
+
+async function logDecision(db: D1Database, decision: ReportedAgeReviewDecision): Promise<boolean> {
+  try {
+    await db.prepare(`
+      INSERT INTO moderation_decisions
+      (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
+    `).bind(
+      decision.targetType,
+      decision.targetId,
+      decision.action,
+      decision.reason,
+      AUTOMATED_MODERATOR,
+      decision.reportId,
+      decision.reporterPubkey,
+    ).run();
+    return true;
+  } catch (error) {
+    console.error('[private-reports] Failed to log decision:', errorNameOnly(error));
+    return false;
+  }
+}
+
+async function openAgeReview(db: D1Database, env: PrivateReportEnv, report: PrivateReport): Promise<AttemptResult> {
+  try {
+    const result = await openReportedAgeReviewCase(
+      db,
+      env,
+      report.reportedPubkey,
+      { kind: 'private_report', reportId: report.reportId, reporterPubkey: report.reporterPubkey },
+      (decision) => logDecision(db, decision),
+      '[private-reports]',
+    );
+    // An approved minor's case opens already cleared; it is still a new case.
+    return { ok: true, outcome: result.outcome === 'exists' ? 'age_review_exists' : 'age_review_opened', caseId: result.caseId };
+  } catch (error) {
+    console.error('[private-reports] Age review case not opened:', errorNameOnly(error));
+    return { ok: false, code: 'age_review_failed' };
+  }
+}
+
+// Coop's nostr_user item: only fields its schema declares, and nothing from the
+// report beyond the account and the reason.
+async function queueInCoop(env: PrivateReportEnv, report: PrivateReport): Promise<AttemptResult> {
+  if (!env.COOP_URL || !env.COOP_API_KEY || !env.COOP_USER_TYPE_ID) {
+    const unset = [!env.COOP_URL && 'COOP_URL', !env.COOP_API_KEY && 'COOP_API_KEY',
+      !env.COOP_USER_TYPE_ID && 'COOP_USER_TYPE_ID'].filter(Boolean);
+    console.error(`[private-reports] Coop handoff not configured: ${unset.join(', ')} unset`);
+    return { ok: false, code: 'coop_not_configured' };
+  }
+  let headers: Record<string, string>;
+  try {
+    headers = await coopHeaders(env.COOP_URL, env.COOP_API_KEY, env);
+  } catch (error) {
+    console.error('[private-reports] Coop credentials unusable (key, Access pair or HTTPS):', errorNameOnly(error));
+    return { ok: false, code: 'coop_not_configured' };
+  }
+  let response: Response;
+  try {
+    response = await fetch(`${env.COOP_URL.replace(/\/$/, '')}/api/v1/items/async/`, {
+      method: 'POST',
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(COOP_TIMEOUT_MS),
+      body: JSON.stringify({
+        items: [{
+          id: report.reportedPubkey,
+          typeId: env.COOP_USER_TYPE_ID,
+          data: { pubkey: report.reportedPubkey, report_reason: COOP_REPORT_REASON.get(report.reportType) ?? 'other' },
+        }],
+      }),
+    });
+  } catch (error) {
+    console.error('[private-reports] Coop unreachable:', errorNameOnly(error));
+    return { ok: false, code: 'coop_unreachable' };
+  }
+  await response.body?.cancel();
+  // Coop answers 202 with no body; any 2xx is an accepted item.
+  if (!response.ok) {
+    console.error(`[private-reports] Coop refused the item: ${response.status}`);
+    return { ok: false, code: `coop_status_${response.status}` };
+  }
+  return { ok: true, outcome: 'queued_in_coop', caseId: null };
+}
+
+async function intake(
+  db: D1Database,
+  env: PrivateReportEnv,
+  report: PrivateReport,
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  const done = (outcome: PrivateReportOutcome | null, duplicate: boolean) =>
+    json({ success: true, outcome, duplicate }, 200, corsHeaders);
+  const unavailable = (code: string) =>
+    json({ success: false, error: 'The report could not be handed over now; retry later', code }, 503, corsHeaders);
+
+  await db.prepare(`INSERT INTO private_report_intake
+    (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at, first_received_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(report_id) DO NOTHING`)
+    .bind(report.reportId, report.reportedPubkey, report.reporterPubkey, report.reportType, report.giftWrapId,
+      report.hasExcerpt ? 1 : 0, report.reportedAt, new Date().toISOString())
+    .run();
+
+  const stored = await readRow(db, report.reportId);
+  if (!stored) throw new Error('intake row missing after insert');
+  // A resend carries a new gift wrap and possibly a new timestamp, but never a
+  // different account, reporter or reason. One that does is a caller bug, and
+  // answering `duplicate` would drop it unseen.
+  if (stored.reported_pubkey !== report.reportedPubkey || stored.reporter_pubkey !== report.reporterPubkey
+    || stored.report_type !== report.reportType) {
+    console.error(`[private-reports] reportId ${report.reportId} already names a different report; refused`);
+    return json({ success: false, error: 'reportId already names a different report', code: 'report_id_conflict' }, 400, corsHeaders);
+  }
+  if (stored.completed_at) return done(stored.outcome, true);
+
+  const startedAt = Date.now();
+  const claim = await db.prepare(`UPDATE private_report_intake
+    SET attempts = attempts + 1, last_attempt_at = ?, lease_until = ?
+    WHERE report_id = ? AND completed_at IS NULL AND lease_until <= ?`)
+    .bind(new Date(startedAt).toISOString(), startedAt + ATTEMPT_LEASE_MS, report.reportId, startedAt)
+    .run();
+  if (claim.meta.changes !== 1) {
+    const current = await readRow(db, report.reportId);
+    if (current?.completed_at) return done(current.outcome, true);
+    return unavailable('attempt_in_progress');
+  }
+
+  const result = report.reportType === UNDERAGE_REPORT_TYPE
+    ? await openAgeReview(db, env, report)
+    : await queueInCoop(env, report);
+
+  if (!result.ok) {
+    await db.prepare(`UPDATE private_report_intake SET last_error = ?, lease_until = 0 WHERE report_id = ?`)
+      .bind(result.code, report.reportId).run();
+    return unavailable(result.code);
+  }
+  // If this write fails after Coop accepted the item, the retry submits it again.
+  await db.prepare(`UPDATE private_report_intake
+    SET outcome = ?, case_id = ?, completed_at = ?, last_error = NULL, lease_until = 0
+    WHERE report_id = ?`)
+    .bind(result.outcome, result.caseId, new Date().toISOString(), report.reportId).run();
+  console.log(`[private-reports] ${report.reportId}: ${result.outcome} (${report.reportType})`);
+  return done(result.outcome, false);
+}
+
+/**
+ * Take a private report moderation-service received by encrypted DM and put the
+ * reported account in front of a moderator: an age-review case for an under-16
+ * report, otherwise a Coop `nostr_user` item routed by reason. It only creates
+ * review items. Nothing is published to a relay, no Zendesk ticket is filed,
+ * and nothing is hidden, restricted or banned.
+ *
+ * The caller authorizes the request first (index.ts opens this route to
+ * moderation-service's MOD_RELAY_ADMIN_KEY).
+ *
+ * Answers 200 with the outcome, `duplicate: true` when this reportId already
+ * completed; 400 for a body that will never succeed; 503 when the handoff
+ * cannot complete now, which moderation-service retries.
+ */
+export async function handlePrivateReport(
+  request: Request,
+  env: PrivateReportEnv,
+  corsHeaders: Record<string, string>,
+  prepareDb: (db: D1Database) => Promise<void>,
+): Promise<Response> {
+  let raw: unknown;
+  try {
+    raw = await request.json();
+  } catch {
+    raw = undefined;
+  }
+  const parsed = parseReport(raw);
+  if ('error' in parsed) {
+    return json({ success: false, error: parsed.error, code: 'invalid_body' }, 400, corsHeaders);
+  }
+
+  const unavailable = () => json({
+    success: false, error: 'The report could not be handed over now; retry later', code: 'db_unavailable',
+  }, 503, corsHeaders);
+  if (!env.DB) return unavailable();
+  try {
+    await prepareDb(env.DB);
+    return await intake(env.DB, env, parsed.report, corsHeaders);
+  } catch (error) {
+    console.error('[private-reports] Intake failed:', errorNameOnly(error));
+    return unavailable();
+  }
+}

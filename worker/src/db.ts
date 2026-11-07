@@ -305,6 +305,31 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     }
   }
 
+  // Private DM reports handed over by moderation-service (POST
+  // /api/internal/private-reports), one row per reportId, its idempotency key:
+  // a completed row answers a retry with the stored outcome instead of queueing
+  // the account twice. Identifiers only; the reported message and the
+  // reporter's note stay in moderation-service. No retention stage disposes of
+  // these rows yet (docs/api-webhooks.md). Keep this DDL in sync with migration 0019.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS private_report_intake (
+    report_id TEXT PRIMARY KEY,
+    reported_pubkey TEXT NOT NULL,
+    reporter_pubkey TEXT NOT NULL,
+    report_type TEXT NOT NULL,
+    gift_wrap_id TEXT NOT NULL,
+    has_excerpt INTEGER NOT NULL CHECK (has_excerpt IN (0, 1)),
+    reported_at TEXT NOT NULL,
+    outcome TEXT CHECK (outcome IN ('queued_in_coop', 'age_review_opened', 'age_review_exists')),
+    case_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    first_received_at TEXT NOT NULL,
+    last_attempt_at TEXT,
+    completed_at TEXT,
+    CHECK ((outcome IS NULL) = (completed_at IS NULL))
+  )`).run();
+
   await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_class = CASE
       WHEN clear_reason = 'false_positive' THEN 'false_positive'
       WHEN clear_reason IN ('age_review_denied', 'age_review_expired', 'age_up', 'age_verified') THEN 'valid_prior'

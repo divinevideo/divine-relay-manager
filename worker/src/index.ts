@@ -57,6 +57,7 @@ import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
+import { handlePrivateReport, type PrivateReportEnv } from './private-reports';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
 
@@ -72,7 +73,10 @@ async function ensureSchemaOnce(db: D1Database): Promise<void> {
 // Re-export ReportWatcher Durable Object for wrangler
 export { ReportWatcher } from './ReportWatcher';
 
-interface Env extends KeycastEnv, ConsentVideoEnv {
+// PrivateReportEnv adds the Coop handoff settings for private reports:
+// COOP_URL, COOP_API_KEY, the optional dedicated COOP_ACCESS_CLIENT_ID /
+// COOP_ACCESS_CLIENT_SECRET pair, and COOP_USER_TYPE_ID.
+interface Env extends KeycastEnv, ConsentVideoEnv, PrivateReportEnv {
   NOSTR_NSEC: string | SecretStoreSecret;
   RELAY_URL: string;
   ALLOWED_ORIGINS: string;
@@ -118,10 +122,10 @@ interface Env extends KeycastEnv, ConsentVideoEnv {
   AUTO_HIDE_ENABLED?: string;
   // Admin API key — required on all admin endpoints when request doesn't come through CF Access
   ADMIN_API_KEY?: string;
-  // Dedicated shared key for divine-moderation-service's calls to /api/relay-rpc and
-  // /api/moderate-media/lift-check. Secrets Store secret (MODERATION_TO_RELAY_ADMIN_KEY),
-  // accepted in addition to ADMIN_API_KEY on those routes so it can be rotated
-  // independently of other callers (#170).
+  // Dedicated shared key for divine-moderation-service's calls to /api/relay-rpc,
+  // /api/moderate-media/lift-check and /api/internal/private-reports. Secrets Store
+  // secret (MODERATION_TO_RELAY_ADMIN_KEY), accepted in addition to ADMIN_API_KEY on
+  // those routes so it can be rotated independently of other callers (#170).
   MOD_RELAY_ADMIN_KEY?: string | SecretStoreSecret;
   PROTECTED_MINOR_SERVICE_TOKEN?: string | SecretStoreSecret;
   PROTECTED_MINOR_REPLACEMENT_ENABLED?: string;
@@ -450,8 +454,8 @@ const ACCESS_UNAVAILABLE = {
 // Accepts any of:
 //   1. X-Admin-Key header matching ADMIN_API_KEY env var (server-to-server callers)
 //   2. X-Admin-Key header matching MOD_RELAY_ADMIN_KEY, only when allowModRelayAdminKey
-//      is true for divine-moderation-service's calls to /api/relay-rpc (#170) and
-//      /api/moderate-media/lift-check
+//      is true for divine-moderation-service's calls to /api/relay-rpc (#170),
+//      /api/moderate-media/lift-check and /api/internal/private-reports
 //   3. A Cf-Access-Jwt-Assertion that verifies (signature, then issuer, audience, exp, nbf) for the
 //      main API's Access application (API_ACCESS_AUD on ACCESS_TEAM_DOMAIN). The
 //      header alone proves nothing: service bindings reach this Worker without
@@ -592,12 +596,18 @@ export default {
       // docs/protected-minor-edge-auth.md) must stay before this check: their
       // tokens carry a different audience and would be refused here
       // (admin-access.test.ts pins both routes' order).
-      // moderation-service's key opens only relay-rpc (#170) and the read-only
-      // media lift check (moderation-service#231), never a route that writes
-      // media decisions.
+      // moderation-service's key opens only relay-rpc (#170), which carries its
+      // own NIP-86 actions, the read-only media lift check
+      // (moderation-service#231), and private-report intake. Intake is open to
+      // it because moderation-service is where a private DM report arrives, and
+      // handing the report over here is its only way into a review queue. Intake
+      // only creates review items (a Coop item or an age-review case) and
+      // enforces nothing. The key still opens no route that writes media
+      // decisions.
       const adminAuthError = await verifyAdminAccess(request, env, {
         allowModRelayAdminKey: request.method === 'POST'
-          && (path === '/api/relay-rpc' || path === '/api/moderate-media/lift-check'),
+          && (path === '/api/relay-rpc' || path === '/api/moderate-media/lift-check'
+            || path === '/api/internal/private-reports'),
       });
       if (adminAuthError) {
         const { status, error, code } = adminAuthError;
@@ -672,6 +682,10 @@ export default {
 
       if (path === '/api/moderate-media/lift-check' && request.method === 'POST') {
         return handleMediaLiftCheck(request, env, corsHeaders);
+      }
+
+      if (path === '/api/internal/private-reports' && request.method === 'POST') {
+        return handlePrivateReport(request, env, corsHeaders, ensureSchemaOnce);
       }
 
       if (path === '/api/decisions' && request.method === 'POST') {
