@@ -315,13 +315,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // nulls reporter_pubkey; a redacted row then answers a late resend by
   // reportId, account and type.
   // Retention clears the reporter link (reporter_pubkey, gift_wrap_id) on every
-  // completed row; the rest of the row is what answers a late retry.
+  // completed or expired row; the rest of the row is what answers a late retry.
   // - Under-16: retention.ts's private-report-redaction stage clears it once
   //   the row's age-review case is redacted or deleted, legal holds included.
   // - Coop handoff: private-report-coop-redaction clears it a year after the
   //   handoff completed (RETENTION_DAYS.privateReportCoopLink), as moderation-
   //   service deletes its own copy. No legal-hold record type covers these rows.
-  // An unfinished row keeps its link until it completes.
+  // An unfinished row loses its link a year after first receipt, retaining a
+  // tombstone which refuses late retries without restoring the reporter.
   // Keep this DDL in sync with migration 0019.
   await db.prepare(`CREATE TABLE IF NOT EXISTS private_report_intake (
     id INTEGER PRIMARY KEY,
@@ -349,6 +350,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     ON private_report_intake (case_id) WHERE redacted_at IS NULL AND case_id IS NOT NULL`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_coop
     ON private_report_intake (completed_at) WHERE redacted_at IS NULL AND outcome = 'queued_in_coop'`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_pending
+    ON private_report_intake (first_received_at) WHERE redacted_at IS NULL AND completed_at IS NULL`).run();
 
   await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_class = CASE
       WHEN clear_reason = 'false_positive' THEN 'false_positive'

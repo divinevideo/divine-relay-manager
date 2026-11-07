@@ -436,6 +436,8 @@ One that failed is retried by the next request. A request for a report another
 request is still handling answers `503` `attempt_in_progress`, and the
 attempt's lease lapses after two minutes if it never finishes. One gap remains: if Coop accepts
 the item and the write recording that then fails, the retry submits it again.
+An unfinished handoff older than a year is redacted by retention and answers
+later retries with `400 report_expired`, without restoring its reporter link.
 
 **Responses:**
 
@@ -445,6 +447,7 @@ the item and the write recording that then fails, the retry submits it again.
 | 200 | the same, with `"duplicate": true` | This reporter's `reportId` already completed, or a redacted row with the same `reportId`, account and type did; the stored outcome. |
 | 400 | `code: "invalid_body"` | The body is not a JSON object, or a field is missing or malformed. Do not retry. |
 | 400 | `code: "report_id_conflict"` | This reporter already used this `reportId` for a different account or type. Do not retry. |
+| 400 | `code: "report_expired"` | An unfinished handoff expired a year after first receipt. Do not retry; no reporter link is restored. |
 | 401 | | Missing or wrong key. |
 | 503 | `code: "coop_not_configured"` | A Coop setting below is missing, its credentials cannot be used, or `COOP_URL` is not HTTPS. Retry. |
 | 503 | `code: "coop_unreachable"`, `"coop_status_<n>"` | Coop could not be reached, or did not answer 2xx (a redirect is not followed). Retry. |
@@ -493,11 +496,12 @@ reported and reporting accounts, the type, the gift wrap id, whether an excerpt
 exists, the outcome and case id, and attempt timestamps.
 
 **Retention.** The hourly retention run clears the reporter link
-(`reporter_pubkey` and `gift_wrap_id`) from every completed row, on the
+(`reporter_pubkey` and `gift_wrap_id`) from completed and expired unfinished rows, on the
 schedules below. A redacted row keeps `reportId`, the reported account, the
 type and the outcome, which is what answers a late resend (see Idempotency);
-nothing is written back. A row still being delivered keeps its link until it
-completes.
+nothing is written back. An unfinished row keeps its link for at most 365 days
+from first receipt. The retained `reportId` is the lookup token described above,
+not a gift-wrap event id.
 
 - *An under-16 report's row follows its age-review case.* The
   `private-report-redaction` stage clears the link once the case is redacted,
@@ -508,6 +512,11 @@ completes.
   as moderation-service deletes its own DM copy after a year. The review item
   is in Coop, so there is no case here to follow, and `retention_legal_holds`
   has no record type for these rows, so no legal hold can keep one.
+- *An unfinished handoff expires a year after first receipt.* The
+  `private-report-pending-redaction` stage clears its reporter and gift-wrap
+  link, retaining a tombstone. A late resend answers `400 report_expired`
+  instead of queueing it or writing its reporter back. This stage has no legal
+  hold record type, as for the Coop-link stage.
 - *The decision log never names a private reporter.* The
   `age_review_case_created` row an under-16 private report writes carries the
   `reportId` and no `reporter_pubkey`. `moderation_decisions` has no disposal

@@ -14,6 +14,8 @@ export const RETENTION_DAYS = {
   // The reporter link on a private report handed to Coop: cleared a year after
   // the handoff, as moderation-service deletes its own DM copy after a year.
   privateReportCoopLink: 365,
+  // Unfinished handoffs keep a reporter link for at most a year from receipt.
+  privateReportPendingLink: 365,
   pendingOperationalDeadline: 1,
 } as const;
 

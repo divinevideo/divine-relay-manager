@@ -125,13 +125,12 @@ async function readRow(db: D1Database, report: PrivateReport): Promise<IntakeRow
 
 // A row retention redacted no longer names its reporter, so it answers a late
 // resend of the same reportId, account and type from whoever sends it.
-async function readRedactedOutcome(db: D1Database, report: PrivateReport): Promise<PrivateReportOutcome | null> {
+async function readRedactedOutcome(db: D1Database, report: PrivateReport): Promise<{ outcome: PrivateReportOutcome | null } | null> {
   const row = await db.prepare(`SELECT outcome FROM private_report_intake
     WHERE report_id = ? AND reporter_pubkey IS NULL AND reported_pubkey = ? AND report_type = ?
-      AND completed_at IS NOT NULL
     LIMIT 1`)
-    .bind(report.reportId, report.reportedPubkey, report.reportType).first<{ outcome: PrivateReportOutcome }>();
-  return row?.outcome ?? null;
+    .bind(report.reportId, report.reportedPubkey, report.reportType).first<{ outcome: PrivateReportOutcome | null }>();
+  return row;
 }
 
 async function logDecision(db: D1Database, decision: ReportedAgeReviewDecision): Promise<boolean> {
@@ -264,7 +263,10 @@ async function intake(
   if (!stored) {
     // Answered before the insert, so a resend never writes the link back.
     const redacted = await readRedactedOutcome(db, report);
-    if (redacted) return done(redacted, true);
+    if (redacted) {
+      if (redacted.outcome) return done(redacted.outcome, true);
+      return json({ success: false, error: 'The undelivered report has expired', code: 'report_expired' }, 400, corsHeaders);
+    }
     await db.prepare(`INSERT INTO private_report_intake
       (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at, first_received_at)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)

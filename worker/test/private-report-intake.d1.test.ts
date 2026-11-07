@@ -191,6 +191,21 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
     expect(await rowCount(body.reportId)).toBe(1);
   });
 
+  it('refuses a late retry of an expired unfinished handoff without restoring its reporter link', async () => {
+    const body = report();
+    expect((await post(body, testEnv({ COOP_USER_TYPE_ID: undefined }))).status).toBe(503);
+    await DB.prepare("UPDATE private_report_intake SET first_received_at = ? WHERE report_id = ?")
+      .bind(new Date(Date.now() - 366 * 864e5).toISOString(), body.reportId).run();
+    await runRetentionDisposal({ DB });
+
+    const retry = await post(body);
+    expect(retry.status).toBe(400);
+    expect(await retry.json()).toMatchObject({ success: false, code: 'report_expired' });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(await intakeRow(body.reportId, null)).toMatchObject({ reporter_pubkey: null, gift_wrap_id: null, outcome: null });
+    expect(await rowCount(body.reportId)).toBe(1);
+  });
+
   it('treats a Coop redirect as a refusal rather than following it', async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 302, headers: { Location: 'https://elsewhere.example.test/' } }));
     const res = await post(report());

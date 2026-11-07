@@ -377,7 +377,7 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
   // A Coop handoff has no case here to follow, so its reporter link is cleared
   // a year after the handoff completed, as moderation-service deletes its own
   // copy. retention_legal_holds has no record type for these rows, so no hold
-  // applies. An unfinished handoff keeps its link until it completes.
+  // applies. Unfinished handoffs have their own bounded stage below.
   await runStage('private-report-coop-redaction', async () => {
     // completed_at is written by toISOString(), so a cutoff in the same form
     // compares correctly as text, and the partial index can serve the range.
@@ -386,6 +386,18 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
       SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
       WHERE id IN (SELECT id FROM private_report_intake
         WHERE redacted_at IS NULL AND outcome = 'queued_in_coop' AND completed_at <= ?
+        LIMIT ${BATCH_LIMIT})`).bind(cutoff).run();
+    result.privateReportsRedacted += redacted.meta.changes;
+  });
+
+  // A caller may stop retrying without completing a handoff. Expire its link
+  // from first receipt, retaining a tombstone so a late retry cannot restore it.
+  await runStage('private-report-pending-redaction', async () => {
+    const cutoff = new Date(Date.now() - RETENTION_DAYS.privateReportPendingLink * 24 * 60 * 60 * 1000).toISOString();
+    const redacted = await db.prepare(`UPDATE private_report_intake
+      SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
+      WHERE id IN (SELECT id FROM private_report_intake
+        WHERE redacted_at IS NULL AND completed_at IS NULL AND first_received_at <= ?
         LIMIT ${BATCH_LIMIT})`).bind(cutoff).run();
     result.privateReportsRedacted += redacted.meta.changes;
   });

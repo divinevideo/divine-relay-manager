@@ -627,14 +627,27 @@ describe('private-report intake retention', () => {
     expect(row?.redacted_at).not.toBeNull();
   });
 
-  it('keeps a Coop handoff\'s link inside its year, and an unfinished handoff\'s link at any age', async () => {
+  it('keeps a Coop handoff\'s link inside its year, and a recently received unfinished handoff\'s link', async () => {
     await intake('report-coop-recent', null, 'queued_in_coop', 'csam', REPORTER, daysAgo(RETENTION_DAYS.privateReportCoopLink - 1));
     // Still being delivered: moderation-service retries it, and nothing has queued it yet.
     await intake('report-coop-pending', null, null, 'csam', REPORTER, null);
+    await DB.prepare('UPDATE private_report_intake SET first_received_at = ? WHERE report_id = ?')
+      .bind(daysAgo(RETENTION_DAYS.privateReportPendingLink - 1), 'report-coop-pending').run();
 
     expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
     for (const id of ['report-coop-recent', 'report-coop-pending']) {
       expect(await intakeRow(id)).toMatchObject({ reporter_pubkey: REPORTER, gift_wrap_id: GIFT_WRAP, redacted_at: null });
     }
+  });
+
+  it('expires an unfinished handoff a year after first receipt, bounded independently of completion', async () => {
+    await intake('report-pending-old', null, null, 'csam', REPORTER, null);
+    await DB.prepare('UPDATE private_report_intake SET first_received_at = ? WHERE report_id = ?')
+      .bind(daysAgo(RETENTION_DAYS.privateReportPendingLink + 1), 'report-pending-old').run();
+
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(1);
+    expect(await intakeRow('report-pending-old')).toMatchObject({ reporter_pubkey: null, gift_wrap_id: null, outcome: null });
+    expect((await intakeRow('report-pending-old'))?.redacted_at).not.toBeNull();
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
   });
 });
