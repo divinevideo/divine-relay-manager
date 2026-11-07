@@ -379,12 +379,14 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
   // copy. retention_legal_holds has no record type for these rows, so no hold
   // applies. An unfinished handoff keeps its link until it completes.
   await runStage('private-report-coop-redaction', async () => {
+    // completed_at is written by toISOString(), so a cutoff in the same form
+    // compares correctly as text, and the partial index can serve the range.
+    const cutoff = new Date(Date.now() - RETENTION_DAYS.privateReportCoopLink * 24 * 60 * 60 * 1000).toISOString();
     const redacted = await db.prepare(`UPDATE private_report_intake
       SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
       WHERE id IN (SELECT id FROM private_report_intake
-        WHERE redacted_at IS NULL AND outcome = 'queued_in_coop'
-          AND datetime(completed_at) <= datetime('now', '-${RETENTION_DAYS.privateReportCoopLink} days')
-        LIMIT ${BATCH_LIMIT})`).run();
+        WHERE redacted_at IS NULL AND outcome = 'queued_in_coop' AND completed_at <= ?
+        LIMIT ${BATCH_LIMIT})`).bind(cutoff).run();
     result.privateReportsRedacted += redacted.meta.changes;
   });
 
