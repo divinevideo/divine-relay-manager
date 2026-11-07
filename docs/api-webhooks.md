@@ -427,18 +427,43 @@ the item and the write recording that then fails, the retry submits it again.
 | 503 | `code: "coop_unreachable"`, `"coop_status_<n>"` | Coop could not be reached, or did not answer 2xx (a redirect is not followed). Retry. |
 | 503 | `code: "age_review_failed"`, `"db_unavailable"`, `"attempt_in_progress"` | Retry. |
 
-**Configuration.** For the Coop handoff, per environment: `COOP_URL`, the secret
-`COOP_API_KEY`, and `COOP_USER_TYPE_ID`, Coop's id for the `nostr_user` item type
-(the value Osprey has as `DIVINE_COOP_USER_TYPE_ID`). When Coop is behind
-Cloudflare Access, also the dedicated `COOP_ACCESS_CLIENT_ID` and
-`COOP_ACCESS_CLIENT_SECRET` pair; they are sent only over HTTPS, and only when
-both are bound. `COOP_URL` must be `https://` for this route, whether or not an
-Access pair is bound, because the item names an account and a reason such as
-`csam` and the request carries the ingestion key. Only a loopback host
-(`localhost`, `127.0.0.0/8`, `[::1]`) may use `http://`, for the local stack.
-The sexual-quarantine handoff keeps its own rule. These are the settings the sexual-quarantine handoff uses (see
-[sexual-quarantine-rollout.md](sexual-quarantine-rollout.md)), plus
+**Configuration.** Per environment, for the Coop handoff:
+
+- `COOP_URL`, Coop's base URL. It must be `https://` for this route, whether or
+  not an Access pair is bound, because the item names an account and a reason
+  such as `csam` and the request carries the ingestion key. Only a loopback
+  host (`localhost`, `127.0.0.0/8`, `[::1]`) may use `http://`, for the local
+  stack. The sexual-quarantine handoff keeps its own rule.
+- `COOP_API_KEY`, the ingestion key, a secret.
+- `COOP_USER_TYPE_ID`, Coop's id for the `nostr_user` item type (the value
+  Osprey has as `DIVINE_COOP_USER_TYPE_ID`).
+- When Coop is behind Cloudflare Access, the dedicated `COOP_ACCESS_CLIENT_ID`
+  and `COOP_ACCESS_CLIENT_SECRET` pair. They are sent only over HTTPS, and only
+  when both are bound.
+
+These are the sexual-quarantine handoff's settings (see
+[sexual-quarantine-rollout.md](sexual-quarantine-rollout.md)) plus
 `COOP_USER_TYPE_ID`. Under-16 reports need none of them.
+
+**Binding `COOP_URL` and `COOP_USER_TYPE_ID`.** No `wrangler.*.toml` declares
+either, and their values belong to whoever runs each environment. Bind each one
+as a Worker secret (`npx wrangler secret put COOP_URL --config
+wrangler.<env>.toml`, and the same for `COOP_USER_TYPE_ID`), or have whoever
+deploys add it to that environment's `[vars]` in `wrangler.<env>.toml`. Do not
+set either as a plaintext variable in the Cloudflare dashboard: the configs do
+not set `keep_vars = true`, so the next `wrangler deploy` drops dashboard
+variables. Secrets survive a deploy.
+
+Until both are bound, every private report except `underage_user` gets `503`
+`coop_not_configured` and stays pending, and moderation-service retries it.
+That shows up in three places:
+
+- the worker's log line `[private-reports] Coop handoff not configured:
+  COOP_URL, COOP_USER_TYPE_ID unset`, naming whichever are missing (`npx
+  wrangler tail --config wrangler.<env>.toml`);
+- the report's `private_report_intake` row, with `last_error =
+  'coop_not_configured'` and `completed_at` still NULL;
+- moderation-service's own log of the 503 and its code.
 
 **Storage.** One `private_report_intake` row per reporter and `reportId`: the reported and
 reporting accounts, the type, the gift wrap id, whether an excerpt exists, the
