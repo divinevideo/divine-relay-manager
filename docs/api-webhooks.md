@@ -427,10 +427,11 @@ first row still names its reporter, another reporter's report under the same
 redacted that row (see Retention below), it no longer names a reporter, so any
 report with the same `reportId`, account and type, from whoever sends it,
 answers `duplicate: true` with the stored outcome; a different account or type
-under that `reportId` is still a new report. One that failed is retried by the
-next request. A request for a report another request is
-still handling answers `503` `attempt_in_progress`, and the attempt's lease
-lapses after two minutes if it never finishes. One gap remains: if Coop accepts
+under that `reportId` is still a new report.
+
+One that failed is retried by the next request. A request for a report another
+request is still handling answers `503` `attempt_in_progress`, and the
+attempt's lease lapses after two minutes if it never finishes. One gap remains: if Coop accepts
 the item and the write recording that then fails, the retry submits it again.
 
 **Responses:**
@@ -438,7 +439,7 @@ the item and the write recording that then fails, the retry submits it again.
 | Status | Body | Meaning |
 |--------|------|---------|
 | 200 | `{ "success": true, "outcome": "queued_in_coop" \| "age_review_opened" \| "age_review_exists", "duplicate": false }` | Handed over. `age_review_opened` includes an approved minor's case, opened already cleared. |
-| 200 | the same, with `"duplicate": true` | This `reportId` already completed; the stored outcome. |
+| 200 | the same, with `"duplicate": true` | This reporter's `reportId` already completed, or a redacted row with the same `reportId`, account and type did; the stored outcome. |
 | 400 | `code: "invalid_body"` | The body is not a JSON object, or a field is missing or malformed. Do not retry. |
 | 400 | `code: "report_id_conflict"` | This reporter already used this `reportId` for a different account or type. Do not retry. |
 | 401 | | Missing or wrong key. |
@@ -484,16 +485,16 @@ That shows up in three places:
   'coop_not_configured'` and `completed_at` still NULL;
 - moderation-service's own log of the 503 and its code.
 
-**Storage.** One `private_report_intake` row per reporter and `reportId`: the reported and
-reporting accounts, the type, the gift wrap id, whether an excerpt exists, the
-outcome and case id, and attempt timestamps.
+**Storage.** One `private_report_intake` row per reporter and `reportId`: the
+reported and reporting accounts, the type, the gift wrap id, whether an excerpt
+exists, the outcome and case id, and attempt timestamps.
 
 **Retention.** The hourly retention run clears the reporter link
-(`reporter_pubkey` and `gift_wrap_id`) from every completed row. A redacted row
-keeps `reportId`, the reported account, the type and the outcome. A late resend
-of that `reportId`, account and type still answers `duplicate: true`, from
-whoever sends it, since the row no longer names a reporter; nothing is written
-back. A row still being delivered keeps its link until it completes.
+(`reporter_pubkey` and `gift_wrap_id`) from every completed row, on the
+schedules below. A redacted row keeps `reportId`, the reported account, the
+type and the outcome, which is what answers a late resend (see Idempotency);
+nothing is written back. A row still being delivered keeps its link until it
+completes.
 
 - *An under-16 report's row follows its age-review case.* The
   `private-report-redaction` stage clears the link once the case is redacted,
