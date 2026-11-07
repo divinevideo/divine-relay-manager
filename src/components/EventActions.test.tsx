@@ -436,6 +436,7 @@ describe('EventActions: a video thumbnail never breaks the video action', () => 
       reason: 'Unblocked 1 thumbnail(s); 1 of 2 lifted, then: moderation down',
     })));
     expect(api.logDecision).toHaveBeenCalledTimes(1);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
     // Something changed, so the screen checks the media status again.
     expect(onActionComplete).toHaveBeenCalled();
   });
@@ -1832,6 +1833,8 @@ describe('EventActions: media actions send the state the screen showed', () => {
       reason: `${auditReason}; ${message}`,
     })));
     expect(api.logDecision).toHaveBeenCalledTimes(1);
+    // #178: the partial's audit row goes out under the login taken at the click.
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
     // Something did change, so the status is read again, once, by the host.
     expect(onActionComplete).toHaveBeenCalledTimes(1);
     expect(statusReads(invalidate)).toBe(0);
