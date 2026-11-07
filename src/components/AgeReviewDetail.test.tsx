@@ -4,6 +4,7 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
 import { ApiError } from '@/lib/adminApi';
+import { accountStatusKey } from '@/lib/accountStatusCache';
 
 // AgeReviewDetail reads relay content-presence via useUserStats (which needs a
 // NostrProvider). This unit test isolates the case-action logic, so stub it with
@@ -700,7 +701,7 @@ describe('AgeReviewDetail', () => {
     it('invalidates only the decided case\'s account status, not other accounts\' cached status', async () => {
       const { queryClient } = renderDetail(makeCase());
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-      const otherKey = ['account-status', 'https://api.test.divine.video', 'c'.repeat(64)];
+      const otherKey = accountStatusKey('https://api.test.divine.video', 'c'.repeat(64));
       queryClient.setQueryData(otherKey, { success: true, status: 'active', verified_minor: false, protected_minor: false });
 
       fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));

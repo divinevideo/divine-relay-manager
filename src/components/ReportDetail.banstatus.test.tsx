@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
+import { accountStatusKey } from '@/lib/accountStatusCache';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { ModerationStatus } from '@/hooks/useModerationStatus';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
@@ -232,7 +233,7 @@ describe('ReportDetail user ban-status panel', () => {
         .find((filters) => JSON.stringify(filters?.queryKey) === JSON.stringify(['account-status']));
       expect(call?.predicate).toBeTypeOf('function');
       const matches = (pubkey: string) =>
-        call!.predicate!({ queryKey: ['account-status', 'https://api.example', pubkey] } as never);
+        call!.predicate!({ queryKey: accountStatusKey('https://api.example', pubkey) } as never);
       expect(matches(REPORTED_PUBKEY)).toBe(true);
       expect(matches(MOD_PUBKEY)).toBe(false);
     } finally {

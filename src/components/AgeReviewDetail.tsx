@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
+import { invalidateAccountStatus } from "@/lib/accountStatusCache";
 import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
@@ -334,17 +335,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // or a lost response can follow a write that did commit. Only this case's
     // account can have changed, and only by a state change: a clock or band edit
     // leaves both statuses alone, unless it lost a version conflict, since the
-    // winning write may have been a decision. Key shape:
-    // ['account-status', apiUrl, pubkey], lowercased as useAccountStatus is called.
+    // winning write may have been a decision.
     onSettled: (_data, error, updates, ctx) => {
       if (!ctx) return;
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
-      const subject = ctx.casePubkey.toLowerCase();
-      queryClient.invalidateQueries({
-        queryKey: ['account-status'],
-        predicate: (query) => query.queryKey[2] === subject,
-      });
+      void invalidateAccountStatus(queryClient, ctx.casePubkey);
     },
     onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed
