@@ -381,11 +381,25 @@ Nothing is published to a relay, no Zendesk ticket is filed, and nothing is
 hidden, restricted or banned. The reported message and the reporter's note never
 reach this worker: moderation-service keeps them.
 
-**Authentication.** The admin gate, plus moderation-service's relay key in the
-`X-Admin-Key` header (the worker's `MOD_RELAY_ADMIN_KEY` binding), on `POST`
-only, as for `POST /api/relay-rpc` and `POST /api/moderate-media/lift-check`.
-moderation-service calls it over its service binding, so the request does not
-pass through Cloudflare Access. That key still opens no other route.
+**Authentication.** The admin gate. moderation-service reaches the route in one
+of two ways, as its other relay-admin calls do:
+
+- *Over its `RELAY_ADMIN` service binding,* with its relay key in the
+  `X-Admin-Key` header (this worker's `MOD_RELAY_ADMIN_KEY` binding). A service
+  binding does not pass through Cloudflare Access, so the key is what the gate
+  checks. It is accepted on `POST` only, as for `POST /api/relay-rpc` and
+  `POST /api/moderate-media/lift-check`, and opens no other route.
+- *Over the public edge at `RELAY_ADMIN_URL`,* its fallback when the binding is
+  unavailable, with its Cloudflare Access service token
+  (`CF-Access-Client-Id` and `CF-Access-Client-Secret`) and no `X-Admin-Key`.
+  Access admits the token and adds a `Cf-Access-Jwt-Assertion`, which the gate
+  verifies against the API's Access application (`API_ACCESS_AUD`). This path
+  falls under the hostname-wide Access application, since the only path-scoped
+  one covers `/api/internal/protected-minors/*`, so that application's policy
+  must allow the token, as relay-rpc's fallback already requires.
+
+`ADMIN_API_KEY` and a moderator's Access login are accepted too, as on every
+admin route.
 
 **Request:**
 ```json
