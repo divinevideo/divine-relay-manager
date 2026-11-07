@@ -417,6 +417,9 @@ admin route.
 `reportId` is a UUID, or the 64-hex gift wrap id when the report carried none.
 Identifiers are stored and sent lowercase. `reportType` is moderation-service's
 lowercase report type.
+The worker converts a hex `reportId` to a domain-separated SHA-256 lookup token
+before storage or logging, including the decision log. UUID lookup keys are
+unchanged. A retry uses the same original request id and derives the same token.
 
 **Idempotency.** The key is the reporter and `reportId` together, as
 moderation-service keys its own intake. A report that completed answers again

@@ -9,6 +9,7 @@ import { handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding } from '../src/protected-minors';
 import { fetchAccountIdentity } from '../src/relay-profile';
 import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
+import { runRetentionDisposal } from '../src/retention';
 
 // The age-review case captures the account's profile from the relay. That read
 // is the only relay contact the route may make, and it is a read.
@@ -452,6 +453,23 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     expect(rows.results.map((row) => String(row.reason).split(':')[0]).sort())
       .toEqual(['Under-16 private report', 'Under-16 private report auto-cleared']);
     expect(rows.results.every((row) => row.reporter_pubkey === null)).toBe(true);
+  });
+
+  it('keeps an opaque lookup token for a gift-wrap reportId after case redaction, including in decisions', async () => {
+    const body = report({ reportType: 'underage_user', reportId: GIFT_WRAP.toUpperCase() });
+    expect((await post(body)).status).toBe(200);
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(`private-report-id:v1:${GIFT_WRAP}`));
+    const key = `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')}`;
+    const decision = await DB.prepare('SELECT report_id, reporter_pubkey FROM moderation_decisions').first();
+    expect(decision).toEqual({ report_id: key, reporter_pubkey: null });
+    await DB.prepare("UPDATE age_review_cases SET state = 'cleared', closed_at = datetime('now', '-31 days')").run();
+    await runRetentionDisposal({ DB });
+    const row = await intakeRow(key, null);
+    expect(row).toMatchObject({ report_id: key, reporter_pubkey: null, gift_wrap_id: null });
+    expect(JSON.stringify(row)).not.toContain(GIFT_WRAP);
+    expect(await (await post(body)).json()).toMatchObject({ duplicate: true });
+    expect(await rowCount(key)).toBe(1);
+    expect(fetchAccountIdentity).toHaveBeenCalledOnce();
   });
 
   it('still records the reporter of a public under-16 report, whose report is public', async () => {

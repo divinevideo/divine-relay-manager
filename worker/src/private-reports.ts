@@ -108,6 +108,15 @@ function parseReport(raw: unknown): { report: PrivateReport } | { error: string 
   };
 }
 
+// UUIDs are application lookup keys. A hex fallback is a gift-wrap event id;
+// retain only a domain-separated digest so the lookup key is not a relay pointer.
+async function reportLookupKey(reportId: string): Promise<string> {
+  if (!isHex64(reportId)) return reportId;
+  const digest = await crypto.subtle.digest('SHA-256',
+    new TextEncoder().encode(`private-report-id:v1:${reportId}`));
+  return `sha256:${Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')}`;
+}
+
 async function readRow(db: D1Database, report: PrivateReport): Promise<IntakeRow | null> {
   return db.prepare(`SELECT reported_pubkey, report_type, outcome, completed_at
     FROM private_report_intake WHERE reporter_pubkey = ? AND report_id = ?`)
@@ -354,6 +363,7 @@ export async function handlePrivateReport(
   }, 503, corsHeaders);
   if (!env.DB) return unavailable();
   try {
+    parsed.report.reportId = await reportLookupKey(parsed.report.reportId);
     await prepareDb(env.DB);
     return await intake(env.DB, env, parsed.report, corsHeaders);
   } catch (error) {
