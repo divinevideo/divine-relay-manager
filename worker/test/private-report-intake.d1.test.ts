@@ -178,6 +178,17 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
     expect(coopCalls()).toHaveLength(2);
   });
 
+  it('answers a resend of a Coop handoff whose reporter link retention cleared, without calling Coop', async () => {
+    const body = report({ reportType: 'csam' });
+    expect((await post(body)).status).toBe(200);
+    await DB.prepare(`UPDATE private_report_intake SET reporter_pubkey = NULL, gift_wrap_id = NULL,
+      redacted_at = datetime('now') WHERE report_id = ?`).bind(body.reportId).run();
+
+    expect(await (await post(body)).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: true });
+    expect(coopCalls()).toHaveLength(1);
+    expect(await rowCount(body.reportId)).toBe(1);
+  });
+
   it('treats a Coop redirect as a refusal rather than following it', async () => {
     fetchMock.mockResolvedValueOnce(new Response(null, { status: 302, headers: { Location: 'https://elsewhere.example.test/' } }));
     const res = await post(report());

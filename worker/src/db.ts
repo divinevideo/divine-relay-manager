@@ -314,12 +314,14 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // A surrogate id rather than a primary key over the pair, because redaction
   // nulls reporter_pubkey; a redacted row then answers a late resend by
   // reportId, account and type.
-  // Retention: an under-16 row follows its age-review case. retention.ts's
-  // private-report-redaction stage clears the reporter link (reporter_pubkey,
-  // gift_wrap_id) once that case is redacted or deleted, legal holds included.
-  // A Coop handoff has no case here and is kept like moderation_decisions,
-  // which holds the same reporter-to-account link for public reports and has
-  // no disposal stage either. The rest of a row is what answers a late retry.
+  // Retention clears the reporter link (reporter_pubkey, gift_wrap_id) on every
+  // completed row; the rest of the row is what answers a late retry.
+  // - Under-16: retention.ts's private-report-redaction stage clears it once
+  //   the row's age-review case is redacted or deleted, legal holds included.
+  // - Coop handoff: private-report-coop-redaction clears it a year after the
+  //   handoff completed (RETENTION_DAYS.privateReportCoopLink), as moderation-
+  //   service deletes its own copy. No legal-hold record type covers these rows.
+  // An unfinished row keeps its link until it completes.
   // Keep this DDL in sync with migration 0019.
   await db.prepare(`CREATE TABLE IF NOT EXISTS private_report_intake (
     id INTEGER PRIMARY KEY,
@@ -345,6 +347,8 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   )`).run();
   await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_case
     ON private_report_intake (case_id) WHERE redacted_at IS NULL AND case_id IS NOT NULL`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_coop
+    ON private_report_intake (completed_at) WHERE redacted_at IS NULL AND outcome = 'queued_in_coop'`).run();
 
   await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_class = CASE
       WHEN clear_reason = 'false_positive' THEN 'false_positive'

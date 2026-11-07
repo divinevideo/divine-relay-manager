@@ -371,7 +371,21 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
         WHERE i.redacted_at IS NULL AND i.case_id IS NOT NULL
           AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = i.case_id AND c.redacted_at IS NULL)
         LIMIT ${BATCH_LIMIT})`).run();
-    result.privateReportsRedacted = redacted.meta.changes;
+    result.privateReportsRedacted += redacted.meta.changes;
+  });
+
+  // A Coop handoff has no case here to follow, so its reporter link is cleared
+  // a year after the handoff completed, as moderation-service deletes its own
+  // copy. retention_legal_holds has no record type for these rows, so no hold
+  // applies. An unfinished handoff keeps its link until it completes.
+  await runStage('private-report-coop-redaction', async () => {
+    const redacted = await db.prepare(`UPDATE private_report_intake
+      SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
+      WHERE id IN (SELECT id FROM private_report_intake
+        WHERE redacted_at IS NULL AND outcome = 'queued_in_coop'
+          AND datetime(completed_at) <= datetime('now', '-${RETENTION_DAYS.privateReportCoopLink} days')
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.privateReportsRedacted += redacted.meta.changes;
   });
 
   return result;

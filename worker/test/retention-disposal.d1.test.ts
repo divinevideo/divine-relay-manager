@@ -523,7 +523,7 @@ describe('protected-record retention on real D1', () => {
   });
 });
 
-describe('private-report intake rows follow their age-review case', () => {
+describe('private-report intake retention', () => {
   const REPORTER = 'b2'.repeat(32);
   const GIFT_WRAP = 'c3'.repeat(32);
 
@@ -531,13 +531,15 @@ describe('private-report intake rows follow their age-review case', () => {
     await DB.prepare('DELETE FROM private_report_intake').run();
   });
 
-  async function intake(reportId: string, caseId: string | null, outcome: string, reportType = 'underage_user',
-    reporter = REPORTER) {
+  const daysAgo = (days: number) => new Date(Date.now() - days * 864e5).toISOString();
+
+  async function intake(reportId: string, caseId: string | null, outcome: string | null, reportType = 'underage_user',
+    reporter = REPORTER, completedAt: string | null = OLD_30) {
     await DB.prepare(`INSERT INTO private_report_intake
       (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at,
        outcome, case_id, attempts, first_received_at, completed_at)
       VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)`)
-      .bind(reportId, PUBKEY_A, reporter, reportType, GIFT_WRAP, OLD_30, outcome, caseId, OLD_30, OLD_30).run();
+      .bind(reportId, PUBKEY_A, reporter, reportType, GIFT_WRAP, OLD_30, outcome, caseId, OLD_30, completedAt).run();
   }
 
   async function intakeRow(reportId: string) {
@@ -603,7 +605,7 @@ describe('private-report intake rows follow their age-review case', () => {
     const other = 'e5'.repeat(32);
     await closedCase('case-shared-id', RETENTION_DAYS.ageReviewDetail + 1);
     await intake('report-shared', 'case-shared-id', 'age_review_opened');
-    await intake('report-shared', null, 'queued_in_coop', 'csam', other);
+    await intake('report-shared', null, 'queued_in_coop', 'csam', other, daysAgo(1));
 
     expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(1);
     const rows = await DB.prepare(`SELECT reporter_pubkey, outcome FROM private_report_intake
@@ -614,9 +616,25 @@ describe('private-report intake rows follow their age-review case', () => {
     ]);
   });
 
-  it('keeps a Coop handoff, which has no case, like a moderation_decisions row', async () => {
-    await intake('report-coop', null, 'queued_in_coop', 'csam');
+  it('clears a Coop handoff\'s reporter link a year after it completed', async () => {
+    await intake('report-coop-old', null, 'queued_in_coop', 'csam', REPORTER, daysAgo(RETENTION_DAYS.privateReportCoopLink + 1));
+
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(1);
+    const row = await intakeRow('report-coop-old');
+    expect(row).toMatchObject({
+      reporter_pubkey: null, gift_wrap_id: null, reported_pubkey: PUBKEY_A, report_type: 'csam', outcome: 'queued_in_coop',
+    });
+    expect(row?.redacted_at).not.toBeNull();
+  });
+
+  it('keeps a Coop handoff\'s link inside its year, and an unfinished handoff\'s link at any age', async () => {
+    await intake('report-coop-recent', null, 'queued_in_coop', 'csam', REPORTER, daysAgo(RETENTION_DAYS.privateReportCoopLink - 1));
+    // Still being delivered: moderation-service retries it, and nothing has queued it yet.
+    await intake('report-coop-pending', null, null, 'csam', REPORTER, null);
+
     expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
-    expect(await intakeRow('report-coop')).toMatchObject({ reporter_pubkey: REPORTER, gift_wrap_id: GIFT_WRAP });
+    for (const id of ['report-coop-recent', 'report-coop-pending']) {
+      expect(await intakeRow(id)).toMatchObject({ reporter_pubkey: REPORTER, gift_wrap_id: GIFT_WRAP, redacted_at: null });
+    }
   });
 });

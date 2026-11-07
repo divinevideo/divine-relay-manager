@@ -435,21 +435,22 @@ both are bound. These are the settings the sexual-quarantine handoff uses (see
 reporting accounts, the type, the gift wrap id, whether an excerpt exists, the
 outcome and case id, and attempt timestamps.
 
-**Retention.**
+**Retention.** The hourly retention run clears the reporter link
+(`reporter_pubkey` and `gift_wrap_id`) from every completed row. A redacted row
+keeps `reportId`, the reported account, the type and the outcome. A late resend
+of that `reportId`, account and type still answers `duplicate: true`, from
+whoever sends it, since the row no longer names a reporter; nothing is written
+back. A row still being delivered keeps its link until it completes.
 
-- *An under-16 report's row follows its age-review case.* The hourly retention
-  run's `private-report-redaction` stage clears the reporter link
-  (`reporter_pubkey` and `gift_wrap_id`) once the case is redacted, 30 days
-  after it closes, or no longer exists. A legal hold that keeps the case's
-  detail keeps the link too. The row keeps `reportId`, the reported account,
-  the type and the outcome. A late resend of that `reportId`, account and type
-  still answers `duplicate: true`, from whoever sends it, since the row no
-  longer names a reporter; nothing is written back.
-- *A Coop handoff is kept like `moderation_decisions`.* It has no case in this
-  worker to follow: the review item is in Coop. The row is the only record of
-  which report put the account in Coop. `moderation_decisions` holds the same
-  reporter-to-account link for public reports and has no disposal stage
-  either, so a period for this report history belongs to both tables together.
+- *An under-16 report's row follows its age-review case.* The
+  `private-report-redaction` stage clears the link once the case is redacted,
+  30 days after it closes, or no longer exists. A legal hold that keeps the
+  case's detail keeps the link too.
+- *A Coop handoff's link is cleared a year after the handoff completed.* The
+  `private-report-coop-redaction` stage does this (`RETENTION_DAYS.privateReportCoopLink`),
+  as moderation-service deletes its own DM copy after a year. The review item
+  is in Coop, so there is no case here to follow, and `retention_legal_holds`
+  has no record type for these rows, so no legal hold can keep one.
 - *The age-review case's own decision-log row keeps its reporter.* It is the
   `age_review_case_created` row with the `reportId`, the same as for a
   kind-1984 report. Clearing the intake row does not remove that row.
