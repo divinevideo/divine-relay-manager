@@ -11,6 +11,9 @@ export const RETENTION_DAYS = {
   // Greenlight consent clips: deleted 120 days after the case closes, never
   // on a fixed age-since-upload clock, and only when no legal hold applies.
   consentVideo: 120,
+  // The reporter link on a private report handed to Coop: cleared a year after
+  // the handoff, as moderation-service deletes its own DM copy after a year.
+  privateReportCoopLink: 365,
   pendingOperationalDeadline: 1,
 } as const;
 

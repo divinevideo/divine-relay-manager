@@ -305,6 +305,51 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     }
   }
 
+  // Private DM reports handed over by moderation-service (POST
+  // /api/internal/private-reports), one row per reporter and reportId, the
+  // idempotency key moderation-service keeps too: a completed row answers a
+  // retry with the stored outcome instead of queueing the account twice, and
+  // one reporter's row never stands in for another's. Identifiers only; the
+  // reported message and the reporter's note stay in moderation-service.
+  // A surrogate id rather than a primary key over the pair, because redaction
+  // nulls reporter_pubkey; a redacted row then answers a late resend by
+  // reportId, account and type.
+  // Retention clears the reporter link (reporter_pubkey, gift_wrap_id) on every
+  // completed row; the rest of the row is what answers a late retry.
+  // - Under-16: retention.ts's private-report-redaction stage clears it once
+  //   the row's age-review case is redacted or deleted, legal holds included.
+  // - Coop handoff: private-report-coop-redaction clears it a year after the
+  //   handoff completed (RETENTION_DAYS.privateReportCoopLink), as moderation-
+  //   service deletes its own copy. No legal-hold record type covers these rows.
+  // An unfinished row keeps its link until it completes.
+  // Keep this DDL in sync with migration 0019.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS private_report_intake (
+    id INTEGER PRIMARY KEY,
+    report_id TEXT NOT NULL,
+    reported_pubkey TEXT NOT NULL,
+    reporter_pubkey TEXT,
+    report_type TEXT NOT NULL,
+    gift_wrap_id TEXT,
+    has_excerpt INTEGER NOT NULL CHECK (has_excerpt IN (0, 1)),
+    reported_at TEXT NOT NULL,
+    outcome TEXT CHECK (outcome IN ('queued_in_coop', 'age_review_opened', 'age_review_exists')),
+    case_id TEXT,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    lease_until INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    first_received_at TEXT NOT NULL,
+    last_attempt_at TEXT,
+    completed_at TEXT,
+    redacted_at TEXT,
+    CHECK ((outcome IS NULL) = (completed_at IS NULL)),
+    CHECK (redacted_at IS NOT NULL OR (reporter_pubkey IS NOT NULL AND gift_wrap_id IS NOT NULL)),
+    UNIQUE (reporter_pubkey, report_id)
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_case
+    ON private_report_intake (case_id) WHERE redacted_at IS NULL AND case_id IS NOT NULL`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_coop
+    ON private_report_intake (completed_at) WHERE redacted_at IS NULL AND outcome = 'queued_in_coop'`).run();
+
   await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_class = CASE
       WHEN clear_reason = 'false_positive' THEN 'false_positive'
       WHEN clear_reason IN ('age_review_denied', 'age_review_expired', 'age_up', 'age_verified') THEN 'valid_prior'

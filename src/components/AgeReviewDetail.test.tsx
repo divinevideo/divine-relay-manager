@@ -118,6 +118,31 @@ describe('AgeReviewDetail', () => {
     expect(screen.getByText('Family requested Greenlight')).toBeInTheDocument();
   });
 
+  const PRIVATE_REPORT_LABEL = 'Private DM report: the reporter named this account in an encrypted message. '
+    + 'It is an unverified allegation, and nothing was published.';
+
+  it('marks a case opened by a private DM report as an unverified, unpublished allegation', () => {
+    // A private report has no public report event, so no report_id.
+    renderDetail(makeCase({ created_via: 'private_report', report_id: null }));
+    expect(screen.getByText(PRIVATE_REPORT_LABEL)).toBeInTheDocument();
+  });
+
+  it('marks a Greenlight case a private report attached to', () => {
+    // A private report attaches its reporter but no report event.
+    renderDetail(makeCase({ created_via: 'greenlight_application', reporter_pubkey: 'b'.repeat(64), report_id: null }));
+    expect(screen.getByText(PRIVATE_REPORT_LABEL)).toBeInTheDocument();
+  });
+
+  it.each(['report', 'greenlight_application', 'minor_onboarding', null])('does not mark a %s case with a public report as a private report', (created_via) => {
+    renderDetail(makeCase({ created_via }));
+    expect(screen.queryByText(PRIVATE_REPORT_LABEL)).not.toBeInTheDocument();
+  });
+
+  it('does not mark a Greenlight case no report attached to', () => {
+    renderDetail(makeCase({ created_via: 'greenlight_application', reporter_pubkey: null, report_id: null }));
+    expect(screen.queryByText(PRIVATE_REPORT_LABEL)).not.toBeInTheDocument();
+  });
+
   beforeEach(() => {
     updateAgeReviewCase.mockClear();
     updateAgeReviewCase.mockResolvedValue({ success: true });
