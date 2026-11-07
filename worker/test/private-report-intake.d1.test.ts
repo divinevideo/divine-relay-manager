@@ -363,6 +363,28 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
         expect(await intakeRow(body.reportId)).toMatchObject({ attempts: 2, outcome: 'queued_in_coop', last_error: null });
       }
     });
+
+    it('records the handoff when retention expires the row while the attempt is in flight', async () => {
+      // Retention runs at the top of the hour, and moderation-service retries a
+      // stuck report hourly, so the expiry can land mid-attempt.
+      const body = report();
+      const held = heldCoopCall();
+      const attempt = post(body);
+      await held.reached;
+      await DB.prepare('UPDATE private_report_intake SET first_received_at = ? WHERE report_id = ?')
+        .bind(new Date(Date.now() - 366 * 864e5).toISOString(), body.reportId).run();
+      expect((await runRetentionDisposal({ DB })).privateReportsRedacted).toBe(1);
+
+      held.release(new Response(null, { status: 202 }));
+      expect(await (await attempt).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: false });
+      // Coop has the item, so the row says so, and still names no reporter.
+      expect(await intakeRow(body.reportId, null)).toMatchObject({
+        reporter_pubkey: null, gift_wrap_id: null, outcome: 'queued_in_coop', lease_until: 0,
+      });
+      expect(await (await post(body)).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: true });
+      expect(coopCalls()).toHaveLength(1);
+      expect(await rowCount(body.reportId)).toBe(1);
+    });
   });
 
   it('refuses, without calling Coop, a reporter reusing a reportId for a different account or type', async () => {
