@@ -406,10 +406,15 @@ lowercase report type.
 
 **Idempotency.** The key is the reporter and `reportId` together, as
 moderation-service keys its own intake. A report that completed answers again
-with its stored outcome and `duplicate: true`, and nothing is redone. Another
-reporter's report under the same `reportId` is a report of its own: it gets a
-Coop submission, or `age_review_exists` when the account already has a case. One that
-failed is retried by the next request. A request for a report another request is
+with its stored outcome and `duplicate: true`, and nothing is redone. While the
+first row still names its reporter, another reporter's report under the same
+`reportId` is a report of its own: it gets a Coop submission, or
+`age_review_exists` when the account already has a case. Once retention has
+redacted that row (see Retention below), it no longer names a reporter, so any
+report with the same `reportId`, account and type, from whoever sends it,
+answers `duplicate: true` with the stored outcome; a different account or type
+under that `reportId` is still a new report. One that failed is retried by the
+next request. A request for a report another request is
 still handling answers `503` `attempt_in_progress`, and the attempt's lease
 lapses after two minutes if it never finishes. One gap remains: if Coop accepts
 the item and the write recording that then fails, the retry submits it again.
