@@ -297,6 +297,58 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
     expect(coopCalls()).toHaveLength(1);
   });
 
+  describe('an attempt that outlived its lease', () => {
+    // Holds the next Coop call open until released, as a slow attempt would.
+    function heldCoopCall() {
+      let release!: (response: Response) => void;
+      let entered!: () => void;
+      const reached = new Promise<void>((resolve) => { entered = resolve; });
+      const response = new Promise<Response>((resolve) => { release = resolve; });
+      fetchMock.mockImplementationOnce(async () => { entered(); return response; });
+      return { reached, release };
+    }
+
+    async function lapseLease(reportId: string) {
+      await DB.prepare('UPDATE private_report_intake SET lease_until = ? WHERE report_id = ?')
+        .bind(Date.now() - 1, reportId).run();
+    }
+
+    it.each([
+      ['finished', 202], ['finished', 500], ['still in flight', 202], ['still in flight', 500],
+    ] as const)('changes nothing when the newer attempt has %s and the stale one gets %i', async (newer, staleStatus) => {
+      const body = report();
+      const first = heldCoopCall();
+      const stale = post(body);
+      await first.reached;
+      await lapseLease(body.reportId);
+
+      const second = newer === 'finished' ? null : heldCoopCall();
+      const current = post(body);
+      if (second) {
+        await second.reached;
+      } else {
+        expect(await (await current).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: false });
+        // A marker the stale attempt's completion would replace.
+        await DB.prepare("UPDATE private_report_intake SET completed_at = '2000-01-01T00:00:00.000Z' WHERE report_id = ?")
+          .bind(body.reportId).run();
+      }
+      const before = await intakeRow(body.reportId);
+
+      first.release(new Response(null, { status: staleStatus }));
+      expect((await stale).status).toBe(staleStatus === 202 ? 200 : 503);
+      // Neither the stale completion nor its failure touched the newer attempt's row.
+      expect(await intakeRow(body.reportId)).toEqual(before);
+      expect(before).toMatchObject({ attempts: 2, last_error: null });
+
+      if (second) {
+        expect(Number(before!.lease_until)).toBeGreaterThan(Date.now());
+        second.release(new Response(null, { status: 202 }));
+        expect(await (await current).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: false });
+        expect(await intakeRow(body.reportId)).toMatchObject({ attempts: 2, outcome: 'queued_in_coop', last_error: null });
+      }
+    });
+  });
+
   it('refuses, without calling Coop, a reporter reusing a reportId for a different account or type', async () => {
     const body = report({ reportType: 'spam' });
     expect((await post(body)).status).toBe(200);

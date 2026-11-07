@@ -278,15 +278,21 @@ async function intake(
   const startedAt = Date.now();
   const claim = await db.prepare(`UPDATE private_report_intake
     SET attempts = attempts + 1, last_attempt_at = ?, lease_until = ?
-    WHERE reporter_pubkey = ? AND report_id = ? AND completed_at IS NULL AND lease_until <= ?`)
+    WHERE reporter_pubkey = ? AND report_id = ? AND completed_at IS NULL AND lease_until <= ?
+    RETURNING attempts`)
     .bind(new Date(startedAt).toISOString(), startedAt + ATTEMPT_LEASE_MS, report.reporterPubkey, report.reportId,
       startedAt)
-    .run();
-  if (claim.meta.changes !== 1) {
+    .first<{ attempts: number }>();
+  if (!claim) {
     const current = await readRow(db, report);
     if (current?.completed_at) return done(current.outcome, true);
     return unavailable('attempt_in_progress');
   }
+  // This attempt's number. A newer attempt claims the row once this one's
+  // lease lapses, so both finishing writes below change the row only while it
+  // is still this attempt's: a late one must not clear the newer attempt's
+  // lease or replace what it recorded.
+  const attempt = claim.attempts;
 
   const result = report.reportType === UNDERAGE_REPORT_TYPE
     ? await openAgeReview(db, env, report)
@@ -294,15 +300,20 @@ async function intake(
 
   if (!result.ok) {
     await db.prepare(`UPDATE private_report_intake SET last_error = ?, lease_until = 0
-      WHERE reporter_pubkey = ? AND report_id = ?`)
-      .bind(result.code, report.reporterPubkey, report.reportId).run();
+      WHERE reporter_pubkey = ? AND report_id = ? AND completed_at IS NULL AND attempts = ?`)
+      .bind(result.code, report.reporterPubkey, report.reportId, attempt).run();
     return unavailable(result.code);
   }
   // If this write fails after Coop accepted the item, the retry submits it again.
-  await db.prepare(`UPDATE private_report_intake
+  const recorded = await db.prepare(`UPDATE private_report_intake
     SET outcome = ?, case_id = ?, completed_at = ?, last_error = NULL, lease_until = 0
-    WHERE reporter_pubkey = ? AND report_id = ?`)
-    .bind(result.outcome, result.caseId, new Date().toISOString(), report.reporterPubkey, report.reportId).run();
+    WHERE reporter_pubkey = ? AND report_id = ? AND completed_at IS NULL AND attempts = ?`)
+    .bind(result.outcome, result.caseId, new Date().toISOString(), report.reporterPubkey, report.reportId, attempt)
+    .run();
+  if (recorded.meta.changes !== 1) {
+    // The report was still handed over; the row is the newer attempt's to record.
+    console.warn(`[private-reports] ${report.reportId}: attempt ${attempt} finished after a newer attempt took the row`);
+  }
   console.log(`[private-reports] ${report.reportId}: ${result.outcome} (${report.reportType})`);
   return done(result.outcome, false);
 }
