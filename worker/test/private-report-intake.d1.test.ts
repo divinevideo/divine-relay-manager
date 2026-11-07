@@ -265,6 +265,21 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it('takes back a lease that lapsed, as when an attempt died mid-way', async () => {
+    const body = report();
+    await DB.prepare(`INSERT INTO private_report_intake
+      (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at,
+       attempts, lease_until, first_received_at, last_attempt_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?, 1, ?, ?, ?)`)
+      .bind(body.reportId, REPORTED, REPORTER, body.reportType, GIFT_WRAP, body.reportedAt,
+        Date.now() - 1, body.reportedAt, body.reportedAt).run();
+
+    const res = await post(body);
+    expect(await res.json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: false });
+    expect(await intakeRow(body.reportId)).toMatchObject({ outcome: 'queued_in_coop', attempts: 2 });
+    expect(coopCalls()).toHaveLength(1);
+  });
+
   it('refuses, without calling Coop, a reporter reusing a reportId for a different account or type', async () => {
     const body = report({ reportType: 'spam' });
     expect((await post(body)).status).toBe(200);
