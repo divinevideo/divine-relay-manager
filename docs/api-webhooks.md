@@ -353,7 +353,12 @@ route puts the reported account in front of a moderator and does nothing else.
   an approved minor is recorded as already cleared. The case has `created_via =
   'private_report'`, the reporter in `reporter_pubkey`, and no `report_id`, since
   there is no report event to look up. The decision log row carries the
-  `reportId` but not the reporter.
+  `reportId` but not the reporter. If the account already has a family's
+  Greenlight case with no report on it, the report is attached there instead:
+  the reporter, still with no `report_id`. The case pane labels both shapes as
+  an unverified private report. A later public under-16 report attaches over a
+  private one, as it would have before; a second private report does not
+  replace the first.
 - Every other type becomes a Coop `nostr_user` item, routed by `report_reason`:
 
   | `reportType` | `report_reason` |

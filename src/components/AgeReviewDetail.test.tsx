@@ -127,8 +127,19 @@ describe('AgeReviewDetail', () => {
     expect(screen.getByText(PRIVATE_REPORT_LABEL)).toBeInTheDocument();
   });
 
-  it.each(['report', 'greenlight_application', 'minor_onboarding', null])('does not mark a %s case as a private report', (created_via) => {
+  it('marks a Greenlight case a private report attached to', () => {
+    // A private report attaches its reporter but no report event.
+    renderDetail(makeCase({ created_via: 'greenlight_application', reporter_pubkey: 'b'.repeat(64), report_id: null }));
+    expect(screen.getByText(PRIVATE_REPORT_LABEL)).toBeInTheDocument();
+  });
+
+  it.each(['report', 'greenlight_application', 'minor_onboarding', null])('does not mark a %s case with a public report as a private report', (created_via) => {
     renderDetail(makeCase({ created_via }));
+    expect(screen.queryByText(PRIVATE_REPORT_LABEL)).not.toBeInTheDocument();
+  });
+
+  it('does not mark a Greenlight case no report attached to', () => {
+    renderDetail(makeCase({ created_via: 'greenlight_application', reporter_pubkey: null, report_id: null }));
     expect(screen.queryByText(PRIVATE_REPORT_LABEL)).not.toBeInTheDocument();
   });
 

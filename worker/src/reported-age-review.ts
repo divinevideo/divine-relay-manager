@@ -99,10 +99,16 @@ async function attachReportToFamilyApplication(
 ): Promise<void> {
   // Keep the first report visible without overwriting provenance or opening a
   // second case. The predicate also handles a family start winning the insert race.
+  // A private report attaches with no report_id, which only it can leave beside a
+  // reporter. A public report still attaches over one, as it did before private
+  // reports existed, and so takes the place of a private one, never the reverse.
+  const unattached = source.kind === 'report'
+    ? 'report_id IS NULL'
+    : 'report_id IS NULL AND reporter_pubkey IS NULL';
   await db.prepare(`UPDATE age_review_cases
     SET report_id = ?, reporter_pubkey = ?, updated_at = datetime('now'), version = version + 1
     WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}) AND created_via = 'greenlight_application'
-      AND report_id IS NULL AND reporter_pubkey IS NULL`)
+      AND ${unattached}`)
     .bind(caseReportId(source), source.reporterPubkey, reportedPubkey, ...TERMINAL_STATES).run();
 }
 

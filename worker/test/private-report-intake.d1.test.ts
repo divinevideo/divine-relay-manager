@@ -306,6 +306,20 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
   });
 });
 
+// The kind-1984 path, as ReportWatcher runs it, against the same D1.
+function reportWatcher() {
+  const state = {
+    storage: { get: async () => undefined, put: async () => {},
+      transaction: async (fn: (tx: unknown) => unknown) => fn({ getAlarm: async () => null, list: async () => new Map() }) },
+    blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+  } as unknown as DurableObjectState;
+  return new ReportWatcher(state, { DB } as never);
+}
+
+function publicUnderageReport(id: string, reporter: string): ReportEvent {
+  return { id, pubkey: reporter, kind: 1984, content: '', tags: [['p', REPORTED]], created_at: Math.floor(Date.now() / 1000) };
+}
+
 describe('POST /api/internal/private-reports: under-16 reports', () => {
   // Zendesk credentials are bound on purpose: a private report must not reach it.
   const zendeskEnv = () => testEnv({
@@ -357,15 +371,8 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
   });
 
   it('still records the reporter of a public under-16 report, whose report is public', async () => {
-    const state = {
-      storage: { get: async () => undefined, put: async () => {},
-        transaction: async (fn: (tx: unknown) => unknown) => fn({ getAlarm: async () => null, list: async () => new Map() }) },
-      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
-    } as unknown as DurableObjectState;
-    const watcher = new ReportWatcher(state, { DB } as never);
-    const event: ReportEvent = { id: 'e7'.repeat(32), pubkey: REPORTER, kind: 1984, content: '',
-      tags: [['p', REPORTED]], created_at: Math.floor(Date.now() / 1000) };
-    await watcher['createAgeReviewCase'](event, REPORTED);
+    const event = publicUnderageReport('e7'.repeat(32), REPORTER);
+    await reportWatcher()['createAgeReviewCase'](event, REPORTED);
 
     expect(await DB.prepare('SELECT report_id, reporter_pubkey FROM moderation_decisions WHERE target_id = ?')
       .bind(REPORTED).first()).toEqual({ report_id: event.id, reporter_pubkey: REPORTER });
@@ -458,6 +465,41 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     const count = await DB.prepare('SELECT COUNT(*) AS n FROM age_review_cases WHERE pubkey = ?').bind(REPORTED)
       .first<{ n: number }>();
     expect(count!.n).toBe(1);
+  });
+
+  describe('on a family\'s Greenlight case', () => {
+    async function familyCase() {
+      await handleStartGreenlight(REPORTED, { DB }, {});
+      return () => DB.prepare(`SELECT reporter_pubkey, report_id FROM age_review_cases
+        WHERE pubkey = ? AND created_via = 'greenlight_application'`).bind(REPORTED).first();
+    }
+
+    it('shows the private report on the case, and a later public report replaces it as it would have', async () => {
+      const read = await familyCase();
+      const body = report({ reportType: 'underage_user' });
+      expect(await (await post(body)).json()).toMatchObject({ outcome: 'age_review_exists' });
+      // Reporter without a report id: the shape the case pane labels as a private report.
+      expect(await read()).toEqual({ reporter_pubkey: REPORTER, report_id: null });
+
+      const event = publicUnderageReport('e7'.repeat(32), 'f6'.repeat(32));
+      await reportWatcher()['createAgeReviewCase'](event, REPORTED);
+      expect(await read()).toEqual({ reporter_pubkey: event.pubkey, report_id: event.id });
+    });
+
+    it('keeps the first private report when a second one arrives', async () => {
+      const read = await familyCase();
+      await post(report({ reportType: 'underage_user' }));
+      await post(report({ reportType: 'underage_user', reporterPubkey: 'f6'.repeat(32) }));
+      expect(await read()).toEqual({ reporter_pubkey: REPORTER, report_id: null });
+    });
+
+    it('does not let a private report replace a public one', async () => {
+      const read = await familyCase();
+      const event = publicUnderageReport('e7'.repeat(32), 'f6'.repeat(32));
+      await reportWatcher()['createAgeReviewCase'](event, REPORTED);
+      await post(report({ reportType: 'underage_user' }));
+      expect(await read()).toEqual({ reporter_pubkey: event.pubkey, report_id: event.id });
+    });
   });
 
   it('keeps the row incomplete when the case cannot be written, and the retry opens it', async () => {
