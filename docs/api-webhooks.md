@@ -342,6 +342,99 @@ that cannot get an answer should refuse the lift.
 
 ---
 
+### POST /api/internal/private-reports
+
+moderation-service's handoff of a private report: one a user sent the moderation
+account as an encrypted direct message instead of a public kind-1984 event. The
+route puts the reported account in front of a moderator and does nothing else.
+
+- `underage_user` opens an age-review case for the reported account, through the
+  same routine a kind-1984 under-16 report uses: one active case per account, and
+  an approved minor is recorded as already cleared. The case has `created_via =
+  'private_report'`, the reporter in `reporter_pubkey`, and no `report_id`, since
+  there is no report event to look up. The decision log row carries the
+  `reportId`.
+- Every other type becomes a Coop `nostr_user` item, routed by `report_reason`:
+
+  | `reportType` | `report_reason` |
+  |---|---|
+  | `csam` | `csam` |
+  | `child_safety` | `child_safety` |
+  | `sexual_content` | `nudity` |
+  | `violence` | `violence` |
+  | `harassment` | `harassment` |
+  | `spam` | `spam` |
+  | `ai_generated` | `ai_generated` |
+  | anything else | `other` |
+
+  Coop gives the first five their own queues, CSAM and Child Safety first, and
+  sends the rest to General Review. The item carries only the account and the
+  reason: `{"items":[{"id": <pubkey>, "typeId": COOP_USER_TYPE_ID, "data":
+  {"pubkey": <pubkey>, "report_reason": <token>}}]}`.
+
+Nothing is published to a relay, no Zendesk ticket is filed, and nothing is
+hidden, restricted or banned. The reported message and the reporter's note never
+reach this worker: moderation-service keeps them.
+
+**Authentication.** The admin gate, plus moderation-service's relay key in the
+`X-Admin-Key` header (the worker's `MOD_RELAY_ADMIN_KEY` binding), on `POST`
+only, as for `POST /api/relay-rpc` and `POST /api/moderate-media/lift-check`.
+moderation-service calls it over its service binding, so the request does not
+pass through Cloudflare Access. That key still opens no other route.
+
+**Request:**
+```json
+{
+  "reportId": "6f1c2b9e-3d4a-4f8b-9c2d-1e5f7a8b9c0d",
+  "reportedPubkey": "<64 hex>",
+  "reporterPubkey": "<64 hex>",
+  "reportType": "csam",
+  "reportedAt": "2026-11-07T10:00:00.000Z",
+  "hasExcerpt": true,
+  "giftWrapId": "<64 hex>"
+}
+```
+
+`reportId` is a UUID, or the 64-hex gift wrap id when the report carried none.
+Identifiers are stored and sent lowercase. `reportType` is moderation-service's
+lowercase report type.
+
+**Idempotency.** `reportId` is the key. A report that completed answers again
+with its stored outcome and `duplicate: true`, and nothing is redone. One that
+failed is retried by the next request. A request for a report another request is
+still handling answers `503` `attempt_in_progress`, and the attempt's lease
+lapses after two minutes if it never finishes. One gap remains: if Coop accepts
+the item and the write recording that then fails, the retry submits it again.
+
+**Responses:**
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 200 | `{ "success": true, "outcome": "queued_in_coop" \| "age_review_opened" \| "age_review_exists", "duplicate": false }` | Handed over. `age_review_opened` includes an approved minor's case, opened already cleared. |
+| 200 | the same, with `"duplicate": true` | This `reportId` already completed; the stored outcome. |
+| 400 | `code: "invalid_body"` | The body is not a JSON object, or a field is missing or malformed. Do not retry. |
+| 400 | `code: "report_id_conflict"` | This `reportId` is already recorded for a different account, reporter or type. Do not retry. |
+| 401 | | Missing or wrong key. |
+| 503 | `code: "coop_not_configured"` | A Coop setting below is missing, or its credentials cannot be used. Retry. |
+| 503 | `code: "coop_unreachable"`, `"coop_status_<n>"` | Coop could not be reached, or did not answer 2xx (a redirect is not followed). Retry. |
+| 503 | `code: "age_review_failed"`, `"db_unavailable"`, `"attempt_in_progress"` | Retry. |
+
+**Configuration.** For the Coop handoff, per environment: `COOP_URL`, the secret
+`COOP_API_KEY`, and `COOP_USER_TYPE_ID`, Coop's id for the `nostr_user` item type
+(the value Osprey has as `DIVINE_COOP_USER_TYPE_ID`). When Coop is behind
+Cloudflare Access, also the dedicated `COOP_ACCESS_CLIENT_ID` and
+`COOP_ACCESS_CLIENT_SECRET` pair; they are sent only over HTTPS, and only when
+both are bound. These are the settings the sexual-quarantine handoff uses (see
+[sexual-quarantine-rollout.md](sexual-quarantine-rollout.md)), plus
+`COOP_USER_TYPE_ID`. Under-16 reports need none of them.
+
+**Storage.** One `private_report_intake` row per `reportId`: the reported and
+reporting accounts, the type, the gift wrap id, whether an excerpt exists, the
+outcome and case id, and attempt timestamps. No retention stage disposes of these
+rows yet.
+
+---
+
 ### GET /api/check-result/:sha256
 
 Check the moderation status of a media file. The worker passes moderation-service's answer through.
