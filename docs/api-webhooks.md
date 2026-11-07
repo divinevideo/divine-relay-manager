@@ -353,7 +353,7 @@ route puts the reported account in front of a moderator and does nothing else.
   an approved minor is recorded as already cleared. The case has `created_via =
   'private_report'`, the reporter in `reporter_pubkey`, and no `report_id`, since
   there is no report event to look up. The decision log row carries the
-  `reportId`.
+  `reportId` but not the reporter.
 - Every other type becomes a Coop `nostr_user` item, routed by `report_reason`:
 
   | `reportType` | `report_reason` |
@@ -451,9 +451,11 @@ back. A row still being delivered keeps its link until it completes.
   as moderation-service deletes its own DM copy after a year. The review item
   is in Coop, so there is no case here to follow, and `retention_legal_holds`
   has no record type for these rows, so no legal hold can keep one.
-- *The age-review case's own decision-log row keeps its reporter.* It is the
-  `age_review_case_created` row with the `reportId`, the same as for a
-  kind-1984 report. Clearing the intake row does not remove that row.
+- *The decision log never names a private reporter.* The
+  `age_review_case_created` row an under-16 private report writes carries the
+  `reportId` and no `reporter_pubkey`. `moderation_decisions` has no disposal
+  stage, so it must not hold a link retention is meant to clear. A kind-1984
+  report's row still records its reporter, whose report is public on the relay.
 
 ---
 

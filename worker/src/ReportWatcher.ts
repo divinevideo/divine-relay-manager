@@ -1423,7 +1423,7 @@ export class ReportWatcher implements DurableObject {
     action: string;
     reason: string;
     reportId: string;
-    reporterPubkey: string;
+    reporterPubkey: string | null;
     moderatorPubkey?: string;
   }): Promise<boolean> {
     if (!this.env.DB) {

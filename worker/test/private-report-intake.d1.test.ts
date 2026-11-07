@@ -8,6 +8,7 @@ import { ensureSchema } from '../src/db';
 import { handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding } from '../src/protected-minors';
 import { fetchAccountIdentity } from '../src/relay-profile';
+import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
 
 // The age-review case captures the account's profile from the relay. That read
 // is the only relay contact the route may make, and it is a read.
@@ -334,10 +335,40 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     const decision = await DB.prepare('SELECT * FROM moderation_decisions WHERE target_id = ?').bind(REPORTED)
       .first<Record<string, unknown>>();
     expect(decision).toMatchObject({
-      target_type: 'pubkey', action: 'age_review_case_created', report_id: body.reportId, reporter_pubkey: REPORTER,
+      target_type: 'pubkey', action: 'age_review_case_created', report_id: body.reportId, reporter_pubkey: null,
     });
     expect(String(decision!.reason)).toMatch(/^Under-16 private report: age review case [0-9a-f-]{36} created/);
     expect(await intakeRow(body.reportId)).toMatchObject({ outcome: 'age_review_opened', case_id: cases.results[0].id });
+  });
+
+  it('writes no decision-log row that names a private reporter', async () => {
+    // Retention clears the reporter from the case and the intake row; the
+    // decision log has no disposal stage, so it must never hold the link.
+    await createSubjectWithBinding(DB, 'case-approved-earlier', 'd4'.repeat(32));
+    expect(await (await post(report({ reportType: 'underage_user' }))).json()).toMatchObject({ outcome: 'age_review_opened' });
+    expect(await (await post(report({ reportType: 'underage_user', reportedPubkey: 'd4'.repeat(32) }))).json())
+      .toMatchObject({ outcome: 'age_review_opened' });
+
+    const rows = await DB.prepare('SELECT reason, reporter_pubkey FROM moderation_decisions').all<Record<string, unknown>>();
+    // One opened case and one auto-cleared approved minor.
+    expect(rows.results.map((row) => String(row.reason).split(':')[0]).sort())
+      .toEqual(['Under-16 private report', 'Under-16 private report auto-cleared']);
+    expect(rows.results.every((row) => row.reporter_pubkey === null)).toBe(true);
+  });
+
+  it('still records the reporter of a public under-16 report, whose report is public', async () => {
+    const state = {
+      storage: { get: async () => undefined, put: async () => {},
+        transaction: async (fn: (tx: unknown) => unknown) => fn({ getAlarm: async () => null, list: async () => new Map() }) },
+      blockConcurrencyWhile: async (callback: () => Promise<void>) => callback(),
+    } as unknown as DurableObjectState;
+    const watcher = new ReportWatcher(state, { DB } as never);
+    const event: ReportEvent = { id: 'e7'.repeat(32), pubkey: REPORTER, kind: 1984, content: '',
+      tags: [['p', REPORTED]], created_at: Math.floor(Date.now() / 1000) };
+    await watcher['createAgeReviewCase'](event, REPORTED);
+
+    expect(await DB.prepare('SELECT report_id, reporter_pubkey FROM moderation_decisions WHERE target_id = ?')
+      .bind(REPORTED).first()).toEqual({ report_id: event.id, reporter_pubkey: REPORTER });
   });
 
   it('answers a repeated reportId with the stored outcome and opens no second case', async () => {

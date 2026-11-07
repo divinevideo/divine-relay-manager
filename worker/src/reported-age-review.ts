@@ -38,7 +38,8 @@ export interface ReportedAgeReviewDecision {
   action: string;
   reason: string;
   reportId: string;
-  reporterPubkey: string;
+  // Null for a private report; see decisionReporter.
+  reporterPubkey: string | null;
 }
 
 export type ReportedAgeReviewResult =
@@ -53,6 +54,14 @@ function caseReportId(source: ReportedAgeReviewSource): string | null {
 
 function decisionReportId(source: ReportedAgeReviewSource): string {
   return source.kind === 'report' ? source.reportEventId : source.reportId;
+}
+
+// The decision log has no disposal stage. A kind-1984 report's reporter is
+// public on the relay anyway, but a private report's reporter-to-account link
+// exists nowhere public: it is kept only on the case and the intake row, where
+// retention clears it.
+function decisionReporter(source: ReportedAgeReviewSource): string | null {
+  return source.kind === 'report' ? source.reporterPubkey : null;
 }
 
 function reasonLabel(source: ReportedAgeReviewSource): string {
@@ -163,7 +172,7 @@ export async function openReportedAgeReviewCase(
         action: AGE_REVIEW_ACTION.caseCreated,
         reason: `${reasonLabel(source)} auto-cleared: verified minor via ${approvedVia} (case ${caseId})`,
         reportId: decisionReportId(source),
-        reporterPubkey: source.reporterPubkey,
+        reporterPubkey: decisionReporter(source),
       });
 
       console.log(`${logPrefix} Age review case auto-cleared for verified minor`);
@@ -245,7 +254,7 @@ export async function openReportedAgeReviewCase(
     action: AGE_REVIEW_ACTION.caseCreated,
     reason: `${reasonLabel(source)}: age review case ${caseId} created (default band: ${band})`,
     reportId: decisionReportId(source),
-    reporterPubkey: source.reporterPubkey,
+    reporterPubkey: decisionReporter(source),
   });
 
   console.log(`${logPrefix} Age review case created`);
