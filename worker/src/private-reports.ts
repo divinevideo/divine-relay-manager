@@ -124,7 +124,8 @@ async function readRow(db: D1Database, report: PrivateReport): Promise<IntakeRow
 }
 
 // A row retention redacted no longer names its reporter, so it answers a late
-// resend of the same reportId, account and type from whoever sends it.
+// resend of the same reportId, account and type from whoever sends it: with
+// its outcome if it completed, and as expired if it did not.
 async function readRedactedOutcome(db: D1Database, report: PrivateReport):
   Promise<{ outcome: PrivateReportOutcome | null; lease_until: number } | null> {
   const row = await db.prepare(`SELECT outcome, lease_until FROM private_report_intake

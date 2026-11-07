@@ -429,7 +429,8 @@ first row still names its reporter, another reporter's report under the same
 `age_review_exists` when the account already has a case. Once retention has
 redacted that row (see Retention below), it no longer names a reporter, so any
 report with the same `reportId`, account and type, from whoever sends it,
-answers `duplicate: true` with the stored outcome; a different account or type
+answers `duplicate: true` with the stored outcome if the row completed, or
+`400 report_expired` if it expired unfinished; a different account or type
 under that `reportId` is still a new report.
 
 One that failed is retried by the next request. A request for a report another
@@ -438,6 +439,8 @@ attempt's lease lapses after two minutes if it never finishes. One gap remains: 
 the item and the write recording that then fails, the retry submits it again.
 An unfinished handoff older than a year is redacted by retention and answers
 later retries with `400 report_expired`, without restoring its reporter link.
+An attempt already running when the row expires still records its result, and
+until it finishes another request gets `503` `attempt_in_progress`.
 
 **Responses:**
 
