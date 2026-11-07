@@ -430,8 +430,25 @@ both are bound. These are the settings the sexual-quarantine handoff uses (see
 
 **Storage.** One `private_report_intake` row per `reportId`: the reported and
 reporting accounts, the type, the gift wrap id, whether an excerpt exists, the
-outcome and case id, and attempt timestamps. No retention stage disposes of these
-rows yet.
+outcome and case id, and attempt timestamps.
+
+**Retention.**
+
+- *An under-16 report's row follows its age-review case.* The hourly retention
+  run's `private-report-redaction` stage clears the reporter link
+  (`reporter_pubkey` and `gift_wrap_id`) once the case is redacted, 30 days
+  after it closes, or no longer exists. A legal hold that keeps the case's
+  detail keeps the link too. The row keeps `reportId`, the reported account,
+  the type and the outcome, so a late resend still answers `duplicate: true`;
+  the reporter is not compared or written back.
+- *A Coop handoff is kept like `moderation_decisions`.* It has no case in this
+  worker to follow: the review item is in Coop. The row is the only record of
+  which report put the account in Coop. `moderation_decisions` holds the same
+  reporter-to-account link for public reports and has no disposal stage
+  either, so a period for this report history belongs to both tables together.
+- *The age-review case's own decision-log row keeps its reporter.* It is the
+  `age_review_case_created` row with the `reportId`, the same as for a
+  kind-1984 report. Clearing the intake row does not remove that row.
 
 ---
 
