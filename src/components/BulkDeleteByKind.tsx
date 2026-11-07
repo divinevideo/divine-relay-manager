@@ -200,10 +200,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
       }
       onComplete?.();
     },
-    onError: (error) => {
+    onError: (error, target) => {
       // Like Delete All Content, the worker refuses a bulk job on an account
-      // with an open age-review case; send the moderator to the case.
-      if (redirectIfGuarded(error, pubkey)) return;
+      // with an open age-review case; send the moderator to that account's case,
+      // which may no longer be the account shown.
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: "Bulk delete failed", description: error.message, variant: "destructive" });
     },
     onTrackingLost: () => {

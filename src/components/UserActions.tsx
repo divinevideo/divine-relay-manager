@@ -51,12 +51,18 @@ interface UserActionsProps {
    * current.
    */
   statusStale?: boolean;
-  /**
-   * `accountStatusChanged`: the action was a ban, unban, suspend or unsuspend.
-   * The bulk content actions leave the account's status as it was.
-   */
-  onActionComplete?: (change: { accountStatusChanged: boolean }) => void;
+  onActionComplete?: (change: UserActionChange) => void;
 }
+
+/**
+ * What a finished action changed. `accountStatusChanged`: the action was a ban,
+ * unban, suspend or unsuspend; the bulk content actions leave the account's
+ * status as it was. `pubkey` is the account the action was taken on, captured
+ * when it started: the parent can switch to another account while it runs.
+ */
+export type UserActionChange =
+  | { accountStatusChanged: false }
+  | { accountStatusChanged: true; pubkey: string; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' };
 
 export function UserActions({
   pubkey,
@@ -91,7 +97,6 @@ export function UserActions({
   // Shared: the worker refuses suspend/unsuspend/unban on an account under age
   // review. See useAgeReviewGuardRedirect for why this is not copied per site.
   const redirectIfGuarded = useAgeReviewGuardRedirect();
-  const routeToAgeReviewIfGuarded = (error: Error): boolean => redirectIfGuarded(error, pubkey);
 
   // Whether this account has an open age-review case, which changes the Ban
   // copy (a ban purges content the review may still need). For an underage
@@ -148,62 +153,62 @@ export function UserActions({
       }));
 
   const suspendUserMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (target: string) => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.suspendPubkey(pubkey, 'Suspended by moderator');
+      await api.suspendPubkey(target, 'Suspended by moderator');
       logAudit(moderator, {
         targetType: 'pubkey',
-        targetId: pubkey,
+        targetId: target,
         action: 'suspend_user',
         reason: 'Suspended by moderator',
       });
     },
-    onSuccess: () => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User suspended' });
-      onActionComplete?.({ accountStatusChanged: true });
+      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'suspend' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const unsuspendUserMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (target: string) => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.unsuspendPubkey(pubkey);
+      await api.unsuspendPubkey(target);
       logAudit(moderator, {
         targetType: 'pubkey',
-        targetId: pubkey,
+        targetId: target,
         action: 'unsuspend_user',
         reason: 'Unsuspended by moderator',
       });
     },
-    onSuccess: () => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User unsuspended' });
-      onActionComplete?.({ accountStatusChanged: true });
+      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const banUserMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (target: string) => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const outcome = await api.banPubkey(pubkey, 'Banned by moderator');
+      const outcome = await api.banPubkey(target, 'Banned by moderator');
       logAudit(moderator, {
         targetType: 'pubkey',
-        targetId: pubkey,
+        targetId: target,
         action: 'ban_user',
         reason: 'Banned by moderator',
       }, banSuccessNote(outcome));
       return outcome;
     },
-    onSuccess: (outcome) => {
+    onSuccess: (outcome, target) => {
       toast({ title: 'User banned from relay', description: banSuccessNote(outcome) });
-      onActionComplete?.({ accountStatusChanged: true });
+      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'ban' });
     },
     onError: (error: Error) => {
       refreshAfterUnconfirmedBan(error, queryClient);
@@ -212,22 +217,22 @@ export function UserActions({
   });
 
   const unbanUserMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (target: string) => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.unbanPubkey(pubkey);
+      await api.unbanPubkey(target);
       logAudit(moderator, {
         targetType: 'pubkey',
-        targetId: pubkey,
+        targetId: target,
         action: 'unban_user',
         reason: 'Unbanned by moderator',
       });
     },
-    onSuccess: () => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User unbanned' });
-      onActionComplete?.({ accountStatusChanged: true });
+      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
   });
@@ -283,11 +288,12 @@ export function UserActions({
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.({ accountStatusChanged: false });
     },
-    onError: (error) => {
+    onError: (error, target) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
       // the contexts where the buttons still render (Users tab, non-underage
-      // report on an account that also has an open case).
-      if (routeToAgeReviewIfGuarded(error)) return;
+      // report on an account that also has an open case). The case is the one
+      // for the account enqueued, which may no longer be the one shown.
+      if (redirectIfGuarded(error, target)) return;
       // The enqueue failed, so no job started.
       toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
     },
@@ -341,7 +347,7 @@ export function UserActions({
       {isBanned ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => unbanUserMutation.mutate()} disabled={anyPending}>
+            <Button variant="outline" onClick={() => unbanUserMutation.mutate(pubkey)} disabled={anyPending}>
               <UserCheck className="h-4 w-4 mr-1" />
               {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
             </Button>
@@ -365,7 +371,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                  onClick={() => unsuspendUserMutation.mutate()} disabled={anyPending}>
+                  onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
                   <Play className="h-4 w-4 mr-1" />
                   {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
                 </Button>
@@ -376,7 +382,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-amber-500 text-amber-600 hover:bg-amber-50"
-                  onClick={() => suspendUserMutation.mutate()} disabled={anyPending}>
+                  onClick={() => suspendUserMutation.mutate(pubkey)} disabled={anyPending}>
                   <Pause className="h-4 w-4 mr-1" />
                   {suspendUserMutation.isPending ? 'Suspending...' : 'Suspend User'}
                 </Button>
@@ -398,7 +404,7 @@ export function UserActions({
               : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
-            onConfirm={async () => { await banUserMutation.mutateAsync(); }}
+            onConfirm={async () => { await banUserMutation.mutateAsync(pubkey); }}
             isPending={banUserMutation.isPending}
           />
         </>

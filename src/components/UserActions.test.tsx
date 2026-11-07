@@ -207,6 +207,95 @@ describe('UserActions', () => {
     );
   });
 
+  // ReportDetail keeps this component mounted when the moderator opens another
+  // report, so the pubkey prop can change while an action is in flight. The
+  // completion must name the account the action was taken on, not the one on
+  // screen when it finished.
+  it.each([
+    { action: 'suspend', props: {}, button: /Suspend User/i, call: api.suspendPubkey },
+    { action: 'unsuspend', props: { isSuspended: true }, button: /Unsuspend User/i, call: api.unsuspendPubkey },
+    { action: 'ban', props: {}, button: /Ban User/i, call: api.banPubkey },
+    { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
+  ] as const)('reports the account a $action was taken on, even after the pubkey changes mid-action', async ({ action, props, button, call }) => {
+    const OTHER = 'b'.repeat(64);
+    let finish!: (value: unknown) => void;
+    call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const onActionComplete = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pubkey} {...props} onActionComplete={onActionComplete} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (action === 'ban') {
+      const dialog = await screen.findByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+    }
+    await waitFor(() => expect(call).toHaveBeenCalledWith(PUBKEY, ...(action === 'suspend' || action === 'ban' ? [expect.any(String)] : [])));
+
+    rerender(ui(OTHER));
+    finish(action === 'ban' ? { unconfirmed: null } : { success: true });
+
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action });
+    // The decision log names the acted-on account too.
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ targetId: PUBKEY })));
+    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ targetId: OTHER }));
+  });
+
+  // A refusal because the account is under age review routes to that account's
+  // case. After a switch mid-action it must still be the acted-on account.
+  it.each([
+    { action: 'suspend', props: {}, button: /Suspend User/i, call: api.suspendPubkey },
+    { action: 'unsuspend', props: { isSuspended: true }, button: /Unsuspend User/i, call: api.unsuspendPubkey },
+    { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
+  ] as const)('routes a refused $action to the acted-on account\'s age review, even after the pubkey changes mid-action', async ({ props, button, call }) => {
+    const OTHER = 'b'.repeat(64);
+    let refuse!: (error: Error) => void;
+    call.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pubkey} {...props} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    await waitFor(() => expect(call).toHaveBeenCalled());
+
+    rerender(ui(OTHER));
+    refuse(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
+  });
+
+  it('routes a refused bulk enqueue to the enqueued account\'s age review, even after the pubkey changes', async () => {
+    const OTHER = 'b'.repeat(64);
+    let refuse!: (error: Error) => void;
+    api.bulkModerate.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pubkey} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(api.bulkModerate).toHaveBeenCalled());
+
+    rerender(ui(OTHER));
+    refuse(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
+  });
+
   it('warns about evidence when banning an account with an open age-review case', async () => {
     api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: { id: 'case-1' } });
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
@@ -748,14 +837,14 @@ describe('UserActions', () => {
       const onActionComplete = vi.fn();
       renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
       fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
-      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'suspend' }));
     });
 
     it('after an unsuspend', async () => {
       const onActionComplete = vi.fn();
       renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended onActionComplete={onActionComplete} />);
       fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
-      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unsuspend' }));
     });
 
     it('after a ban', async () => {
@@ -763,14 +852,14 @@ describe('UserActions', () => {
       renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
       fireEvent.click(screen.getByRole('button', { name: /Ban User/i }));
       fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
-      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'ban' }));
     });
 
     it('after an unban', async () => {
       const onActionComplete = vi.fn();
       renderWithProvider(<UserActions pubkey={PUBKEY} isBanned onActionComplete={onActionComplete} />);
       fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
-      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban' }));
     });
 
     it('after a bulk content action, which leaves the account as it was', async () => {
