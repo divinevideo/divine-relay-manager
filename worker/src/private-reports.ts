@@ -160,7 +160,13 @@ async function openAgeReview(db: D1Database, env: PrivateReportEnv, report: Priv
     // this report joined, since retention clears the reporter link with it.
     const caseId = result.caseId ?? (await db.prepare(`SELECT id FROM age_review_cases
       WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}) LIMIT 1`)
-      .bind(report.reportedPubkey, ...TERMINAL_STATES).first<{ id: string }>())?.id ?? null;
+      .bind(report.reportedPubkey, ...TERMINAL_STATES).first<{ id: string }>())?.id;
+    // Gone again already (closed in between). A row with no case would never be
+    // redacted, so fail the attempt; the retry sees the account as it is then.
+    if (!caseId) {
+      console.error(`[private-reports] ${report.reportId}: joined an age review case that is no longer active`);
+      return { ok: false, code: 'age_review_failed' };
+    }
     return { ok: true, outcome: 'age_review_exists', caseId };
   } catch (error) {
     console.error('[private-reports] Age review case not opened:', errorNameOnly(error));

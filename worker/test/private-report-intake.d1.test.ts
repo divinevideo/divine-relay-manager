@@ -448,6 +448,44 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     expect(await intakeRow(body.reportId)).toMatchObject({ outcome: 'age_review_exists', case_id: family!.id });
   });
 
+  it('fails the attempt, and records no case, when the case it joined cannot be found', async () => {
+    // A family start wins the insert race, and the case it opened is gone by
+    // the time the route looks for its id.
+    let releaseLookup!: () => void;
+    let lookupStarted!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookupEntered = new Promise<void>((resolve) => { lookupStarted = resolve; });
+    vi.mocked(fetchAccountIdentity).mockImplementationOnce(async () => {
+      lookupStarted();
+      await lookupGate;
+      return { completed: true, profile: null };
+    });
+    const noActiveCase = new Proxy(DB, {
+      get(target, prop, receiver) {
+        if (prop !== 'prepare') return Reflect.get(target, prop, receiver);
+        return (sql: string) => sql.includes('SELECT id FROM age_review_cases')
+          ? { bind: () => ({ first: async () => null }) }
+          : target.prepare(sql);
+      },
+    });
+    const body = report({ reportType: 'underage_user' });
+    const pending = post(body, testEnv({ DB: noActiveCase }));
+    await lookupEntered;
+    await handleStartGreenlight(REPORTED, { DB }, {});
+    releaseLookup();
+
+    const failed = await pending;
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toMatchObject({ code: 'age_review_failed' });
+    expect(await intakeRow(body.reportId)).toMatchObject({ outcome: null, case_id: null, completed_at: null });
+
+    // The retry finds the family case directly and records it.
+    const family = await DB.prepare("SELECT id FROM age_review_cases WHERE pubkey = ? AND created_via = 'greenlight_application'")
+      .bind(REPORTED).first<{ id: string }>();
+    expect(await (await post(body)).json()).toEqual({ success: true, outcome: 'age_review_exists', duplicate: false });
+    expect(await intakeRow(body.reportId)).toMatchObject({ case_id: family!.id });
+  });
+
   it('answers a resend as a duplicate after retention cleared the reporter link', async () => {
     const body = report({ reportType: 'underage_user' });
     expect((await post(body)).status).toBe(200);
