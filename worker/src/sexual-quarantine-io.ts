@@ -1,5 +1,6 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
-import { callNip86Rpc, type Nip86Env, type SecretStoreSecret } from './nip86';
+import { callNip86Rpc, type Nip86Env } from './nip86';
+import { coopHeaders, type CoopEnv } from './coop';
 import { queryRelay } from './relay-profile';
 import { readBlossomSecret, type MediaServerEnv } from './media-server';
 import { isLowerHex64 } from './hex';
@@ -7,14 +8,10 @@ import { recordSexualQuarantineDecision } from './sexual-quarantine-decision';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
 import { OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit, type QuarantineIO, type QuarantineSnapshot } from './sexual-quarantine';
 
-export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv, ZendeskSyncEnv {
+export interface SexualQuarantineEnv extends Nip86Env, MediaServerEnv, ZendeskSyncEnv, CoopEnv {
   DB?: D1Database;
   SEXUAL_QUARANTINE_ENABLED?: string;
-  COOP_URL?: string;
-  COOP_API_KEY?: string | SecretStoreSecret;
   REVIEWER_BASE_URL?: string;
-  COOP_ACCESS_CLIENT_ID?: string | SecretStoreSecret;
-  COOP_ACCESS_CLIENT_SECRET?: string | SecretStoreSecret;
 }
 type Hold = { hold_id: string; version: number; active: boolean | number };
 type MediaHolds = { quarantined: boolean; base_status?: string; holds: Hold[] };
@@ -270,19 +267,7 @@ export function createQuarantineIO(env: SexualQuarantineEnv): QuarantineIO {
     },
     async review(c) {
       if (!env.COOP_URL || !env.COOP_API_KEY || !env.REVIEWER_BASE_URL) throw new Error('Review delivery not configured');
-      const key = typeof env.COOP_API_KEY === 'string' ? env.COOP_API_KEY : await env.COOP_API_KEY.get();
-      if (!key) throw new Error('Review credentials unavailable');
-      const headers: Record<string, string> = { 'Content-Type': 'application/json', 'x-api-key': key };
-      if (env.COOP_ACCESS_CLIENT_ID !== undefined || env.COOP_ACCESS_CLIENT_SECRET !== undefined) {
-        const [clientId, clientSecret] = await Promise.all(
-          [env.COOP_ACCESS_CLIENT_ID, env.COOP_ACCESS_CLIENT_SECRET].map(binding =>
-            typeof binding === 'string' ? binding : binding?.get()),
-        );
-        if (!clientId || !clientSecret) throw new Error('Review access credentials unavailable');
-        if (new URL(env.COOP_URL).protocol !== 'https:') throw new Error('Review access requires HTTPS');
-        headers['CF-Access-Client-Id'] = clientId;
-        headers['CF-Access-Client-Secret'] = clientSecret;
-      }
+      const headers = await coopHeaders(env.COOP_URL, env.COOP_API_KEY, env);
       const event = c.snapshot?.event as NostrEvent | undefined;
       const response = await serviceRequest(`${env.COOP_URL.replace(/\/$/, '')}/api/v1/content`, {
         method: 'POST', headers,
