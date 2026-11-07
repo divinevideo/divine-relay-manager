@@ -522,3 +522,85 @@ describe('protected-record retention on real D1', () => {
     expect(held?.disposed_at).toBeNull();
   });
 });
+
+describe('private-report intake rows follow their age-review case', () => {
+  const REPORTER = 'b2'.repeat(32);
+  const GIFT_WRAP = 'c3'.repeat(32);
+
+  beforeEach(async () => {
+    await DB.prepare('DELETE FROM private_report_intake').run();
+  });
+
+  async function intake(reportId: string, caseId: string | null, outcome: string, reportType = 'underage_user') {
+    await DB.prepare(`INSERT INTO private_report_intake
+      (report_id, reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, has_excerpt, reported_at,
+       outcome, case_id, attempts, first_received_at, completed_at)
+      VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, 1, ?, ?)`)
+      .bind(reportId, PUBKEY_A, REPORTER, reportType, GIFT_WRAP, OLD_30, outcome, caseId, OLD_30, OLD_30).run();
+  }
+
+  async function intakeRow(reportId: string) {
+    return DB.prepare(`SELECT reported_pubkey, reporter_pubkey, report_type, gift_wrap_id, outcome, case_id, redacted_at
+      FROM private_report_intake WHERE report_id = ?`).bind(reportId).first<Record<string, unknown>>();
+  }
+
+  async function closedCase(id: string, closedDaysAgo: number) {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, reporter_pubkey, state, created_via, closed_at)
+      VALUES (?, ?, ?, 'cleared', 'private_report', datetime('now', ?))`)
+      .bind(id, PUBKEY_A, REPORTER, `-${closedDaysAgo} days`).run();
+  }
+
+  it('clears the reporter link when its case is redacted, and keeps what idempotency needs', async () => {
+    await closedCase('case-private', RETENTION_DAYS.ageReviewDetail + 1);
+    await intake('report-redact', 'case-private', 'age_review_opened');
+
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(result.casesRedacted).toBe(1);
+    expect(result.privateReportsRedacted).toBe(1);
+    const row = await intakeRow('report-redact');
+    expect(row).toMatchObject({
+      reporter_pubkey: null, gift_wrap_id: null,
+      reported_pubkey: PUBKEY_A, report_type: 'underage_user', outcome: 'age_review_opened', case_id: 'case-private',
+    });
+    expect(row?.redacted_at).not.toBeNull();
+  });
+
+  it('clears the reporter link when its case has already been deleted', async () => {
+    await intake('report-orphan', 'case-deleted-earlier', 'age_review_exists');
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+    expect(result.privateReportsRedacted).toBe(1);
+    expect(await intakeRow('report-orphan')).toMatchObject({ reporter_pubkey: null, gift_wrap_id: null });
+  });
+
+  it('keeps the link while its case is open or closed too recently', async () => {
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, reporter_pubkey, state, created_via)
+      VALUES ('case-open', ?, ?, 'open_reported', 'private_report')`).bind(PUBKEY_A, REPORTER).run();
+    await closedCase('case-recent', RETENTION_DAYS.ageReviewDetail - 1);
+    await intake('report-open', 'case-open', 'age_review_opened');
+    await intake('report-recent', 'case-recent', 'age_review_opened');
+
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
+    for (const id of ['report-open', 'report-recent']) {
+      expect(await intakeRow(id)).toMatchObject({ reporter_pubkey: REPORTER, gift_wrap_id: GIFT_WRAP, redacted_at: null });
+    }
+  });
+
+  it('keeps the link while a legal hold keeps the case detail', async () => {
+    await closedCase('case-held', RETENTION_DAYS.ageReviewDetail + 1);
+    await DB.prepare(`INSERT INTO retention_legal_holds
+      (id, record_type, record_key, disposal_stage, authorized_role, starts_at, review_at)
+      VALUES ('hold-private', 'age_review_case', 'case-held', 'redaction', 'privacy/legal', ?, ?)`)
+      .bind(OLD_30, '2099-01-01T00:00:00Z').run();
+    await intake('report-held', 'case-held', 'age_review_opened');
+
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
+    expect(await intakeRow('report-held')).toMatchObject({ reporter_pubkey: REPORTER, redacted_at: null });
+  });
+
+  it('keeps a Coop handoff, which has no case, like a moderation_decisions row', async () => {
+    await intake('report-coop', null, 'queued_in_coop', 'csam');
+    expect((await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY })).privateReportsRedacted).toBe(0);
+    expect(await intakeRow('report-coop')).toMatchObject({ reporter_pubkey: REPORTER, gift_wrap_id: GIFT_WRAP });
+  });
+});

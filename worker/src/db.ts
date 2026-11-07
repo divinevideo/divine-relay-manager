@@ -309,14 +309,20 @@ export async function ensureSchema(db: D1Database): Promise<void> {
   // /api/internal/private-reports), one row per reportId, its idempotency key:
   // a completed row answers a retry with the stored outcome instead of queueing
   // the account twice. Identifiers only; the reported message and the
-  // reporter's note stay in moderation-service. No retention stage disposes of
-  // these rows yet (docs/api-webhooks.md). Keep this DDL in sync with migration 0019.
+  // reporter's note stay in moderation-service.
+  // Retention: an under-16 row follows its age-review case. retention.ts's
+  // private-report-redaction stage clears the reporter link (reporter_pubkey,
+  // gift_wrap_id) once that case is redacted or deleted, legal holds included.
+  // A Coop handoff has no case here and is kept like moderation_decisions,
+  // which holds the same reporter-to-account link for public reports and has
+  // no disposal stage either. The rest of a row is what answers a late retry.
+  // Keep this DDL in sync with migration 0019.
   await db.prepare(`CREATE TABLE IF NOT EXISTS private_report_intake (
     report_id TEXT PRIMARY KEY,
     reported_pubkey TEXT NOT NULL,
-    reporter_pubkey TEXT NOT NULL,
+    reporter_pubkey TEXT,
     report_type TEXT NOT NULL,
-    gift_wrap_id TEXT NOT NULL,
+    gift_wrap_id TEXT,
     has_excerpt INTEGER NOT NULL CHECK (has_excerpt IN (0, 1)),
     reported_at TEXT NOT NULL,
     outcome TEXT CHECK (outcome IN ('queued_in_coop', 'age_review_opened', 'age_review_exists')),
@@ -327,8 +333,12 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     first_received_at TEXT NOT NULL,
     last_attempt_at TEXT,
     completed_at TEXT,
-    CHECK ((outcome IS NULL) = (completed_at IS NULL))
+    redacted_at TEXT,
+    CHECK ((outcome IS NULL) = (completed_at IS NULL)),
+    CHECK (redacted_at IS NOT NULL OR (reporter_pubkey IS NOT NULL AND gift_wrap_id IS NOT NULL))
   )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_private_report_intake_unredacted_case
+    ON private_report_intake (case_id) WHERE redacted_at IS NULL AND case_id IS NOT NULL`).run();
 
   await db.prepare(`UPDATE protected_minor_subjects SET clear_reason_class = CASE
       WHEN clear_reason = 'false_positive' THEN 'false_positive'

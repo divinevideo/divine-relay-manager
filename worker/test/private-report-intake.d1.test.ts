@@ -5,6 +5,7 @@ import { Miniflare } from 'miniflare';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
+import { handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding } from '../src/protected-minors';
 import { fetchAccountIdentity } from '../src/relay-profile';
 
@@ -329,6 +330,41 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     const row = await DB.prepare('SELECT state, created_via FROM age_review_cases WHERE pubkey = ?')
       .bind(REPORTED).first();
     expect(row).toEqual({ state: 'cleared', created_via: 'private_report' });
+  });
+
+  it('records the family case it joined when a Greenlight start wins the insert race', async () => {
+    let releaseLookup!: () => void;
+    let lookupStarted!: () => void;
+    const lookupGate = new Promise<void>((resolve) => { releaseLookup = resolve; });
+    const lookupEntered = new Promise<void>((resolve) => { lookupStarted = resolve; });
+    vi.mocked(fetchAccountIdentity).mockImplementationOnce(async () => {
+      lookupStarted();
+      await lookupGate;
+      return { completed: true, profile: null };
+    });
+    const body = report({ reportType: 'underage_user' });
+    const pending = post(body);
+    await lookupEntered;
+    await handleStartGreenlight(REPORTED, { DB }, {});
+    releaseLookup();
+
+    expect(await (await pending).json()).toEqual({ success: true, outcome: 'age_review_exists', duplicate: false });
+    const family = await DB.prepare("SELECT id FROM age_review_cases WHERE pubkey = ? AND created_via = 'greenlight_application'")
+      .bind(REPORTED).first<{ id: string }>();
+    // The link retention follows to clear the reporter once that case is redacted.
+    expect(await intakeRow(body.reportId)).toMatchObject({ outcome: 'age_review_exists', case_id: family!.id });
+  });
+
+  it('answers a resend as a duplicate after retention cleared the reporter link', async () => {
+    const body = report({ reportType: 'underage_user' });
+    expect((await post(body)).status).toBe(200);
+    await DB.prepare(`UPDATE private_report_intake SET reporter_pubkey = NULL, gift_wrap_id = NULL,
+      redacted_at = datetime('now') WHERE report_id = ?`).bind(body.reportId).run();
+
+    const again = await post(body);
+    expect(await again.json()).toEqual({ success: true, outcome: 'age_review_opened', duplicate: true });
+    // The resend does not restore the link retention cleared.
+    expect(await intakeRow(body.reportId)).toMatchObject({ reporter_pubkey: null, gift_wrap_id: null });
   });
 
   it('keeps the row incomplete when the case cannot be written, and the retry opens it', async () => {

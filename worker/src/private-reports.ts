@@ -1,6 +1,7 @@
 // ABOUTME: POST /api/internal/private-reports: moderation-service hands over a private DM report,
 // ABOUTME: which becomes a Coop review item, or an age-review case for an under-16 report.
 
+import { TERMINAL_STATES } from '../../shared/age-review';
 import { AUTOMATED_MODERATOR } from '../../shared/automated-decision';
 import { coopHeaders, type CoopEnv } from './coop';
 import { errorNameOnly } from './error-name';
@@ -31,7 +32,8 @@ interface PrivateReport {
 
 interface IntakeRow {
   reported_pubkey: string;
-  reporter_pubkey: string;
+  // Null once retention has cleared the reporter link.
+  reporter_pubkey: string | null;
   report_type: string;
   outcome: PrivateReportOutcome | null;
   completed_at: string | null;
@@ -143,7 +145,13 @@ async function openAgeReview(db: D1Database, env: PrivateReportEnv, report: Priv
       '[private-reports]',
     );
     // An approved minor's case opens already cleared; it is still a new case.
-    return { ok: true, outcome: result.outcome === 'exists' ? 'age_review_exists' : 'age_review_opened', caseId: result.caseId };
+    if (result.outcome !== 'exists') return { ok: true, outcome: 'age_review_opened', caseId: result.caseId };
+    // A family start that won the insert race leaves no id; record the case
+    // this report joined, since retention clears the reporter link with it.
+    const caseId = result.caseId ?? (await db.prepare(`SELECT id FROM age_review_cases
+      WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')}) LIMIT 1`)
+      .bind(report.reportedPubkey, ...TERMINAL_STATES).first<{ id: string }>())?.id ?? null;
+    return { ok: true, outcome: 'age_review_exists', caseId };
   } catch (error) {
     console.error('[private-reports] Age review case not opened:', errorNameOnly(error));
     return { ok: false, code: 'age_review_failed' };
@@ -217,9 +225,10 @@ async function intake(
   if (!stored) throw new Error('intake row missing after insert');
   // A resend carries a new gift wrap and possibly a new timestamp, but never a
   // different account, reporter or reason. One that does is a caller bug, and
-  // answering `duplicate` would drop it unseen.
-  if (stored.reported_pubkey !== report.reportedPubkey || stored.reporter_pubkey !== report.reporterPubkey
-    || stored.report_type !== report.reportType) {
+  // answering `duplicate` would drop it unseen. A reporter retention cleared
+  // can no longer be compared, and is not written back.
+  if (stored.reported_pubkey !== report.reportedPubkey || stored.report_type !== report.reportType
+    || (stored.reporter_pubkey !== null && stored.reporter_pubkey !== report.reporterPubkey)) {
     console.error(`[private-reports] reportId ${report.reportId} already names a different report; refused`);
     return json({ success: false, error: 'reportId already names a different report', code: 'report_id_conflict' }, 400, corsHeaders);
   }

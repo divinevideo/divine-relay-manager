@@ -29,6 +29,7 @@ export interface RetentionResult {
   pendingProjectionsOverdue: number;
   unknownReasonsAlerted: number;
   consentVideosDeleted: number;
+  privateReportsRedacted: number;
 }
 
 function emptyResult(): RetentionResult {
@@ -37,7 +38,7 @@ function emptyResult(): RetentionResult {
     projectionsDeleted: 0, bindingsDeleted: 0, operationsCompacted: 0,
     subjectsDeleted: 0, pendingOperationsOverdue: 0,
     pendingProjectionsOverdue: 0, unknownReasonsAlerted: 0,
-    consentVideosDeleted: 0,
+    consentVideosDeleted: 0, privateReportsRedacted: 0,
   };
 }
 
@@ -357,6 +358,20 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
       .bind(...ids);
     const outcomes = await db.batch([...notes, cases]);
     result.casesDeleted = outcomes[outcomes.length - 1].meta.changes;
+  });
+
+  // A private report's reporter link follows its age-review case: once the
+  // case is redacted, or no longer exists, the intake row loses it too. A
+  // legal hold that keeps the case's detail therefore keeps this link. Runs
+  // after case-delete so a case deleted in this run is caught in it.
+  await runStage('private-report-redaction', async () => {
+    const redacted = await db.prepare(`UPDATE private_report_intake
+      SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
+      WHERE report_id IN (SELECT i.report_id FROM private_report_intake i
+        WHERE i.redacted_at IS NULL AND i.case_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = i.case_id AND c.redacted_at IS NULL)
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.privateReportsRedacted = redacted.meta.changes;
   });
 
   return result;

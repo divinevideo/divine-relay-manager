@@ -1020,7 +1020,7 @@ export default {
           const disposed = await runRetentionDisposal(env);
           const changed = disposed.claimLinksCleared + disposed.casesRedacted + disposed.casesDeleted
             + disposed.projectionsDeleted + disposed.bindingsDeleted + disposed.operationsCompacted
-            + disposed.subjectsDeleted;
+            + disposed.subjectsDeleted + disposed.privateReportsRedacted;
           if (changed > 0) console.log(`[scheduled] Disposed ${changed} expired protected record(s)`);
         } catch (error) {
           console.error('[scheduled] Protected-record retention failed:', error);
