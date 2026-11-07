@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
-import { accountStatusKey } from '@/lib/accountStatusCache';
+import { KEYCAST_MIRROR_SETTLE_MS, accountStatusKey } from '@/lib/accountStatusCache';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { ModerationStatus } from '@/hooks/useModerationStatus';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
@@ -208,19 +208,26 @@ describe('ReportDetail user ban-status panel', () => {
   // pre-action; a content action leaves it as it was.
 
   it('runs the check after an action when an account action completes', () => {
-    renderDetail();
-    const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+    // Fake timers so the delayed account-status refresh can't fire in a later test.
+    vi.useFakeTimers();
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
 
-    onActionComplete({ accountStatusChanged: true });
+      onActionComplete({ accountStatusChanged: true });
 
-    expect(status.value.recheckAfterAction).toHaveBeenCalledTimes(1);
-    expect(status.value.recheck).not.toHaveBeenCalled();
+      expect(status.value.recheckAfterAction).toHaveBeenCalledTimes(1);
+      expect(status.value.recheck).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   // The reported user's sign-in label shares the account-status query with age
   // review, and a ban or suspend flips what it should say. Without this the label
   // keeps its pre-action answer for the query's whole minute of staleness.
   it('refreshes the reported user\'s account-status entry, and only that one, when an account action completes', () => {
+    vi.useFakeTimers();
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
@@ -238,6 +245,29 @@ describe('ReportDetail user ban-status panel', () => {
       expect(matches(MOD_PUBKEY)).toBe(false);
     } finally {
       invalidate.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  // The worker mirrors the action into Keycast after it responds, so the first
+  // refresh can read the status from before it.
+  it('refreshes the reported user\'s account-status entry again once the Keycast mirror has had time to land', () => {
+    vi.useFakeTimers();
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+      const accountStatusCalls = () =>
+        invalidate.mock.calls.filter(([filters]) => JSON.stringify(filters?.queryKey) === JSON.stringify(['account-status']));
+
+      onActionComplete({ accountStatusChanged: true });
+      expect(accountStatusCalls()).toHaveLength(1);
+
+      vi.advanceTimersByTime(KEYCAST_MIRROR_SETTLE_MS);
+      expect(accountStatusCalls()).toHaveLength(2);
+    } finally {
+      invalidate.mockRestore();
+      vi.useRealTimers();
     }
   });
 

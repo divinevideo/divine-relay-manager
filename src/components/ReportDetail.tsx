@@ -33,7 +33,7 @@ import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
 import { AccountTypeLabel } from "@/components/AccountTypeBadge";
-import { invalidateAccountStatus } from "@/lib/accountStatusCache";
+import { refreshAccountStatusAfterMirror } from "@/lib/accountStatusCache";
 import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
@@ -557,10 +557,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The reported user's sign-in label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
-      // runs after the worker responds, so this read can still beat it. Only this
-      // account changed, so only its entry is refreshed.
+      // runs after the worker responds, so the first read can beat it; a second
+      // read follows once the mirror has had time to land. Only this account
+      // changed, so only its entry is refreshed.
       const subject = context.reportedUser.pubkey;
-      if (subject) void invalidateAccountStatus(queryClient, subject);
+      if (subject) refreshAccountStatusAfterMirror(queryClient, subject);
     } else {
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.
