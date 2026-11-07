@@ -174,6 +174,21 @@ async function openAgeReview(db: D1Database, env: PrivateReportEnv, report: Priv
   }
 }
 
+// The item names an account and a reason such as csam, and the request carries
+// the ingestion key, so neither may cross the network in clear. Loopback is the
+// local stack. The quarantine handoff applies its own rule and is not changed.
+function isPrivateSafeCoopUrl(raw: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (url.protocol === 'https:') return true;
+  return url.protocol === 'http:'
+    && (url.hostname === 'localhost' || url.hostname === '[::1]' || /^127(\.\d{1,3}){3}$/.test(url.hostname));
+}
+
 // Coop's nostr_user item: only fields its schema declares, and nothing from the
 // report beyond the account and the reason.
 async function queueInCoop(env: PrivateReportEnv, report: PrivateReport): Promise<AttemptResult> {
@@ -181,6 +196,10 @@ async function queueInCoop(env: PrivateReportEnv, report: PrivateReport): Promis
     const unset = [!env.COOP_URL && 'COOP_URL', !env.COOP_API_KEY && 'COOP_API_KEY',
       !env.COOP_USER_TYPE_ID && 'COOP_USER_TYPE_ID'].filter(Boolean);
     console.error(`[private-reports] Coop handoff not configured: ${unset.join(', ')} unset`);
+    return { ok: false, code: 'coop_not_configured' };
+  }
+  if (!isPrivateSafeCoopUrl(env.COOP_URL)) {
+    console.error('[private-reports] Coop handoff not configured: COOP_URL must be https (or loopback)');
     return { ok: false, code: 'coop_not_configured' };
   }
   let headers: Record<string, string>;

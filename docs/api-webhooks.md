@@ -423,7 +423,7 @@ the item and the write recording that then fails, the retry submits it again.
 | 400 | `code: "invalid_body"` | The body is not a JSON object, or a field is missing or malformed. Do not retry. |
 | 400 | `code: "report_id_conflict"` | This reporter already used this `reportId` for a different account or type. Do not retry. |
 | 401 | | Missing or wrong key. |
-| 503 | `code: "coop_not_configured"` | A Coop setting below is missing, or its credentials cannot be used. Retry. |
+| 503 | `code: "coop_not_configured"` | A Coop setting below is missing, its credentials cannot be used, or `COOP_URL` is not HTTPS. Retry. |
 | 503 | `code: "coop_unreachable"`, `"coop_status_<n>"` | Coop could not be reached, or did not answer 2xx (a redirect is not followed). Retry. |
 | 503 | `code: "age_review_failed"`, `"db_unavailable"`, `"attempt_in_progress"` | Retry. |
 
@@ -432,7 +432,11 @@ the item and the write recording that then fails, the retry submits it again.
 (the value Osprey has as `DIVINE_COOP_USER_TYPE_ID`). When Coop is behind
 Cloudflare Access, also the dedicated `COOP_ACCESS_CLIENT_ID` and
 `COOP_ACCESS_CLIENT_SECRET` pair; they are sent only over HTTPS, and only when
-both are bound. These are the settings the sexual-quarantine handoff uses (see
+both are bound. `COOP_URL` must be `https://` for this route, whether or not an
+Access pair is bound, because the item names an account and a reason such as
+`csam` and the request carries the ingestion key. Only a loopback host
+(`localhost`, `127.0.0.0/8`, `[::1]`) may use `http://`, for the local stack.
+The sexual-quarantine handoff keeps its own rule. These are the settings the sexual-quarantine handoff uses (see
 [sexual-quarantine-rollout.md](sexual-quarantine-rollout.md)), plus
 `COOP_USER_TYPE_ID`. Under-16 reports need none of them.
 

@@ -250,6 +250,23 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each(['http://coop.example.test', 'http://10.0.0.5:8080', 'ftp://coop.example.test', 'not a url'])(
+    'refuses to send the item and the ingestion key to %s', async (coopUrl) => {
+      const body = report({ reportType: 'csam' });
+      const res = await post(body, testEnv({ COOP_URL: coopUrl }));
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ code: 'coop_not_configured' });
+      expect(fetchMock).not.toHaveBeenCalled();
+      expect(await intakeRow(body.reportId)).toMatchObject({ completed_at: null, last_error: 'coop_not_configured' });
+    });
+
+  it.each(['http://localhost:8790', 'http://127.0.0.1:8790', 'http://[::1]:8790'])(
+    'allows plain HTTP to a loopback Coop at %s, the local stack', async (coopUrl) => {
+      const res = await post(report(), testEnv({ COOP_URL: coopUrl }));
+      expect(res.status).toBe(200);
+      expect(fetchMock).toHaveBeenCalledWith(`${coopUrl}/api/v1/items/async/`, expect.anything());
+    });
+
   it('answers 503 and calls nothing while another attempt holds the report', async () => {
     const body = report();
     await DB.prepare(`INSERT INTO private_report_intake
