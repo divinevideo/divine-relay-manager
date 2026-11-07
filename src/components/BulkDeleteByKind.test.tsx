@@ -421,6 +421,29 @@ describe('BulkDeleteByKind running a job', () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
+  // The report view keeps this mounted when the moderator opens another report.
+  it('routes a refused job to the age-review case of the account it was for, after the account changes', async () => {
+    const other = 'b'.repeat(64);
+    let refuse!: (error: Error) => void;
+    api.bulkModerate.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const view = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <BulkDeleteByKind pubkey={pubkey} />
+      </QueryClientProvider>
+    );
+    const { rerender } = render(view(PUBKEY));
+    await openAndPickReactions();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
+    await waitFor(() => expect(api.bulkModerate).toHaveBeenCalledTimes(1));
+    rerender(view(other));
+    await act(async () => { refuse(new ApiError('under age review', 409, 'Conflict', 'age_review_active')); });
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
+  });
+
   it('routes to the age-review case when the worker refuses the job', async () => {
     api.bulkModerate.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
     renderDialog();

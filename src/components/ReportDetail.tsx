@@ -52,7 +52,7 @@ import { AIDetectionReport } from "@/components/AIDetectionReport";
 import { MediaPreview } from "@/components/MediaPreview";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { EventActions } from "@/components/EventActions";
-import { UserActions } from "@/components/UserActions";
+import { UserActions, type UserActionChange } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
 import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
@@ -541,7 +541,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // and unsuspend change the account's status, and it says so. The rest (post,
   // media and bulk content actions, through EventActions, BulkDeleteByKind,
   // UserActions' bulk jobs and the delete below) call it with no change.
-  const handleActionComplete = (change?: { accountStatusChanged: boolean }) => {
+  const handleActionComplete = (change?: UserActionChange) => {
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
@@ -554,14 +554,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
-      // The reported user's sign-in label reads the shared account-status query,
+      // The acted-on account's sign-in label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
       // runs after the worker responds, so the first read can beat it; a second
-      // read follows once the mirror has had time to land. Only this account
-      // changed, so only its entry is refreshed.
-      const subject = context.reportedUser.pubkey;
-      if (subject) refreshAccountStatusAfterMirror(queryClient, subject);
+      // read follows once the mirror has had time to land. Only that account
+      // changed, so only its entry is refreshed. It comes from UserActions, not
+      // from this pane: the moderator may have opened another report since.
+      refreshAccountStatusAfterMirror(queryClient, change.pubkey);
     } else {
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.

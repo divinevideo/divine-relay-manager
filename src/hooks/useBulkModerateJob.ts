@@ -22,7 +22,8 @@ interface UseBulkModerateJobOptions {
   onComplete?: (job: BulkJob) => void;
   // Called if the enqueue fails. A failed status poll is not reported here: the
   // job may still be running, so it is tracking that was lost, not the job.
-  onError?: (error: Error) => void;
+  // `target`: the account the enqueue was for, which may no longer be the one shown.
+  onError?: (error: Error, target: string) => void;
   // Called once each time the status poll gives out while a job is held (see
   // `trackingLost`).
   onTrackingLost?: () => void;
@@ -67,7 +68,7 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
       if (target === currentPubkey.current && client === currentApi.current) setJobId(res.jobId);
       else setPendingAction(null);
     },
-    onError: (error: Error) => { setPendingAction(null); onError?.(error); },
+    onError: (error: Error, { target }) => { setPendingAction(null); onError?.(error, target); },
   });
 
   // Detach from any in-flight job when the target user changes. UserActions is

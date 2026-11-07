@@ -7,6 +7,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
 import { KEYCAST_MIRROR_SETTLE_MS, accountStatusKey } from '@/lib/accountStatusCache';
+import type { UserActionChange } from './UserActions';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { ModerationStatus } from '@/hooks/useModerationStatus';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
@@ -212,9 +213,9 @@ describe('ReportDetail user ban-status panel', () => {
     vi.useFakeTimers();
     try {
       renderDetail();
-      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
 
-      onActionComplete({ accountStatusChanged: true });
+      onActionComplete({ accountStatusChanged: true, pubkey: REPORTED_PUBKEY, action: 'ban' });
 
       expect(status.value.recheckAfterAction).toHaveBeenCalledTimes(1);
       expect(status.value.recheck).not.toHaveBeenCalled();
@@ -231,9 +232,9 @@ describe('ReportDetail user ban-status panel', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
-      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
 
-      onActionComplete({ accountStatusChanged: true });
+      onActionComplete({ accountStatusChanged: true, pubkey: REPORTED_PUBKEY, action: 'ban' });
 
       const call = invalidate.mock.calls
         .map(([filters]) => filters)
@@ -256,11 +257,11 @@ describe('ReportDetail user ban-status panel', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
-      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
       const accountStatusCalls = () =>
         invalidate.mock.calls.filter(([filters]) => JSON.stringify(filters?.queryKey) === JSON.stringify(['account-status']));
 
-      onActionComplete({ accountStatusChanged: true });
+      onActionComplete({ accountStatusChanged: true, pubkey: REPORTED_PUBKEY, action: 'ban' });
       expect(accountStatusCalls()).toHaveLength(1);
 
       vi.advanceTimersByTime(KEYCAST_MIRROR_SETTLE_MS);
@@ -271,11 +272,41 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
+  // This pane stays mounted when the moderator opens another report, so an action
+  // can finish while a different account is on screen. Refresh the account it was
+  // taken on, which UserActions reports, not the one shown now.
+  it('refreshes the account the action was taken on, not the one on screen when it finished', () => {
+    vi.useFakeTimers();
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    const ACTED_ON = 'f'.repeat(64);
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
+
+      onActionComplete({ accountStatusChanged: true, pubkey: ACTED_ON, action: 'suspend' });
+      vi.advanceTimersByTime(KEYCAST_MIRROR_SETTLE_MS);
+
+      const refreshes = invalidate.mock.calls
+        .map(([filters]) => filters)
+        .filter((filters) => JSON.stringify(filters?.queryKey) === JSON.stringify(['account-status']));
+      expect(refreshes).toHaveLength(2);
+      for (const call of refreshes) {
+        const matches = (pubkey: string) =>
+          call!.predicate!({ queryKey: accountStatusKey('https://api.example', pubkey) } as never);
+        expect(matches(ACTED_ON)).toBe(true);
+        expect(matches(REPORTED_PUBKEY)).toBe(false);
+      }
+    } finally {
+      invalidate.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('leaves the account-status entry alone when a content action completes', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
-      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
 
       onActionComplete({ accountStatusChanged: false });
 
@@ -313,7 +344,7 @@ describe('ReportDetail user ban-status panel', () => {
 
   it('runs a plain check when a bulk content action from UserActions completes', () => {
     renderDetail();
-    const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+    const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
 
     onActionComplete({ accountStatusChanged: false });
 
