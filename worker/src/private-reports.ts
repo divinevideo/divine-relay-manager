@@ -125,11 +125,13 @@ async function readRow(db: D1Database, report: PrivateReport): Promise<IntakeRow
 
 // A row retention redacted no longer names its reporter, so it answers a late
 // resend of the same reportId, account and type from whoever sends it.
-async function readRedactedOutcome(db: D1Database, report: PrivateReport): Promise<{ outcome: PrivateReportOutcome | null } | null> {
-  const row = await db.prepare(`SELECT outcome FROM private_report_intake
+async function readRedactedOutcome(db: D1Database, report: PrivateReport):
+  Promise<{ outcome: PrivateReportOutcome | null; lease_until: number } | null> {
+  const row = await db.prepare(`SELECT outcome, lease_until FROM private_report_intake
     WHERE report_id = ? AND reporter_pubkey IS NULL AND reported_pubkey = ? AND report_type = ?
     LIMIT 1`)
-    .bind(report.reportId, report.reportedPubkey, report.reportType).first<{ outcome: PrivateReportOutcome | null }>();
+    .bind(report.reportId, report.reportedPubkey, report.reportType)
+    .first<{ outcome: PrivateReportOutcome | null; lease_until: number }>();
   return row;
 }
 
@@ -265,6 +267,9 @@ async function intake(
     const redacted = await readRedactedOutcome(db, report);
     if (redacted) {
       if (redacted.outcome) return done(redacted.outcome, true);
+      // Expired while an attempt holds it: that attempt may still deliver the
+      // report, so the caller retries rather than being told it expired.
+      if (redacted.lease_until > Date.now()) return unavailable('attempt_in_progress');
       return json({ success: false, error: 'The undelivered report has expired', code: 'report_expired' }, 400, corsHeaders);
     }
     await db.prepare(`INSERT INTO private_report_intake

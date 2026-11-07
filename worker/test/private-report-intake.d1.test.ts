@@ -403,6 +403,26 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
       expect(await (await post(body)).json()).toMatchObject({ success: false, code: 'report_expired' });
       expect(coopCalls()).toHaveLength(1);
     });
+
+    it('asks a second delivery to retry, not that it expired, while the expired row\'s attempt is in flight', async () => {
+      const body = report();
+      const held = heldCoopCall();
+      const attempt = post(body);
+      await held.reached;
+      await DB.prepare('UPDATE private_report_intake SET first_received_at = ? WHERE report_id = ?')
+        .bind(new Date(Date.now() - 366 * 864e5).toISOString(), body.reportId).run();
+      expect((await runRetentionDisposal({ DB })).privateReportsRedacted).toBe(1);
+
+      const overlapping = await post(body);
+      expect(overlapping.status).toBe(503);
+      expect(await overlapping.json()).toMatchObject({ success: false, code: 'attempt_in_progress' });
+
+      held.release(new Response(null, { status: 202 }));
+      expect(await (await attempt).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: false });
+      expect(await (await post(body)).json()).toEqual({ success: true, outcome: 'queued_in_coop', duplicate: true });
+      expect(coopCalls()).toHaveLength(1);
+      expect(await rowCount(body.reportId)).toBe(1);
+    });
   });
 
   it('refuses, without calling Coop, a reporter reusing a reportId for a different account or type', async () => {
