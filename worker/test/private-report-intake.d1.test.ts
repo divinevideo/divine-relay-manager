@@ -385,6 +385,24 @@ describe('POST /api/internal/private-reports: Coop handoff', () => {
       expect(coopCalls()).toHaveLength(1);
       expect(await rowCount(body.reportId)).toBe(1);
     });
+
+    it('records the failure and frees the lease when retention expires the row while the attempt is in flight', async () => {
+      const body = report();
+      const held = heldCoopCall();
+      const attempt = post(body);
+      await held.reached;
+      await DB.prepare('UPDATE private_report_intake SET first_received_at = ? WHERE report_id = ?')
+        .bind(new Date(Date.now() - 366 * 864e5).toISOString(), body.reportId).run();
+      expect((await runRetentionDisposal({ DB })).privateReportsRedacted).toBe(1);
+
+      held.release(new Response(null, { status: 500 }));
+      expect(await (await attempt).json()).toMatchObject({ success: false, code: 'coop_status_500' });
+      expect(await intakeRow(body.reportId, null)).toMatchObject({
+        reporter_pubkey: null, outcome: null, last_error: 'coop_status_500', lease_until: 0,
+      });
+      expect(await (await post(body)).json()).toMatchObject({ success: false, code: 'report_expired' });
+      expect(coopCalls()).toHaveLength(1);
+    });
   });
 
   it('refuses, without calling Coop, a reporter reusing a reportId for a different account or type', async () => {
