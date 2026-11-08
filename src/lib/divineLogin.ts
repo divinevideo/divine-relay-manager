@@ -121,5 +121,9 @@ export function getSession(): Promise<StoredCredentials | null> {
 
 /** Clear all session data (SDK-managed). */
 export function logout(): void {
+  // A later focus/visibility refresh must read the signed-out session, not join
+  // a pre-logout read whose result the provider's generation guard will discard.
+  // That old call's finally only clears itself, so it cannot clear a newer read.
+  inFlight = null;
   getClient().oauth.logout();
 }
