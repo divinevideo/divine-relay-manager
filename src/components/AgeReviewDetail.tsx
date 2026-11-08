@@ -630,6 +630,14 @@ export function AgeReviewDetail({ caseData: c }: Props) {
           {(c.created_via === 'greenlight_application' || c.greenlight_requested_at) && (
             <p className="text-xs text-muted-foreground">Family requested Greenlight</p>
           )}
+          {/* A reporter with no report event is a private report: a case it
+              opened, or a family's Greenlight case it attached to. */}
+          {(c.created_via === 'private_report' || (c.reporter_pubkey && !c.report_id)) && (
+            <p className="text-xs text-muted-foreground">
+              Private DM report: the reporter named this account in an encrypted message.
+              {' '}It is an unverified allegation, and nothing was published.
+            </p>
+          )}
           {c.reporter_pubkey && (
             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
               <span>Reported by:</span>
