@@ -28,9 +28,39 @@ function Probe() {
   </>;
 }
 
-afterEach(() => vi.clearAllMocks());
+afterEach(() => {
+  vi.clearAllMocks();
+  delete (navigator as { locks?: unknown }).locks;
+});
 
-it.each(['focus', 'visibilitychange'])('does not rejoin a pre-logout refresh on %s', async (event) => {
+it.each([
+  ['focus', false], ['visibilitychange', false],
+  ['focus', true], ['visibilitychange', true],
+] as const)('stays signed out after %s (Web Locks: %s)', async (event, withLocks) => {
+  if (withLocks) {
+    const queue: (() => void)[] = [];
+    let held = false;
+    const grantNext = () => {
+      if (!held) queue.shift()?.();
+    };
+    Object.defineProperty(navigator, 'locks', { configurable: true, value: {
+      request: (_name: string, _options: LockOptions, callback: () => Promise<unknown>) =>
+        new Promise((resolve, reject) => {
+          queue.push(() => {
+            held = true;
+            void callback().then((value) => {
+              held = false;
+              // Release/grant the next holder BEFORE resolving the old request,
+              // as permitted by Web Locks sections 2.4, 4.2 and 4.4. Cleanup in
+              // the provider's reaction to that old request is too late here.
+              grantNext();
+              resolve(value);
+            }, reject);
+          });
+          grantNext();
+        }),
+    } });
+  }
   const credentials = { accessToken: 'old-login', bunkerUrl: 'bunker://test' };
   let stored: StoredCredentials | null = credentials;
   let release!: () => void;

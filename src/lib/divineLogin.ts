@@ -77,6 +77,7 @@ const SESSION_LOCK = 'divine-login:session';
 // refresh always finishes first. Past it, read without the lock.
 const LOCK_WAIT_MS = 20_000;
 let inFlight: Promise<StoredCredentials | null> | null = null;
+let sessionGeneration = 0;
 
 function readUnderLock(
   locks: LockManager,
@@ -107,7 +108,19 @@ function readUnderLock(
 /** Current session with automatic refresh (SDK-managed). Null when signed out. */
 export function getSession(): Promise<StoredCredentials | null> {
   if (inFlight) return inFlight;
-  const read = () => getClient().oauth.getSessionWithRefresh();
+  const generation = sessionGeneration;
+  const read = async () => {
+    if (generation !== sessionGeneration) return null;
+    const session = await getClient().oauth.getSessionWithRefresh();
+    if (generation !== sessionGeneration) {
+      // Refresh can re-persist credentials after logout. Clear them before this
+      // callback releases the Web Lock, not in a reaction to locks.request():
+      // the next holder can otherwise read them before that reaction runs.
+      getClient().oauth.logout();
+      return null;
+    }
+    return session;
+  };
   // Web Locks need a secure context; without them, fall back to this tab's
   // single flight only.
   const locks = typeof navigator !== 'undefined' ? navigator.locks : undefined;
@@ -121,6 +134,7 @@ export function getSession(): Promise<StoredCredentials | null> {
 
 /** Clear all session data (SDK-managed). */
 export function logout(): void {
+  sessionGeneration += 1;
   // A later focus/visibility refresh must read the signed-out session, not join
   // a pre-logout read whose result the provider's generation guard will discard.
   // That old call's finally only clears itself, so it cannot clear a newer read.
