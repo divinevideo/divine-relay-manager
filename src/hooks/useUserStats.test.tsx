@@ -10,6 +10,7 @@ vi.mock('@/hooks/useAppContext', () => ({
 }));
 
 import { useUserStats, HISTORY_PAGE_SIZE, HISTORY_MAX_PAGES } from './useUserStats';
+import { RECENT_AUTHORED_LIMIT } from '@/lib/constants';
 
 const PUBKEY = 'd4'.repeat(32);
 
@@ -50,6 +51,30 @@ describe('useUserStats', () => {
     expect(result.current.data?.authoredContentIncomplete).toBe(false);
     expect(result.current.data?.labelsIncomplete).toBe(false);
     expect(result.current.data?.reportsIncomplete).toBe(false);
+  });
+
+  // ReportDetail invalidates this exact key after an action (its test pins that
+  // side). If the two drift, the card keeps a stale count after an Unsuspend.
+  it('caches under the relay URL and the pubkey', async () => {
+    req.mockImplementation(completes([]));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const { result } = renderHook(() => useUserStats(PUBKEY), {
+      wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
+    });
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(client.getQueryData(['user-stats', 'wss://relay.test', PUBKEY])).toBe(result.current.data);
+  });
+
+  // The cards print a count at this limit as a floor ("20+"). If the read asked
+  // for a different number, a full page would print as an exact total.
+  it('asks for exactly the authored-content limit the cards treat as a floor', async () => {
+    req.mockImplementation(completes([]));
+    const { result } = show();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    const authoredFilter = req.mock.calls
+      .map(args => args[0]?.[0])
+      .find(f => f?.authors?.includes(PUBKEY));
+    expect(authoredFilter?.limit).toBe(RECENT_AUTHORED_LIMIT);
   });
 
   it('flags an authored-content read the relay closed, so a zero count is not read as absence', async () => {

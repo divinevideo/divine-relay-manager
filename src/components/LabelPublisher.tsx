@@ -15,8 +15,9 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
-import type { LabelAndBanResult, LabelParams } from "@/lib/adminApi";
+import { BanNotConfirmedError, type LabelAndBanResult, type LabelParams } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
+import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 // The label is out before the ban runs, so a ban problem is reported against
 // the ban, never as a failed publish: a retry would publish the label twice.
@@ -86,6 +87,7 @@ const NAMESPACES = [
 export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnPublish }: LabelPublisherProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const restoreEnvironment = useRestoreEnvironment();
   const { publishLabel, publishLabelAndBan } = useAdminApi();
   const [isOpen, setIsOpen] = useState(false);
 
@@ -111,7 +113,17 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
       };
 
       if (params.shouldBan) {
-        return publishLabelAndBan(params);
+        // Captured before the request: the account and environment acted on.
+        const target = params.targetValue;
+        const env = restoreEnvironment;
+        const result = await publishLabelAndBan(params);
+        // A ban that landed hides the account again, so a restore window still
+        // open would print "just restored" (lib/userStatsCache): end it. So does
+        // one that could not be confirmed, which may have landed. A refused or
+        // failed ban only resets.
+        if (result.banned || result.banError instanceof BanNotConfirmedError) void markHidden(queryClient, target, env);
+        else if (result.banError) void resetAccountContentReads(queryClient, target);
+        return result;
       } else {
         await publishLabel(params);
         return { labelPublished: true, banned: false };
@@ -339,6 +351,7 @@ export function LabelPublisherInline({
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const restoreEnvironment = useRestoreEnvironment();
   const { publishLabel, publishLabelAndBan } = useAdminApi();
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const [shouldBan, setShouldBan] = useState(false);
@@ -354,7 +367,17 @@ export function LabelPublisherInline({
       };
 
       if (params.shouldBan) {
-        return publishLabelAndBan(params);
+        // Captured before the request: the account and environment acted on.
+        const target = params.targetValue;
+        const env = restoreEnvironment;
+        const result = await publishLabelAndBan(params);
+        // A ban that landed hides the account again, so a restore window still
+        // open would print "just restored" (lib/userStatsCache): end it. So does
+        // one that could not be confirmed, which may have landed. A refused or
+        // failed ban only resets.
+        if (result.banned || result.banError instanceof BanNotConfirmedError) void markHidden(queryClient, target, env);
+        else if (result.banError) void resetAccountContentReads(queryClient, target);
+        return result;
       } else {
         await publishLabel(params);
         return { labelPublished: true, banned: false };

@@ -152,6 +152,63 @@ describe('ThreadContext moderation status summary', () => {
   });
 });
 
+// The verification REQ is a public read, and the relay hides a suspended
+// account's posts from it, so a suspended author's post comes back "gone".
+// Saying it was deleted states something nobody observed. ReportDetail decides
+// the cause (lib/goneCause, tested there); this panel states the one it is given.
+describe('ThreadContext missing post with a cause from ReportDetail', () => {
+  const CHECKED = new Date('2026-08-10T12:00:00Z');
+  const DELETED = 'Event has been deleted from the relay';
+  const base = { reportedEvent: undefined, isEventDeleted: true, isUserBanned: false, checkedAt: CHECKED } as const;
+
+  it('states a suspension as the cause, not a deletion', () => {
+    renderThread({ ...base, goneCause: { kind: 'suspended', stale: false, line: 'withheld for a suspension', badge: 'b', tone: 'withheld' } });
+
+    expect(screen.getByText('withheld for a suspension')).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  it('states an unknown cause, not a deletion', () => {
+    renderThread({ ...base, goneCause: { kind: 'unknown', line: 'cause not checked', badge: 'b', tone: 'unknown' } });
+
+    expect(screen.getByText('cause not checked')).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  // Gone, suspended, and a ban kept from a list that could not be refreshed.
+  // ReportDetail calls that cause unknown; the panel must not add "deleted".
+  it('does not say deleted beside a last-known ban when the cause is unknown', () => {
+    renderThread({
+      ...base, isUserBanned: true, isUserBannedStale: true,
+      goneCause: { kind: 'unknown', line: 'cause not checked', badge: 'b', tone: 'unknown' },
+    });
+
+    expect(screen.getByText(/Last known: banned/)).toBeInTheDocument();
+    expect(screen.getByText('cause not checked')).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  it('states "none found" in neutral wording, not as a deletion', () => {
+    renderThread({ ...base, goneCause: { kind: 'none-found', line: 'not returned, cause unknown', badge: 'b', tone: 'removal' } });
+
+    expect(screen.getByText('not returned, cause unknown')).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  it('states an explained cause in its own words, not as a deletion', () => {
+    renderThread({ ...base, goneCause: { kind: 'explained', by: 'event-ban', line: 'in the ban list', badge: 'b', tone: 'removal' } });
+
+    expect(screen.getByText('in the ban list')).toBeInTheDocument();
+    expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  it('keeps the deleted line when no cause is passed', () => {
+    renderThread({ ...base });
+
+    expect(screen.getByText(DELETED)).toBeInTheDocument();
+  });
+});
+
 describe('ThreadContext relay-profile globe (#132)', () => {
   // The bare purple globe beside an author our relay returned no profile for
   // used to carry no explanation at all.

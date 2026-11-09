@@ -25,6 +25,12 @@ export interface ModerationStatus {
   isUserSuspendedStale: boolean;
   /** Event ID is in the relay's ban list */
   isEventBanned: boolean | null;
+  /**
+   * `isEventBanned` is `true` only because a copy of the banned-events list
+   * whose latest refresh failed said so. listMembership keeps that presence on
+   * purpose, but it is last known, not confirmed: the ban may have been lifted.
+   */
+  isEventBannedStale: boolean;
   /** Event is not queryable from the relay (deleted, banned, or never existed) */
   isEventGone: boolean | null;
   /** Ban list data is still loading */
@@ -48,6 +54,14 @@ export interface ModerationStatus {
    * Always false with no pubkey.
    */
   isUserBanChecking: boolean;
+  /**
+   * A read of the suspended list is in flight (first load, retry or re-read).
+   * Narrower than isAccountStatusLoading: once it is false, a suspension that is
+   * still unknown could not be read, rather than not read yet.
+   */
+  isUserSuspensionChecking: boolean;
+  /** As isUserSuspensionChecking, for the banned-events list. */
+  isEventBanChecking: boolean;
   /**
    * The live check (verifyPubkeyBanned / verifyEventDeleted) is running. Does
    * not cover the list re-reads it asks for; those are in
@@ -93,6 +107,12 @@ interface ListReads {
 function successfulReads(client: QueryClient, key: string[]): ListReads {
   const query = client.getQueryCache().find({ queryKey: key, exact: true });
   return { query, reads: query?.state.dataUpdateCount ?? 0 };
+}
+
+// A list entry's id against the one on screen, ignoring case. The entry comes
+// from the relay, so it is checked to be a string first.
+function sameHex(entryValue: unknown, target: string): boolean {
+  return typeof entryValue === 'string' && entryValue.toLowerCase() === target.toLowerCase();
 }
 
 // Where one account list stands relative to the latest check's request to
@@ -207,14 +227,18 @@ export function useModerationStatus(
   // re-renders. Before a mark exists the count is not consulted at all.
   const bannedReRead = sinceReRead(bannedPubkeys, successfulReads(queryClient, BANNED_PUBKEYS_KEY), reReadMarks?.banned ?? null);
   const suspendedReRead = sinceReRead(suspendedPubkeys, successfulReads(queryClient, SUSPENDED_PUBKEYS_KEY), reReadMarks?.suspended ?? null);
+  // Matched case-insensitively. A report's p and e tags are not normalized
+  // (getReportTarget), while the worker lowercases an event id before it bans
+  // it, so an exact match would miss a post the moderator just deleted and
+  // offer Ban and Delete again.
   const isUserBannedFromList = pubkey
-    ? listMembership({ isError: !bannedReRead.current, data: bannedPubkeys.data }, entry => entry.pubkey === pubkey)
+    ? listMembership({ isError: !bannedReRead.current, data: bannedPubkeys.data }, entry => sameHex(entry.pubkey, pubkey))
     : null;
   const isUserSuspendedFromList = pubkey
-    ? listMembership({ isError: !suspendedReRead.current, data: suspendedPubkeys.data }, entry => entry.pubkey === pubkey)
+    ? listMembership({ isError: !suspendedReRead.current, data: suspendedPubkeys.data }, entry => sameHex(entry.pubkey, pubkey))
     : null;
   const isEventBannedFromList = eventId
-    ? listMembership(bannedEvents, e => e.id === eventId)
+    ? listMembership(bannedEvents, e => sameHex(e.id, eventId))
     : null;
   // A positive carried over from a copy that is not current: the latest
   // refresh failed, or the list has not answered since the latest check.
@@ -222,6 +246,7 @@ export function useModerationStatus(
   // that is what is being shown.
   const isUserSuspendedStale = isUserSuspendedFromList === true && !suspendedReRead.current;
   const bannedFromStaleList = isUserBannedFromList === true && !bannedReRead.current;
+  const isEventBannedStale = isEventBannedFromList === true && bannedEvents.isError;
 
   const banListsLoading = bannedPubkeys.isLoading || bannedEvents.isLoading || suspendedPubkeys.isLoading;
 
@@ -403,6 +428,7 @@ export function useModerationStatus(
     isUserSuspendedStale,
     // Event in ban list (separate from "gone" — banned events can be retrieved via admin API)
     isEventBanned: isEventBannedFromList,
+    isEventBannedStale,
     // Event gone from relay (WebSocket verified, or known from ban list)
     isEventGone: wsResult.eventGone === undefined
       ? (isEventBannedFromList === true ? true : null)
@@ -424,6 +450,8 @@ export function useModerationStatus(
       || wsResult.isChecking
       || bannedReRead.rereading
     ),
+    isUserSuspensionChecking: !!pubkey && suspendedPubkeys.fetchStatus === 'fetching',
+    isEventBanChecking: !!eventId && bannedEvents.fetchStatus === 'fetching',
     isChecking: wsResult.isChecking,
     checkedAt: wsResult.checkedAt,
     recheck,

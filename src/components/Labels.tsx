@@ -32,6 +32,7 @@ import { UserProfilePreview } from "@/components/UserProfilePreview";
 import { ReportedBy } from "@/components/ReporterInfo";
 import { UserIdentifier, UserDisplayName } from "@/components/UserIdentifier";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 interface LabelsProps {
   relayUrl: string;
@@ -89,6 +90,7 @@ export function Labels({ relayUrl }: LabelsProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const restoreEnvironment = useRestoreEnvironment();
   const { banPubkey, verifyPubkeyBanned } = useAdminApi();
   const [selectedLabel, setSelectedLabel] = useState<string | null>(null);
   const [namespaceFilter, setNamespaceFilter] = useState<string | null>(null);
@@ -128,7 +130,11 @@ export function Labels({ relayUrl }: LabelsProps) {
   // Ban mutation with proper loading state and error handling
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
-      const outcome = await banPubkey(pubkey, reason);
+      // The relay hides a banned account's content, so a stats read from
+      // before the ban describes the other state (lib/userStatsCache). Reset
+      // whatever the call did: a ban that could not be confirmed may have landed.
+      const env = restoreEnvironment; // the environment the action ran in
+      const outcome = await runHidingAction(queryClient, pubkey, env, () => banPubkey(pubkey, reason));
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {
