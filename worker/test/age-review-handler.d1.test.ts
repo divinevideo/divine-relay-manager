@@ -11,6 +11,8 @@ import { ensureSchema } from '../src/db';
 import { handleUpdateAgeReviewCase, handleAgeReviewReplyWebhook, checkAgeReviewDeadlines, handleGetModerationStatus, handleStartGreenlight } from '../src/age-review';
 import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, clearSubject, markProjectionComplete } from '../src/protected-minors';
 import { submitSignedConsent, consentPayloadHash } from '../src/test-helpers/signed-consent';
+import worker from '../src/index';
+import { __clearModeratorLoginCache } from '../src/moderator-identity';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -54,7 +56,7 @@ function patch(id: string, patchBody: Record<string, unknown>) {
     method: 'PATCH',
     body: JSON.stringify(patchBody),
   });
-  return handleUpdateAgeReviewCase(req, id, env, cors);
+  return handleUpdateAgeReviewCase(req, id, env, cors, undefined);
 }
 
 async function rowOf(id: string) {
@@ -1176,7 +1178,7 @@ describe('protected-minor projection on a self-custody deny', () => {
       ...env,
       KEYCAST_URL: 'https://login.test.divine.video',
       KEYCAST_SERVICE_TOKEN: 'test-token',
-    }, cors);
+    }, cors, undefined);
 
     // Positive assertion first: the denial really did create a job to settle.
     const total = await DB.prepare(
@@ -1313,7 +1315,7 @@ describe('approving a 13-15 minor', () => {
       method: 'PATCH',
       body: JSON.stringify({ state: 'cleared', resolution: 'approved_minor', ...body }),
     });
-    return handleUpdateAgeReviewCase(req, 'ap', keycastEnv(), cors);
+    return handleUpdateAgeReviewCase(req, 'ap', keycastEnv(), cors, undefined);
   }
   const rowCount = async (table: string) => (await DB.prepare(`SELECT COUNT(*) AS c FROM ${table}`)
     .first<{ c: number }>())!.c;
@@ -1540,7 +1542,7 @@ describe('approving a 13-15 minor', () => {
     const req = new Request('https://api.test/api/age-review/cases/ap', {
       method: 'PATCH', body: JSON.stringify({ state: 'cleared', resolution: 'not_minor' }),
     });
-    const body = await (await handleUpdateAgeReviewCase(req, 'ap', keycastEnv(), cors)).json() as {
+    const body = await (await handleUpdateAgeReviewCase(req, 'ap', keycastEnv(), cors, undefined)).json() as {
       enforcement: { keycastMinorSet: string; subjectActivate: string };
     };
     expect(body.enforcement.keycastMinorSet).toBe('not_attempted');
@@ -1590,7 +1592,7 @@ describe('inline projection convergence after racing writes', () => {
   function patchCase(id: string, body: Record<string, unknown>) {
     return handleUpdateAgeReviewCase(new Request(`https://api.test/api/age-review/cases/${id}`, {
       method: 'PATCH', body: JSON.stringify(body),
-    }), id, raceEnv(), cors);
+    }), id, raceEnv(), cors, undefined);
   }
 
   it('X1: a deny clear landing after a racing approval set re-arms the live subject', async () => {
@@ -1683,5 +1685,140 @@ describe('inline projection convergence after racing writes', () => {
     expect(calls).toEqual(['PUT', 'DELETE']);
     expect(flagged).toBe(false);
     expect(await pendingCount()).toBe(0);
+  });
+});
+
+// #178 phase 2: the PATCH records nobody from its body. The Keycast audit actor
+// on every leg is the moderator the fetch handler verified from the login
+// token, and the case's moderator_pubkey column is neither written nor read as
+// a stand-in. That column gates Greenlight attachment and voluntary-case
+// detection (greenlight-start.d1.test.ts pins those gates).
+describe('the verified moderator on the age-review PATCH', () => {
+  const P = 'f1'.repeat(32);
+  const P2 = 'f2'.repeat(32);
+  const VERIFIED = 'e'.repeat(64);
+  const keycastEnv = () => ({
+    ...env,
+    KEYCAST_URL: 'https://keycast.invalid',
+    KEYCAST_SERVICE_TOKEN: 'test-token',
+    NOSTR_NSEC: 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5',
+    RELAY_URL: 'wss://relay.invalid',
+    BLOSSOM_WEBHOOK_SECRET: 'test-blossom',
+  } as unknown as Parameters<typeof handleUpdateAgeReviewCase>[2]);
+  let statusBodies: Array<Record<string, unknown>>;
+  let minorCalls: Array<{ method: string; url: string }>;
+
+  beforeEach(async () => {
+    await reset();
+    for (const table of ['protected_minor_projection_jobs', 'protected_minor_account_bindings', 'protected_minor_subjects']) {
+      await DB.prepare(`DELETE FROM ${table}`).run();
+    }
+    __clearModeratorLoginCache();
+    statusBodies = [];
+    minorCalls = [];
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith('/api/nostr')) return Response.json({ result: VERIFIED });
+      if (url.includes('keycast.invalid') && url.endsWith('/status')) {
+        statusBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      if (url.includes('/verified-minor')) minorCalls.push({ method: init?.method ?? 'GET', url });
+      if (url.includes('/admin/api/user/')) return new Response('[]', { status: 200 });
+      return new Response('{}', { status: 200 });
+    });
+  });
+  afterEach(() => vi.restoreAllMocks());
+
+  async function seed(id: string, pubkey: string, state: string, moderatorPubkey: string | null = null) {
+    await DB.prepare(`INSERT INTO age_review_cases
+      (id, pubkey, state, suspected_age_band, deadline_at, clock_paused, version, moderator_pubkey)
+      VALUES (?, ?, ?, 'age_13_15', ?, 0, 0, ?)`)
+      .bind(id, pubkey, state, new Date(Date.now() + 9 * 864e5).toISOString(), moderatorPubkey).run();
+  }
+  function send(id: string, body: Record<string, unknown>, moderator: string | undefined) {
+    return handleUpdateAgeReviewCase(new Request(`https://api.test/api/age-review/cases/${id}`, {
+      method: 'PATCH', body: JSON.stringify(body),
+    }), id, keycastEnv(), cors, moderator);
+  }
+  const storedModerator = async (id: string) => (await DB.prepare('SELECT moderator_pubkey FROM age_review_cases WHERE id = ?')
+    .bind(id).first<{ moderator_pubkey: string | null }>())?.moderator_pubkey;
+
+  it('ignores a body moderator_pubkey and leaves the column unchanged', async () => {
+    await seed('ig', P, 'under_moderator_review');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const named = await send('ig', { resolution_note: 'first', moderator_pubkey: 'c'.repeat(64) }, VERIFIED);
+    expect(named.status).toBe(200);
+    expect(await storedModerator('ig')).toBeNull();
+    // The differing claim is visible in the log, and only there.
+    expect(warn).toHaveBeenCalledWith(
+      `[moderator-identity] /api/age-review/cases: claimed moderator ${'c'.repeat(64)} differs from verified ${VERIFIED}`,
+    );
+
+    // The old type check is gone with the field: a non-string claim is ignored, not a 400.
+    const malformed = await send('ig', { resolution_note: 'second', moderator_pubkey: 42 }, VERIFIED);
+    expect(malformed.status).toBe(200);
+    expect(await storedModerator('ig')).toBeNull();
+    const note = await DB.prepare("SELECT resolution_note FROM age_review_cases WHERE id = 'ig'")
+      .first<{ resolution_note: string }>();
+    expect(note?.resolution_note).toBe('second');
+  });
+
+  it('passes the verified moderator to setVerifiedMinor, clearVerifiedMinor and clearSubject', async () => {
+    await seed('ap', P, 'submitted_for_review');
+    expect((await send('ap', { state: 'cleared', resolution: 'approved_minor' }, VERIFIED)).status).toBe(200);
+    expect(minorCalls).toEqual([{
+      method: 'PUT',
+      url: `https://keycast.invalid/api/admin/users/${P}/verified-minor?actor=${VERIFIED}&reason=age_review_approved`,
+    }]);
+
+    await createSubjectWithBinding(DB, 'onboarding', P2);
+    await seed('dn', P2, 'restricted_pending_user_response');
+    minorCalls = [];
+    await send('dn', { state: 'denied_closed' }, VERIFIED);
+    expect(minorCalls).toEqual([{
+      method: 'DELETE',
+      url: `https://keycast.invalid/api/admin/users/${P2}/verified-minor?actor=${VERIFIED}&reason=age_review_denied`,
+    }]);
+    const subject = await DB.prepare(`SELECT s.classification_state, s.cleared_by FROM protected_minor_subjects s
+      JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id WHERE b.pubkey = ?`)
+      .bind(P2).first<{ classification_state: string; cleared_by: string | null }>();
+    expect(subject).toEqual({ classification_state: 'cleared', cleared_by: VERIFIED });
+    expect(statusBodies).toContainEqual({ status: 'banned', reason: 'age_review_denied', actor: VERIFIED });
+  });
+
+  it('sets verified_minor with no actor without a verified login, even when the case row has moderator_pubkey set', async () => {
+    await seed('ap', P, 'submitted_for_review', 'd'.repeat(64));
+    expect((await send('ap', { state: 'cleared', resolution: 'approved_minor' }, undefined)).status).toBe(200);
+    expect(minorCalls).toEqual([{
+      method: 'PUT',
+      url: `https://keycast.invalid/api/admin/users/${P}/verified-minor?reason=age_review_approved`,
+    }]);
+    expect(statusBodies).toEqual([{ status: 'active' }]);
+  });
+
+  // Through the router: the fetch handler verifies the login and hands the
+  // pubkey to the handler. A body claim is logged and ignored.
+  it('attributes the Keycast suspension to the moderator verified from the login token, not the body', async () => {
+    await seed('rt', P, 'under_moderator_review');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const tasks: Promise<unknown>[] = [];
+    const res = await worker.fetch(new Request('https://api.test/api/age-review/cases/rt', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key', 'X-Divine-Login-Token': 'tok' },
+      body: JSON.stringify({ state: 'restricted_pending_user_response', moderator_pubkey: 'c'.repeat(64) }),
+    }), {
+      ...keycastEnv(),
+      ADMIN_API_KEY: 'test-admin-key',
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      MODERATOR_LOGIN_URL: 'https://login.example.test',
+    } as never, { waitUntil: (task: Promise<unknown>) => { tasks.push(task); } } as unknown as ExecutionContext);
+    await Promise.allSettled(tasks);
+
+    expect(res.status).toBe(200);
+    expect(statusBodies).toEqual([{ status: 'suspended', reason: 'age_review', actor: VERIFIED }]);
+    expect(await storedModerator('rt')).toBeNull();
+    expect(warn).toHaveBeenCalledWith(
+      `[moderator-identity] /api/age-review/cases: claimed moderator ${'c'.repeat(64)} differs from verified ${VERIFIED}`,
+    );
   });
 });

@@ -11,6 +11,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserManagement } from './UserManagement';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
@@ -28,11 +29,13 @@ vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => navigate,
 }));
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 const MOD_PUBKEY = 'e'.repeat(64);
+const MOD_TOKEN = 'moderator-login-token';
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => MOD_TOKEN }),
 }));
 // UserIdentifier resolves profiles through Nostr; irrelevant to guard wiring.
 vi.mock('@nostrify/react', () => ({
@@ -172,6 +175,9 @@ describe('UserManagement age-review guard wiring', () => {
     fireEvent.click(screen.getByRole('button', { name: /^Allow User$/i }));
 
     await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('unbanpubkey', [PUBKEY, undefined]));
+    // The allow and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'callRelayRpc')).toEqual([MOD_TOKEN]);
   });
 
   it('routes a ban through the moderation endpoint helper', async () => {
@@ -184,6 +190,9 @@ describe('UserManagement age-review guard wiring', () => {
 
     await waitFor(() => expect(api.banPubkey).toHaveBeenCalledWith(PUBKEY, 'Account banned by moderator'));
     expect(api.callRelayRpc).not.toHaveBeenCalledWith('banpubkey', expect.anything());
+    // The ban and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'banPubkey')).toEqual([MOD_TOKEN]);
   });
 
   async function banViaDialog() {
@@ -289,6 +298,9 @@ describe('UserManagement drops cached authored-content reads after an account ac
     fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
 
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+    // The unsuspend and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'unsuspendPubkey')).toEqual([MOD_TOKEN]);
   });
 
   it('after an unban', async () => {
@@ -300,6 +312,9 @@ describe('UserManagement drops cached authored-content reads after an account ac
     fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
 
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+    // The unban and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
   });
 
   it('after an allow', async () => {

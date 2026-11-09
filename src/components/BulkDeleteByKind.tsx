@@ -66,9 +66,10 @@ interface BulkDeleteByKindProps {
   onComplete?: () => void;
   /** Report the delete is taken from, recorded on each decision row */
   reportId?: string;
-  /** Snapshot the acting moderator's pubkey, resolved once at job start so a
-   *  logout/switch mid-delete can't retarget the attribution (#178). */
-  getModeratorPubkey?: () => Promise<string | undefined>;
+  /** The acting moderator's login token, taken once at the click so a
+   *  logout/switch mid-delete can't retarget the attribution (#178).
+   *  Required, so a new caller cannot leave its deletes unattributed. */
+  getModeratorToken: () => string | undefined;
   /** Account status where the caller already has it: true, false, or
    *  null/undefined when unknown. The relay hides a banned or suspended
    *  account's events from every listing, so its counts read as zero. */
@@ -147,7 +148,7 @@ function describeOutcome(job: BulkJob, expected: ExpectedCount | undefined, cont
   };
 }
 
-export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPubkey, isBanned, isSuspended }: BulkDeleteByKindProps) {
+export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorToken, isBanned, isSuspended }: BulkDeleteByKindProps) {
   const api = useAdminApi();
   const { toast } = useToast();
   const queryClient = useQueryClient();
@@ -156,8 +157,8 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
   const [selectedKind, setSelectedKind] = useState<string>("34235"); // Default to Addressable Video
   const [dialogOpen, setDialogOpen] = useState(false);
   const [reason, setReason] = useState("");
-  // True while the moderator's identity resolves, before the enqueue is pending,
-  // so a second click in that gap cannot start a second job.
+  // True from the click until the enqueue settles, so a second click before
+  // the enqueue shows as pending cannot start a second job.
   const [starting, setStarting] = useState(false);
   // What the moderator confirmed for the job the hook holds. It is set only
   // once that job's enqueue succeeds, so a later attempt that never became a
@@ -200,10 +201,11 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
       }
       onComplete?.();
     },
-    onError: (error) => {
+    onError: (error, target) => {
       // Like Delete All Content, the worker refuses a bulk job on an account
-      // with an open age-review case; send the moderator to the case.
-      if (redirectIfGuarded(error, pubkey)) return;
+      // with an open age-review case; send the moderator to that account's case,
+      // which may no longer be the account shown.
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: "Bulk delete failed", description: error.message, variant: "destructive" });
     },
     onTrackingLost: () => {
@@ -234,24 +236,17 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorPub
 
   const handleDelete = async () => {
     if (!counts) return;
+    const loginToken = getModeratorToken(); // take the login at the click
     const kind = Number(selectedKind);
     setStarting(true);
     try {
       const confirmed = { count: selectedCount ?? 0, complete: counts.complete, kind };
-      let moderatorPubkey: string | undefined;
-      try {
-        moderatorPubkey = await getModeratorPubkey?.();
-      } catch (error) {
-        // Attribution is non-critical: the job's rows fall back to the worker's key.
-        console.warn("[BulkDeleteByKind] could not resolve the moderator pubkey", error);
-      }
       try {
         await bulkJob.startAsync("delete-kind", {
           kind,
           reason: reason.trim() || `Bulk delete: kind ${kind}`,
-          moderatorPubkey,
           reportId,
-        });
+        }, loginToken);
         setExpected(confirmed);
       } catch {
         // The hook's onError has reported it; the previous job's outcome stands.

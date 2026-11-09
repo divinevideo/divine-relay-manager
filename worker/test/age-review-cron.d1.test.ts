@@ -543,7 +543,7 @@ describe('age-review cron on real D1', () => {
         (subject_id, pubkey, reason, state, created_at, updated_at)
         VALUES (?, ?, 'age_review_approved', 'pending', ?, ?)`).bind(subjectId, P, now, now).run();
 
-      const result = await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
+      const result = await clearSubject(DB, retry.pubkey, undefined, retry.reason, retry.subjectId, retry.denialCaseId);
 
       expect(result).toEqual({ success: true, projectionPubkey: P, keptActive: true });
       expect(await activeCount()).toBe(1);
@@ -592,13 +592,28 @@ describe('age-review cron on real D1', () => {
       await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
       const [retry] = await pendingSubjectClears(DB);
 
-      const result = await clearSubject(DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId);
+      const result = await clearSubject(DB, retry.pubkey, undefined, retry.reason, retry.subjectId, retry.denialCaseId);
 
       expect(result).toEqual({ success: true, projectionPubkey: P });
       expect(await activeCount()).toBe(0);
       const job = await DB.prepare('SELECT reason, state FROM protected_minor_projection_jobs WHERE subject_id = ?')
         .bind(subjectId).first<{ reason: string; state: string }>();
       expect(job).toEqual({ reason: 'age_review_denied', state: 'pending' });
+    });
+
+    it('(j) the cron retry records no moderator, even when the denial row carries a legacy moderator_pubkey', async () => {
+      // A denial written before #178 phase 2 holds a body-supplied, unverified
+      // moderator_pubkey. Its inline clear failed, so the subject is still active.
+      const { subjectId } = await createSubjectWithBinding(DB, 'onboarding-case', P);
+      await caseAt('deny-case', 'denied_closed', null, '2026-03-01 00:00:00');
+      await DB.prepare("UPDATE age_review_cases SET moderator_pubkey = ? WHERE id = 'deny-case'")
+        .bind('d'.repeat(64)).run();
+
+      await checkAgeReviewDeadlines(env());
+
+      const subject = await DB.prepare('SELECT classification_state, cleared_by FROM protected_minor_subjects WHERE subject_id = ?')
+        .bind(subjectId).first();
+      expect(subject).toEqual({ classification_state: 'cleared', cleared_by: null });
     });
 
     it('(i) an approval landing while an expiry runs its other legs keeps the subject and the keycast flag', async () => {

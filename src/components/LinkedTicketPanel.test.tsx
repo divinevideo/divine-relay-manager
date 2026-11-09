@@ -6,26 +6,30 @@ import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import TestApp from '@/test/TestApp';
 import { LinkedTicketPanel } from './LinkedTicketPanel';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const getLinkedTickets = vi.fn();
 const closeTicket = vi.fn();
 const toast = vi.fn();
+const MOD_TOKEN = 'moderator-login-token';
+const moderatorApi = withAsModerator({
+  getLinkedTickets: (...args: unknown[]) => getLinkedTickets(...args),
+  closeTicket: (...args: unknown[]) => closeTicket(...args),
+});
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test',
-  useAdminApi: () => ({
-    getLinkedTickets: (...args: unknown[]) => getLinkedTickets(...args),
-    closeTicket: (...args: unknown[]) => closeTicket(...args),
-  }),
+  useAdminApi: () => moderatorApi,
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ getModeratorPubkey: async () => 'b'.repeat(64) }),
+  useCurrentUser: () => ({ getModeratorToken: () => MOD_TOKEN }),
 }));
 
 const EVENT = 'e'.repeat(64);
 
 beforeEach(() => {
+  moderatorApi.moderatorCall.mockClear();
   getLinkedTickets.mockReset();
   closeTicket.mockReset();
   toast.mockReset();
@@ -99,7 +103,8 @@ describe('LinkedTicketPanel', () => {
     await waitFor(() => expect(screen.getByText(/Closing…/)).toBeInTheDocument());
     // The sibling keeps its own active button rather than being greyed out too.
     expect(screen.getByRole('button', { name: /close ticket/i })).toBeEnabled();
-    expect(closeTicket).toHaveBeenCalledWith(1001, 'b'.repeat(64));
+    expect(closeTicket).toHaveBeenCalledWith(1001);
+    expect(tokensFor(moderatorApi, 'closeTicket')).toEqual([MOD_TOKEN]);
     resolveClose();
   });
 

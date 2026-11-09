@@ -56,10 +56,10 @@ export function AccountTypeBadge({ accountStatus, accountStatusError, accountSta
 
 /** The badge for one pubkey, looked up through the shared account-status query. */
 export function AccountTypeLabel({ pubkey }: { pubkey: string | null | undefined }) {
-  // Lowercase to share age review's cache entry. A report's p tag is written by
-  // whoever filed it, so anything but a 64-hex pubkey is never looked up: a path
-  // like '../info' would otherwise reach another route that answers success.
-  const lookup = isHex64(pubkey) ? pubkey.toLowerCase() : undefined;
+  // A report's p tag is written by whoever filed it. The shared hook never looks
+  // up anything but a 64-hex pubkey; checking here too lets the label say
+  // "unavailable" for one instead of rendering as a lookup that never ran.
+  const lookup = isHex64(pubkey) ? pubkey : undefined;
   const { data, isError, isLoading } = useAccountStatus(lookup);
   if (!pubkey) return null;
   if (!lookup) return <AccountTypeBadge accountStatus={undefined} accountStatusError accountStatusLoading={false} />;

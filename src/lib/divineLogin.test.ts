@@ -7,6 +7,7 @@ const { oauth, createDivineClient } = vi.hoisted(() => {
     getAuthorizationUrl: vi.fn(),
     parseCallback: vi.fn(),
     exchangeCode: vi.fn(),
+    getSession: vi.fn(),
     getSessionWithRefresh: vi.fn(),
     logout: vi.fn(),
   };
@@ -115,6 +116,143 @@ describe('divineLogin', () => {
   it('getSession delegates to getSessionWithRefresh', async () => {
     oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
     expect(await getSession()).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+  });
+
+  // Keycast refresh tokens are single use, so two overlapping refreshes sign the
+  // moderator out: the second is refused and the SDK deletes the session.
+  it('getSession shares one in-flight call between concurrent callers', async () => {
+    let release!: (v: { bunkerUrl: string; accessToken: string }) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    const first = getSession();
+    const second = getSession();
+    release({ bunkerUrl: 'bunker://x', accessToken: 't' });
+    expect(await first).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+    expect(await second).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+    expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+
+    // Once it settles, the next call reads again.
+    oauth.getSessionWithRefresh.mockResolvedValue(null);
+    expect(await getSession()).toBeNull();
+    expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(2);
+  });
+
+  it('getSession runs under a cross-tab Web Lock when one is available', async () => {
+    let grant!: () => void;
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      const pending = getSession();
+      expect(request).toHaveBeenCalledWith(
+        'divine-login:session', { signal: expect.any(AbortSignal) }, expect.any(Function),
+      );
+      // Another tab holds the lock: nothing reads or refreshes until it is granted.
+      expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+      grant();
+      expect(await pending).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
+  // A tab that holds the lock and never lets go must not leave this one
+  // resolving forever, with every action unattributed.
+  it('getSession reads without the lock once the wait for it times out', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    // Never grants; rejects as the platform does when the signal aborts.
+    const request = vi.fn((_name: string, opts: LockOptions) => new Promise((_resolve, reject) => {
+      opts.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+    }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      let settled: unknown = 'pending';
+      void getSession().then((v) => { settled = v; });
+
+      await vi.advanceTimersByTimeAsync(19_999);
+      expect(settled).toBe('pending');
+      expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(1);
+      expect(settled).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+      expect(warn).toHaveBeenCalledWith('[divine-login] session lock not granted in time; reading without it');
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+      warn.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
+  it('getSession does not fall back when the read under the lock fails', async () => {
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) => cb());
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockRejectedValue(new Error('storage disabled'));
+      await expect(getSession()).rejects.toThrow('storage disabled');
+      expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
+  // Another tab's lock can be held for the length of a refresh. A logout while
+  // this read waits must stop it reading, or refreshing, the signed-out session,
+  // and must still hold once the lock is granted: the holder's refresh may have
+  // saved the old session after the logout cleared it. This read cannot tell
+  // that from a sign-in made meanwhile, so it fails closed and clears storage.
+  it('getSession skips the refresh and clears storage when a logout lands while it waits for the lock', async () => {
+    let grant!: () => void;
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'old' });
+      const pending = getSession();
+      logout();
+      grant();
+      expect(await pending).toBeNull();
+      expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+      expect(oauth.logout).toHaveBeenCalledTimes(2); // the sign-out, then the clear under the lock
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
+  // The SDK can persist a refresh that finishes after a logout. That session is
+  // cleared; anything else in storage by then was written by a newer sign-in in
+  // another tab, and is left alone.
+  it.each([
+    ['clears the session a refresh re-persisted after a logout', 'old', 2],
+    ['leaves a newer sign-in alone when a refresh finishes after a logout', 'newer', 1],
+  ] as const)('getSession %s', async (_name, storedToken, logoutCalls) => {
+    let release!: (v: { bunkerUrl: string; accessToken: string }) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    oauth.getSession.mockReturnValue({ bunkerUrl: 'bunker://x', accessToken: storedToken });
+    const pending = getSession();
+    await Promise.resolve();
+    logout();
+    release({ bunkerUrl: 'bunker://x', accessToken: 'old' });
+    expect(await pending).toBeNull();
+    expect(oauth.logout).toHaveBeenCalledTimes(logoutCalls);
+  });
+
+  // Nothing to match on: a session without an access token is not proof that
+  // storage holds this read's write, and an empty storage may hold another
+  // tab's sign-in in progress (its PKCE verifier), which logout would delete.
+  it('getSession clears nothing after a logout when the stale refresh has no access token', async () => {
+    let release!: (v: { bunkerUrl: string }) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    oauth.getSession.mockReturnValue(null);
+    const pending = getSession();
+    await Promise.resolve();
+    logout();
+    release({ bunkerUrl: 'bunker://x' });
+    expect(await pending).toBeNull();
+    expect(oauth.logout).toHaveBeenCalledTimes(1); // the sign-out only
   });
 
   it('logout delegates to the SDK', () => {
