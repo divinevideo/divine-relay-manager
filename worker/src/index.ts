@@ -1667,9 +1667,9 @@ async function runRelayRpc(
   // the ban list with no way out of the UI. Nothing is risked by allowing it: a
   // non-canonical request value reaches only the relay rows written with that same
   // value (Keycast refuses it outright), so it lifts nothing on the account an
-  // age-review case holds, which is why the guard also lets it through. A case
-  // opened before #313 can still carry an uppercase pubkey; for a lowercase
-  // reversal the guard's lookup finds it (see getActiveAgeReviewCase).
+  // age-review case holds, which is why the guard also lets it through. Cases
+  // are stored under a lowercase pubkey (#313), so the guard's exact lookup
+  // finds the case a lowercase reversal is about.
   if (
     (body.method === 'banpubkey' || body.method === 'suspendpubkey')
     && !/^[0-9a-f]{64}$/.test(target)

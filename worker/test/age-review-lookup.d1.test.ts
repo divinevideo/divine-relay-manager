@@ -8,8 +8,8 @@ import worker from '../src/index';
 import { ensureSchema } from '../src/db';
 import { getActiveAgeReviewCase } from '../src/age-review-lookup';
 import { ageReviewActiveGuard } from '../src/age-review';
-import { handleBulkJobStatus, handleBulkModerateEnqueue, processBulkJob } from '../src/bulk-moderate';
-import type { BulkEnqueueResponse, BulkJob, BulkJobMessage } from '../../shared/bulk-moderation';
+import { handleBulkModerateEnqueue, processBulkJob } from '../src/bulk-moderate';
+import type { BulkJobMessage } from '../../shared/bulk-moderation';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -73,12 +73,10 @@ describe('getActiveAgeReviewCase', () => {
   });
 });
 
-// A case's pubkey is the report's `p` tag as written, so a case can be stored
-// in uppercase while every caller asks in lowercase (#313). The lookup matches
-// it only for the callers that would lift a hold by missing it: reversals,
-// loosening bulk actions, a note's Restore and the active-case route. Suspend
-// and the enforcing bulk actions match exactly, as before: matching there
-// would keep no hold, only refuse enforcement.
+// Every path opens cases under a lowercase pubkey (#313), and production held
+// no case in another spelling before or after that deploy, so the lookup
+// matches exactly everywhere. A case stored in another spelling is not found:
+// these pin that no caller widens the match again.
 describe('a case stored under an uppercase pubkey', () => {
   const MIXED = 'Ab'.repeat(32);
   const LOWER = MIXED.toLowerCase();
@@ -86,24 +84,12 @@ describe('a case stored under an uppercase pubkey', () => {
 
   beforeEach(async () => { await insertCase(MIXED.toUpperCase(), 'open_reported'); });
 
-  it('is found by the lowercase pubkey only when asked to match any case', async () => {
+  it('is not found by the lowercase pubkey', async () => {
     expect(await getActiveAgeReviewCase(LOWER, { DB })).toBeNull();
-    expect((await getActiveAgeReviewCase(LOWER, { DB }, { anyCase: true }))?.id).toBe('c1');
   });
 
-  // Until #313 an account can have an open case under each spelling (an exact
-  // insert beside an uppercase report case). The one stored as asked comes
-  // first, wherever it sits in the table, so the route names the case main does.
-  it('answers the case stored exactly as asked before one stored in uppercase', async () => {
-    await insertCase(LOWER, 'open_reported'); // c2; c1 is the uppercase one
-    expect((await getActiveAgeReviewCase(LOWER, { DB }, { anyCase: true }))?.id).toBe('c2');
-    expect((await getActiveAgeReviewCase(MIXED.toUpperCase(), { DB }, { anyCase: true }))?.id).toBe('c1');
-  });
-
-  it('holds the guard when it fails closed, and only then', async () => {
-    const held = await ageReviewActiveGuard(LOWER, { DB } as never, {}, 'held', { failClosed: true });
-    expect(held?.status).toBe(409);
-    expect(await held?.json()).toMatchObject({ code: 'age_review_active', caseId: 'c1' });
+  it('does not hold the guard, even when it fails closed', async () => {
+    expect(await ageReviewActiveGuard(LOWER, { DB } as never, {}, 'held', { failClosed: true })).toBeNull();
     expect(await ageReviewActiveGuard(LOWER, { DB } as never, {}, 'held')).toBeNull();
   });
 
@@ -142,61 +128,30 @@ describe('a case stored under an uppercase pubkey', () => {
     }
   }
 
-  // What the case hand-off and the panel's pause ask.
-  it('is the open case the active-case route answers', async () => {
+  it('is not the open case the active-case route answers', async () => {
     const res = await send(`/api/age-review/active-case?pubkey=${LOWER}`);
     expect(res.status).toBe(200);
-    expect(res.json).toMatchObject({ success: true, case: { id: 'c1' } });
+    expect(res.json).toMatchObject({ success: true, case: null });
   });
 
-  it("refuses a note's Restore, and writes nothing", async () => {
-    const res = await send('/api/moderate-media', { sha256: '5'.repeat(64), action: 'SAFE', from: 'QUARANTINE', pubkey: LOWER });
-    expect(res.status).toBe(409);
-    expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c1' });
-    expect(res.outbound).toBe(0);
-  });
-
-  it.each(['unbanpubkey', 'unsuspendpubkey'])('refuses relay-RPC %s, and sends nothing', async (method) => {
-    const res = await send('/api/relay-rpc', { method, params: [LOWER] });
-    expect(res.status).toBe(409);
-    expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c1' });
-    expect(res.outbound).toBe(0);
-  });
-
-  it('lets relay-RPC suspendpubkey through to the relay', async () => {
-    const res = await send('/api/relay-rpc', { method: 'suspendpubkey', params: [LOWER, 'policy'] });
+  it('does not refuse relay-RPC unbanpubkey', async () => {
+    const res = await send('/api/relay-rpc', { method: 'unbanpubkey', params: [LOWER] });
     expect(res).toMatchObject({ status: 200, json: { success: true } });
     expect(res.outbound).toBeGreaterThan(0);
   });
 
-  it.each(['age-gate-all', 'un-age-restrict-all'])('refuses the bulk %s, and queues nothing', async (action) => {
-    const res = await send('/api/bulk-moderate', { pubkey: LOWER, action });
-    expect(res.status).toBe(409);
-    expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c1' });
-    expect(queued).toEqual([]);
-  });
-
-  it.each(['delete-all', 'age-restrict-all'])('queues the bulk %s', async (action) => {
-    const res = await send('/api/bulk-moderate', { pubkey: LOWER, action });
-    expect(res).toMatchObject({ status: 200, json: { success: true } });
-    expect(queued).toEqual([expect.objectContaining({ pubkey: LOWER, action })]);
-  });
-
-  // A loosening job queued before the case opened stops at its next chunk.
-  it('stops a queued Un-age-restrict All before its next chunk sends anything', async () => {
+  // The per-chunk check the bulk queue consumer runs for a loosening job.
+  it('does not stop a queued Un-age-restrict All at its next chunk', async () => {
     const enqueued = await handleBulkModerateEnqueue(new Request('https://relay.example/api/bulk-moderate', {
       method: 'POST', body: JSON.stringify({ pubkey: LOWER, action: 'un-age-restrict-all' }),
     }), env(), {});
-    const { jobId } = await enqueued.json() as BulkEnqueueResponse;
+    expect(enqueued.status).toBe(200);
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
     try {
       await processBulkJob(queued[0], env());
-      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(fetchSpy).toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
     }
-    const job = await (await handleBulkJobStatus(jobId, env(), {})).json() as BulkJob;
-    expect(job.status).toBe('failed');
-    expect(job.failures.join('\n')).toContain(`stopped: ${LOWER} is under age review`);
   });
 });

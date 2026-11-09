@@ -60,8 +60,7 @@ export function AgeReview() {
   const queryClient = useQueryClient();
   const selectedCaseId = searchParams.get('case');
   // Lowercased when it is a 64-character hex id: cases are stored that way, and
-  // the active-case lookup accepts only lowercase hex (#316). That lookup still
-  // finds a case stored under an older uppercase spelling (TODO(#313) there).
+  // the active-case lookup accepts only lowercase hex and matches exactly (#316, #313).
   const rawPubkeyParam = searchParams.get('pubkey');
   const pubkeyParam = rawPubkeyParam === null ? null : canonicalHex64(rawPubkeyParam) ?? rawPubkeyParam;
 
