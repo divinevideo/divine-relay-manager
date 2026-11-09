@@ -1,6 +1,8 @@
 // ABOUTME: Decides which of the three GET /api/reports modes a request is, and
 // ABOUTME: the relay filter each one reads.
 
+import { hexTagFilterValues } from '../../shared/hex-id';
+
 export const REPORT_KIND = 1984;
 
 // Legacy bulk mode only. Kept exactly as it was so a frontend that does not ask
@@ -23,12 +25,13 @@ export type ReportsMode =
 
 // Targeted lookups win over everything: they exist to find reports for targets
 // the queue has dropped, including resolved ones, so they are never filtered.
-// Nostr ids are lowercase hex and relay filters match exactly, so normalize.
+// Relay filters match exactly, and a report's tag can spell its target in
+// uppercase, so a hex id is asked for in both spellings (hexTagFilterValues).
 export function reportsMode(params: URLSearchParams): ReportsMode {
   const event = params.get('event');
-  if (event) return { kind: 'target', filter: { kinds: [REPORT_KIND], '#e': [event.toLowerCase()] } };
+  if (event) return { kind: 'target', filter: { kinds: [REPORT_KIND], '#e': hexTagFilterValues(event) } };
   const pubkey = params.get('pubkey');
-  if (pubkey) return { kind: 'target', filter: { kinds: [REPORT_KIND], '#p': [pubkey.toLowerCase()] } };
+  if (pubkey) return { kind: 'target', filter: { kinds: [REPORT_KIND], '#p': hexTagFilterValues(pubkey) } };
   if (params.get('needs_attention') === '1') return { kind: 'needs-attention' };
   return { kind: 'legacy-bulk', filter: { kinds: [REPORT_KIND], limit: LEGACY_BULK_LIMIT } };
 }

@@ -26,6 +26,7 @@ import {
 import { runBulkModeration, type BulkModerateEnv } from './bulk-moderate';
 import { deleteBulkFailure, ensureBulkNotesTable, storeBulkNotes } from './bulk-notes';
 import { getActiveAgeReviewCase } from './age-review-lookup';
+import { isLowerHex64 } from './hex';
 import { resolveZendeskCreds } from './zendesk-sync';
 import { ageReviewNotesJobId, autoDeletePendingWarning, bulkLegStoppedWarning, MAX_NOTES_PER_WRITE, notSavedWarning, type AccountBulkAction, type BulkNote } from '../../shared/bulk-moderation';
 import { suspendUser, unsuspendUser, banUser, clearVerifiedMinor, setVerifiedMinor, createMinorAccount, HEX_64, type KeycastEnv, type KeycastReason, type KeycastResult } from './keycast-client';
@@ -271,8 +272,8 @@ export async function ageReviewActiveGuard(
   // block exactly that. Such a value reaches only the relay rows written with it:
   // the relay matches bytes exactly and Keycast refuses anything but lowercase
   // hex, so it lifts nothing on the account a case is about. What a case stores
-  // is another matter: a case can hold an uppercase `p` tag until #313, which is
-  // why a fail-closed lookup below matches in any case.
+  // is another matter: a case opened before #313 can hold an uppercase `p` tag,
+  // which is why a fail-closed lookup below matches in any case.
   //
   // The enforce direction does not reach this: handleRelayRpc answers those with a
   // 400 first, since a ban on a value the relay cannot match enforces on nobody.
@@ -923,6 +924,14 @@ export async function handleCreateMinorAccount(
   }
 
   const result = await createMinorAccount(username, displayName, env, provisioningOperationId);
+  // Lowercase only: cases are looked up that way (#313), and the provisioning
+  // tables reject any other form, so check before the result, case, subject or
+  // binding is written, as the replacement path does. Keycast did create an
+  // account here, so the error says what went wrong rather than "failed".
+  if (result.success && !isLowerHex64(result.pubkey)) {
+    console.error('[age-review] Keycast returned a pubkey that is not lowercase hex; nothing recorded');
+    return json({ success: false, error: 'Keycast returned a malformed pubkey; the account may exist in Keycast', provisioning_operation_id: provisioningOperationId }, 502, corsHeaders);
+  }
   if (!result.success || !result.pubkey || (result.account_state !== 'claimed' && !result.claim_url)) {
     const is409 = result.error?.startsWith('409:');
     const is4xx = result.error?.match(/^4\d{2}:/);

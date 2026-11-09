@@ -318,3 +318,32 @@ describe('EventsList profile row', () => {
     expect(await screen.findByText('["not","a","profile"]')).toBeInTheDocument();
   });
 });
+
+// A report's tag is reporter-written and can spell its target in uppercase
+// (#315); relay events carry the lowercase id, so the tag is lowercased.
+describe('EventsList "Has reports" filter', () => {
+  it.each([
+    ['lowercase (control)', (id: string) => id],
+    ['uppercase', (id: string) => id.toUpperCase()],
+  ])('counts a report that spells the event in %s', async (_label, spell) => {
+    const reported = event({ id: 'ab'.repeat(32), pubkey: 'cd'.repeat(32), content: 'reported post' });
+    const quiet = event({ id: '12'.repeat(32), pubkey: '34'.repeat(32), content: 'quiet post' });
+    const report = event({ id: '9'.repeat(64), kind: 1984, pubkey: '5'.repeat(64), tags: [['e', spell(reported.id), 'spam']] });
+    relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
+      const f = filters[0] ?? {};
+      if (f.kinds?.includes(1984)) return [report];
+      if (f.ids || f['#d'] || f.until) return [];
+      return [reported, quiet];
+    });
+    rpc.fn.mockImplementation(async () => []);
+
+    renderEvents('/events');
+    expect(await screen.findByText('quiet post')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('checkbox', { name: /Has reports/ }));
+
+    // Every row is filtered out until the reports read lands, so wait for the
+    // reported row to come back rather than for the quiet one to go.
+    expect(await screen.findByText('reported post')).toBeInTheDocument();
+    expect(screen.queryByText('quiet post')).not.toBeInTheDocument();
+  });
+});

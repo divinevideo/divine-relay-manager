@@ -52,18 +52,16 @@ interface UserActionsProps {
    * current.
    */
   statusStale?: boolean;
-  /**
-   * `accountStatusChanged`: the action was a ban, unban, suspend or unsuspend.
-   * The bulk content actions leave the account's status as it was.
-   */
   onActionComplete?: (change: UserActionChange) => void;
 }
 
 /**
- * What a finished action changed. An account action names the account it was
- * taken on, captured when it started: TanStack hands a pending mutation the
- * latest render's callbacks, so a pubkey read at completion is whichever
- * account is on screen by then, not the one acted on.
+ * What a finished action changed. `accountStatusChanged`: the action was a ban,
+ * unban, suspend or unsuspend; the bulk content actions leave the account's
+ * status as it was. `pubkey` is the account the action was taken on, captured
+ * when it started: TanStack hands a pending mutation the latest render's
+ * callbacks, so a pubkey read at completion is whichever account is on screen
+ * by then, not the one acted on.
  */
 // Each account action also drops the acted-on account's authored-content
 // reads, here rather than in each host so every host gets it (report detail,
@@ -113,7 +111,6 @@ export function UserActions({
   // Shared: the worker refuses suspend/unsuspend/unban on an account under age
   // review. See useAgeReviewGuardRedirect for why this is not copied per site.
   const redirectIfGuarded = useAgeReviewGuardRedirect();
-  const routeToAgeReviewIfGuarded = (error: Error): boolean => redirectIfGuarded(error, pubkey);
 
   // Whether this account has an open age-review case, which changes the Ban
   // copy (a ban purges content the review may still need). For an underage
@@ -170,8 +167,7 @@ export function UserActions({
       });
 
   const suspendUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
+    mutationFn: async (target: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       await runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator'));
@@ -181,23 +177,21 @@ export function UserActions({
         action: 'suspend_user',
         reason: 'Suspended by moderator',
       });
-      return target;
     },
-    onSuccess: (target) => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User suspended' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'suspend' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const unsuspendUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
+    mutationFn: async (target: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      const env = restoreEnvironment; // captured before the call, like target
+      const env = restoreEnvironment; // captured before the call
       await act.unsuspendPubkey(target);
       void markRestored(queryClient, target, env);
       logAudit(act, {
@@ -206,21 +200,19 @@ export function UserActions({
         action: 'unsuspend_user',
         reason: 'Unsuspended by moderator',
       });
-      return target;
     },
-    onSuccess: (target) => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User unsuspended' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const banUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
+    mutationFn: async (target: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       const outcome = await runHidingAction(queryClient, target, env, () => act.banPubkey(target, 'Banned by moderator'));
@@ -230,9 +222,9 @@ export function UserActions({
         action: 'ban_user',
         reason: 'Banned by moderator',
       }, banSuccessNote(outcome));
-      return { outcome, target };
+      return outcome;
     },
-    onSuccess: ({ outcome, target }) => {
+    onSuccess: (outcome, target) => {
       toast({ title: 'User banned from relay', description: banSuccessNote(outcome) });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'ban' });
     },
@@ -243,8 +235,7 @@ export function UserActions({
   });
 
   const unbanUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
+    mutationFn: async (target: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       await act.unbanPubkey(target);
       // A ban usually purged the posts, so no restore window: reset only.
@@ -255,14 +246,13 @@ export function UserActions({
         action: 'unban_user',
         reason: 'Unbanned by moderator',
       });
-      return target;
     },
-    onSuccess: (target) => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User unbanned' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
   });
@@ -318,11 +308,12 @@ export function UserActions({
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.({ accountStatusChanged: false });
     },
-    onError: (error) => {
+    onError: (error, target) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
       // the contexts where the buttons still render (Users tab, non-underage
-      // report on an account that also has an open case).
-      if (routeToAgeReviewIfGuarded(error)) return;
+      // report on an account that also has an open case). The case is the one
+      // for the account enqueued, which may no longer be the one shown.
+      if (redirectIfGuarded(error, target)) return;
       // The enqueue failed, so no job started.
       toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
     },
@@ -376,7 +367,7 @@ export function UserActions({
       {isBanned ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => unbanUserMutation.mutate()} disabled={anyPending}>
+            <Button variant="outline" onClick={() => unbanUserMutation.mutate(pubkey)} disabled={anyPending}>
               <UserCheck className="h-4 w-4 mr-1" />
               {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
             </Button>
@@ -400,7 +391,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                  onClick={() => unsuspendUserMutation.mutate()} disabled={anyPending}>
+                  onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
                   <Play className="h-4 w-4 mr-1" />
                   {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
                 </Button>
@@ -411,7 +402,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-amber-500 text-amber-600 hover:bg-amber-50"
-                  onClick={() => suspendUserMutation.mutate()} disabled={anyPending}>
+                  onClick={() => suspendUserMutation.mutate(pubkey)} disabled={anyPending}>
                   <Pause className="h-4 w-4 mr-1" />
                   {suspendUserMutation.isPending ? 'Suspending...' : 'Suspend User'}
                 </Button>
@@ -433,7 +424,7 @@ export function UserActions({
               : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
-            onConfirm={async () => { await banUserMutation.mutateAsync(); }}
+            onConfirm={async () => { await banUserMutation.mutateAsync(pubkey); }}
             isPending={banUserMutation.isPending}
           />
         </>

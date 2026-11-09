@@ -61,7 +61,8 @@ import { mergeReportFeeds } from "@/lib/reportFeeds";
 import { historyFooterState } from "@/lib/historyFooter";
 import { captureScrollAnchor, restoreScrollAnchor, type ScrollAnchor } from "@/lib/scrollAnchor";
 import { ResolvedHistoryFooter } from "@/components/ResolvedHistoryFooter";
-import { getReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
+import { getReportTarget, getWrittenReportTarget, reportTargetKey, type ReportTarget } from "../../shared/report-target";
+import { canonicalHex64, hexTagFilterValues } from "../../shared/hex-id";
 import { pendingReviewTargetStates } from "../../shared/autohide";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
@@ -390,7 +391,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     ? targetedHistory : null;
   const targetedHistoryTruncated = targetedHistoryOfSelected?.truncated === true;
   // Every report of the selected target was read: a targeted read of that same
-  // target that did not stop early.
+  // target that did not stop early. "Every" means every report spelling the
+  // target lowercase or all uppercase, the spellings the read asks for. An
+  // older mixed-case report beside them is not fetched, and can't be asked for.
   const targetedReadComplete = targetedHistoryOfSelected !== null
     && targetedHistoryOfSelected.exact && !targetedHistoryOfSelected.truncated;
   const attemptedTargetRef = useRef<string | null>(null); // one targeted fetch per target
@@ -633,9 +636,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // The deep-link target, resolved here rather than beside the pane that renders
   // it: the per-target decisions read below is a hook, and the pane sits after
   // this component's early returns.
-  const deepLinkTarget = searchParams.get('event')
-    ? { type: 'event' as const, value: searchParams.get('event')!.toLowerCase() }
-    : { type: 'pubkey' as const, value: (searchParams.get('pubkey') ?? '').toLowerCase() };
+  const deepLinkParam = searchParams.get('event') || searchParams.get('pubkey') || '';
+  const deepLinkTarget = {
+    type: searchParams.get('event') ? 'event' as const : 'pubkey' as const,
+    value: canonicalHex64(deepLinkParam) ?? deepLinkParam,
+  };
 
   // The fallback pane used to filter the bulk decisions list, which was capped at
   // the newest 1000 rows -- so "No prior moderation actions recorded for this
@@ -698,6 +703,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // Add from resolution labels. The worker now walks every page of labels and
     // reduces them to target keys, so this no longer re-derives tags in the
     // browser over a single capped page.
+    //
+    // Every source is keyed as stored, though getReportTarget lowercases a
+    // report's hex id (#315). Labels and decisions: the pane's history and
+    // Reopen read them exactly, so one in another spelling leaves its report
+    // in front of a person rather than hiding it where Reopen can't reach.
+    // Ban lists are relay state: the relay matches a ban exactly, so an
+    // uppercase entry never hid the real, lowercase target. Records written
+    // now are lowercase: decisions are stored that way, labels name the
+    // lowercase target, and the moderation actions ban through the relay-rpc
+    // route or the event coordinator, which refuse any other. Age-review
+    // enforcement bans a case's stored pubkey, lowercase for every case
+    // opened since #313.
     if (labelTargets) {
       for (const target of labelTargets) {
         resolved.add(reportTargetKey(target));
@@ -756,18 +773,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // registering each in listbannedevents, so the event's own key never lands in
   // resolvedTargets; this bridges that gap. See lib/reportResolution.
   //
-  // Lowercased because the predicate lowercases the report's side, and the relay
-  // does not canonicalise this list: funnelcake stores whatever `banpubkey` was
-  // given (its hex check accepts A-F) and `listbannedpubkeys` reads it back
-  // verbatim, while our own ban call forwards the pubkey unchanged -- which for a
-  // report whose event is no longer on the relay is the raw `p` tag. Matching only
-  // on the report side would leave that ban unable to clear its own reports.
+  // Kept as written, while the predicate lowercases the report's side. The
+  // relay does not canonicalise this list (funnelcake stores whatever
+  // `banpubkey` was given) but matches it exactly, so an entry spelled in
+  // uppercase (from a ban placed before #217 began refusing that spelling, or
+  // from age-review enforcement on a case opened before #313) never banned the
+  // lowercase account, and the reports on its posts still need a person. How
+  // bans are placed now: see resolvedTargets.
   // Runtime-guarded for the same reason getReportTargetIds is: this is a relay
   // payload, and a malformed entry must not take the whole queue down.
   const bannedPubkeySet = useMemo(
     () => new Set(
       (bannedPubkeys ?? []).flatMap(entry =>
-        typeof entry.pubkey === 'string' ? [entry.pubkey.toLowerCase()] : []),
+        typeof entry.pubkey === 'string' ? [entry.pubkey] : []),
     ),
     [bannedPubkeys],
   );
@@ -1474,10 +1492,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       return;
     }
 
+    // A hex id is lowercased, as getReportTarget lowercases the listed rows'
+    // targets, so an uppercase link opens the row its lowercase twin does.
     const target: { type: 'event' | 'pubkey'; value: string } | null = eventParam
-      ? { type: 'event', value: eventParam }
+      ? { type: 'event', value: canonicalHex64(eventParam) ?? eventParam }
       : pubkeyParam
-      ? { type: 'pubkey', value: pubkeyParam }
+      ? { type: 'pubkey', value: canonicalHex64(pubkeyParam) ?? pubkeyParam }
       : null;
     if (!target) return;
 
@@ -1546,12 +1566,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         // p-tags a ?pubkey= target (but resolves to an event) a false 'gone'. An empty
         // result here is a relay-confirmed absence; an empty *timeout* never reaches this
         // branch (the worker 502s it → the catch below → 'unavailable').
-        // The worker's filter lowercases the target, so the reports it returns
-        // are matched against the lowercase form: an uppercase link then opens
-        // the same report its lowercase twin does.
+        // The target is canonical where it is built (a hex id lowercased, any
+        // other value as written), as getReportTarget keys a report, so an
+        // uppercase link opens the same report its lowercase twin does.
         const matching = reportsMatchingTarget(
           events,
-          { type: target.type, value: target.value.toLowerCase() },
+          target,
           (e: NostrEvent) => getReportTarget(e),
         );
         if (truncated && events.length === 0) {
@@ -1575,18 +1595,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           // pane counts; it can differ from the deep-link target when no
           // returned report resolves to it (the fallback pool above).
           const latestTarget = getReportTarget(latest);
-          setTargetedHistory(latestTarget
+          const latestWritten = getWrittenReportTarget(latest);
+          setTargetedHistory(latestTarget && latestWritten
             ? {
                 relayUrl,
                 target: latestTarget,
                 truncated,
-                // The read fetched the link's lowercase form (the worker's filter
-                // lowercases it), so only a report whose own tag is that lowercase
-                // value was read for this target: an uppercase tag was not fetched
-                // by a lowercase link. A malformed report's tag can have no value,
-                // and an absent value never equals a string.
-                exact: latestTarget.type === target.type
-                  && latestTarget.value === target.value.toLowerCase(),
+                // Only a report whose own tag spells the target one of the ways
+                // the worker's filter asked for (lowercase or all uppercase) was
+                // read for this target. getReportTarget lowercases the row's
+                // target, so the tag as written is compared: a mixed-case tag was
+                // never fetched. A malformed report's tag can have no value, and
+                // an absent value is never one of those strings.
+                exact: latestWritten.type === target.type
+                  && hexTagFilterValues(target.value).includes(latestWritten.value),
               }
             : null);
           setDeepLinkStatus('found');
@@ -1805,10 +1827,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // the two views cannot drift. Reports render attacker-authored event data:
   // a crashing report degrades to the inline fallback (with the target's
   // identifiers and retry/dismiss) while the reports list stays usable (#158).
-  // deepLinkTarget is lowercased where it is built, matching the worker's
-  // reports filter (reportsMode lowercases too), so the per-target
-  // decisions read keys off the same normalized hex an uppercase-hex deep link
-  // would otherwise miss.
+  // deepLinkTarget is canonical where it is built (a hex id lowercased, any
+  // other value as written), the form the worker now stores decisions in, so
+  // an uppercase-hex deep link reads the same history, under the same cache
+  // key, as its lowercase twin.
   const reportDetailPane = showDeepLinkFallback ? (
     <DeepLinkFallback
       status={deepLinkStatus === 'gone' ? 'gone' : 'unavailable'}

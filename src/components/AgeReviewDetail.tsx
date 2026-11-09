@@ -4,6 +4,7 @@ import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironme
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
+import { invalidateAccountStatus } from "@/lib/accountStatusCache";
 import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
 import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
@@ -112,8 +113,9 @@ interface Props {
 }
 
 // The worker records an approval only for a lowercase 64-char hex pubkey (HEX_64 in
-// worker/src/keycast-client.ts). A case stores the report's p tag verbatim, so a
-// mixed-case tag is possible and could never be approved.
+// worker/src/keycast-client.ts). A case opened before #313 stored the report's p
+// tag verbatim, so a mixed-case pubkey is possible there and could never be
+// approved; cases are opened in lowercase now.
 const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
 
 // The active-case lookup's cache keys for a case's pubkey: its own first,
@@ -342,17 +344,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // or a lost response can follow a write that did commit. Only this case's
     // account can have changed, and only by a state change: a clock or band edit
     // leaves both statuses alone, unless it lost a version conflict, since the
-    // winning write may have been a decision. Key shape:
-    // ['account-status', apiUrl, pubkey], lowercased as useAccountStatus is called.
+    // winning write may have been a decision.
     onSettled: (data, error, updates, ctx) => {
       if (!ctx) return;
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
+      void invalidateAccountStatus(queryClient, ctx.casePubkey);
       const subject = ctx.casePubkey.toLowerCase();
-      queryClient.invalidateQueries({
-        queryKey: ['account-status'],
-        predicate: (query) => query.queryKey[2] === subject,
-      });
       // Restrict suspends the account, clear unsuspends it and deny bans it,
       // so the shared authored-content reads describe the other state
       // (lib/userStatsCache). Settled for the same reason as above: the reset
@@ -419,10 +417,10 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // Protected-minor status from keycast (verified_minor) and the D1 registry
   // (protected_minor). Best-effort: a keycast blip resolves to success:false, and
   // without a registry answer we show status unavailable.
-  // Normalized once here: the case pubkey is stored verbatim from the report's
-  // `p` tag, which is untrusted, while relays and the worker both require
-  // lowercase hex. Passing it raw makes a mixed-case tag look like an account
-  // with no content and no available enforcement.
+  // Normalized once here: a case opened before #313 stored the pubkey verbatim
+  // from the report's untrusted `p` tag, while relays and the worker both
+  // require lowercase hex. Passing it raw makes a mixed-case tag look like an
+  // account with no content and no available enforcement.
   const subjectPubkey = c.pubkey.toLowerCase();
   const { data: accountStatus, isError: accountStatusFailed, isLoading: accountStatusLoading, refetch: refetchAccountStatus } = useAccountStatus(subjectPubkey);
   const { data: userStats, isError: userStatsFailed, isFetching: userStatsFetching, refetch: refetchUserStats } = useUserStats(subjectPubkey);

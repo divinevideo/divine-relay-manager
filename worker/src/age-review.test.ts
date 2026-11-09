@@ -4345,6 +4345,31 @@ describe('handleCreateMinorAccount', () => {
     });
   });
 
+  // Cases are looked up by lowercase pubkey (#313), and the provisioning
+  // tables reject any other form, so a Keycast reply is checked before any
+  // write, as the replacement path checks it.
+  it.each([
+    ['not lowercase hex', 'A'.repeat(64)],
+    ['missing', undefined],
+  ])('opens no case when Keycast reports success with a pubkey that is %s', async (_label, pubkey) => {
+    mockCreateMinorAccount.mockResolvedValue({
+      success: true, pubkey, claim_url: 'https://login.test/claim/abc', expires_at: '2026-06-15T00:00:00Z',
+    });
+    const db = makeMinorDb();
+    const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), makeEnv(db), corsHeaders);
+
+    expect(res.status).toBe(502);
+    // Keycast did create an account, so the error must not say it failed:
+    // an operator reading "creation failed" could retry under a new id.
+    const body = await res.json() as { error: string; provisioning_operation_id: string };
+    expect(body.error).toMatch(/malformed pubkey/);
+    expect(body.error).not.toMatch(/creation failed/);
+    expect(body.provisioning_operation_id).toBeDefined();
+    const prepared = (db.prepare as ReturnType<typeof vi.fn>).mock.calls.map(c => String(c[0]));
+    expect(prepared.some(sql => sql.includes('INSERT INTO age_review_cases'))).toBe(false);
+    expect(prepared.some(sql => sql.includes('SET result_pubkey'))).toBe(false);
+  });
+
   it('creates account and returns success with claim_url', async () => {
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), makeEnv(db), corsHeaders);

@@ -7,6 +7,7 @@ import { MemoryRouter } from 'react-router-dom';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { ApiError } from '@/lib/adminApi';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
+import { accountStatusKey } from '@/lib/accountStatusCache';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 
 // AgeReviewDetail reads relay content-presence via useUserStats (which needs a
@@ -736,7 +737,7 @@ describe('AgeReviewDetail', () => {
     it('invalidates only the decided case\'s account status, not other accounts\' cached status', async () => {
       const { queryClient } = renderDetail(makeCase());
       await waitFor(() => expect(queryClient.isFetching()).toBe(0));
-      const otherKey = ['account-status', 'https://api.test.divine.video', 'c'.repeat(64)];
+      const otherKey = accountStatusKey('https://api.test.divine.video', 'c'.repeat(64));
       queryClient.setQueryData(otherKey, { success: true, status: 'active', verified_minor: false, protected_minor: false });
 
       fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));

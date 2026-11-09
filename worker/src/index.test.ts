@@ -3075,7 +3075,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     const sock = FakeRelaySocket.instances[0];
     expect(sock).toBeDefined();
     // The filter really is the targeted one, not the bulk window.
-    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
+    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64), 'A'.repeat(64) ]);
     sock.message(['EVENT', sock.subId(), EVENT_A]);
     await vi.advanceTimersByTimeAsync(5000);
 
@@ -3493,6 +3493,53 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     // One socket, and it asked about the e-tag.
     expect(FakeRelaySocket.instances).toHaveLength(1);
     expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
+  });
+
+  // The request is canonicalized, so an older tab asking with a report's
+  // uppercase tag clears the lowercase rows the worker now writes. The match
+  // itself stays exact, as the queue keys every stored record as stored; a
+  // machine auto-hide row in a report's uppercase spelling never applied to
+  // the lowercase target.
+  it('deletes decision rows in the canonical spelling only, whichever spelling is asked for', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () =>
+      new Response(JSON.stringify({ result: true }), { status: 200 })
+    ));
+    const statements: Array<{ sql: string; binds: unknown[] }> = [];
+    const db = {
+      prepare: (sql: string) => {
+        const entry = { sql, binds: [] as unknown[] };
+        statements.push(entry);
+        const stmt: Record<string, unknown> = {
+          bind: (...binds: unknown[]) => { entry.binds = binds; return stmt; },
+          run: async () => ({ success: true, meta: { changes: 2 } }),
+          first: async () => null,
+          all: async () => ({ results: [] }),
+        };
+        return stmt;
+      },
+    };
+
+    const resPromise = worker.fetch(
+      new Request(`https://api.example/api/decisions/${'A'.repeat(64)}?targetType=event`, {
+        method: 'DELETE',
+        headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      { ...(reportsEnv as object), DB: db, NOSTR_NSEC: TEST_NSEC } as never,
+      ctx,
+    );
+    for (let t = 0; t < 100 && !FakeRelaySocket.instances[0]; t++) {
+      await new Promise((r) => setTimeout(r, 0));
+    }
+    const sock = FakeRelaySocket.instances[0];
+    sock.message(['EOSE', sock.subId()]);
+    await resPromise;
+
+    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
+    const del = statements.find((s) => /DELETE FROM moderation_decisions/.test(s.sql));
+    expect(del?.binds).toEqual(['a'.repeat(64)]);
+    // And by an exact match: lower() or COLLATE NOCASE would widen it with
+    // the same single bind.
+    expect(del?.sql.replace(/\s+/g, ' ')).toMatch(/WHERE target_id = \? $/);
   });
 
   it('queries the pubkey filter alone for a pubkey target', async () => {

@@ -4,6 +4,7 @@ import { adultSexualCategory } from './sexual-quarantine';
 import type { ReportEvent } from './ReportWatcher';
 import { CSAM_CATEGORIES } from '../../shared/report-classification';
 import { getReportedList } from '../../shared/list-report';
+import { canonicalHex64 } from '../../shared/hex-id';
 
 const PAGE = 100;
 const CHILD_CATEGORIES = new Map(CSAM_CATEGORIES.map(c => [c.toLowerCase(), c]));
@@ -46,7 +47,9 @@ export async function replayAdultReports(
     seen.add(event.id);
     oldest = Math.min(oldest, event.created_at);
     const category = reportCategory(event.tags);
-    const target = event.tags.find(t => t[0] === 'e')?.[1];
+    // Lowercased as the live path does (#315); a value that is not a
+    // 64-character hex id has nothing to hide.
+    const target = canonicalHex64(event.tags.find(t => t[0] === 'e')?.[1]);
     // List reports never enter the quarantine. The live path already logged
     // them for human review; replaying them would repeat that log and alert.
     if (adultSexualCategory(category) && target && !getReportedList(event)) {

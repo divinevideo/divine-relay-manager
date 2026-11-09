@@ -154,6 +154,31 @@ beforeEach(() => {
 
 describe('EventDetail media gating by related reports', () => {
 
+  // A reporter's client can spell the event in uppercase (#315), and the relay
+  // matches tag filters exactly, so the read must ask for that spelling or the
+  // CSAM report never gates the media.
+  it('hides media for a CSAM report that spells the event in uppercase', async () => {
+    const upperCsam = makeReport(
+      [['e', EVENT.id.toUpperCase(), 'illegal'], ['p', REPORTED_PUBKEY, 'illegal'], ['client', 'diVine']],
+      'CONTENT REPORT - NIP-56\nReason: csam\nDetails: x\n',
+    );
+    relay.answer = (filters) => {
+      const e = filters[0]['#e'] as string[] | undefined;
+      return Promise.resolve(e?.includes(EVENT.id.toUpperCase()) ? [upperCsam] : []);
+    };
+    renderDetail();
+    await screen.findByText('1 Related Report');
+    await waitFor(() => expect(screen.getByTestId('media').dataset.show).toBe('false'));
+  });
+
+  it('asks for reports on the account in both spellings too', async () => {
+    const asked: Record<string, unknown>[] = [];
+    relay.answer = (filters) => { asked.push(filters[0]); return Promise.resolve([]); };
+    renderDetail();
+    await waitFor(() => expect(asked.some(f => f['#p'])).toBe(true));
+    expect(asked.find(f => f['#p'])!['#p']).toEqual([REPORTED_PUBKEY, REPORTED_PUBKEY.toUpperCase()]);
+  });
+
   it('hides media by default when a related report is an old-build CSAM report', async () => {
     reports.value = [OLD_BUILD];
     renderDetail();

@@ -16,12 +16,17 @@ describe('resolvedKeysFrom', () => {
     expect(keys.automated.size).toBe(0);
   });
 
-  it('does not change the case of a key', () => {
-    // Resolved keys must not be case-normalized: the worker has to key exactly
-    // as the client does, or a mixed-case pubkey/id resolves on one side and
-    // not the other.
-    const keys = resolvedKeysFrom([{ target_type: 'pubkey', target_id: 'AbC' }], []);
-    expect(keys.resolved.has('pubkey:AbC')).toBe(true);
+  it('keys stored decisions and labels as written', () => {
+    // getReportTarget lowercases a 64-character hex id (#315), but a stored
+    // record is keyed as stored, as the pane's history and Reopen read it. One
+    // in another spelling leaves its report in front of a person rather than
+    // hiding it where Reopen can't reach.
+    const hex = 'ab'.repeat(32);
+    const keys = resolvedKeysFrom(
+      [{ target_type: 'pubkey', target_id: 'AbC' }, { target_type: 'event', target_id: hex.toUpperCase() }],
+      [{ type: 'pubkey', value: hex.toUpperCase() }],
+    );
+    expect([...keys.resolved].sort()).toEqual([`event:${hex.toUpperCase()}`, `pubkey:${hex.toUpperCase()}`, 'pubkey:AbC']);
   });
 
   it('keeps a target only the worker decided on out of resolved, unless a label also resolves it', () => {
@@ -47,6 +52,18 @@ describe('selectReportsNeedingAttention', () => {
     );
     expect(result.events.map(r => r.id)).toEqual(['r1', 'r3']);
     expect(result.counts).toEqual({ targets: 2, resolved: 1 });
+  });
+
+  it('drops a report naming its target in uppercase hex once that target is resolved', () => {
+    // getReportTarget keys both reports lowercase (#315).
+    const lower = 'ab'.repeat(32);
+    const result = selectReportsNeedingAttention(
+      [report('r1', [['e', lower.toUpperCase()]]), report('r2', [['e', lower]])],
+      new Set([`event:${lower}`]),
+      new Set(),
+    );
+    expect(result.events).toEqual([]);
+    expect(result.counts).toEqual({ targets: 0, resolved: 1 });
   });
 
   it('keeps a resolved target that is still pending review', () => {
