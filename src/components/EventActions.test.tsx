@@ -77,6 +77,35 @@ describe('EventActions', () => {
     expect(screen.getByRole('button', { name: /Delete Event & Media/i })).toBeInTheDocument();
   });
 
+  // `null`: nothing has said whether the post is banned. Ban and the deletes
+  // are safe whatever the post's state, and a moderator must always be able to
+  // take a post down, so they stay available. Restore waits for a confirmed ban.
+  it('keeps Ban and the deletes available, without Restore, while the ban status is unknown', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} mediaHashes={['abc123']} isEventBanned={null} />
+    );
+    expect(screen.getByRole('button', { name: /Ban Event/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /^Delete Event$/i })).toBeEnabled();
+    expect(screen.getByRole('button', { name: /Delete Event & Media/i })).toBeEnabled();
+    expect(screen.queryByRole('button', { name: /Restore Event/i })).not.toBeInTheDocument();
+    expect(screen.getByText('Post status could not be confirmed')).toBeInTheDocument();
+  });
+
+  it('says the status is being checked while it is still pending', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={null} statusPending />
+    );
+    expect(screen.getByRole('status')).toHaveTextContent('Checking post status');
+  });
+
+  it('enables Delete Event & Media once the post is known not to be banned', () => {
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} mediaHashes={['abc123']} isEventBanned={false} />
+    );
+    expect(screen.getByRole('button', { name: /Delete Event & Media/i })).toBeEnabled();
+    expect(screen.queryByText(/post status/i)).not.toBeInTheDocument();
+  });
+
   it('renders restore button when event is banned', () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={true} />

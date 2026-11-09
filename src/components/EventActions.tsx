@@ -57,7 +57,18 @@ interface EventActionsProps {
   /** The video's separately uploaded thumbnails. Acted on after mediaHashes. */
   thumbnailHashes?: string[];
   mediaHashStatuses?: MediaHashStatus[];
-  isEventBanned?: boolean;
+  /**
+   * `null` means the post's ban status is not known yet: nothing that can say
+   * has answered. Ban and the deletes stay available, because they are safe
+   * whatever the post's state (banning a banned post is idempotent) and a
+   * moderator must be able to take a post down during a relay hiccup. Restore
+   * is shown only for a post confirmed banned. A note says the status is
+   * unknown. Callers without any status omit it and get the `false` default.
+   * `statusPending` says whether a `null` is still being checked or could not
+   * be confirmed.
+   */
+  isEventBanned?: boolean | null;
+  statusPending?: boolean;
   hasBlockedMedia?: boolean;
   hasRestrictedMedia?: boolean;
   /** The media status check has not answered yet, or is checking again. */
@@ -72,6 +83,7 @@ export function EventActions({
   thumbnailHashes = [],
   mediaHashStatuses = [],
   isEventBanned = false,
+  statusPending = false,
   hasBlockedMedia = false,
   hasRestrictedMedia = false,
   mediaStatusLoading = false,
@@ -665,8 +677,17 @@ export function EventActions({
     </Tooltip>
   );
 
+  // A default-parameter value applies to `undefined`, not to `null`, so a caller
+  // that passes an explicit null keeps it and lands here.
+  const banStatusUnknown = isEventBanned === null;
+
   return (
     <div className="flex flex-wrap gap-2">
+      {banStatusUnknown && (
+        <p role="status" className="basis-full text-xs text-muted-foreground">
+          {statusPending ? 'Checking post status' : 'Post status could not be confirmed'}
+        </p>
+      )}
       {/* Ban / Restore Event (reversible) */}
       {isEventBanned ? (
         <Tooltip>
