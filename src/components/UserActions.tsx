@@ -191,7 +191,7 @@ export function UserActions({
   const unsuspendUserMutation = useMutation({
     mutationFn: async (target: string) => {
       const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const env = restoreEnvironment; // captured before the call, like target
+      const env = restoreEnvironment; // captured before the call
       await api.unsuspendPubkey(target);
       void markRestored(queryClient, target, env);
       logAudit(moderator, {

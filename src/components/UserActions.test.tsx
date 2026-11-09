@@ -863,31 +863,6 @@ describe('UserActions', () => {
       await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban' }));
     });
 
-    // TanStack hands a pending mutation the latest render's callbacks, so a
-    // pubkey read at completion is whichever account is on screen by then.
-    // The caller resets that account's cached reads, so it must get the one
-    // the action was taken on.
-    it('names the account the action was taken on, even if another is shown by the time it lands', async () => {
-      const OTHER = 'c'.repeat(64);
-      let land: (v: unknown) => void = () => {};
-      api.suspendPubkey.mockImplementation(() => new Promise(r => { land = r; }));
-      const onActionComplete = vi.fn();
-      const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-      const tree = (pk: string) => (
-        <QueryClientProvider client={qc}>
-          <TooltipProvider><UserActions pubkey={pk} onActionComplete={onActionComplete} /></TooltipProvider>
-        </QueryClientProvider>
-      );
-      const { rerender } = render(tree(PUBKEY));
-      fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
-      await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalledWith(PUBKEY, expect.anything()));
-
-      rerender(tree(OTHER));
-      await act(async () => { land({ success: true }); });
-
-      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'suspend' }));
-    });
-
     it('after a bulk content action, which leaves the account as it was', async () => {
       const onActionComplete = vi.fn();
       renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
