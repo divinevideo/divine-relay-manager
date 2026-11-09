@@ -137,7 +137,8 @@ Rules:
 
 - The verification runs once per request, near the access gate, before the handler. The handler receives the verified pubkey as an argument. Handlers no longer read a moderator from the body.
 - **Bulk moderate:** the check runs when the request arrives. Only the verified pubkey goes into the queue job. The token never enters the queue. The existing fallback to the worker's admin pubkey for unattributed bulk work stays as it is.
-- **ReportWatcher and Zendesk sync** receive the verified pubkey where they're called from these routes. Their existing format checks stay.
+- **ReportWatcher** receives the verified pubkey where it's called from these routes. Its existing format check stays.
+- **Zendesk sync** keeps naming the worker's admin key on publish, moderate and bulk. Ticket close and the sexual-quarantine decision, which already passed a moderator, pass the verified one, or their "no human named" value (the plan's call, Matt's answer 1).
 - **Age review (my call):** no frontend code sends `moderator_pubkey` on the PATCH today, so the column is never set in practice, and it gates greenlight attachment and voluntary-case detection (`worker/src/age-review.ts`, the `moderator_pubkey IS NULL` checks). Phase 2 does not start setting it. The PATCH stops accepting it from the body (ignored, not refused, as in decision 3). The Keycast audit actor on the minor-status calls (`minorFlagActor`) becomes the verified moderator making this request, with no fallback to the stored column.
 - `POST /api/age-review/create-minor-account` and the protected-minor routes take no moderator from the body (checked).
 
