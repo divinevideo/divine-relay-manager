@@ -1123,6 +1123,17 @@ async function handleInfo(env: Env, corsHeaders: Record<string, string>): Promis
   }
 }
 
+// The kinds POST /api/publish signs with the worker's key: the only kinds the
+// app publishes through it. Every caller sends a NIP-32 label (kind 1985): the
+// moderator label and resolution paths (src/lib/adminApi.ts publishLabel) and
+// moderation automation's enforcement labels. The admin profile (kind 0) is
+// signed in the browser by the logged-in user, not here.
+//
+// This key is also the relay's NIP-86 admin identity (nip86.ts signs its
+// kind 27235 auth with it), so the list is deliberately closed: adding a kind
+// means confirming the relay grants it no meaning as a credential.
+const PUBLISHABLE_KINDS: ReadonlySet<number> = new Set([1985]);
+
 async function handlePublish(
   request: Request,
   env: Env,
@@ -1135,8 +1146,15 @@ async function handlePublish(
   noteClaimedModerator('/api/publish', body.moderatorPubkey, moderator);
   let resolutionVisibility: EventVisibilityResult | undefined;
 
-  if (!body.kind || body.content === undefined) {
+  if (body.kind === undefined || body.kind === null || body.content === undefined) {
     return jsonResponse({ success: false, error: 'Missing required fields: kind, content' }, 400, corsHeaders);
+  }
+  // Checked before the key is read: nothing outside PUBLISHABLE_KINDS is signed.
+  if (!Number.isInteger(body.kind)) {
+    return jsonResponse({ success: false, error: 'kind must be an integer', code: 'invalid_kind' }, 400, corsHeaders);
+  }
+  if (!PUBLISHABLE_KINDS.has(body.kind)) {
+    return jsonResponse({ success: false, error: `kind ${body.kind} is not published by this API`, code: 'kind_not_allowed' }, 400, corsHeaders);
   }
   if (body.moderationReason !== undefined && typeof body.moderationReason !== 'string') {
     return jsonResponse({ success: false, error: 'Invalid moderationReason' }, 400, corsHeaders);

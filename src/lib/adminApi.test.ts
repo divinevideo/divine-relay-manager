@@ -169,7 +169,7 @@ describe('adminApi', () => {
     });
 
     it('should make POST request with correct headers and body', async () => {
-      const event: UnsignedEvent = { kind: 1, content: 'test' };
+      const event: UnsignedEvent = { kind: 1985, content: 'test' };
       mockFetch.mockResolvedValueOnce({
         ok: true,
         json: async () => ({ success: true }),
@@ -351,7 +351,7 @@ describe('adminApi', () => {
   describe('publishEvent', () => {
     it('should POST to /api/publish with event data', async () => {
       const event: UnsignedEvent = {
-        kind: 1,
+        kind: 1985,
         content: 'Hello world',
         tags: [['t', 'test']],
         created_at: 1234567890,
@@ -379,7 +379,7 @@ describe('adminApi', () => {
         json: async () => ({ success: false, error: 'Invalid event' }),
       });
 
-      await expect(publishEvent(API_URL, { kind: 1, content: 'test' })).rejects.toThrow('Invalid event');
+      await expect(publishEvent(API_URL, { kind: 1985, content: 'test' })).rejects.toThrow('Invalid event');
     });
 
     it('should return successful response', async () => {
@@ -389,7 +389,7 @@ describe('adminApi', () => {
         json: async () => mockResponse,
       });
 
-      const result = await publishEvent(API_URL, { kind: 1, content: 'test' });
+      const result = await publishEvent(API_URL, { kind: 1985, content: 'test' });
 
       expect(result).toEqual(mockResponse);
     });
