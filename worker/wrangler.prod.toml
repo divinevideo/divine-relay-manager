@@ -124,6 +124,11 @@ ZENDESK_FIELD_AGE_REVIEW_DEADLINE = "16123853180303"
 ZENDESK_GROUP_ID = "15225535020687"
 # Keycast account suspension API
 KEYCAST_URL = "https://login.divine.video"
+# Where a moderator's Divine login (X-Divine-Login-Token) is verified. Separate from
+# KEYCAST_URL, which drives the account status calls. Must name the same Keycast as
+# the frontend's VITE_DIVINE_LOGIN_URL (src/lib/divineLogin.ts): a token from one
+# Keycast fails verification at another, and attribution silently records null.
+MODERATOR_LOGIN_URL = "https://login.divine.video"
 PROTECTED_MINOR_REPLACEMENT_ENABLED = "false"
 # Greenlight consent reviewer playback: the dedicated Access application's
 # team domain. CONSENT_ACCESS_AUD is set only once that path-scoped Access

@@ -1,6 +1,6 @@
 // ABOUTME: Provider that resolves the divine-login session AND the moderator
 // identity (pubkey + signer) once, so every useCurrentUser consumer shares it
-// (no per-mount RPC, no act-before-resolve null-attribution race).
+// (no per-mount RPC). Attribution goes by the login token (getModeratorToken).
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { StoredCredentials } from '@divinevideo/login';
 import type { NostrSigner } from '@nostrify/nostrify';
@@ -9,13 +9,23 @@ import { DivineRpcSigner } from '@/lib/divineSigner';
 import { DivineSessionContext, type DivineSessionValue } from '@/contexts/DivineSessionContext';
 
 const HEX_64 = /^[0-9a-f]{64}$/;
-// How long an audit write waits for an in-flight pubkey before falling back to
-// null. getPublicKey is cached once resolved, so this only bites in the brief
-// boot window. Never blocks the moderation action itself.
-const MOD_PUBKEY_WAIT_MS = 3000;
 // Stable "no resolved identity" record, so clearing never allocates a new object
 // and re-runs the value memo for nothing.
 const NO_IDENTITY = { token: undefined, pubkey: undefined } as const;
+
+// Scheduled refresh runs this long before the access token expires. Inside the
+// SDK's own window (getSessionWithRefresh refreshes only within 5 minutes of
+// expiry), so the call really refreshes instead of returning the same token.
+const REFRESH_LEAD_MS = 4 * 60_000;
+// Floor on the scheduled refresh, so a token issued with less than the lead
+// left cannot make the schedule refresh in a tight loop.
+const MIN_REFRESH_DELAY_MS = 30_000;
+// setTimeout runs at once for any delay above 2^31-1 ms (about 24.8 days).
+const MAX_TIMER_MS = 2 ** 31 - 1;
+const timerDelay = (ms: number) => Math.min(Math.max(ms, 0), MAX_TIMER_MS);
+// How long after expiresAt the one retry runs when the expiry refresh got the
+// same token back (see the expiry timer).
+const EXPIRY_RETRY_MARGIN_MS = 1_000;
 
 export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);
@@ -34,12 +44,10 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [resolvedForToken, setResolvedForToken] = useState<string | undefined>(undefined);
 
   // Bumped on logout so an in-flight refresh that started earlier can detect it
-  // lost the race and undo any session the SDK re-persisted mid-refresh.
+  // lost the race and discard its result. getSession clears anything the SDK
+  // re-persisted mid-refresh (lib/divineLogin).
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
-  // Latest signer, read by getModeratorPubkey so it can snapshot the identity at
-  // action-start time (see below).
-  const signerRef = useRef<NostrSigner | null>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -47,15 +55,18 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     };
   }, []);
 
-  // Known phase-1 limitation: getSessionWithRefresh() returns null both for "no
-  // session" and "refresh transiently failed", so a network blip during a
-  // focus-triggered refresh collapses to signed-out.
-  // Not self-recovering, despite what this comment used to say: the SDK deletes
-  // the stored session when a refresh throws, so the moderator has to sign in
-  // again rather than wait for the next focus. Attribution-only, and it only
-  // bites a token near enough to expiry to be refreshed at all, so still not
-  // worth a getSession fallback here; revisit with phase-2 verify.
-  const refresh = useCallback(async () => {
+  // The access token now matters for attribution (the worker verifies it on
+  // every action, #178 phase 2), so it is refreshed before it expires: on mount,
+  // on window focus, when the tab becomes visible, on a timer shortly before
+  // expiresAt, and when getModeratorToken finds it expired.
+  // Known limitation: getSessionWithRefresh() returns null both for "no
+  // session" and "refresh failed", and the SDK deletes the stored session when a
+  // refresh throws, so a network blip during a refresh signs the moderator out
+  // and they sign in again. That surfaces as the attribution notice rather than
+  // as silent unattributed actions. Only a refresh near expiry can hit it.
+  // Resolves to the credentials it applied, or undefined when it applied
+  // nothing (unmounted, or a logout won the race). The expiry timer reads it.
+  const loadSession = useCallback(async (): Promise<StoredCredentials | null | undefined> => {
     const gen = generationRef.current;
     let creds: StoredCredentials | null = null;
     try {
@@ -65,29 +76,48 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       // rather than hanging on the loading state forever.
       creds = null;
     }
-    if (!mountedRef.current) return;
+    if (!mountedRef.current) return undefined;
     if (gen !== generationRef.current) {
-      // A logout landed while this resolve was in flight; getSessionWithRefresh
-      // may have re-persisted a refreshed session, so clear it again and bail.
-      sdkLogout();
-      return;
+      // A logout landed while this resolve was in flight: discard the result.
+      // getSession already cleared anything its refresh re-persisted, inside
+      // the read (under the session lock, unless the wait for it timed out).
+      // Clearing again here would run after the lock is released, and could
+      // delete a sign-in another tab has made since.
+      return undefined;
     }
     setCredentials(creds);
     setCredentialsResolved(true);
+    return creds;
   }, []);
+  const refresh = useCallback(async () => {
+    await loadSession();
+  }, [loadSession]);
 
   useEffect(() => {
     void refresh();
     const onFocus = () => {
       void refresh();
     };
+    // A tab brought back from the background may not get a focus event (switching
+    // tabs within one window), and its expiry timer may have been throttled.
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') void refresh();
+    };
     window.addEventListener('focus', onFocus);
+    document.addEventListener('visibilitychange', onVisibility);
     return () => {
       window.removeEventListener('focus', onFocus);
+      document.removeEventListener('visibilitychange', onVisibility);
     };
   }, [refresh]);
 
   const accessToken = credentials?.accessToken;
+  const expiresAt = credentials?.expiresAt;
+  // The access token that reached expiresAt with no refresh replacing it. Set by
+  // the expiry timer below or by getModeratorToken; a new token clears it by no
+  // longer matching.
+  const [expiredToken, setExpiredToken] = useState<string | undefined>(undefined);
+  const tokenExpired = !!accessToken && expiredToken === accessToken;
   // Derived during render, like identityResolved below and for the same reason:
   // the signer is rebuilt from the live token immediately, so an effect that
   // cleared a stale pubkey would land one render too late, and for that render
@@ -96,44 +126,71 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // useCurrentUser does not expose isResolving, so a consumer reading
   // user.pubkey (EditProfileForm loads a profile from it) would see one
   // session's identity attached to another's.
-  const pubkey = resolvedIdentity.token === accessToken ? resolvedIdentity.pubkey : undefined;
+  // An expired token hands out no pubkey either. Keycast refuses the token, so
+  // the worker records nobody, and the UI has to say so (AttributionNotice shows
+  // when there is no user). The pubkey cannot be re-checked by asking the
+  // signer: DivineRpcSigner caches it and would answer from the cache.
+  const pubkey = !tokenExpired && resolvedIdentity.token === accessToken ? resolvedIdentity.pubkey : undefined;
   const signer = useMemo<NostrSigner | null>(
     () => (accessToken ? new DivineRpcSigner(() => accessToken) : null),
     [accessToken],
   );
+  // Latest access token and its expiry, mirrored in a ref so getModeratorToken
+  // is a synchronous read of the live session at call time.
+  const tokenRef = useRef<{ token?: string; expiresAt?: number }>({});
   useEffect(() => {
-    signerRef.current = signer;
-  }, [signer]);
+    tokenRef.current = { token: accessToken, expiresAt };
+  }, [accessToken, expiresAt]);
 
-  // Snapshot the moderator pubkey for an audit write. Reads the signer at call
-  // time (so callers can capture the identity at ACTION START and a later
-  // logout/switch can't retarget a long job) and waits briefly for an in-flight
-  // pubkey before falling back to undefined. getPublicKey is cached once
-  // resolved, so this returns instantly in the common case and never gates the
-  // moderation action.
-  const getModeratorPubkey = useCallback(async (): Promise<string | undefined> => {
-    const sig = signerRef.current;
-    if (!sig) return undefined;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    try {
-      const pkPromise = sig.getPublicKey();
-      // If the timeout wins the race, getPublicKey stays pending; swallow a late
-      // rejection so it doesn't surface as an unhandled promise rejection.
-      pkPromise.catch(() => {});
-      const pk = await Promise.race([
-        pkPromise,
-        new Promise<string>((resolve) => {
-          timer = setTimeout(() => resolve(''), MOD_PUBKEY_WAIT_MS);
-        }),
-      ]);
-      const normalized = pk.trim().toLowerCase();
-      return HEX_64.test(normalized) ? normalized : undefined;
-    } catch {
+  // Stable identity on purpose: it reads the ref, so a caller that took it from
+  // an earlier render still sees the current session. The returned string is a
+  // value, so a token taken at the click is unaffected by what happens next.
+  // Synchronous, so an expired token cannot wait for its refresh: the action
+  // gets no token (and records nobody, which Keycast refusing the stale token
+  // would have done anyway), the UI is told, and the refresh serves the next one.
+  const getModeratorToken = useCallback((): string | undefined => {
+    const { token, expiresAt: expiry } = tokenRef.current;
+    if (token && expiry !== undefined && expiry <= Date.now()) {
+      setExpiredToken(token);
+      void refresh();
       return undefined;
-    } finally {
-      if (timer) clearTimeout(timer);
     }
-  }, []);
+    return token;
+  }, [refresh]);
+
+  // Refresh shortly before the token expires, so a long session in one focused
+  // tab never acts on an expired token. If expiresAt passes anyway (the refresh
+  // failed to replace it, or the timer ran late), mark the token expired and try
+  // once more; a session that cannot refresh then reads as signed out.
+  useEffect(() => {
+    if (!accessToken || expiresAt === undefined) return;
+    const untilExpiry = expiresAt - Date.now();
+    const refreshTimer = setTimeout(() => {
+      void refresh();
+    }, timerDelay(Math.max(untilExpiry - REFRESH_LEAD_MS, MIN_REFRESH_DELAY_MS)));
+    // If this timer runs a moment before the SDK's clock reaches expiresAt, a
+    // session with no refresh token comes back unchanged and still marked
+    // expired, and nothing else would reschedule. So when the same token comes
+    // back, retry once just after expiresAt: the SDK then reports it expired
+    // and the session settles to signed out (or a fresh token).
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let cancelled = false;
+    const expiryTimer = setTimeout(() => {
+      setExpiredToken(accessToken);
+      void loadSession().then((creds) => {
+        if (cancelled || creds?.accessToken !== accessToken) return;
+        retryTimer = setTimeout(() => {
+          void refresh();
+        }, timerDelay(expiresAt + EXPIRY_RETRY_MARGIN_MS - Date.now()));
+      });
+    }, timerDelay(untilExpiry));
+    return () => {
+      cancelled = true;
+      clearTimeout(refreshTimer);
+      clearTimeout(expiryTimer);
+      clearTimeout(retryTimer);
+    };
+  }, [accessToken, expiresAt, refresh, loadSession]);
 
   useEffect(() => {
     let cancelled = false;
@@ -192,6 +249,10 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const logout = useCallback(() => {
     generationRef.current += 1;
     sdkLogout();
+    // Drop the token now rather than waiting for the post-commit effect, so a
+    // click between logout and the re-render takes no token. An action that
+    // already took one keeps its own copy.
+    tokenRef.current = {};
     setCredentials(null);
     setResolvedIdentity(NO_IDENTITY);
     setCredentialsResolved(true); // logout is a definitive "signed out" resolution
@@ -220,12 +281,12 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       isSignedIn,
       isResolving,
       identityUnavailable,
-      getModeratorPubkey,
+      getModeratorToken,
       startLogin: sdkStartLogin,
       logout,
       refresh,
     }),
-    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorPubkey, logout, refresh],
+    [credentials, pubkey, signer, isSignedIn, isResolving, identityUnavailable, getModeratorToken, logout, refresh],
   );
 
   return <DivineSessionContext.Provider value={value}>{children}</DivineSessionContext.Provider>;

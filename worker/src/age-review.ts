@@ -49,6 +49,7 @@ import {
 } from './protected-minors';
 import { digestProvisioningFingerprint, findProvisioningTombstone, resolveTombstoneKey } from './retention';
 import { errorNameOnly } from './error-name';
+import { noteClaimedModerator } from './moderator-identity';
 import {
   parseConsentMultipart,
   trackConsentObject,
@@ -343,6 +344,12 @@ export async function handleUpdateAgeReviewCase(
   caseId: string,
   env: AgeReviewEnv,
   corsHeaders: Record<string, string>,
+  // The moderator the fetch handler verified from the login header, or
+  // undefined. It is the Keycast audit actor on every leg below and the
+  // protected-minor subject's cleared_by on a deny. It is not written to the
+  // case's moderator_pubkey column, which gates Greenlight attachment and
+  // voluntary-case detection.
+  moderator: string | undefined,
 ): Promise<Response> {
   if (!env.DB) return json({ success: false, error: 'Database not configured' }, 500, corsHeaders);
 
@@ -355,6 +362,9 @@ export async function handleUpdateAgeReviewCase(
   }
 
   const body = await request.json() as Record<string, unknown>;
+  // A body moderator is never recorded or used; a differing claim is only logged.
+  const claimedModerator: unknown = body.moderator_pubkey;
+  noteClaimedModerator('/api/age-review/cases', claimedModerator, moderator);
   const updates: string[] = [];
   const binds: unknown[] = [];
   let responseDeadline = existing.deadline_at;
@@ -444,15 +454,6 @@ export async function handleUpdateAgeReviewCase(
   if (responseDeadline !== existing.deadline_at) {
     updates.push('deadline_at = ?');
     binds.push(responseDeadline);
-  }
-
-  // Moderator assignment
-  if (body.moderator_pubkey !== undefined) {
-    if (body.moderator_pubkey !== null && typeof body.moderator_pubkey !== 'string') {
-      return json({ success: false, error: 'moderator_pubkey must be a string or null' }, 400, corsHeaders);
-    }
-    updates.push('moderator_pubkey = ?');
-    binds.push(body.moderator_pubkey as string | null);
   }
 
   // Resolution note
@@ -688,9 +689,9 @@ export async function handleUpdateAgeReviewCase(
 
     // Keycast account status.
     const keycastLeg = await runStatusLeg('Keycast', () =>
-      enteredRestrictedState ? suspendUser(existing.pubkey, 'age_review', env)
-      : clearedCase ? unsuspendUser(existing.pubkey, env)
-      : deniedCase ? banUser(existing.pubkey, 'age_review_denied', env)
+      enteredRestrictedState ? suspendUser(existing.pubkey, 'age_review', env, moderator)
+      : clearedCase ? unsuspendUser(existing.pubkey, env, moderator)
+      : deniedCase ? banUser(existing.pubkey, 'age_review_denied', env, moderator)
       : undefined);
     keycast = keycastLeg.status;
     keycastError = keycastLeg.error;
@@ -711,11 +712,11 @@ export async function handleUpdateAgeReviewCase(
     // keycast's clear is an idempotent no-op for never-minor accounts, so no
     // pre-read is needed.
     //
-    // actor (clear and set alike) = the case's assigned moderator (best-effort:
-    // relay-manager auths with a shared admin pubkey, so there's no per-actor
-    // signal, and moderator_pubkey is unvalidated on write). A malformed/absent
-    // actor is dropped server-side by keycast-client → keycast logs-only.
-    const minorFlagActor = (updated?.moderator_pubkey ?? existing.moderator_pubkey) ?? undefined;
+    // actor (clear and set alike) = the moderator verified from the login token
+    // (#178). There is no fallback to the case's moderator_pubkey column: only a
+    // request body ever wrote it, so it names nobody the worker verified. Without
+    // a verified login the actor is undefined and keycast keeps a log-only audit.
+    const minorFlagActor = moderator;
     // A newer approval of this account landed while this denial ran its other
     // legs: latest decision wins, so its protections, keycast flag included, stay.
     // The denial's relay ban, purge and keycast ban above have already run and
@@ -2871,7 +2872,8 @@ export async function checkAgeReviewDeadlines(env: AgeReviewEnv): Promise<void> 
   }
   for (const retry of subjectClearRetries) {
     const result = await clearSubject(
-      env.DB, retry.pubkey, retry.clearedBy, retry.reason, retry.subjectId, retry.denialCaseId,
+      // No moderator: see pendingSubjectClears for why a retry records null.
+      env.DB, retry.pubkey, undefined, retry.reason, retry.subjectId, retry.denialCaseId,
     );
     if (!result.success) {
       console.error(`[age-review] Protected-subject clear retry failed: ${result.error}`);

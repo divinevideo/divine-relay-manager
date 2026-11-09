@@ -1,7 +1,8 @@
-// ABOUTME: The guarantee that matters, end to end: a signed-in moderator's pubkey
-// reaches a real moderation audit write. Exercises the REAL DivineSessionProvider
-// + REAL useCurrentUser + REAL EventActions, mocking only the SDK boundary and the
-// admin API. Guards against "green units over an inert path" (#178).
+// ABOUTME: The guarantee that matters, end to end: a signed-in moderator's login
+// token reaches every request of a real moderation action. Exercises the REAL
+// DivineSessionProvider + REAL useCurrentUser + REAL EventActions + REAL
+// useAdminApi, mocking only the SDK boundary and the adminApi functions it
+// calls. Guards against "green units over an inert path" (#178).
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -25,6 +26,12 @@ vi.mock('@/lib/divineSigner', () => ({
 // Profile metadata is not part of the attribution path; keep the relay out.
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: {} }) }));
 
+const API_URL = 'https://api.example';
+vi.mock('@/hooks/useAppContext', () => ({
+  useAppContext: () => ({ config: { apiUrl: API_URL, relayUrl: 'wss://relay.example' } }),
+}));
+// The real useAdminApi binds the token; only the request functions are doubles,
+// so each call shows the `{ loginToken }` the wrapper passed on.
 const api = vi.hoisted(() => ({
   hideEvent: vi.fn(),
   restoreEvent: vi.fn(),
@@ -34,17 +41,31 @@ const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
   logDecision: vi.fn(),
 }));
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+vi.mock('@/lib/adminApi', async (orig) => ({
+  ...(await orig<typeof import('@/lib/adminApi')>()),
+  ...api,
+}));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 import { DivineSessionProvider } from '@/components/DivineSessionProvider';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
+import { useDivineSession } from '@/hooks/useDivineSession';
 import { EventActions } from './EventActions';
 
 function Probe() {
   const { user } = useCurrentUser();
-  return <span data-testid="resolved-mod">{user?.pubkey ?? 'none'}</span>;
+  const { isSignedIn } = useDivineSession();
+  return (
+    <>
+      <span data-testid="resolved-mod">{user?.pubkey ?? 'none'}</span>
+      <span data-testid="signed-in">{isSignedIn ? 'yes' : 'no'}</span>
+    </>
+  );
 }
+
+// The login each call carried: the last argument the real wrapper passed on.
+const loginOf = (call: unknown[]) => (call[call.length - 1] as { loginToken?: string } | undefined)?.loginToken;
+const banAudit = () => api.logDecision.mock.calls.find((c) => (c[1] as { action?: string })?.action === 'ban_event');
 
 function renderComposed() {
   const qc = new QueryClient({
@@ -70,25 +91,22 @@ beforeEach(() => {
   getPublicKey.mockResolvedValue(MOD_PUBKEY);
 });
 
-describe('moderator attribution (composed: provider -> useCurrentUser -> moderation action)', () => {
-  it('carries the resolved moderator pubkey to a real moderation audit write', async () => {
+describe('moderator attribution (composed: provider -> useCurrentUser -> useAdminApi -> moderation action)', () => {
+  it('sends the login token on a real moderation action and its audit write', async () => {
     renderComposed();
-    // The shared provider resolves the session + pubkey once; wait for it (the
-    // same resolution EventActions reads) before acting.
     await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent(MOD_PUBKEY));
 
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
     await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
-    await waitFor(() =>
-      expect(api.logDecision).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'ban_event', moderatorPubkey: MOD_PUBKEY }),
-      ),
-    );
+    expect(api.hideEvent).toHaveBeenCalledWith(API_URL, 'event-1', 'Banned by moderator', { loginToken: 'tok' });
+    await waitFor(() => expect(banAudit()).toBeDefined());
+    expect(loginOf(banAudit()!)).toBe('tok');
   });
 
-  it('captures the pubkey for an action fired during the boot-resolve window (no null attribution)', async () => {
-    // getPublicKey is deferred: the moderator acts before their identity resolves.
+  it('sends the token for an action fired while the pubkey is still resolving', async () => {
+    // getPublicKey is deferred: the moderator acts before their identity
+    // resolves. The token does not wait on it, so the action is attributed.
     let releasePubkey!: (pk: string) => void;
     getPublicKey.mockReturnValue(
       new Promise((resolve) => {
@@ -96,25 +114,23 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
       }),
     );
     renderComposed();
-    // Ban immediately, while the pubkey is still resolving (probe reads 'none').
+    await waitFor(() => expect(screen.getByTestId('signed-in')).toHaveTextContent('yes'));
     expect(screen.getByTestId('resolved-mod')).toHaveTextContent('none');
-    fireEvent.click(await screen.findByRole('button', { name: /Ban Event/i }));
-    await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
-    // The detached audit path waits for the in-flight identity; now it resolves.
+
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+
+    await waitFor(() => expect(banAudit()).toBeDefined());
+    expect(loginOf(api.hideEvent.mock.calls[0])).toBe('tok');
+    expect(loginOf(banAudit()!)).toBe('tok');
     await act(async () => {
       releasePubkey(MOD_PUBKEY);
     });
-    await waitFor(() =>
-      expect(api.logDecision).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'ban_event', moderatorPubkey: MOD_PUBKEY }),
-      ),
-    );
   });
 
-  it('attributes the moderator captured at action start, not one switched in mid-request (dcadenas #181)', async () => {
-    // The exact race: identity must be captured BEFORE the authoritative request,
-    // so a logout/account-switch WHILE the request is in flight can't retarget it.
-    // This fails on the old code (which read identity after the request).
+  it('an action and its follow-up logDecision both send the token taken at the click, even after an account switch mid-action', async () => {
+    // The exact race (dcadenas #181): the token is taken BEFORE the
+    // authoritative request, so a logout or account switch WHILE it is in
+    // flight cannot retarget the action or its audit write.
     const PK_A = 'a'.repeat(64);
     const PK_B = 'b'.repeat(64);
     getPublicKey.mockImplementation(async (token: string) => (token === 'tokB' ? PK_B : PK_A));
@@ -129,35 +145,53 @@ describe('moderator attribution (composed: provider -> useCurrentUser -> moderat
     renderComposed();
     await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent(PK_A));
 
-    // Start the ban: the mutation captures moderator A, then awaits banEvent.
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
     await waitFor(() => expect(api.hideEvent).toHaveBeenCalled());
 
-    // Switch accounts WHILE banEvent is still in flight.
+    // Switch accounts WHILE the ban is still in flight.
     getSession.mockResolvedValue({ bunkerUrl: 'bunker://y', accessToken: 'tokB' });
     await act(async () => {
       window.dispatchEvent(new Event('focus'));
     });
     await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent(PK_B));
 
-    // The request completes; the audit must attribute A (captured at start), not B.
     await act(async () => {
       releaseBan();
     });
-    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
-    const banCall = api.logDecision.mock.calls.find((c) => c[0]?.action === 'ban_event');
-    expect(banCall?.[0].moderatorPubkey).toBe(PK_A);
+    await waitFor(() => expect(banAudit()).toBeDefined());
+    expect(loginOf(api.hideEvent.mock.calls[0])).toBe('tokA');
+    expect(loginOf(banAudit()!)).toBe('tokA');
   });
 
-  it('writes null attribution (not a stale/other pubkey) when signed out', async () => {
+  it('sends no login token (not a stale or other one) when signed out', async () => {
     getSession.mockResolvedValue(null);
     renderComposed();
-    await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent('none'));
+    await waitFor(() => expect(screen.getByTestId('signed-in')).toHaveTextContent('no'));
 
     fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
 
-    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
-    const banCall = api.logDecision.mock.calls.find((c) => c[0]?.action === 'ban_event');
-    expect(banCall?.[0].moderatorPubkey).toBeUndefined();
+    await waitFor(() => expect(banAudit()).toBeDefined());
+    expect(loginOf(api.hideEvent.mock.calls[0])).toBeUndefined();
+    expect(loginOf(banAudit()!)).toBeUndefined();
+  });
+
+  // Lifts July's 494a0926: the worker takes the moderator from the token only,
+  // so no request argument may still name one.
+  it('no attribution call sends a moderator in the body when signed in', async () => {
+    renderComposed();
+    await waitFor(() => expect(screen.getByTestId('resolved-mod')).toHaveTextContent(MOD_PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+    await waitFor(() => expect(banAudit()).toBeDefined());
+
+    const objects = Object.values(api)
+      .flatMap((fn) => fn.mock.calls.flat())
+      .filter((arg): arg is Record<string, unknown> => typeof arg === 'object' && arg !== null);
+    expect(objects.length).toBeGreaterThan(0);
+    for (const arg of objects) {
+      expect(arg).not.toHaveProperty('moderatorPubkey');
+      expect(arg).not.toHaveProperty('moderator_pubkey');
+      expect(arg).not.toHaveProperty('actor');
+    }
   });
 });

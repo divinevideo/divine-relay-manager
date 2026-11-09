@@ -4,6 +4,7 @@ import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
 import * as accountStatus from './account-status';
+import { __clearModeratorLoginCache } from './moderator-identity';
 import { relayFake } from './test-helpers/relay-fake';
 
 const env = {
@@ -136,7 +137,7 @@ describe('relay manager cors', () => {
     expect(response.status).toBe(204);
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://app.divine.video');
     expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret');
+    expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret, X-Divine-Login-Token');
     expect(response.headers.get('Access-Control-Max-Age')).toBe('86400');
     expect(response.headers.get('Vary')).toContain('Origin');
   });
@@ -168,7 +169,7 @@ describe('relay manager cors', () => {
 
     expect(response.headers.get('Access-Control-Allow-Origin')).toBe('https://pr-123.openvine-app.pages.dev');
     expect(response.headers.get('Access-Control-Allow-Methods')).toBe('GET, POST, PUT, PATCH, DELETE, OPTIONS');
-    expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret');
+    expect(response.headers.get('Access-Control-Allow-Headers')).toBe('Content-Type, Authorization, X-Requested-With, Range, X-Admin-Key, CF-Access-Client-Id, CF-Access-Client-Secret, X-Divine-Login-Token');
     expect(response.headers.get('Access-Control-Max-Age')).toBe('86400');
     expect(response.headers.get('Vary')).toContain('Origin');
   });
@@ -299,6 +300,9 @@ describe('relay-rpc account-state side effects', () => {
   afterEach(() => { vi.restoreAllMocks(); });
 
   const VALID_PUBKEY = 'abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234';
+  const MODERATOR_PUBKEY = 'b'.repeat(64);
+  const LOGIN_ENV = { MODERATOR_LOGIN_URL: 'https://login.example.test' };
+  beforeEach(() => { __clearModeratorLoginCache(); });
 
   function makeAccountStateEnv() {
     return {
@@ -382,6 +386,10 @@ describe('relay-rpc account-state side effects', () => {
       if (url.includes('/api/v1/notify')) {
         return new Response(JSON.stringify({ dm_sent: true }), { status: 200 });
       }
+      if (url.endsWith('/api/nostr')) {
+        // Keycast get_public_key: the moderator login check.
+        return new Response(JSON.stringify({ result: MODERATOR_PUBKEY }), { status: 200 });
+      }
       if (url.includes('/api/admin/users/')) {
         return new Response('', { status: 200 });
       }
@@ -447,7 +455,7 @@ describe('relay-rpc account-state side effects', () => {
     return Promise.all(reqs.map(async req => JSON.parse(await req.clone().text())));
   }
 
-  function keycastCalls(fetchSpy: ReturnType<typeof makeFetchSpy>): Array<{ url: string; status: string }> {
+  function keycastCalls(fetchSpy: ReturnType<typeof makeFetchSpy>): Array<{ url: string; status: string; actor?: string }> {
     return fetchSpy.mock.calls
       .filter(([input]) => {
         const url = input instanceof Request ? input.url : String(input);
@@ -456,13 +464,129 @@ describe('relay-rpc account-state side effects', () => {
       .map(([input, init]) => {
         const url = input instanceof Request ? input.url : String(input);
         const body = input instanceof Request ? undefined : (init as RequestInit | undefined)?.body;
-        return { url, status: JSON.parse(String(body)).status as string };
+        const parsed = JSON.parse(String(body)) as { status: string; actor?: string };
+        return { url, status: parsed.status, actor: parsed.actor };
       });
   }
 
   async function drain(waitUntil: ReturnType<typeof vi.fn>): Promise<void> {
     await Promise.all(waitUntil.mock.calls.map(c => c[0]));
   }
+
+  describe('names the verified moderator on Keycast status calls', () => {
+    const envWithLogin = () => ({ ...(makeAccountStateEnv() as unknown as Record<string, unknown>), ...LOGIN_ENV }) as never;
+    // makeAccountStateEnvWithDb's statements have no `.all`, which Zendesk sync's
+    // ticket lookup needs. Wrap them so the lookup finds no linked tickets.
+    const envWithLoginAndDb = () => {
+      const base = makeAccountStateEnvWithDb(null) as unknown as { DB: { prepare: (sql: string) => { bind: (...a: unknown[]) => Record<string, unknown>; run: unknown } } };
+      const prepare = (sql: string) => {
+        const stmt = base.DB.prepare(sql);
+        return { ...stmt, bind: (...args: unknown[]) => ({ ...stmt.bind(...args), all: async () => ({ results: [] }) }) };
+      };
+      return { ...(base as unknown as Record<string, unknown>), DB: { prepare }, ...LOGIN_ENV } as never;
+    };
+
+    function rpc(method: string, params: string[], headers: Record<string, string>, path = '/api/relay-rpc', body?: unknown) {
+      return new Request(`https://api-relay-prod.divine.video${path}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key', Origin: 'https://app.divine.video', ...headers },
+        body: JSON.stringify(body ?? { method, params }),
+      });
+    }
+
+    it.each([
+      ['banpubkey', 'banned'],
+      ['unbanpubkey', 'active'],
+      ['suspendpubkey', 'suspended'],
+      ['unsuspendpubkey', 'active'],
+    ])('passes the verified moderator as the Keycast actor on %s', async (method, status) => {
+      const fetchSpy = makeFetchSpy();
+      const waitUntil = vi.fn();
+      const res = await worker.fetch(
+        rpc(method, [VALID_PUBKEY, 'r'], { 'X-Divine-Login-Token': 'tok' }),
+        envWithLoginAndDb(),
+        { waitUntil } as unknown as ExecutionContext,
+      );
+      expect(res.status).toBe(200);
+      await drain(waitUntil);
+      const kc = keycastCalls(fetchSpy);
+      expect(kc).toHaveLength(1);
+      expect(kc[0].status).toBe(status);
+      expect(kc[0].actor).toBe(MODERATOR_PUBKEY);
+    });
+
+    it('passes no actor without a verified login', async () => {
+      const fetchSpy = makeFetchSpy();
+      const waitUntil = vi.fn();
+      await worker.fetch(rpc('banpubkey', [VALID_PUBKEY, 'r'], {}), envWithLogin(), { waitUntil } as unknown as ExecutionContext);
+      await drain(waitUntil);
+      const kc = keycastCalls(fetchSpy);
+      expect(kc).toHaveLength(1);
+      expect(kc[0].actor).toBeUndefined();
+    });
+
+    it("moderation-service's X-Admin-Key relay-rpc call passes no actor", async () => {
+      const fetchSpy = makeFetchSpy();
+      const waitUntil = vi.fn();
+      // moderation-service authenticates with MOD_RELAY_ADMIN_KEY, not ADMIN_API_KEY,
+      // so a 200 here proves the request went through that branch.
+      const env = { ...(envWithLogin() as unknown as Record<string, unknown>), MOD_RELAY_ADMIN_KEY: 'mod-relay-key' } as never;
+      const res = await worker.fetch(
+        rpc('suspendpubkey', [VALID_PUBKEY, 'r'], { 'X-Admin-Key': 'mod-relay-key' }),
+        env,
+        { waitUntil } as unknown as ExecutionContext,
+      );
+      expect(res.status).toBe(200);
+      await drain(waitUntil);
+      expect(fetchSpy.mock.calls.some(([i]) => String(i instanceof Request ? i.url : i).endsWith('/api/nostr'))).toBe(false);
+      const kc = keycastCalls(fetchSpy);
+      expect(kc).toHaveLength(1);
+      expect(kc[0].actor).toBeUndefined();
+    });
+
+    it('passes no actor when the login token is present but Keycast rejects it with 401', async () => {
+      const fetchSpy = makeFetchSpy();
+      const base = fetchSpy.getMockImplementation()!;
+      fetchSpy.mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith('/api/nostr')) return new Response('unauthorized', { status: 401 });
+        return base(input, init);
+      });
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const waitUntil = vi.fn();
+      const res = await worker.fetch(
+        rpc('banpubkey', [VALID_PUBKEY, 'r'], { 'X-Divine-Login-Token': 'tok' }),
+        envWithLogin(),
+        { waitUntil } as unknown as ExecutionContext,
+      );
+      expect(res.status).toBe(200);
+      expect(await res.json()).toMatchObject({ success: true });
+      await drain(waitUntil);
+      expect(fetchSpy.mock.calls.some(([i]) => String(i instanceof Request ? i.url : i).endsWith('/api/nostr'))).toBe(true);
+      const kc = keycastCalls(fetchSpy);
+      expect(kc).toHaveLength(1);
+      expect(kc[0].actor).toBeUndefined();
+    });
+
+    it.each([
+      ['ban_pubkey', 'banned', envWithLoginAndDb],
+      ['allow_pubkey', 'active', envWithLoginAndDb],
+    ])('carries the verified moderator through /api/moderate %s to Keycast', async (action, status, mkEnv) => {
+      const fetchSpy = makeFetchSpy();
+      const waitUntil = vi.fn();
+      const res = await worker.fetch(
+        rpc('', [], { 'X-Divine-Login-Token': 'tok' }, '/api/moderate', { action, pubkey: VALID_PUBKEY, reason: 'spam' }),
+        mkEnv(),
+        { waitUntil } as unknown as ExecutionContext,
+      );
+      expect(res.status).toBe(200);
+      await drain(waitUntil);
+      const kc = keycastCalls(fetchSpy);
+      expect(kc).toHaveLength(1);
+      expect(kc[0].status).toBe(status);
+      expect(kc[0].actor).toBe(MODERATOR_PUBKEY);
+    });
+  });
 
   it('banpubkey triggers Keycast ban and DM action ACCOUNT_BANNED', async () => {
     const fetchSpy = makeFetchSpy();
@@ -939,7 +1063,6 @@ describe('relay-rpc account-state side effects', () => {
       action: 'allow_event',
       eventId: VALID_EVENT_ID,
       reason: 'False positive',
-      moderatorPubkey: 'b'.repeat(64),
     }, env, testCtx);
 
     expect(response.status).toBe(200);
@@ -951,7 +1074,6 @@ describe('relay-rpc account-state side effects', () => {
       relayAction: 'allow',
       reason: 'False positive',
       humanAction: 'allow_event',
-      moderatorPubkey: 'b'.repeat(64),
     }]);
     expect(await response.json()).toMatchObject({ success: true, recorded: true, reconciled: true });
 
@@ -992,7 +1114,7 @@ describe('relay-rpc account-state side effects', () => {
     fetchSpy.mockRestore();
   });
 
-  it('rejects malformed restore attribution before mutating relay visibility', async () => {
+  it('ignores a malformed body moderator on allow_event instead of refusing the action', async () => {
     const order: string[] = [];
     const fetchSpy = makeOrderedRelaySpy(order);
     const testCtx = { waitUntil: vi.fn() } as unknown as ExecutionContext;
@@ -1004,9 +1126,9 @@ describe('relay-rpc account-state side effects', () => {
       moderatorPubkey: { forged: true },
     }, env, testCtx);
 
-    expect(response.status).toBe(400);
-    expect(visibilityOperations).toEqual([]);
-    expect(order).toEqual([]);
+    expect(response.status).toBe(200);
+    expect(visibilityOperations).toHaveLength(1);
+    expect(visibilityOperations[0]).not.toHaveProperty('moderatorPubkey');
     fetchSpy.mockRestore();
   });
 
@@ -1032,7 +1154,6 @@ describe('relay-rpc account-state side effects', () => {
       { reporterPubkey: 'forged' },
       { reportId: ['b'.repeat(64)] },
       { reporterPubkey: ['c'.repeat(64)] },
-      { moderatorPubkey: ['d'.repeat(64)] },
     ]) {
       expect((await request(body)).status).toBe(400);
     }
@@ -1943,6 +2064,31 @@ describe('bulk-moderate age-review guard', () => {
       body: JSON.stringify(body),
     });
   }
+
+  it('queues the moderator verified from the login token, not one named in the body', async () => {
+    __clearModeratorLoginCache();
+    const VERIFIED = 'b'.repeat(64);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+      const url = input instanceof Request ? input.url : String(input);
+      if (url.endsWith('/api/nostr')) return new Response(JSON.stringify({ result: VERIFIED }), { status: 200 });
+      return new Response('{}', { status: 200 });
+    });
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const { env, send } = makeBulkEnv(null);
+      const req = enqueueRequest({ pubkey: VALID_PUBKEY, action: 'age-restrict-all', moderatorPubkey: 'c'.repeat(64) });
+      req.headers.set('X-Divine-Login-Token', 'tok');
+      const response = await worker.fetch(
+        req, { ...(env as unknown as Record<string, unknown>), MODERATOR_LOGIN_URL: 'https://login.example.test' } as never, ctx,
+      );
+      expect(response.status).toBe(200);
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown[])[0]).toMatchObject({ moderatorPubkey: VERIFIED });
+    } finally {
+      warn.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
 
   it('refuses a bulk action when the target has an active age-review case', async () => {
     const { env, executed, send } = makeBulkEnv({ id: 'case-b1', state: 'restricted_pending_user_response' });

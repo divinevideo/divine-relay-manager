@@ -62,6 +62,7 @@ Cloudflare Dashboard. There is no root `worker/wrangler.toml`.
 | `MODERATION_SERVICE_URL` | No | URL for media moderation service | `https://moderation-api.divine.video` |
 | `ALLOWED_ORIGINS` | Yes | Comma-separated allowed CORS origins | `https://relay.admin.divine.video,*.pages.dev` |
 | `ACCESS_TEAM_DOMAIN` | Yes (staging, prod) | Cloudflare Access team domain whose certs sign the `Cf-Access-Jwt-Assertion` | `divinevideo.cloudflareaccess.com` |
+| `MODERATOR_LOGIN_URL` | Yes (staging, prod) | Keycast that verifies a moderator's Divine login (the `X-Divine-Login-Token` header) so decisions record the verified pubkey (#178). Must name the same Keycast as the frontend's `VITE_DIVINE_LOGIN_URL` (default `https://login.divine.video`): a token from a different Keycast fails verification, and every decision then records no moderator, with no error shown. Unset, nothing is verified and the same happens. Not `KEYCAST_URL`, which drives the account status calls and differs on staging. | `https://login.divine.video` |
 | `API_ACCESS_AUD` | Yes (staging, prod) | Audience (AUD) tag of the Access application in front of the API. It identifies the application rather than granting anything, so it ships in `[vars]`. Without it, or without `ACCESS_TEAM_DOMAIN`, the worker refuses every Access login (401) and moderators are locked out. `X-Admin-Key` callers are unaffected. `worker/test/deployed-config-access-gate.test.ts` fails if either is missing (issue #338). | 64 hex characters, from the application's Overview tab |
 
 ### Secrets (must be set via CLI or Dashboard)
@@ -96,6 +97,10 @@ npm install
 npx wrangler deploy --config wrangler.staging.toml   # staging
 npx wrangler deploy --config wrangler.prod.toml      # production
 ```
+
+Both workers share one Pages frontend, so a change that spans the worker and the
+frontend deploys both workers first, then the frontend, and rolls back the
+frontend first. See "Deploy order (worker BEFORE frontend)" below.
 
 ---
 
@@ -251,6 +256,22 @@ negotiation, so order matters and the gap should be minimized:
 2. **Frontend second**, back-to-back. `npx vite build && npx wrangler pages deploy dist ...`.
    - New frontend + old worker: the UI polls `/api/bulk-moderate/status/:jobId` against
      a worker with no status route (404) — bulk moderation breaks until the worker catches up.
+
+The same order holds for moderator login verification (#178 phase 2), for the same
+reason: the new frontend needs the new worker. There is one frontend for both
+environments, so the order is the staging worker, the prod worker, then the single
+frontend deploy.
+
+- New worker + old frontend: old tabs send a claimed moderator pubkey and no login
+  token, so their actions record no moderator. Nothing fails.
+- New frontend + old worker: the frontend sends no `actor`, so the old Durable Object
+  answers 400 to every sexual-quarantine decision, and the old CORS allow-list lacks
+  the `X-Divine-Login-Token` header, so the browser's preflight blocks every request
+  that carries it (every attribution request from a signed-in moderator).
+- After the frontend deploy, ask moderators to reload. A tab opened before it sends no
+  token, and its actions stay unattributed until it reloads.
+- **Rollback runs in reverse: the frontend first, then the workers.** Rolling a worker
+  back while the new frontend is live recreates the break above.
 
 ### Post-deploy verification
 

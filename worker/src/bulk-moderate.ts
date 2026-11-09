@@ -1,6 +1,7 @@
 import { getAdminPubkey, banEvent, type Nip86Env } from './nip86';
 import { syncZendeskAfterAction, type ZendeskSyncEnv } from './zendesk-sync';
 import { isHex64, isLowerHex64 } from './hex';
+import { noteClaimedModerator } from './moderator-identity';
 import {
   listAccountVideos, readBlossomSecret, readBlossomStatus,
   STATUS_READ_TIMEOUT_MS, type AccountVideo, type BlossomBlob, type MediaLevel, type MediaStatus,
@@ -750,6 +751,10 @@ export async function handleBulkModerateEnqueue(
   request: Request,
   env: BulkModerateEnv,
   corsHeaders: Record<string, string>,
+  // The moderator the fetch handler verified from the login header, or undefined.
+  // It is the only moderator this route records. The token itself never gets
+  // here, so it cannot reach the queue message or the job row.
+  moderator: string | undefined,
 ): Promise<Response> {
   type EnqueueBody = {
     pubkey?: string; action?: string; reason?: string;
@@ -785,9 +790,8 @@ export async function handleBulkModerateEnqueue(
   } else if (body.kind !== undefined) {
     return json({ error: 'kind is only supported for delete-kind' }, 400, corsHeaders);
   }
-  if (body.moderatorPubkey !== undefined && (typeof body.moderatorPubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.moderatorPubkey))) {
-    return json({ error: 'moderatorPubkey must be a 64-char hex pubkey' }, 400, corsHeaders);
-  }
+  // A moderator named in the body is ignored, never refused: old tabs still send one.
+  noteClaimedModerator('/api/bulk-moderate', body.moderatorPubkey, moderator);
   if (body.reportId !== undefined && (typeof body.reportId !== 'string' || !/^[0-9a-f]{64}$/.test(body.reportId))) {
     return json({ error: 'reportId must be a 64-char hex event id' }, 400, corsHeaders);
   }
@@ -823,7 +827,7 @@ export async function handleBulkModerateEnqueue(
       ...jobScope({
         kind,
         sweepUntil: action === 'delete-kind' ? kindSweepCeiling() : undefined,
-        moderatorPubkey: body.moderatorPubkey as string | undefined,
+        moderatorPubkey: moderator,
         reportId: body.reportId as string | undefined,
       }),
     });

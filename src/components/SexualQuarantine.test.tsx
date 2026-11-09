@@ -5,11 +5,12 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { SexualCase } from '../../shared/sexual-quarantine';
 import { SexualQuarantine } from './SexualQuarantine';
 
-const context = vi.hoisted(() => ({ apiUrl: 'https://api.example.test', relayUrl: 'wss://relay.example.test', identity: vi.fn() }));
+const context = vi.hoisted(() => ({ apiUrl: 'https://api.example.test', relayUrl: 'wss://relay.example.test', token: undefined as string | undefined }));
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: context }) }));
 vi.mock('@/hooks/useDivineSession', () => ({ useDivineSession: () => ({
-  getModeratorPubkey: context.identity, identityUnavailable: false,
+  getModeratorToken: () => context.token, identityUnavailable: false,
 }) }));
+const MOD_TOKEN = 'moderator-login-token';
 
 const EVENT = 'a'.repeat(64);
 const HASH = 'b'.repeat(64);
@@ -23,6 +24,7 @@ const makeCase = (changes: Partial<SexualCase> = {}): SexualCase => ({
 let current: SexualCase;
 let postStatus: number;
 let lastDecision: unknown;
+let lastDecisionHeaders: Record<string, string> | undefined;
 
 function renderQueue(path = `/sexual-quarantine/${EVENT}`) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -35,11 +37,12 @@ function renderQueue(path = `/sexual-quarantine/${EVENT}`) {
 
 beforeEach(() => {
   context.apiUrl = 'https://api.example.test';
-  context.identity.mockResolvedValue('d'.repeat(64));
-  current = makeCase(); postStatus = 202; lastDecision = undefined;
+  context.token = MOD_TOKEN;
+  current = makeCase(); postStatus = 202; lastDecision = undefined; lastDecisionHeaders = undefined;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
       lastDecision = JSON.parse(init.body as string);
+      lastDecisionHeaders = init.headers as Record<string, string>;
       if (postStatus === 409) {
         current = makeCase({ revision: 9, state: 'hidden' });
         return Response.json({ error: 'Case revision conflict' }, { status: 409 });
@@ -99,13 +102,15 @@ describe('Sexual quarantine review', () => {
     expect(screen.getByText(/retry scheduled/)).toBeInTheDocument();
   });
 
-  it('requires a reason and submits the viewed revision with snapshotted identity, keeping 202 pending', async () => {
+  it('requires a reason and submits the viewed revision with the login token, keeping 202 pending', async () => {
     renderQueue();
     const restore = await screen.findByRole('button', { name: 'Restore' });
     expect(restore).toBeDisabled();
     fireEvent.change(screen.getByLabelText('Decision reason'), { target: { value: '  No explicit activity  ' } });
     fireEvent.click(restore);
-    await waitFor(() => expect(lastDecision).toEqual({ revision: 3, decision: 'restore', actor: 'd'.repeat(64), reason: 'No explicit activity' }));
+    // No actor in the body: the worker records the moderator it verifies.
+    await waitFor(() => expect(lastDecision).toEqual({ revision: 3, decision: 'restore', reason: 'No explicit activity' }));
+    expect(lastDecisionHeaders?.['X-Divine-Login-Token']).toBe(MOD_TOKEN);
     expect(await screen.findByText(/decision saved.*verification or reports recording pending/i)).toBeInTheDocument();
     expect(screen.getByText('Pending verification')).toBeInTheDocument();
     expect(screen.queryByText('Restored')).not.toBeInTheDocument();
@@ -145,22 +150,5 @@ describe('Sexual quarantine review', () => {
     renderQueue();
     expect(await screen.findByText('Restored with remaining restrictions')).toBeInTheDocument();
     expect(screen.getByText(/other restrictions still apply/i)).toBeInTheDocument();
-  });
-
-  it('does not write an old case after environment changes while identity resolves', async () => {
-    let resolveIdentity!: (value: string) => void;
-    context.identity.mockReturnValue(new Promise<string>(resolve => { resolveIdentity = resolve; }));
-    const view = renderQueue();
-    fireEvent.change(await screen.findByLabelText('Decision reason'), { target: { value: 'Reviewed' } });
-    fireEvent.click(screen.getByRole('button', { name: 'Restore' }));
-    await waitFor(() => expect(context.identity).toHaveBeenCalled());
-    context.apiUrl = 'https://staging.example.test';
-    current = makeCase({ revision: 15, state: 'review', goal: 'review', snapshot: undefined });
-    view.rerender(view.view());
-    expect(await screen.findByText('Revision 15')).toBeInTheDocument();
-    resolveIdentity('d'.repeat(64));
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Restore' })).toBeDisabled());
-    expect(lastDecision).toBeUndefined();
-    expect(screen.queryByRole('link', { name: `Review media ${HASH}` })).not.toBeInTheDocument();
   });
 });

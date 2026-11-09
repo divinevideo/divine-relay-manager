@@ -7,6 +7,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DebugPanel } from './DebugPanel';
 import { markRestored, useJustRestored } from '@/lib/userStatsCache';
 import { BanNotConfirmedError } from '@/lib/adminApi';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const api = vi.hoisted(() => ({
   getWorkerInfo: vi.fn(),
@@ -20,10 +21,13 @@ const api = vi.hoisted(() => ({
   verifyPubkeyBanned: vi.fn(),
   verifyPubkeyUnbanned: vi.fn(),
 }));
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+// Ban and unban go through asModerator(token) since #178 phase 2.
+const MOD_TOKEN = 'moderator-login-token';
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: 'e'.repeat(64) }, getModeratorPubkey: async () => 'e'.repeat(64) }),
+  useCurrentUser: () => ({ user: { pubkey: 'e'.repeat(64) }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 
 function renderPanel() {
@@ -61,6 +65,9 @@ describe('DebugPanel Ban Pubkey and the restore window', () => {
 
     await waitFor(() => expect(result.current).toBe(false));
     expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
+    // The ban and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'banPubkey')).toEqual([MOD_TOKEN]);
   });
 
   // It may have landed, so "just restored" could be wrong: the window ends.
@@ -111,6 +118,9 @@ describe('DebugPanel Ban Pubkey and the restore window', () => {
     await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
     expect(client.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined();
     expect(result.current).toBe(false);
+    // The unban and its audit write go through asModerator(token) (#178).
+    expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
     await act(async () => { settleAudit({ success: true }); });
   });
 

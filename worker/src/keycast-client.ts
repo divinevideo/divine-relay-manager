@@ -92,10 +92,6 @@ async function callKeycast(
   // keycast#279). A malformed actor is dropped (keycast 400s on it, which would
   // fail the whole status change) so keycast falls back to log-only. Mirrors
   // clearVerifiedMinor.
-  // TODO(#178): no caller passes an actor on the status legs yet. Attributing a
-  // status change needs a verified moderator identity (#178); until it lands the
-  // status legs call through actor-less. This lands the relay-manager side of the
-  // keycast#295 contract so it and keycast can deploy independently.
   const payload: { status: string; reason?: KeycastReason; actor?: string } = { ...body };
   if (actor) {
     if (HEX_64.test(actor)) {

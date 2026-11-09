@@ -40,7 +40,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
@@ -63,7 +63,9 @@ vi.mock('@/hooks/useDecisionLog', () => ({
 vi.mock('@/hooks/useModerationStatus', () => ({
   useModerationStatus: () => status.value,
 }));
-vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
+// The getbannedevent read. `data` is the banned post when the relay returned it.
+const bannedEventRead = vi.hoisted(() => ({ value: { data: null as NostrEvent | null | undefined, isLoading: false } }));
+vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => bannedEventRead.value }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 
@@ -166,6 +168,7 @@ describe('ReportDetail post hidden by a suspension', () => {
     threadContextProps.last = null;
     userCardProps.last = null;
     eventActionsProps.last = null;
+    bannedEventRead.value = { data: null, isLoading: false };
     decisionFlags.isDeleted = false;
     decisionFlags.isAutoHidden = false;
     decisionFlags.isPending = false;
@@ -527,6 +530,86 @@ describe('ReportDetail post hidden by a suspension', () => {
     renderDetail();
 
     expect(eventActionsProps.last?.isEventBanned).toBe(false);
+  });
+
+  // EventActions' `null`: nobody has said whether the post is banned, so it
+  // keeps Ban and Delete and leaves out Restore. A missing post used to be
+  // passed as banned whenever the banned-events list had not answered (#371).
+  describe('post actions while the event ban is unconfirmed', () => {
+    beforeEach(() => {
+      status.value.isUserSuspended = false;
+      status.value.isEventBanned = null;
+    });
+
+    it('calls the ban status unknown, not banned, when the banned-events list could not be read', () => {
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+      expect(eventActionsProps.last?.statusPending).toBe(false);
+    });
+
+    it('says the ban status is still being checked while the banned-events list is being read', () => {
+      status.value.isEventBanChecking = true;
+
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+      expect(eventActionsProps.last?.statusPending).toBe(true);
+    });
+
+    it('says the ban status is still being checked while the live check runs', () => {
+      status.value.isEventGone = null;
+      status.value.isChecking = true;
+
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+      expect(eventActionsProps.last?.statusPending).toBe(true);
+    });
+
+    // A ban kept from a list whose refresh failed may have been lifted.
+    it('does not treat a kept event ban as confirmed', () => {
+      status.value.isEventBanned = true;
+      status.value.isEventBannedStale = true;
+
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+    });
+
+    // The live check that found the post can be older than the ban the list
+    // last confirmed, so it does not settle a kept ban.
+    it('does not let a live check that found the post override a kept event ban', () => {
+      status.value.isEventBanned = true;
+      status.value.isEventBannedStale = true;
+      status.value.isEventGone = false;
+
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+    });
+
+    // Funnelcake's getbannedevent also answers for a post under an active
+    // moderation hold, which is not in its ban table and which Restore (an
+    // unban) does not lift. So the post it returns is shown, but it is not
+    // evidence of a ban.
+    it('does not treat a post the getbannedevent read returned as banned', () => {
+      bannedEventRead.value = { data: { ...REPORT, id: EVENT_ID, kind: 1 }, isLoading: false };
+
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+    });
+
+    // The live check's "found it" is kept from when it ran, so a ban made since
+    // (with the list's refresh then failing) would be missed.
+    it('does not settle the ban status from a live check that found the post', () => {
+      status.value.isEventGone = false;
+
+      renderDetail();
+
+      expect(eventActionsProps.last?.isEventBanned).toBe(null);
+    });
   });
 
   // The verb follows the banned-events list's own read (isEventBanChecking).

@@ -15,6 +15,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { Tag, Plus, X, UserX } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { BanNotConfirmedError, type LabelAndBanResult, type LabelParams } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote } from "@/lib/banFeedback";
 import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
@@ -87,8 +88,9 @@ const NAMESPACES = [
 export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnPublish }: LabelPublisherProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const restoreEnvironment = useRestoreEnvironment();
-  const { publishLabel, publishLabelAndBan } = useAdminApi();
   const [isOpen, setIsOpen] = useState(false);
 
   const [targetType, setTargetType] = useState<'event' | 'pubkey'>(defaultTarget?.type || 'pubkey');
@@ -102,6 +104,7 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
 
   const publishMutation = useMutation({
     mutationFn: async () => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       const ns = namespace === 'custom' ? customNamespace : namespace;
       const params: LabelParams & { shouldBan?: boolean } = {
         targetType,
@@ -116,7 +119,7 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
         // Captured before the request: the account and environment acted on.
         const target = params.targetValue;
         const env = restoreEnvironment;
-        const result = await publishLabelAndBan(params);
+        const result = await act.publishLabelAndBan(params);
         // A ban that landed hides the account again, so a restore window still
         // open would print "just restored" (lib/userStatsCache): end it. So does
         // one that could not be confirmed, which may have landed. A refused or
@@ -125,7 +128,7 @@ export function LabelPublisher({ onSuccess, defaultTarget, defaultLabels, banOnP
         else if (result.banError) void resetAccountContentReads(queryClient, target);
         return result;
       } else {
-        await publishLabel(params);
+        await act.publishLabel(params);
         return { labelPublished: true, banned: false };
       }
     },
@@ -351,13 +354,15 @@ export function LabelPublisherInline({
 }) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const restoreEnvironment = useRestoreEnvironment();
-  const { publishLabel, publishLabelAndBan } = useAdminApi();
   const [selectedLabels, setSelectedLabels] = useState<string[]>([]);
   const [shouldBan, setShouldBan] = useState(false);
 
   const publishMutation = useMutation({
     mutationFn: async () => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       const params: LabelParams & { shouldBan?: boolean } = {
         targetType,
         targetValue,
@@ -370,7 +375,7 @@ export function LabelPublisherInline({
         // Captured before the request: the account and environment acted on.
         const target = params.targetValue;
         const env = restoreEnvironment;
-        const result = await publishLabelAndBan(params);
+        const result = await act.publishLabelAndBan(params);
         // A ban that landed hides the account again, so a restore window still
         // open would print "just restored" (lib/userStatsCache): end it. So does
         // one that could not be confirmed, which may have landed. A refused or
@@ -379,7 +384,7 @@ export function LabelPublisherInline({
         else if (result.banError) void resetAccountContentReads(queryClient, target);
         return result;
       } else {
-        await publishLabel(params);
+        await act.publishLabel(params);
         return { labelPublished: true, banned: false };
       }
     },

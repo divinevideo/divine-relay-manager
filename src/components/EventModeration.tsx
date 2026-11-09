@@ -30,8 +30,9 @@ interface BannedEvent {
 export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { callRelayRpc, banEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const api = useAdminApi();
+  const { callRelayRpc, verifyEventDeleted } = api;
+  const { getModeratorToken } = useCurrentUser();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -53,10 +54,17 @@ export function EventModeration() {
 
   // Mutation for allowing events
   const allowEventMutation = useMutation({
-    mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      restoreEvent(eventId, await getModeratorPubkey(), reason || 'Allowed from moderation queue'),
+    mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      return act.restoreEvent(eventId, reason || 'Allowed from moderation queue');
+    },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      // An approve is a restore. Report detail reads a post's ban status from
+      // the banned-events list, so re-read it, as after a ban, or a report
+      // opened soon after keeps calling the approved post banned and offering
+      // Restore.
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       toast(result.recorded === true && result.reconciled !== false
         ? { title: "Event approved successfully" }
         : {
@@ -78,7 +86,8 @@ export function EventModeration() {
   // Mutation for banning events
   const banEventMutation = useMutation({
     mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) => {
-      await banEvent(eventId, reason);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.banEvent(eventId, reason);
       return eventId;
     },
     onSuccess: async (eventId) => {

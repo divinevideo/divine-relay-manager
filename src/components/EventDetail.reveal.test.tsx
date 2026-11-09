@@ -25,7 +25,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 // Every related-reports read waits until the test answers it.
 const pending = vi.hoisted(() => ({ answers: [] as ((events: unknown[]) => void)[] }));
