@@ -1,11 +1,13 @@
 // ABOUTME: Pins what EventDetail shows while the check after a moderator's action is running.
 // ABOUTME: An Unban unconfirms the pre-Unban ban; a delete leaves a confirmed ban confirmed.
 
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
+import { markRestored, useJustRestored } from '@/lib/userStatsCache';
+import { BanNotConfirmedError } from '@/lib/adminApi';
 
 // The real useModerationStatus, over mocked relay calls. Right after an Unban
 // the ban list on screen is the pre-Unban copy, and the live check takes at
@@ -70,13 +72,12 @@ const LAST_KNOWN = 'Last known: banned. The latest check could not confirm it.';
 const CHECKING = 'Last known: banned. Checking now.';
 const hang = () => new Promise(() => {});
 
-function renderDetail() {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+function renderDetail(queryClient = new QueryClient({
+  defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
+}), event: NostrEvent = EVENT) {
   return render(
     <QueryClientProvider client={queryClient}>
-      <EventDetail event={EVENT} />
+      <EventDetail event={event} />
     </QueryClientProvider>,
   );
 }
@@ -168,5 +169,147 @@ describe('EventDetail after an action', () => {
     expect(screen.getByText(BANNED)).toBeInTheDocument();
     expect(screen.queryByText(LAST_KNOWN)).not.toBeInTheDocument();
     expect(screen.queryByText(CHECKING)).not.toBeInTheDocument();
+  });
+});
+
+// The relay hides a banned account's content, so a stats read cached before a
+// ban or unban describes the other state. The author card would show it for
+// useUserStats' 2 minute staleTime (lib/userStatsCache).
+describe('EventDetail drops cached authored-content reads after an account action', () => {
+  const STATS_KEY = ['user-stats', 'wss://relay.test', REPORTED_PUBKEY];
+
+  function clientWithStats() {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(STATS_KEY, { postCount: 0 });
+    return client;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.listBannedEvents.mockResolvedValue([]);
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    api.verifyPubkeyBanned.mockImplementation(hang);
+    api.verifyPubkeyUnbanned.mockImplementation(hang);
+    api.verifyEventDeleted.mockResolvedValue(false);
+    api.logDecision.mockResolvedValue(undefined);
+  });
+
+  it('after an unban', async () => {
+    api.listBannedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    api.unbanPubkey.mockResolvedValue(undefined);
+    const client = clientWithStats();
+
+    renderDetail(client);
+    expect(await screen.findByText(BANNED)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Unban User$/ }));
+    });
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  // The unban awaits its audit write after the relay call, so a failed write
+  // fails the mutation once the account is already unbanned.
+  it('after an unban whose audit write failed', async () => {
+    api.listBannedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    api.unbanPubkey.mockResolvedValue(undefined);
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    const client = clientWithStats();
+
+    renderDetail(client);
+    expect(await screen.findByText(BANNED)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Unban User$/ }));
+    });
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  // Restore, then ban: the author is hidden again, so the count must not keep
+  // saying "just restored".
+  it('ends the restore window after a ban', async () => {
+    const author = '4'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(author));
+    await act(async () => { await markRestored(new QueryClient(), author, undefined); });
+    expect(result.current).toBe(true);
+    api.listBannedPubkeys.mockResolvedValue([]);
+    api.banPubkey.mockResolvedValue({ unconfirmed: null });
+
+    renderDetail(clientWithStats(), { ...EVENT, pubkey: author });
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /^Ban User$/ }));
+    });
+    const dialog = await screen.findByRole('alertdialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /^Ban User$/ }));
+    });
+
+    await waitFor(() => expect(result.current).toBe(false));
+  });
+
+  // A refused ban did not hide the author: the reads reset (the failure
+  // settled), and an earlier unsuspend's window stays.
+  it('keeps the restore window when the ban was refused', async () => {
+    const author = '5'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(author));
+    await act(async () => { await markRestored(new QueryClient(), author, undefined); });
+    api.listBannedPubkeys.mockResolvedValue([]);
+    api.banPubkey.mockRejectedValue(new Error('relay refused'));
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', author], { postCount: 0 });
+
+    renderDetail(client, { ...EVENT, pubkey: author });
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /^Ban User$/ }));
+    });
+    const dialog = await screen.findByRole('alertdialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /^Ban User$/ }));
+    });
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', author])).toBeUndefined());
+    expect(result.current).toBe(true);
+  });
+
+  // A ban usually purged the posts (funnelcake's inline purge), so "posts can
+  // take a few minutes to reappear" would mislead. An unban resets the reads,
+  // also when its audit write fails, and opens no restore window. An author no
+  // other test uses, so no earlier window can be mistaken for one.
+  it('resets the reads after an unban, but opens no restore window', async () => {
+    const author = '3'.repeat(64);
+    const { result } = renderHook(() => useJustRestored(author));
+    api.listBannedPubkeys.mockResolvedValue([{ pubkey: author }]);
+    api.unbanPubkey.mockResolvedValue(undefined);
+    const client = clientWithStats();
+    client.setQueryData(['user-stats', 'wss://relay.test', author], { postCount: 0 });
+    renderDetail(client, { ...EVENT, pubkey: author });
+    expect(await screen.findByText(BANNED)).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /^Unban User$/ }));
+    });
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', author])).toBeUndefined());
+    expect(result.current).toBe(false);
+  });
+
+  it.each([
+    ['a ban', () => api.banPubkey.mockResolvedValue({ unconfirmed: null })],
+    // The ban may have landed even though it could not be confirmed.
+    ['a ban that could not be confirmed', () => api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'))],
+  ])('after %s', async (_name, arrange) => {
+    api.listBannedPubkeys.mockResolvedValue([]);
+    arrange();
+    const client = clientWithStats();
+
+    renderDetail(client);
+    await act(async () => {
+      fireEvent.click(await screen.findByRole('button', { name: /^Ban User$/ }));
+    });
+    const dialog = await screen.findByRole('alertdialog');
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole('button', { name: /^Ban User$/ }));
+    });
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
   });
 });

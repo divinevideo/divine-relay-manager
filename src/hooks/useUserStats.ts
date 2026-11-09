@@ -5,7 +5,7 @@ import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import { useAppContext } from "@/hooks/useAppContext";
 import { queryStrict, RelayReadError } from "@/lib/relayRead";
-import { RECENT_CONTENT_KINDS } from "@/lib/constants";
+import { RECENT_AUTHORED_LIMIT, RECENT_CONTENT_KINDS, userStatsQueryKey } from "@/lib/constants";
 import { pageByUntil } from "../../shared/relay-pager";
 import { hexTagFilterValues } from "../../shared/hex-id";
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
@@ -47,9 +47,7 @@ export function useUserStats(pubkey: string | undefined) {
   const relayUrl = config.relayUrl;
 
   return useQuery<UserStats>({
-    // relayUrl in the key: the QueryClient is a singleton and these events are
-    // shown as evidence, so a cached read must never cross environments.
-    queryKey: ['user-stats', relayUrl, pubkey],
+    queryKey: userStatsQueryKey(relayUrl, pubkey),
     queryFn: async ({ signal }) => {
       if (!pubkey) {
         return {
@@ -116,7 +114,7 @@ export function useUserStats(pubkey: string | undefined) {
       const [authoredContentRead, labelsRead, reportsRead] = await Promise.all([
         // User's recent authored content — RECENT_CONTENT_KINDS is shared with
         // BannedUserCard so the two review surfaces stay aligned (#159).
-        read([{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: 20 }]),
+        read([{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: RECENT_AUTHORED_LIMIT }]),
         // Labels against this user: the whole history, not the newest 50.
         readAll({ kinds: [1985], '#p': [pubkey] }),
         // Reports against this user: the whole history, not the newest 50, in

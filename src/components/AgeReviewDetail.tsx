@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAccountStatus } from "@/hooks/useAccountStatus";
 import { deriveProtectedMinorView } from "@/lib/protectedMinorView";
@@ -49,6 +50,7 @@ import {
   AGE_BANDS,
   TERMINAL_STATES,
   getDaysRemaining,
+  isAccountRestrictedAgeReviewState,
   type AgeReviewCase,
   type AgeReviewState,
   type AgeBand,
@@ -174,6 +176,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const daysRemaining = getDaysRemaining(c);
   const claimLinkExpired = c.claim_link_expires_at != null && new Date(c.claim_link_expires_at).getTime() < Date.now();
 
+  // The environment an update started in, for the restore window (lib/userStatsCache).
+  const restoreEnvironment = useRestoreEnvironment();
+
   const updateCase = useMutation({
     mutationFn: (updates: Record<string, unknown>) => {
       pendingStateRef.current = updates.state as string | undefined;
@@ -183,7 +188,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // fire with the LATEST render's closure, so after a mid-flight case
     // switch a closure-read c would misroute every cache write below
     // (review: wrong case's keys written, the acted-on case left stale)
-    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey }),
+    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey, environment: restoreEnvironment, priorState: c.state }),
     onSuccess: (data, updates, ctx) => {
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
@@ -337,7 +342,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // leaves both statuses alone, unless it lost a version conflict, since the
     // winning write may have been a decision. Key shape:
     // ['account-status', apiUrl, pubkey], lowercased as useAccountStatus is called.
-    onSettled: (_data, error, updates, ctx) => {
+    onSettled: (data, error, updates, ctx) => {
       if (!ctx) return;
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
@@ -346,6 +351,39 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         queryKey: ['account-status'],
         predicate: (query) => query.queryKey[2] === subject,
       });
+      // Restrict suspends the account, clear unsuspends it and deny bans it,
+      // so the shared authored-content reads describe the other state
+      // (lib/userStatsCache). Settled for the same reason as above: the reset
+      // is harmless whatever happened. The restore window says the account was
+      // just restored, so it opens only for a clear that lifted a suspension:
+      // the worker confirmed its relay unsuspend in the response (a rejected
+      // update, such as a version conflict before enforcement, has none, and a
+      // failed relay leg says so), and the case was in a restricted state when
+      // the clear started. The worker calls unsuspendpubkey on every clear, but
+      // only entering a restricted state suspends, so a case cleared from
+      // review never suspended the account. A case restricted earlier and
+      // since moved on (submitted for review, needs follow-up, back to review)
+      // is still suspended, but nothing on the case says it was restricted, so
+      // that clear opens no window rather than guessing. Another leg failing
+      // does not change what the relay shows.
+      // A restrict (suspend) or deny (ban) whose suspend or ban applied hides
+      // the account again, so it ends a window an earlier restore left open.
+      // For a deny that is not the same as its relay leg reporting ok: the
+      // worker reports the leg failed when the ban applied but its content
+      // purge was not confirmed, with an error starting "Ban applied;"
+      // (failUnlessPurgeConfirmed in worker/src/age-review.ts). The response
+      // has no structured field for this, so that prefix is the signal; if the
+      // worker's wording changes, such a deny falls back to only resetting.
+      // The environment is the one the update started in (onMutate).
+      const relayOk = data?.enforcement?.relay === 'ok';
+      const state = typeof updates.state === 'string' ? updates.state : undefined;
+      const restricted = state?.startsWith('restricted_') ?? false;
+      const denyBanApplied = state === 'denied_closed' && (relayOk
+        || (data?.enforcement?.relay === 'failed' && data.enforcement.relayError?.startsWith('Ban applied;') === true));
+      const liftedSuspension = isAccountRestrictedAgeReviewState(ctx.priorState);
+      if (state === 'cleared' && relayOk && liftedSuspension) void markRestored(queryClient, subject, ctx.environment);
+      else if ((restricted && relayOk) || denyBanApplied) void markHidden(queryClient, subject, ctx.environment);
+      else void resetAccountContentReads(queryClient, subject);
     },
     onError: (error, _updates, ctx) => {
       // A concurrent writer (another moderator, or the deadline cron) changed

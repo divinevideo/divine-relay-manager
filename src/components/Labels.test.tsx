@@ -1,7 +1,8 @@
 // ABOUTME: Covers the ban wiring of the Labels tab
 // ABOUTME: A ban that may have landed must not read as a destructive failure
 
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { markRestored, useJustRestored } from '@/lib/userStatsCache';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Labels } from './Labels';
@@ -38,8 +39,7 @@ const LABEL_EVENT = {
   sig: 'd'.repeat(128),
 };
 
-async function banFromLabels() {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+async function banFromLabels(client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) {
   render(
     <QueryClientProvider client={client}>
       <Labels relayUrl="wss://relay.test" />
@@ -84,5 +84,65 @@ describe('Labels ban', () => {
         description: banSuccessNote({ unconfirmed: 'removal_error' }),
       })),
     );
+  });
+});
+
+// The relay hides a banned account's content, so a stats read from before the
+// ban describes the other state (lib/userStatsCache). A ban that could not be
+// confirmed may still have landed.
+describe('Labels ban drops cached authored-content reads', () => {
+  const STATS_KEY = ['user-stats', 'wss://relay.test', PUBKEY];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockResolvedValue([LABEL_EVENT]);
+    api.verifyPubkeyBanned.mockResolvedValue(true);
+  });
+
+  it.each([
+    ['a confirmed ban', () => api.banPubkey.mockResolvedValue({ unconfirmed: null })],
+    ['a ban that could not be confirmed', () => api.banPubkey.mockRejectedValue(new BanNotConfirmedError('timed out'))],
+  ])('after %s', async (_name, arrange) => {
+    arrange();
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(STATS_KEY, { postCount: 0 });
+
+    await banFromLabels(client);
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+});
+
+describe('Labels ban ends the restore window', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    query.mockResolvedValue([LABEL_EVENT]);
+    api.verifyPubkeyBanned.mockResolvedValue(true);
+    api.banPubkey.mockResolvedValue({ unconfirmed: null });
+  });
+
+  it('after a ban that followed a restore', async () => {
+    const { result } = renderHook(() => useJustRestored(PUBKEY));
+    await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
+    expect(result.current).toBe(true);
+
+    await banFromLabels();
+
+    await waitFor(() => expect(result.current).toBe(false));
+  });
+
+  // A refused ban did not hide the account: the reads reset (the failure
+  // settled), and an earlier unsuspend's window stays.
+  it('keeps the window when the ban was refused', async () => {
+    api.banPubkey.mockRejectedValue(new Error('relay refused'));
+    const { result } = renderHook(() => useJustRestored(PUBKEY));
+    await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    client.setQueryData(['user-stats', 'wss://relay.test', PUBKEY], { postCount: 0 });
+
+    await banFromLabels(client);
+
+    await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', PUBKEY])).toBeUndefined());
+    expect(result.current).toBe(true);
   });
 });

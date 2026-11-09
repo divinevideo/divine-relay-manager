@@ -7,6 +7,10 @@ import { MemoryRouter } from 'react-router-dom';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { UserProfileCard } from './UserProfileCard';
 import type { UserStats } from '@/hooks/useUserStats';
+import { RECENT_AUTHORED_LIMIT } from '@/lib/constants';
+import { QueryClient } from '@tanstack/react-query';
+import { act } from '@testing-library/react';
+import { markRestored, RESTORE_SETTLE_MS } from '@/lib/userStatsCache';
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.example.test',
@@ -140,6 +144,77 @@ describe('UserProfileCard', () => {
     render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), labelsIncomplete: true }} />);
     expect(screen.getByText('labels unavailable')).toBeInTheDocument();
     expect(screen.queryByText('0 labels')).not.toBeInTheDocument();
+  });
+
+  it('does not print a failed authored-content read as zero', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats([]), authoredContentIncomplete: true }} />);
+    expect(screen.getByText('events unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('0 events')).not.toBeInTheDocument();
+  });
+
+  it('does not print reports as zero before the stats have answered', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={undefined} />);
+    expect(screen.getByText('checking reports')).toBeInTheDocument();
+    expect(screen.queryByText('0 reports')).not.toBeInTheDocument();
+  });
+
+  it('does not print labels as zero before the stats have answered', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={undefined} />);
+    expect(screen.getByText('checking labels')).toBeInTheDocument();
+    expect(screen.queryByText('0 labels')).not.toBeInTheDocument();
+  });
+
+  it('does not print events as zero before the stats have answered', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={undefined} />);
+    expect(screen.getByText('checking events')).toBeInTheDocument();
+    expect(screen.queryByText('0 events')).not.toBeInTheDocument();
+  });
+
+  it('says a suspended account\'s empty read is the suspension, not an empty account', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended />);
+    expect(screen.getByText('events hidden (account suspended)')).toBeInTheDocument();
+    expect(screen.queryByText('0 events')).not.toBeInTheDocument();
+  });
+
+  it('marks an events count that reached the read limit as a floor', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={{ ...stats(RECENT), postCount: RECENT_AUTHORED_LIMIT }} />);
+    expect(screen.getByText(`${RECENT_AUTHORED_LIMIT}+ events`)).toBeInTheDocument();
+  });
+
+  it("does not print an empty read as a confident zero when the suspension couldn't be checked", () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={null} />);
+    expect(screen.getByText("0 events (couldn't check suspension)")).toBeInTheDocument();
+    expect(screen.queryByText('0 events')).not.toBeInTheDocument();
+  });
+
+  it('says the suspension is still being checked behind an empty read', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={null} isSuspensionChecking />);
+    expect(screen.getByText('0 events (checking suspension)')).toBeInTheDocument();
+  });
+
+  it('prints a confirmed empty read as zero once the account is known not suspended', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={false} />);
+    expect(screen.getByText('0 events')).toBeInTheDocument();
+  });
+
+  // The relay's read filter can lag an Unsuspend by a few minutes, so an empty
+  // read right after one is not an empty account.
+  it('qualifies an empty read just after this tab unsuspended the account', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
+      render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={false} />);
+      expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear)')).toBeInTheDocument();
+      // End the window so it cannot reach the next test.
+      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('marks a suspension carried over from a list that could not be refreshed', () => {
+    render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended isSuspendedStale />);
+    expect(screen.getByText('events hidden (last known: suspended)')).toBeInTheDocument();
   });
 
   it('marks a report count that is a floor, not a total', () => {
