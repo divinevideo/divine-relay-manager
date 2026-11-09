@@ -103,6 +103,31 @@ describe('useReportedEvent', () => {
     expect(result.current.data).toEqual({ status: 'target_missing', targetEventId: TARGET_ID });
   });
 
+  it('treats a suspended-author refusal as not retrievable here, not a relay error', async () => {
+    // The worker refuses getbannedevent for a suspended author (403
+    // suspended_read_not_allowed). Retrying never helps, so this must not show
+    // "relay error" with a Retry button; the pane explains the suspension instead.
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockRejectedValueOnce(
+      new ApiError("This event's author is suspended, so its content is not served here", 403, 'Forbidden', 'suspended_read_not_allowed'),
+    );
+
+    const { result } = render();
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(result.current.data).toEqual({ status: 'target_missing', targetEventId: TARGET_ID });
+  });
+
+  it('surfaces an unconfirmed suspension status as an error, so Retry can recover it', async () => {
+    relayReturns([report([['e', TARGET_ID]])], []);
+    callRelayRpc.mockRejectedValueOnce(
+      new ApiError("Could not confirm the author's suspension status", 503, 'Service Unavailable', 'suspension_status_unavailable'),
+    );
+
+    const { result } = render();
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    expect(result.current.data).toBeUndefined();
+  });
+
   it('surfaces a transport failure as an error rather than a missing target', async () => {
     // An expired CF Access session must never render as "the post was deleted".
     relayReturns([report([['e', TARGET_ID]])], []);

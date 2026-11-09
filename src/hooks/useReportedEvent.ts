@@ -8,7 +8,7 @@ import { useNostr } from "@/hooks/useNostr";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
 import { useAppContext } from "@/hooks/useAppContext";
 import { isHex64 } from "@/lib/constants";
-import { queryStrict, isDefinitiveRpcNegative } from "@/lib/relayRead";
+import { queryStrict, isDefinitiveRpcNegative, isSuspendedReadRefusal } from "@/lib/relayRead";
 
 /**
  * Every outcome is named, so the UI never has to infer a reason from a bare
@@ -161,10 +161,12 @@ export function useReportedEvent(reportId: string | undefined, casePubkey: strin
             }
           }
         } catch (e) {
-          // Only "the relay says it is not banned" is a real negative. Transport,
-          // auth, and unknown failures propagate, so the pane shows an error
-          // rather than asserting the content was deleted.
-          if (!isDefinitiveRpcNegative(e)) {
+          // Only "the relay says it is not banned" and the worker's refusal of a
+          // suspended author's post are real negatives. Transport, auth, and
+          // unknown failures propagate, so the pane shows an error rather than
+          // asserting the content was deleted. A suspended author lands on
+          // target_missing, where the pane names the suspension when it knows it.
+          if (!isDefinitiveRpcNegative(e) && !isSuspendedReadRefusal(e)) {
             // ...unless we already hold a target. The subject-owned case returns
             // above, so what we hold here is foreign, which this pane deliberately
             // shows with an attribution warning. Discarding it because an

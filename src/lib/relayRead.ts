@@ -4,6 +4,7 @@
 // ABOUTME: never worked". Anything that says "no content" must tell those apart.
 import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 import { ApiError } from './adminApi';
+import { SUSPENDED_READ_REFUSED } from '../../shared/suspended-read';
 
 /** The slice of NPool that queryStrict needs, kept structural so it is testable. */
 export interface ReqCapable {
@@ -101,4 +102,15 @@ export function isDefinitiveRpcNegative(error: unknown): boolean {
   // non-HTTP RPC failure, with no status at all). Anything else is not it.
   if (error.statusCode !== undefined && error.statusCode !== 400) return false;
   return RELAY_NOT_BANNED.test(error.message.trim());
+}
+
+/**
+ * Whether a getbannedevent failure is the worker refusing a suspended author's
+ * post (403 `suspended_read_not_allowed`). Like the relay's "not banned", it is
+ * a settled answer that a retry cannot change, so callers treat the target as
+ * not retrievable here rather than as a relay error. Matched on the code, which
+ * the worker sets for this refusal alone.
+ */
+export function isSuspendedReadRefusal(error: unknown): boolean {
+  return error instanceof ApiError && error.code === SUSPENDED_READ_REFUSED;
 }

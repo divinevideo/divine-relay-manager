@@ -18,6 +18,7 @@ import { getReportsForTarget, getReportsNeedingAttention, getResolvedReportsPage
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
+import { checkBannedEventAuthor, isBannedEventRead, isSuspendedReadMethod, SUSPENDED_READ_REFUSED } from './suspended-content';
 import type { KeycastEnv } from './keycast-client';
 import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
@@ -1631,6 +1632,24 @@ async function runRelayRpc(
     return jsonResponse({ success: false, error: 'Missing method' }, 400, corsHeaders);
   }
 
+  // Suspended-account reads are refused before anything else runs, so no caller
+  // past the access gate (MOD_RELAY_ADMIN_KEY included) can read a suspended
+  // account's hidden content without the audited viewer's moderator check and
+  // audit row. It sits here rather than in handleRelayRpc so internal callers are
+  // covered too. 403 rather than 400: the request is well-formed, this route just
+  // never serves it.
+  if (isSuspendedReadMethod(body.method)) {
+    return jsonResponse(
+      {
+        success: false,
+        error: 'Suspended-account reads go through the audited viewer',
+        code: SUSPENDED_READ_REFUSED,
+      },
+      403,
+      corsHeaders,
+    );
+  }
+
   // Age-review guard: a bare account-state change on a pubkey with an open
   // (non-terminal) age-review case must not half-enforce (Suspend orphans the
   // case) or silently lift the hold (Unsuspend skips verification). Refuse and
@@ -1752,6 +1771,19 @@ async function runRelayRpc(
       400,
       corsHeaders,
     );
+  }
+
+  // getbannedevent would otherwise hand back a suspended account's post that was
+  // individually banned or held; see checkBannedEventAuthor.
+  if (isBannedEventRead(body.method)) {
+    const refusal = await checkBannedEventAuthor(result.result, env);
+    if (refusal) {
+      return jsonResponse(
+        { success: false, error: refusal.error, code: refusal.code },
+        refusal.status,
+        corsHeaders,
+      );
+    }
   }
 
   // Account-state side effects (all non-critical, off the response path).
