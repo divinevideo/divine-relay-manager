@@ -25,9 +25,9 @@ Routes that record who acted take the moderator from the `X-Divine-Login-Token`
 header, which carries the moderator's Divine login token. The worker checks it
 with Keycast and records the verified pubkey. A missing header or a failed check
 never refuses the request; the action records the route's "no human named" value
-instead, as listed under Goals in
-`docs/superpowers/specs/2026-11-04-moderator-identity-phase2-design.md`. A
-moderator named in the request body (`moderatorPubkey`,
+instead, as listed under
+[Goals](superpowers/specs/2026-11-04-moderator-identity-phase2-design.md#goals) in
+the phase 2 design. A moderator named in the request body (`moderatorPubkey`,
 `moderator_pubkey`, `actor`) is never recorded.
 
 ### Webhook Signature Verification
@@ -703,7 +703,7 @@ Content-Type: application/json
 
 ### POST /api/decisions
 
-Log a moderation decision (called automatically by action endpoints).
+Log a moderation decision. The app calls this after an action; the action endpoints don't call it.
 
 **Request:**
 ```json
@@ -736,7 +736,7 @@ Get all decisions for a target.
       "action": "ban_user",
       "reason": "Spam",
       "moderator_pubkey": "<64-character hex pubkey>",
-      "created_at": "2025-01-05T12:00:00Z"
+      "created_at": "2025-01-05 12:00:00"
     }
   ]
 }
