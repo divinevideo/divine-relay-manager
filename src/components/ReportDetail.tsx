@@ -223,6 +223,22 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       eventBan: moderationStatus.isEventBanChecking,
     },
   });
+  // Whether the reported post is banned, for the post actions: `null` when
+  // nothing has said (EventActions then keeps Ban and Delete and leaves out
+  // Restore). Only the banned-events list answers it: its "no" never comes
+  // from a failed refresh, and its "yes" counts only from a refresh that
+  // succeeded. The live check is no evidence: its "found it" is kept from when
+  // it ran and can predate a ban made since. Unknown and not banned offer the
+  // same actions, so all leaning on it would buy is dropping the note. Nor is
+  // the getbannedevent read: funnelcake also answers it for a post under a
+  // moderation hold, which is not a ban and which Restore does not lift.
+  const isEventBannedForActions: boolean | null = moderationStatus.isEventBanned === false ? false
+    : moderationStatus.isEventBanned === true && !moderationStatus.isEventBannedStale ? true
+    : null;
+  // A read still out can settle it: the banned-events list, or the live check,
+  // which asks the lists to re-read once it answers.
+  const isEventBanForActionsPending = isEventBannedForActions === null
+    && (moderationStatus.isEventBanChecking || moderationStatus.isChecking);
   const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
   // The banner names what handled the report, not a skip logged after it.
   const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
@@ -1381,13 +1397,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 mediaHashes={mediaHashes}
                 thumbnailHashes={thumbnailHashes}
                 mediaHashStatuses={mediaStatus.results}
-                // The banned-events list confirmed this post is not banned (a
-                // false is never stale), whatever else explains it being gone:
-                // a suspension, nothing at all, or a cause still unknown because
-                // another read failed. So no "Restore Event / reverses the
-                // ban", and Ban and Delete stay. Only an unknown event-ban
-                // status keeps the old fallback.
-                isEventBanned={moderationStatus.isEventBanned === false ? false : (isEventDeleted ?? undefined)}
+                // Whatever explains a missing post (a suspension, nothing at
+                // all, a cause still unknown), Restore needs a confirmed ban.
+                isEventBanned={isEventBannedForActions}
+                statusPending={isEventBanForActionsPending}
                 hasBlockedMedia={videoIsBlocked}
                 hasRestrictedMedia={videoIsRestricted}
                 // Not isLoading, which covers only a first load that is fetching. A

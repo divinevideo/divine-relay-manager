@@ -60,6 +60,11 @@ export function EventModeration() {
     },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      // An approve is a restore. Report detail reads a post's ban status from
+      // the banned-events list, so re-read it, as after a ban, or a report
+      // opened soon after keeps calling the approved post banned and offering
+      // Restore.
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       toast(result.recorded === true && result.reconciled !== false
         ? { title: "Event approved successfully" }
         : {
