@@ -5,9 +5,9 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { EventModeration } from './EventModeration';
+import { withAsModerator } from '@/test/adminApiMock';
 
 const PENDING_ID = 'c'.repeat(64);
-const MOD_PUBKEY = 'e'.repeat(64);
 
 const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
@@ -15,11 +15,13 @@ const api = vi.hoisted(() => ({
   restoreEvent: vi.fn(),
   verifyEventDeleted: vi.fn(),
 }));
+// The approve goes through asModerator(token), taking the login at the click.
+const moderatorApi = withAsModerator(api);
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useRelayBanLists', () => ({
   useBannedEvents: () => ({ data: [], isLoading: false, error: null }),
