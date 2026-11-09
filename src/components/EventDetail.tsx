@@ -72,6 +72,7 @@ import {
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
 import { HIGH_PRIORITY_CATEGORIES, RECENT_AUTHORED_LIMIT, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { hexTagFilterValues } from "../../shared/hex-id";
 
 interface EventDetailProps {
   event: NostrEvent;
@@ -522,13 +523,16 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
       };
       const reads: Promise<{ events: NostrEvent[]; complete: boolean }>[] = [];
 
+      // Both spellings: a reporter's client can write the id in uppercase
+      // (#315), relay tag filters match exactly, and a CSAM report missed here
+      // would not gate the media.
       // Reports on this specific event
       if (event.id) {
-        reads.push(read({ kinds: [1984], '#e': [event.id], limit: 50 }));
+        reads.push(read({ kinds: [1984], '#e': hexTagFilterValues(event.id), limit: 50 }));
       }
 
       // Reports on this user
-      reads.push(read({ kinds: [1984], '#p': [event.pubkey], limit: 50 }));
+      reads.push(read({ kinds: [1984], '#p': hexTagFilterValues(event.pubkey), limit: 50 }));
 
       const results = await Promise.all(reads);
       const reports = results.flatMap(r => r.events);

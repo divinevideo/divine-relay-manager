@@ -36,6 +36,9 @@ export function resolvedKeysFrom(
 ): { resolved: Set<string>; automated: Set<string> } {
   const resolved = new Set<string>();
   const automated = new Set<string>();
+  // Keyed as stored, not lowercased as getReportTarget keys a report: the
+  // pane's history and Reopen read records exactly, so one in another
+  // spelling leaves its report in front of a person.
   for (const label of labels) resolved.add(`${label.type}:${label.value}`);
   for (const decision of decisions) {
     if (decision.target_type === 'pubkey' || decision.target_type === 'event') {

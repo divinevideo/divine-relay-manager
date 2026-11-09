@@ -138,6 +138,26 @@ describe('AgeReview report hand-off (?pubkey=)', () => {
     expect(screen.queryByText(/No active age-review case/)).not.toBeInTheDocument();
   });
 
+  // Cases are stored in lowercase (#313), and the active-case endpoint accepts
+  // only lowercase hex, so a link in uppercase hex is lowercased first (#316).
+  it('looks up a case outside the loaded list by the lowercase form of an uppercase link', async () => {
+    getActiveAgeReviewCase.mockResolvedValue({ success: true, case: makeCase() });
+
+    renderPage(`/age-review?pubkey=${PUBKEY.toUpperCase()}`);
+
+    expect(await screen.findByTestId('case-detail')).toHaveTextContent('case:case-1');
+    expect(getActiveAgeReviewCase).toHaveBeenCalledWith(PUBKEY);
+  });
+
+  it('matches an uppercase link to a case already in the loaded list, without a lookup', async () => {
+    getAgeReviewCases.mockResolvedValue({ success: true, cases: [makeCase()] });
+    getActiveAgeReviewCase.mockReturnValue(new Promise(() => {}));
+
+    renderPage(`/age-review?pubkey=${PUBKEY.toUpperCase()}`);
+
+    expect(await screen.findByTestId('case-detail')).toHaveTextContent('case:case-1');
+  });
+
   it('shows the generic prompt only when no hand-off is in play', async () => {
     renderPage('/age-review');
 

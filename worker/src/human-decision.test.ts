@@ -392,6 +392,42 @@ describe('human decision persistence', () => {
       expect(upsert!.bindings).toContain('target_event_xyz');
     });
 
+    // An older frontend can send a report's tag as written (#313, #315). The
+    // label is signed with the lowercase id, and the human-review mark keys it
+    // that way, as every reader does.
+    it('names a resolution label\'s target in lowercase, in the label and the mark', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      const pubkey = 'cd'.repeat(32);
+      const sent: string[] = [];
+      const originalSend = MockWebSocket.prototype.send;
+      vi.spyOn(MockWebSocket.prototype, 'send').mockImplementation(function (this: MockWebSocket, data: string) {
+        sent.push(data);
+        originalSend.call(this, data);
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
+        body: JSON.stringify({
+          kind: 1985,
+          content: 'Reviewed',
+          tags: [
+            ['L', 'moderation/resolution'],
+            ['l', 'reviewed', 'moderation/resolution'],
+            ['p', pubkey.toUpperCase()],
+          ],
+        }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const published = sent.map(d => JSON.parse(d)).find(m => m[0] === 'EVENT')?.[1] as { tags: string[][] };
+      expect(published.tags).toContainEqual(['p', pubkey]);
+      const upsert = sqlLog.find(s => s.sql.includes('INSERT INTO moderation_targets'));
+      expect(upsert!.bindings).toContain(pubkey);
+      expect(upsert!.bindings).not.toContain(pubkey.toUpperCase());
+    });
+
     it('should NOT call markHumanReviewed for non-resolution labels', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);
@@ -445,6 +481,32 @@ describe('human decision persistence', () => {
       }), env as never, mockCtx);
       expect(response.status).toBe(200);
       expect(reviewedAtPublication).toBe(true);
+    });
+
+    // The event coordinator refuses an id that is not lowercase, so an older
+    // tab marking an uppercase-tagged event report reviewed needs the label's
+    // e value lowercased before it reaches the coordinator.
+    it('hands the coordinator and the relay an event label\'s target in lowercase', async () => {
+      const { db } = createMockDB();
+      const operations: Array<{ eventId: string }> = [];
+      const env = createEnv(db, operations);
+      const id = 'cd'.repeat(32);
+      const sent: string[] = [];
+      const originalSend = MockWebSocket.prototype.send;
+      vi.spyOn(MockWebSocket.prototype, 'send').mockImplementation(function (this: MockWebSocket, data: string) {
+        sent.push(data);
+        originalSend.call(this, data);
+      });
+      const response = await worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
+        body: JSON.stringify({ kind: 1985, content: 'Reviewed', tags: [
+          ['L', 'moderation/resolution'], ['l', 'reviewed', 'moderation/resolution'], ['e', id.toUpperCase()],
+        ] }),
+      }), env as never, mockCtx);
+      expect(response.status).toBe(200);
+      expect(operations.map(o => o.eventId)).toEqual([id]);
+      const published = sent.map(d => JSON.parse(d)).find(m => m[0] === 'EVENT')?.[1] as { tags: string[][] };
+      expect(published.tags).toContainEqual(['e', id]);
     });
 
     it('reports saved human review when the later label publication fails', async () => {
@@ -696,6 +758,35 @@ describe('human decision persistence', () => {
       expect(body.success).toBe(true);
 
       expect(mockCtx.waitUntil).toHaveBeenCalled();
+    });
+
+    // The unban goes to the relay as written, so a ban stored in uppercase stays
+    // removable; the human-review mark keys the lowercase id every reader uses.
+    it('allow_pubkey unbans the spelling given and marks the lowercase id', async () => {
+      const { db, sqlLog } = createMockDB();
+      const env = createEnv(db);
+      const pubkey = 'ef'.repeat(32);
+      mockFetch.mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ result: true }),
+        text: async () => JSON.stringify({ result: true }),
+      });
+
+      const response = await worker.fetch(new Request('http://localhost/api/moderate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
+        body: JSON.stringify({ action: 'allow_pubkey', pubkey: pubkey.toUpperCase() }),
+      }), env as never, mockCtx);
+
+      expect(response.status).toBe(200);
+      const rpcBodies = mockFetch.mock.calls
+        .map(c => (c[1] as { body?: unknown } | undefined)?.body)
+        .filter((b): b is string => typeof b === 'string' && b.includes('unbanpubkey'));
+      expect(rpcBodies.some(b => b.includes(pubkey.toUpperCase()))).toBe(true);
+      const upsert = sqlLog.find(s => s.sql.includes('INSERT INTO moderation_targets'));
+      expect(upsert!.bindings).toContain(pubkey);
+      expect(upsert!.bindings).not.toContain(pubkey.toUpperCase());
     });
 
     it('delete_event via moderate succeeds when notify fails', async () => {

@@ -54,6 +54,7 @@ import {
 } from "lucide-react";
 import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import type { NostrEvent } from "@nostrify/nostrify";
+import { canonicalHex64 } from "../../shared/hex-id";
 
 interface EventsListProps {
   relayUrl: string;
@@ -605,10 +606,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
     const pubkeys = new Set<string>();
     if (allReports) {
       for (const report of allReports) {
+        // A reporter's client can spell the id in uppercase (#315); relay
+        // events carry it lowercase.
         const eTag = report.tags.find(t => t[0] === 'e');
-        if (eTag) eventIds.add(eTag[1]);
+        if (eTag) eventIds.add(canonicalHex64(eTag[1]) ?? eTag[1]);
         const pTag = report.tags.find(t => t[0] === 'p');
-        if (pTag) pubkeys.add(pTag[1]);
+        if (pTag) pubkeys.add(canonicalHex64(pTag[1]) ?? pTag[1]);
       }
     }
     return { reportedEventIds: eventIds, reportedPubkeys: pubkeys };

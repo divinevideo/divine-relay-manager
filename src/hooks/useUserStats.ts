@@ -7,6 +7,7 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { queryStrict, RelayReadError } from "@/lib/relayRead";
 import { RECENT_AUTHORED_LIMIT, RECENT_CONTENT_KINDS, userStatsQueryKey } from "@/lib/constants";
 import { pageByUntil } from "../../shared/relay-pager";
+import { hexTagFilterValues } from "../../shared/hex-id";
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 
 export interface UserStats {
@@ -116,8 +117,10 @@ export function useUserStats(pubkey: string | undefined) {
         read([{ kinds: [...RECENT_CONTENT_KINDS], authors: [pubkey], limit: RECENT_AUTHORED_LIMIT }]),
         // Labels against this user: the whole history, not the newest 50.
         readAll({ kinds: [1985], '#p': [pubkey] }),
-        // Reports against this user: the whole history, not the newest 50.
-        readAll({ kinds: [1984], '#p': [pubkey] }),
+        // Reports against this user: the whole history, not the newest 50, in
+        // both spellings (a reporter's client can write the pubkey in
+        // uppercase, and relay tag filters match exactly).
+        readAll({ kinds: [1984], '#p': hexTagFilterValues(pubkey) }),
       ]);
       const recentPosts = authoredContentRead.events;
       const existingLabels = labelsRead.events;
