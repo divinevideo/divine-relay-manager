@@ -114,7 +114,7 @@ describe('POST /api/publish signs only the kinds the app publishes', () => {
     vi.restoreAllMocks();
   });
 
-  async function expectRefused(body: unknown, code: string) {
+  async function expectRefused(body: unknown, code: string | undefined) {
     const { env, prepare, watcherFetch } = createEnv();
     const response = await publish(env, body);
     const json = await response.json() as Record<string, unknown>;
@@ -129,6 +129,7 @@ describe('POST /api/publish signs only the kinds the app publishes', () => {
     expect(prepare).not.toHaveBeenCalled();
     expect(watcherFetch).not.toHaveBeenCalled();
     expect(fetchMock).not.toHaveBeenCalled();
+    return json;
   }
 
   it('refuses kind 27235 (HTTP auth) without signing or sending anything', async () => {
@@ -145,6 +146,17 @@ describe('POST /api/publish signs only the kinds the app publishes', () => {
 
   it('refuses kind 0, which the app signs in the browser, not here', async () => {
     await expectRefused({ kind: 0, content: '{}' }, 'kind_not_allowed');
+  });
+
+  // The missing-field check runs first and carries no code, so a body without
+  // a kind fails there rather than at the integer check.
+  it.each([
+    ['no kind', { content: 'Reviewed', tags: resolutionTags }],
+    ['a null kind', { kind: null, content: 'Reviewed', tags: resolutionTags }],
+    ['no content', { kind: 1985, tags: resolutionTags }],
+  ])('refuses a body with %s before reading the key', async (_label, body) => {
+    const json = await expectRefused(body, undefined);
+    expect(json.error).toBe('Missing required fields: kind, content');
   });
 
   it.each([
