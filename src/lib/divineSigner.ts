@@ -4,13 +4,14 @@
 // that package will be the maintained nostrify adapter. This is the only
 // divine-login glue we own; keep it thin and lean on the SDK for session/refresh.
 //
-// Known phase-1 limitation: DivineRpc is built without an onUnauthorized hook, so
-// if the access token expires mid-session (a long focused session that never
-// blurs) a signEvent/getPublicKey returns 401 rather than auto-refreshing. The
-// session provider refreshes on mount and window focus, which covers the common
-// case; signing here is only used for the moderator's own profile edits, not for
-// attribution (which needs the pubkey only). Server-side token verification in
-// phase 2 is where refresh-on-expiry becomes worth wiring.
+// DivineRpc is built without an onUnauthorized hook, so a call made with an
+// expired token returns 401 rather than refreshing here. Refresh lives in
+// DivineSessionProvider instead (mount, focus, tab visible, and a timer shortly
+// before expiresAt), which builds a new signer for each new token. Attribution
+// does not go through this signer: the worker verifies the login token itself
+// (#178 phase 2). getPublicKey caches its answer for the signer's lifetime, so
+// it cannot tell whether the token is still valid; the provider uses expiresAt
+// for that.
 import { DivineRpc, type UnsignedEvent } from '@divinevideo/login';
 import type { NostrEvent, NostrSigner } from '@nostrify/nostrify';
 import { DIVINE_LOGIN_SERVER_URL } from './divineLogin';

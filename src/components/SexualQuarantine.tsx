@@ -87,11 +87,12 @@ function CaseDetail({ eventId }: { eventId: string }) {
   const history = useQuery({ queryKey: [...key, 'history'], queryFn: () => api.getSexualQuarantineHistory(eventId), refetchInterval: 15_000 });
   const decision = useMutation({
     mutationFn: async (choice: 'restore' | 'remove') => {
+      // No actor in the body: the worker records the moderator it verifies
+      // from this login, or none.
+      const act = api.asModerator(session.getModeratorToken()); // take the login at the click
       const revision = viewedRevision.current ?? item.data!.revision;
       const explanation = reason.trim();
-      const actor = await session.getModeratorPubkey();
-      if (!active.current) throw new Error('Environment or case changed. Review again.');
-      return api.decideSexualQuarantine(eventId, { revision, decision: choice, actor: actor || 'unattributed', reason: explanation });
+      return act.decideSexualQuarantine(eventId, { revision, decision: choice, reason: explanation });
     },
     onSuccess: async result => {
       client.setQueryData(key, result);

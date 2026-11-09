@@ -9,6 +9,7 @@ import { Labels } from './Labels';
 const query = vi.hoisted(() => vi.fn());
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => ({ banPubkey: vi.fn(), verifyPubkeyBanned: vi.fn() }) }));
+vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ getModeratorToken: () => undefined }) }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@nostrify/react', () => ({ useNostr: () => ({ nostr: { query } }) }));
 // Children are irrelevant to the badge colours and drag in their own dependencies.

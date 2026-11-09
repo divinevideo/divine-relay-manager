@@ -121,8 +121,10 @@ describe('protected-minor registry on real D1', () => {
       (id, pubkey, state, moderator_pubkey, resolution_note, created_at, updated_at)
       VALUES ('deny-a', ?, 'denied_closed', ?, 'Denied by moderator', ?, ?)`)
       .bind(PUBKEY_A, PUBKEY_B, '2026-01-01T00:00:00Z', '2026-01-02T00:00:00Z').run();
+    // No clearedBy: the case's moderator_pubkey (PUBKEY_B here) is a legacy,
+    // unverified column, so a retry carries no moderator (#178 phase 2).
     expect(await pendingSubjectClears(DB)).toEqual([{
-      subjectId, pubkey: PUBKEY_A, clearedBy: PUBKEY_B, reason: 'age_review_denied', denialCaseId: 'deny-a',
+      subjectId, pubkey: PUBKEY_A, reason: 'age_review_denied', denialCaseId: 'deny-a',
     }]);
     await clearSubject(DB, PUBKEY_A, PUBKEY_B, 'age_review_denied', subjectId);
     expect(await pendingSubjectClears(DB)).toEqual([]);
@@ -174,6 +176,18 @@ describe('protected-minor registry on real D1', () => {
     expect(await resolveByPubkey(DB, PUBKEY_C)).toBeNull();
     const copied = await DB.prepare(`SELECT parent_contact_email FROM age_review_cases WHERE id = 'onboard-a'`).first();
     expect(copied).toEqual({ parent_contact_email: null });
+  });
+
+  it('backfill does not copy a denial\'s legacy moderator_pubkey into cleared_by', async () => {
+    // Before #178 phase 2 that column held whatever the request body claimed.
+    await DB.prepare(`INSERT INTO age_review_cases (id, pubkey, state, created_via, moderator_pubkey, created_at, updated_at)
+      VALUES ('onboard-a', ?, 'cleared', 'minor_onboarding', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'),
+             ('deny-a', ?, 'denied_closed', 'report', ?, '2026-01-03T00:00:00Z', '2026-01-04T00:00:00Z')`)
+      .bind(PUBKEY_A, PUBKEY_A, 'd'.repeat(64)).run();
+    expect(await backfillProtectedMinorSubjects(DB)).toEqual({ created: 1, skippedDuplicates: 0 });
+    const subject = await DB.prepare(`SELECT classification_state, cleared_by FROM protected_minor_subjects
+      WHERE source_case_id = 'onboard-a'`).first();
+    expect(subject).toEqual({ classification_state: 'cleared', cleared_by: null });
   });
 
   it('replays replacement with the same operation and a clear wins stale retries', async () => {

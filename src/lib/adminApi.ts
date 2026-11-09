@@ -23,6 +23,25 @@ import {
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 
+// The moderator's Divine login token, for a request that records who acted. The
+// worker verifies it and records that moderator; it never reads one from a body.
+export interface LoginOpts {
+  loginToken?: string;
+}
+
+const MODERATOR_LOGIN_HEADER = 'X-Divine-Login-Token';
+
+function loginHeader(loginToken: string | undefined): Record<string, string> {
+  return loginToken ? { [MODERATOR_LOGIN_HEADER]: loginToken } : {};
+}
+
+// A moderator named in a body is ignored by the worker. Dropped here as well, so
+// a caller that still passes one (an untyped call, a stale object) sends none.
+function withoutModerator<T extends object>(body: T): T {
+  const { moderatorPubkey: _m, moderator_pubkey: _mp, actor: _a, ...rest } = body as Record<string, unknown>;
+  return rest as T;
+}
+
 export interface SexualQuarantineAudit { at: number; action: string; revision?: number; actor?: string; reason?: string; id?: string; pubkey?: string }
 const SEXUAL_QUARANTINE = '/api/report-watcher/sexual-quarantine';
 export const getSexualQuarantineCases = (apiUrl: string, cursor?: string) =>
@@ -31,8 +50,8 @@ export const getSexualQuarantineCase = (apiUrl: string, eventId: string) =>
   apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'GET');
 export const getSexualQuarantineHistory = (apiUrl: string, eventId: string) =>
   apiRequest<SexualQuarantineAudit[]>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}/history`, 'GET');
-export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { revision: number; decision: 'restore' | 'remove'; actor: string; reason: string }) =>
-  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'POST', body);
+export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { revision: number; decision: 'restore' | 'remove'; reason: string }, opts?: LoginOpts) =>
+  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'POST', withoutModerator(body), opts);
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
@@ -58,7 +77,6 @@ export interface UnsignedEvent {
   content: string;
   tags?: string[][];
   created_at?: number;
-  moderatorPubkey?: string;
   moderationReason?: string;
 }
 
@@ -67,7 +85,6 @@ interface ModerateParams {
   eventId?: string;
   pubkey?: string;
   reason?: string;
-  moderatorPubkey?: string;
 }
 
 export interface ApiResponse<T = unknown> {
@@ -98,7 +115,6 @@ export interface LabelParams {
   namespace: string;
   labels: string[];
   comment?: string;
-  moderatorPubkey?: string;
   moderationReason?: string;
 }
 
@@ -207,7 +223,7 @@ async function apiRequest<T>(
   endpoint: string,
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   body?: object,
-  opts?: { timeoutMs?: number }
+  opts?: { timeoutMs?: number } & LoginOpts
 ): Promise<T> {
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
@@ -217,7 +233,7 @@ async function apiRequest<T>(
   const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
   const response = await fetchWithTimeout(`${apiUrl}${endpoint}`, {
     method,
-    headers: getApiHeaders(),
+    headers: { ...getApiHeaders(), ...loginHeader(opts?.loginToken) },
     body: body ? JSON.stringify(body) : undefined,
   }, label, { mutates, timeoutMs });
 
@@ -268,8 +284,8 @@ export async function getWorkerInfo(apiUrl: string): Promise<InfoResponse> {
 }
 
 // Publish endpoint - for general event publishing
-export async function publishEvent(apiUrl: string, event: UnsignedEvent): Promise<ApiResponse> {
-  const data = await apiRequest<ApiResponse>(apiUrl, '/api/publish', 'POST', event);
+export async function publishEvent(apiUrl: string, event: UnsignedEvent, opts?: LoginOpts): Promise<ApiResponse> {
+  const data = await apiRequest<ApiResponse>(apiUrl, '/api/publish', 'POST', withoutModerator(event), opts);
   if (!data.success) {
     throw new ApiError(data.error || 'Failed to publish event');
   }
@@ -277,33 +293,33 @@ export async function publishEvent(apiUrl: string, event: UnsignedEvent): Promis
 }
 
 // Moderate endpoint - for moderation actions
-export async function moderateAction(apiUrl: string, params: ModerateParams): Promise<ApiResponse> {
-  const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate', 'POST', params);
+export async function moderateAction(apiUrl: string, params: ModerateParams, opts?: LoginOpts): Promise<ApiResponse> {
+  const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate', 'POST', withoutModerator(params), opts);
   if (!data.success) {
     throw new ApiError(data.error || 'Moderation action failed');
   }
   return data;
 }
 
-export async function deleteEvent(apiUrl: string, eventId: string, reason?: string, pubkey?: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'delete_event', eventId, reason, pubkey });
+export async function deleteEvent(apiUrl: string, eventId: string, reason?: string, pubkey?: string, opts?: LoginOpts): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'delete_event', eventId, reason, pubkey }, opts);
 }
 
-export async function hideEvent(apiUrl: string, eventId: string, reason?: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'hide_event', eventId, reason });
+export async function hideEvent(apiUrl: string, eventId: string, reason?: string, opts?: LoginOpts): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'hide_event', eventId, reason }, opts);
 }
 
 export async function restoreEvent(
   apiUrl: string,
   eventId: string,
-  moderatorPubkey?: string,
   reason?: string,
+  opts?: LoginOpts,
 ): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'allow_event', eventId, moderatorPubkey, reason });
+  return moderateAction(apiUrl, { action: 'allow_event', eventId, reason }, opts);
 }
 
-export async function allowPubkey(apiUrl: string, pubkey: string): Promise<ApiResponse> {
-  return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey });
+export async function allowPubkey(apiUrl: string, pubkey: string, opts?: LoginOpts): Promise<ApiResponse> {
+  return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey }, opts);
 }
 
 // NIP-86 Relay RPC endpoint - for direct relay management
@@ -311,7 +327,7 @@ export async function callRelayRpc<T = unknown>(
   apiUrl: string,
   method: string,
   params: (string | number | undefined)[] = [],
-  opts?: { timeoutMs?: number }
+  opts?: { timeoutMs?: number } & LoginOpts
 ): Promise<T> {
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
@@ -321,7 +337,7 @@ export async function callRelayRpc<T = unknown>(
   const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
   const response = await fetchWithTimeout(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
-    headers: getApiHeaders(),
+    headers: { ...getApiHeaders(), ...loginHeader(opts?.loginToken) },
     body: JSON.stringify({ method, params }),
   }, label, { mutates, timeoutMs });
 
@@ -394,14 +410,14 @@ export class BanNotConfirmedError extends ApiError {
 // a no-op. Anything but a 4xx refusal is checked against the ban list before
 // it is reported. The worker already did this once; checking again here also
 // covers our own 30s timeout and a dropped connection.
-export async function banPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<BanOutcome> {
+export async function banPubkey(apiUrl: string, pubkey: string, reason?: string, opts?: LoginOpts): Promise<BanOutcome> {
   // Checked here rather than left to apiRequest: with nothing sent, nothing can
   // have applied, so this must stay a plain failure and not reach the re-check.
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
   try {
-    const data = await moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason: reason || 'Banned via admin' });
+    const data = await moderateAction(apiUrl, { action: 'ban_pubkey', pubkey, reason: reason || 'Banned via admin' }, opts);
     if (data.contentRemovalUnconfirmed !== true) return { unconfirmed: null };
     return { unconfirmed: data.relayTimedOut === true ? 'removal_running' : 'removal_error' };
   } catch (error) {
@@ -442,20 +458,20 @@ async function isPubkeyOnBanList(apiUrl: string, pubkey: string): Promise<boolea
   }
 }
 
-export async function banEvent(apiUrl: string, eventId: string, reason?: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'banevent', [eventId, reason]);
+export async function banEvent(apiUrl: string, eventId: string, reason?: string, opts?: LoginOpts): Promise<void> {
+  await callRelayRpc(apiUrl, 'banevent', [eventId, reason], opts);
 }
 
 // Funnelcake's event unban method is intentionally named allowevent, not unbanevent.
-export async function allowEvent(apiUrl: string, eventId: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'allowevent', [eventId]);
+export async function allowEvent(apiUrl: string, eventId: string, opts?: LoginOpts): Promise<void> {
+  await callRelayRpc(apiUrl, 'allowevent', [eventId], opts);
 }
 
 // Convenience function for unbanning pubkey
 // Note: 'unbanpubkey' is not in NIP-86 spec but is a necessary extension
 // This will fail on relays that don't support it until they add the method
-export async function unbanPubkey(apiUrl: string, pubkey: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'unbanpubkey', [pubkey]);
+export async function unbanPubkey(apiUrl: string, pubkey: string, opts?: LoginOpts): Promise<void> {
+  await callRelayRpc(apiUrl, 'unbanpubkey', [pubkey], opts);
 }
 
 // Banned pubkey can be a string or an object with pubkey and reason
@@ -488,12 +504,12 @@ export async function listBannedEvents(
   return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents', [], opts);
 }
 
-export async function suspendPubkey(apiUrl: string, pubkey: string, reason?: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'suspendpubkey', [pubkey, reason || 'Suspended via admin']);
+export async function suspendPubkey(apiUrl: string, pubkey: string, reason?: string, opts?: LoginOpts): Promise<void> {
+  await callRelayRpc(apiUrl, 'suspendpubkey', [pubkey, reason || 'Suspended via admin'], opts);
 }
 
-export async function unsuspendPubkey(apiUrl: string, pubkey: string): Promise<void> {
-  await callRelayRpc(apiUrl, 'unsuspendpubkey', [pubkey]);
+export async function unsuspendPubkey(apiUrl: string, pubkey: string, opts?: LoginOpts): Promise<void> {
+  await callRelayRpc(apiUrl, 'unsuspendpubkey', [pubkey], opts);
 }
 
 export async function listSuspendedPubkeys(
@@ -769,7 +785,7 @@ export async function fetchResolutionLabelTargets(
 }
 
 // Publish a NIP-32 label (kind 1985)
-export async function publishLabel(apiUrl: string, params: LabelParams): Promise<ApiResponse> {
+export async function publishLabel(apiUrl: string, params: LabelParams, opts?: LoginOpts): Promise<ApiResponse> {
   const tags: string[][] = [
     ['L', params.namespace],
     ...params.labels.map(l => ['l', l, params.namespace]),
@@ -780,9 +796,8 @@ export async function publishLabel(apiUrl: string, params: LabelParams): Promise
     kind: 1985,
     content: params.comment || '',
     tags,
-    moderatorPubkey: params.moderatorPubkey,
     moderationReason: params.moderationReason,
-  });
+  }, opts);
 }
 
 export interface LabelAndBanResult {
@@ -796,12 +811,13 @@ export interface LabelAndBanResult {
 // Combined action: publish label and optionally ban
 export async function publishLabelAndBan(
   apiUrl: string,
-  params: LabelParams & { shouldBan?: boolean }
+  params: LabelParams & { shouldBan?: boolean },
+  opts?: LoginOpts,
 ): Promise<LabelAndBanResult> {
   const result: LabelAndBanResult = { labelPublished: false, banned: false };
 
   // Publish the label first
-  await publishLabel(apiUrl, params);
+  await publishLabel(apiUrl, params, opts);
   result.labelPublished = true;
 
   // Optionally ban the pubkey. A ban failure is returned, not thrown: the label
@@ -809,7 +825,7 @@ export async function publishLabelAndBan(
   // that publishes it twice.
   if (params.shouldBan && params.targetType === 'pubkey') {
     try {
-      result.banOutcome = await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`);
+      result.banOutcome = await banPubkey(apiUrl, params.targetValue, `Labeled: ${params.labels.join(', ')}`, opts);
       result.banned = true;
     } catch (error) {
       result.banError = error instanceof Error ? error : new Error(String(error));
@@ -829,7 +845,7 @@ export async function markAsReviewed(
   targetValue: string,
   status: ResolutionStatus = 'reviewed',
   comment?: string,
-  moderatorPubkey?: string,
+  opts?: LoginOpts,
 ): Promise<ApiResponse> {
   const moderationReason = comment || `Marked as ${status} by moderator`;
   return publishLabel(apiUrl, {
@@ -838,9 +854,8 @@ export async function markAsReviewed(
     namespace: 'moderation/resolution',
     labels: [status],
     comment: moderationReason,
-    moderatorPubkey,
     moderationReason,
-  });
+  }, opts);
 }
 
 // Media moderation request actions
@@ -954,10 +969,9 @@ export async function logDecision(apiUrl: string, params: {
   targetId: string;
   action: string;
   reason?: string;
-  moderatorPubkey?: string;
   reportId?: string;
-}): Promise<void> {
-  await apiRequest<ApiResponse>(apiUrl, '/api/decisions', 'POST', params);
+}, opts?: LoginOpts): Promise<void> {
+  await apiRequest<ApiResponse>(apiUrl, '/api/decisions', 'POST', withoutModerator(params), opts);
 }
 
 // Zendesk ticket linkage
@@ -980,18 +994,18 @@ export async function getLinkedTickets(
 }
 
 // Manually close a single linked Zendesk ticket (Zendesk-only; no content decision).
-export async function closeTicket(apiUrl: string, ticketId: number, moderatorPubkey?: string): Promise<void> {
-  await apiRequest<ApiResponse>(apiUrl, `/api/tickets/${ticketId}/close`, 'POST', { moderatorPubkey });
+// The route reads no body.
+export async function closeTicket(apiUrl: string, ticketId: number, opts?: LoginOpts): Promise<void> {
+  await apiRequest<ApiResponse>(apiUrl, `/api/tickets/${ticketId}/close`, 'POST', undefined, opts);
 }
 
 export async function confirmAutoHide(apiUrl: string, params: {
   eventId: string;
   reason?: string;
-  moderatorPubkey?: string;
   reportId?: string;
   reporterPubkey?: string;
-}): Promise<ApiResponse> {
-  return apiRequest<ApiResponse>(apiUrl, '/api/confirm-auto-hide', 'POST', params);
+}, opts?: LoginOpts): Promise<ApiResponse> {
+  return apiRequest<ApiResponse>(apiUrl, '/api/confirm-auto-hide', 'POST', withoutModerator(params), opts);
 }
 
 // Get decisions for a target
@@ -1656,8 +1670,9 @@ export async function updateAgeReviewCase(
   apiUrl: string,
   caseId: string,
   updates: Record<string, unknown>,
+  opts?: LoginOpts,
 ): Promise<AgeReviewCaseResponse> {
-  return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', updates);
+  return apiRequest<AgeReviewCaseResponse>(apiUrl, `/api/age-review/cases/${caseId}`, 'PATCH', withoutModerator(updates), opts);
 }
 
 // Minor onboarding
@@ -1691,11 +1706,10 @@ export async function createMinorAccount(
 export { VALID_BULK_ACTIONS, type BulkAction, type BulkModerateResult, type BulkJob, type BulkJobStatus, type BulkKindCounts, type BulkNote, type BulkNotesPage };
 
 // Optional job scope: `kind` is required for delete-kind (the one event kind it
-// deletes) and rejected for every other action. The moderator and report
-// attribute the job's per-event decision rows.
+// deletes) and rejected for every other action. The report attributes the job's
+// per-event decision rows; the moderator comes from the login token.
 export interface BulkModerateOptions {
   kind?: number;
-  moderatorPubkey?: string;
   reportId?: string;
 }
 
@@ -1707,8 +1721,9 @@ export async function bulkModerate(
   action: BulkAction,
   reason?: string,
   options: BulkModerateOptions = {},
+  opts?: LoginOpts,
 ): Promise<BulkEnqueueResponse> {
-  const result = await apiRequest<BulkEnqueueResponse>(apiUrl, '/api/bulk-moderate', 'POST', { pubkey, action, reason, ...options });
+  const result = await apiRequest<BulkEnqueueResponse>(apiUrl, '/api/bulk-moderate', 'POST', withoutModerator({ pubkey, action, reason, ...options }), opts);
   if (!result.success || !result.jobId) {
     throw new ApiError('Failed to start bulk moderation');
   }

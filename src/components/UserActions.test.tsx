@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserActions } from './UserActions';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
 
@@ -30,12 +31,16 @@ vi.mock('react-router-dom', async (orig) => ({
   useNavigate: () => navigate,
 }));
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
-// Logged-in moderator, so audit writes carry attribution (#178).
+// Logged-in moderator, so actions carry attribution (#178). The live token is
+// read at call time, so a test can switch accounts mid-action.
 const MOD_PUBKEY = 'e'.repeat(64);
+const MOD_TOKEN = 'moderator-login-token';
+const session = vi.hoisted(() => ({ token: undefined as string | undefined }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => session.token }),
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -49,6 +54,7 @@ function doneJob(action: 'age-gate-all' | 'delete-all', over: Partial<Record<str
 
 beforeEach(() => {
   vi.clearAllMocks();
+  session.token = MOD_TOKEN;
   api.bulkModerate.mockResolvedValue({ success: true, jobId: 'job-1' });
   api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
   api.getBulkJobNotes.mockResolvedValue({ notes: [], next: null });
@@ -197,15 +203,35 @@ describe('UserActions', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
-  it('attributes the audit write to the logged-in moderator (#178)', async () => {
-    renderWithProvider(<UserActions pubkey={PUBKEY} />);
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
-    await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
+  it.each([
+    { action: 'suspend_user', call: 'suspendPubkey', props: {}, button: /Suspend User/i, confirm: false },
+    { action: 'unsuspend_user', call: 'unsuspendPubkey', props: { isSuspended: true }, button: /Unsuspend User/i, confirm: false },
+    { action: 'ban_user', call: 'banPubkey', props: {}, button: /Ban User/i, confirm: true },
+    { action: 'unban_user', call: 'unbanPubkey', props: { isBanned: true }, button: /Unban User/i, confirm: false },
+  ] as const)('sends $call and its audit write through asModerator(token) (#178)', async ({ action, call, props, button, confirm }) => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+    await waitFor(() => expect(api[call]).toHaveBeenCalled());
     await waitFor(() =>
-      expect(api.logDecision).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'suspend_user', moderatorPubkey: MOD_PUBKEY }),
-      ),
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action })),
     );
+    expect(tokensFor(moderatorApi, call)).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
+  });
+
+  it('a bulk job and its completion audit carry the token taken at the click, not one switched in mid-job (#178)', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    session.token = 'other-account-token';
+
+    await waitFor(() =>
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'bulk_age_restrict' })),
+    );
+    expect(tokensFor(moderatorApi, 'bulkModerate')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 
   // ReportDetail keeps this component mounted when the moderator opens another

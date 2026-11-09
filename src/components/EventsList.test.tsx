@@ -10,6 +10,7 @@ import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 import { EventsList } from './EventsList';
 import { parseSearchInput } from '@/lib/searchInput';
 import { RELAY_PROFILE_BADGE } from '@/lib/constants';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const PK = 'b'.repeat(64);
 
@@ -47,23 +48,25 @@ const eventModeration = vi.hoisted(() => ({
   restore: vi.fn(),
   verifyDeleted: vi.fn(),
 }));
+const moderatorApi = withAsModerator({
+  callRelayRpc: (...args: unknown[]) => rpc.fn(...args),
+  // Banned posts are read through the shared useBannedEvents definition, which
+  // calls listBannedEvents rather than callRelayRpc('listbannedevents'). Route it
+  // to the same mock so the assertions below keep one source of relay data.
+  listBannedEvents: () => rpc.fn('listbannedevents'),
+  hideEvent: (...args: unknown[]) => eventModeration.hide(...args),
+  restoreEvent: (...args: unknown[]) => eventModeration.restore(...args),
+  verifyEventDeleted: (...args: unknown[]) => eventModeration.verifyDeleted(...args),
+});
 vi.mock('@/hooks/useAdminApi', () => ({
-  useAdminApi: () => ({
-    callRelayRpc: rpc.fn,
-    // Banned posts are read through the shared useBannedEvents definition, which
-    // calls listBannedEvents rather than callRelayRpc('listbannedevents'). Route it
-    // to the same mock so the assertions below keep one source of relay data.
-    listBannedEvents: () => rpc.fn('listbannedevents'),
-    hideEvent: eventModeration.hide,
-    restoreEvent: eventModeration.restore,
-    verifyEventDeleted: eventModeration.verifyDeleted,
-  }),
+  useAdminApi: () => moderatorApi,
 }));
 
+const MOD_TOKEN = 'moderator-login-token';
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({
     user: { pubkey: 'a'.repeat(64) },
-    getModeratorPubkey: async () => 'a'.repeat(64),
+    getModeratorToken: () => MOD_TOKEN,
   }),
 }));
 
@@ -144,6 +147,7 @@ function renderEvents(initialEntry: string) {
 }
 
 beforeEach(() => {
+  moderatorApi.moderatorCall.mockClear();
   authorState.result = { data: undefined, isLoading: false };
   window.HTMLElement.prototype.scrollIntoView = vi.fn();
   relayQuery.fn.mockReset();
@@ -252,10 +256,11 @@ describe('EventsList recorded moderation', () => {
 
     await waitFor(() => expect(eventModeration.restore).toHaveBeenCalledWith(
       target.id,
-      'a'.repeat(64),
       'Allowed from event list',
     ));
     expect(eventModeration.hide).not.toHaveBeenCalled();
+    // Through asModerator(token) (#178).
+    expect(tokensFor(moderatorApi, 'restoreEvent')).toEqual([MOD_TOKEN]);
   });
 });
 

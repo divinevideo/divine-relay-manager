@@ -168,28 +168,27 @@ function StillHiddenRow({ sha256, restoredAt, pubkey, origin, blocked }: {
   const apiUrl = useApiUrl();
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const { getModeratorPubkey } = useCurrentUser();
+  const { getModeratorToken } = useCurrentUser();
   const statusRef = useRef<HTMLDivElement>(null);
 
   const restore = useMutation({
     mutationFn: async () => {
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.moderateMedia(sha256, 'SAFE', RESTORE_REASON, 'QUARANTINE', pubkey);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.moderateMedia(sha256, 'SAFE', RESTORE_REASON, 'QUARANTINE', pubkey);
       // Non-critical audit write, as EventActions does it: never blocks or
       // fails the restore that already happened.
-      void moderator.then((moderatorPubkey) =>
-        api.logDecision({
+      void Promise.resolve()
+        .then(() => act.logDecision({
           targetType: 'media',
           targetId: sha256,
           action: 'remove_restriction',
           reason: `${RESTORE_REASON} (left hidden by a bulk un-hide)`,
-          moderatorPubkey,
-        })
-          .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
-          .catch((e) => {
-            console.warn('[BulkNotesPanel] audit log failed', e);
-            toast({ title: 'File restored; audit log not recorded' });
-          }));
+        }))
+        .then(() => { queryClient.invalidateQueries({ queryKey: ['decisions'] }); })
+        .catch((e) => {
+          console.warn('[BulkNotesPanel] audit log failed', e);
+          toast({ title: 'File restored; audit log not recorded' });
+        });
     },
     // The worker marks the file's notes restored when the restore lands, or
     // finds it already public, so the kept results are read again: a panel

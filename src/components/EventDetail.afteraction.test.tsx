@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { EventDetail } from './EventDetail';
+import { withAsModerator } from '@/test/adminApiMock';
 import { markRestored, useJustRestored } from '@/lib/userStatsCache';
 import { BanNotConfirmedError } from '@/lib/adminApi';
 
@@ -30,16 +31,17 @@ const api = vi.hoisted(() => ({
   listBannedEvents: vi.fn(),
   listSuspendedPubkeys: vi.fn(),
 }));
+const moderatorApi = withAsModerator(api);
 
 vi.mock('@/hooks/useAdminApi', () => ({
-  useAdminApi: () => api,
+  useAdminApi: () => moderatorApi,
   useApiUrl: () => 'https://api.a.example',
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({
     user: { pubkey: MOD_PUBKEY },
-    getModeratorPubkey: async () => MOD_PUBKEY,
+    getModeratorToken: () => 'moderator-login-token',
   }),
 }));
 vi.mock('@/hooks/useNostr', () => ({ useNostr: () => ({ nostr: { query: vi.fn().mockResolvedValue([]) } }) }));

@@ -62,7 +62,7 @@ vi.mock('@/hooks/useModerationStatus', () => ({
   useModerationStatus: () => moderationStatusMock({ isUserBanned: false, isEventGone: false }),
 }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: 'e'.repeat(64) }, getModeratorPubkey: async () => 'e'.repeat(64) }),
+  useCurrentUser: () => ({ user: { pubkey: 'e'.repeat(64) }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));

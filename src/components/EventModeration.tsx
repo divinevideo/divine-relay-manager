@@ -30,8 +30,9 @@ interface BannedEvent {
 export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { callRelayRpc, banEvent, restoreEvent, verifyEventDeleted } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const api = useAdminApi();
+  const { callRelayRpc, verifyEventDeleted } = api;
+  const { getModeratorToken } = useCurrentUser();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -53,8 +54,10 @@ export function EventModeration() {
 
   // Mutation for allowing events
   const allowEventMutation = useMutation({
-    mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) =>
-      restoreEvent(eventId, await getModeratorPubkey(), reason || 'Allowed from moderation queue'),
+    mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      return act.restoreEvent(eventId, reason || 'Allowed from moderation queue');
+    },
     onSuccess: (result) => {
       queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
       toast(result.recorded === true && result.reconciled !== false
@@ -78,7 +81,8 @@ export function EventModeration() {
   // Mutation for banning events
   const banEventMutation = useMutation({
     mutationFn: async ({ eventId, reason }: { eventId: string; reason?: string }) => {
-      await banEvent(eventId, reason);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.banEvent(eventId, reason);
       return eventId;
     },
     onSuccess: async (eventId) => {

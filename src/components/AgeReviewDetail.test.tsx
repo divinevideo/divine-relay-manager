@@ -6,6 +6,7 @@ import { AgeReviewDetail } from './AgeReviewDetail';
 import { MemoryRouter } from 'react-router-dom';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { ApiError } from '@/lib/adminApi';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { accountStatusKey } from '@/lib/accountStatusCache';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 
@@ -42,22 +43,24 @@ const getActiveAgeReviewCase = vi.fn().mockResolvedValue({ success: true, case: 
 const moderateMedia = vi.fn().mockResolvedValue({ success: true });
 const logDecision = vi.fn().mockResolvedValue(undefined);
 
+const MOD_TOKEN = 'moderator-login-token';
+const moderatorApi = withAsModerator({
+  updateAgeReviewCase,
+  getAgeReviewConfig,
+  getAccountStatus,
+  getAgeReviewBulkNotesJob,
+  getBulkJobNotes,
+  getActiveAgeReviewCase,
+  moderateMedia,
+  logDecision,
+  suspendPubkey,
+});
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',
-  useAdminApi: () => ({
-    updateAgeReviewCase,
-    getAgeReviewConfig,
-    getAccountStatus,
-    getAgeReviewBulkNotesJob,
-    getBulkJobNotes,
-    getActiveAgeReviewCase,
-    moderateMedia,
-    logDecision,
-    suspendPubkey,
-  }),
+  useAdminApi: () => moderatorApi,
 }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: undefined, users: [], getModeratorPubkey: async () => 'e'.repeat(64) }),
+  useCurrentUser: () => ({ user: undefined, users: [], getModeratorToken: () => MOD_TOKEN }),
 }));
 
 vi.mock('@/hooks/useToast', () => ({
@@ -151,6 +154,7 @@ describe('AgeReviewDetail', () => {
 
   beforeEach(() => {
     updateAgeReviewCase.mockClear();
+    moderatorApi.moderatorCall.mockClear();
     updateAgeReviewCase.mockResolvedValue({ success: true });
     getAgeReviewConfig.mockClear();
     getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
@@ -177,6 +181,8 @@ describe('AgeReviewDetail', () => {
     await waitFor(() => {
       expect(updateAgeReviewCase).toHaveBeenCalledWith('case-1', { state: expectedState, expected_version: 0 });
     });
+    // The PATCH goes through asModerator(token) (#178).
+    expect(tokensFor(moderatorApi, 'updateAgeReviewCase')).toEqual([MOD_TOKEN]);
   });
 
   it('toasts when relay or bulk enforcement fails even if Keycast succeeds', async () => {
@@ -1098,6 +1104,8 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
 
     await waitFor(() => expect(suspendPubkey).toHaveBeenCalled());
     await waitFor(() => expect(queryClient.getQueryData(STATS_KEY)).toBeUndefined());
+    // The embedded suspend goes through asModerator(token) like the case's own actions (#178).
+    expect(tokensFor(moderatorApi, 'suspendPubkey')).toEqual([MOD_TOKEN]);
   });
 
   // The window says the account was just restored. Only a clear whose relay
