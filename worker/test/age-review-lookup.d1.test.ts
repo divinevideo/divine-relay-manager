@@ -153,18 +153,46 @@ describe('a case stored under an uppercase pubkey', () => {
     expect(res.json).toMatchObject({ success: true, case: { id: 'c2' } });
   });
 
-  it('does not refuse relay-RPC unbanpubkey', async () => {
-    const res = await send('/api/relay-rpc', { method: 'unbanpubkey', params: [LOWER] });
+  it.each(['unbanpubkey', 'unsuspendpubkey'])('does not refuse relay-RPC %s', async (method) => {
+    const res = await send('/api/relay-rpc', { method, params: [LOWER] });
     expect(res).toMatchObject({ status: 200, json: { success: true } });
     expect(res.outbound).toBeGreaterThan(0);
   });
 
-  it('leaves relay-RPC unbanpubkey refused for the lowercase case, sending nothing', async () => {
+  it.each(['unbanpubkey', 'unsuspendpubkey'])('leaves relay-RPC %s refused for the lowercase case, sending nothing', async (method) => {
     await insertCase(LOWER, 'open_reported');
-    const res = await send('/api/relay-rpc', { method: 'unbanpubkey', params: [LOWER] });
+    const res = await send('/api/relay-rpc', { method, params: [LOWER] });
     expect(res.status).toBe(409);
     expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c2' });
     expect(res.outbound).toBe(0);
+  });
+
+  it("does not refuse a note's Restore", async () => {
+    const res = await send('/api/moderate-media', { sha256: '5'.repeat(64), action: 'SAFE', from: 'QUARANTINE', pubkey: LOWER });
+    expect(res.json).not.toMatchObject({ code: 'age_review_active' });
+    expect(res.outbound).toBeGreaterThan(0);
+  });
+
+  it("leaves a note's Restore refused for the lowercase case, writing nothing", async () => {
+    await insertCase(LOWER, 'open_reported');
+    const res = await send('/api/moderate-media', { sha256: '5'.repeat(64), action: 'SAFE', from: 'QUARANTINE', pubkey: LOWER });
+    expect(res.status).toBe(409);
+    expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c2' });
+    expect(res.outbound).toBe(0);
+  });
+
+  it.each(['age-gate-all', 'un-age-restrict-all'])('does not refuse the bulk %s', async (action) => {
+    const res = await send('/api/bulk-moderate', { pubkey: LOWER, action });
+    expect(res).toMatchObject({ status: 200, json: { success: true } });
+    expect(queued).toEqual([expect.objectContaining({ pubkey: LOWER, action })]);
+  });
+
+  it.each(['age-gate-all', 'un-age-restrict-all'])('leaves the bulk %s refused for the lowercase case, queueing nothing', async (action) => {
+    await insertCase(LOWER, 'open_reported');
+    const res = await send('/api/bulk-moderate', { pubkey: LOWER, action });
+    expect(res.status).toBe(409);
+    expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c2' });
+    expect(queued).toEqual([]);
   });
 
   // The per-chunk check the bulk queue consumer runs for a loosening job.

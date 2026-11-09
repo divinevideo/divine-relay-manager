@@ -826,9 +826,10 @@ describe('AgeReviewDetail', () => {
       expect(screen.getByRole('button', { name: 'Clear without approval' })).toBeInTheDocument();
     });
 
-    // The worker only records an approval for a lowercase 64-char hex pubkey, and
-    // the case stores the report's p tag verbatim, so a mixed-case tag can never
-    // be approved. Offering the button would fail every time.
+    // The worker only records an approval for a lowercase 64-char hex pubkey. A
+    // case opened before #313 stored the report's p tag verbatim, so a mixed-case
+    // pubkey is possible there and can never be approved; offering the button
+    // would fail every time. Cases are opened in lowercase now.
     it('hides approval, and says why, when the case pubkey is not lowercase hex', async () => {
       renderDetail(makeCase({ suspected_age_band: 'age_13_15', pubkey: 'A'.repeat(64) }));
       await screen.findByRole('button', { name: 'Clear without approval' });

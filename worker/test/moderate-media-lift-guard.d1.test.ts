@@ -95,12 +95,20 @@ describe('/api/moderate-media lift guard on a real database', () => {
   // Cases are stored under a lowercase pubkey (#313), as the media server's
   // owner is, and the guard's lookup matches exactly: a case in another
   // spelling is not the owner's.
-  it('lets an Unblock through when the only open case is stored in uppercase', async () => {
+  it.each(['SAFE', 'AGE_RESTRICTED'])('lets a %s of a blocked file through when the only open case is stored in uppercase', async (action) => {
     await clearCases();
     await insertCase(OWNER.toUpperCase(), 'open_reported');
-    const res = await unblock();
+    const res = await unblock(action);
     expect(res.status).toBe(200);
     expect(writes).toBe(1);
+  });
+
+  it('refuses an Age Restrict of a blocked file while the owner has an open case, and writes nothing', async () => {
+    await clearCases();
+    await insertCase(OWNER, 'open_reported');
+    const res = await unblock('AGE_RESTRICTED');
+    expect(res).toMatchObject({ status: 409, json: { code: 'age_review_active', caseId: `c${seq}` } });
+    expect(writes).toBe(0);
   });
 
   it.each(['cleared', 'denied_closed'])('lets an Unblock through once the owner\'s case is %s', async (state) => {
