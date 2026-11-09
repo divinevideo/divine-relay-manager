@@ -6,7 +6,11 @@ import { useBulkModerateJob } from './useBulkModerateJob';
 
 // Two environments' clients; the hook uses whichever is current at render.
 const clients = vi.hoisted(() => {
-  const make = () => ({ bulkModerate: vi.fn(), getBulkJobStatus: vi.fn() });
+  const make = () => {
+    const client = { bulkModerate: vi.fn(), getBulkJobStatus: vi.fn(), asModerator: vi.fn() };
+    client.asModerator.mockReturnValue(client);
+    return client;
+  };
   const staging = make();
   const production = make();
   return { staging, production, current: staging };
@@ -29,9 +33,11 @@ describe('useBulkModerateJob start', () => {
     const confirmedStart = result.current.startAsync;
     clients.current = clients.production;
     rerender();
-    await act(async () => { await confirmedStart('delete-kind', { kind: 7 }); });
+    await act(async () => { await confirmedStart('delete-kind', { kind: 7 }, 'tok'); });
 
     expect(clients.staging.bulkModerate).toHaveBeenCalledTimes(1);
+    // The enqueue carries the login the caller took at the click.
+    expect(clients.staging.asModerator).toHaveBeenCalledWith('tok');
     expect(clients.production.bulkModerate).not.toHaveBeenCalled();
     // The job runs detached: the now-selected environment does not poll it.
     expect(clients.production.getBulkJobStatus).not.toHaveBeenCalled();

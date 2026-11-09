@@ -374,12 +374,17 @@ export async function settleSupersededClear(db: D1Database, subjectId: string): 
     .bind(new Date().toISOString(), subjectId).run();
 }
 
+// A retry carries no moderator. The only one on hand would be the denial case's
+// legacy moderator_pubkey column, which phase 2 (#178) no longer writes; a value
+// still in it came from a request body before then and was never verified, so
+// copying it into cleared_by would record an unverified identity. The inline
+// clear records the verified moderator; a retry of it records null.
 export async function pendingSubjectClears(db: D1Database): Promise<Array<{
-  subjectId: string; pubkey: string; clearedBy?: string; reason: 'age_review_denied' | 'age_review_expired';
+  subjectId: string; pubkey: string; reason: 'age_review_denied' | 'age_review_expired';
   /** The denial this retry carries out; clearSubject re-checks it at write time. */
   denialCaseId: string;
 }>> {
-  const rows = await db.prepare(`SELECT s.subject_id, c.id AS denial_case_id, c.pubkey, c.moderator_pubkey, c.resolution_note
+  const rows = await db.prepare(`SELECT s.subject_id, c.id AS denial_case_id, c.pubkey, c.resolution_note
     FROM protected_minor_subjects s
     JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
     JOIN age_review_cases c ON c.pubkey = b.pubkey AND c.state = 'denied_closed'
@@ -392,13 +397,12 @@ export async function pendingSubjectClears(db: D1Database): Promise<Array<{
       -- approval of the same subject (any pubkey in its binding history).
       AND NOT ${newerApprovalThan('s.subject_id', 'c')}
     ORDER BY datetime(c.updated_at), c.rowid LIMIT 100`).all<{
-      subject_id: string; denial_case_id: string; pubkey: string; moderator_pubkey: string | null; resolution_note: string | null;
+      subject_id: string; denial_case_id: string; pubkey: string; resolution_note: string | null;
     }>();
   return rows.results.map((row) => ({
     subjectId: row.subject_id,
     denialCaseId: row.denial_case_id,
     pubkey: row.pubkey,
-    clearedBy: row.moderator_pubkey ?? undefined,
     reason: row.resolution_note?.startsWith('Auto-closed:') ? 'age_review_expired' : 'age_review_denied',
   }));
 }
@@ -456,20 +460,23 @@ export async function backfillProtectedMinorSubjects(db: D1Database): Promise<{ 
     const exists = await db.prepare(`SELECT subject_id FROM protected_minor_subjects WHERE source_case_id = ?`)
       .bind(row.id).first();
     if (exists) continue;
-    const ending = await db.prepare(`SELECT moderator_pubkey, resolution_note, updated_at
+    // cleared_by stays null: the denial's legacy moderator_pubkey came from a
+    // request body before #178 phase 2 and was never verified, and this route is
+    // still live and re-runnable, so it must not copy that value into the registry.
+    const ending = await db.prepare(`SELECT resolution_note, updated_at
       FROM age_review_cases WHERE pubkey = ? AND state = 'denied_closed'
         AND (datetime(updated_at) > datetime(?) OR (datetime(updated_at) = datetime(?) AND rowid > ?))
         ORDER BY datetime(updated_at) DESC, rowid DESC LIMIT 1`)
       .bind(row.pubkey, row.created_at, row.created_at, row.source_rowid)
-      .first<{ moderator_pubkey: string | null; resolution_note: string | null; updated_at: string }>();
+      .first<{ resolution_note: string | null; updated_at: string }>();
     const subjectId = crypto.randomUUID();
     const bindingId = crypto.randomUUID();
     if (ending) {
       await db.batch([
         db.prepare(`INSERT INTO protected_minor_subjects
           (subject_id, source_case_id, classification_state, classified_at, cleared_at, cleared_by, clear_reason, clear_reason_class)
-          VALUES (?, ?, 'cleared', ?, ?, ?, ?, 'valid_prior')`)
-          .bind(subjectId, row.id, row.created_at, ending.updated_at, ending.moderator_pubkey, 'age_review_denied'),
+          VALUES (?, ?, 'cleared', ?, ?, NULL, ?, 'valid_prior')`)
+          .bind(subjectId, row.id, row.created_at, ending.updated_at, 'age_review_denied'),
         db.prepare(`INSERT INTO protected_minor_account_bindings
           (id, subject_id, pubkey, bound_at, unbound_at) VALUES (?, ?, ?, ?, ?)`)
           .bind(bindingId, subjectId, row.pubkey, row.created_at, ending.updated_at),

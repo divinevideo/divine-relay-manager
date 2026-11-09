@@ -6,6 +6,7 @@ import worker from './index';
 import { syncZendeskAfterAction, getLinkedTickets, closeTicketById } from './zendesk-sync';
 import { echoedFragments } from './test-helpers/secret-echo';
 import { secretsMatch } from './secret-compare';
+import { __clearModeratorLoginCache } from './moderator-identity';
 
 // The real comparison, wrapped so tests can see the webhook check goes through it.
 vi.mock('./secret-compare', async (importOriginal) => {
@@ -683,6 +684,83 @@ describe('POST /api/tickets/:id/close id validation', () => {
     expect(response.status).toBe(404);
     expect(await response.json()).toEqual({ success: false, error: 'Linked ticket not found' });
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+describe('POST /api/tickets/:id/close moderator attribution', () => {
+  const ADMIN_KEY = 'test-admin-key';
+  const VERIFIED = 'b'.repeat(64);
+  const CLAIMED = 'c'.repeat(64);
+  // Distinctive on purpose: a short string like 'tok' could match unrelated text.
+  const LOGIN_TOKEN = 'login-token-sentinel-9f3a';
+
+  function close(body: unknown, withLogin: boolean) {
+    const { db, sqlLog } = createMockDB();
+    const zendeskBodies: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input).endsWith('/api/nostr')) {
+        return new Response(JSON.stringify({ result: VERIFIED }), { status: 200 });
+      }
+      zendeskBodies.push(String(init?.body ?? ''));
+      return { ok: true, text: async () => '' } as Response;
+    }));
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', 'X-Admin-Key': ADMIN_KEY };
+    if (withLogin) headers['X-Divine-Login-Token'] = LOGIN_TOKEN;
+    return worker
+      .fetch(
+        new Request('https://api-relay-prod.divine.video/api/tickets/926/close', {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(body),
+        }),
+        makeEnv({ ADMIN_API_KEY: ADMIN_KEY, DB: db, MODERATOR_LOGIN_URL: 'https://login.example.test' }),
+        ctx,
+      )
+      .then((response) => ({ response, sqlLog, zendeskBodies }));
+  }
+
+  const updateOf = (sqlLog: { sql: string; bindings: unknown[] }[]) =>
+    sqlLog.find((entry) => entry.sql.includes('UPDATE zendesk_tickets'));
+
+  // The token is a credential: it must reach neither Zendesk nor a D1 row.
+  const expectNoToken = (r: { sqlLog: { bindings: unknown[] }[]; zendeskBodies: string[] }) => {
+    expect(JSON.stringify(r.sqlLog)).not.toContain(LOGIN_TOKEN);
+    expect(r.zendeskBodies.join('\n')).not.toContain(LOGIN_TOKEN);
+  };
+
+  beforeEach(() => {
+    __clearModeratorLoginCache();
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  it('records the verified moderator as resolution_moderator', async () => {
+    const result = await close({}, true);
+    const { response, sqlLog, zendeskBodies } = result;
+    expect(response.status).toBe(200);
+    expectNoToken(result);
+    expect(updateOf(sqlLog)?.bindings).toEqual([VERIFIED, 926]);
+    expect(zendeskBodies.join('\n')).toContain(VERIFIED);
+  });
+
+  it('records null without a verified login, which reads as unknown in the note', async () => {
+    const { response, sqlLog, zendeskBodies } = await close({}, false);
+    expect(response.status).toBe(200);
+    expect(updateOf(sqlLog)?.bindings).toEqual([null, 926]);
+    expect(zendeskBodies.join('\n')).toContain('unknown');
+  });
+
+  it('ignores a body moderatorPubkey', async () => {
+    const withLogin = await close({ moderatorPubkey: CLAIMED }, true);
+    expect(updateOf(withLogin.sqlLog)?.bindings).toEqual([VERIFIED, 926]);
+    expect(withLogin.zendeskBodies.join('\n')).not.toContain(CLAIMED);
+    expectNoToken(withLogin);
+
+    const withoutLogin = await close({ moderatorPubkey: CLAIMED }, false);
+    expect(updateOf(withoutLogin.sqlLog)?.bindings).toEqual([null, 926]);
+    expect(withoutLogin.zendeskBodies.join('\n')).not.toContain(CLAIMED);
   });
 });
 

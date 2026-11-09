@@ -13,6 +13,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
 }));
 
 import { useAccountStatus } from './useAccountStatus';
+import { createQueryClient } from '@/lib/queryClient';
 
 function wrapper({ children }: { children: ReactNode }) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
@@ -59,5 +60,44 @@ describe('useAccountStatus', () => {
     expect(outcome.isError).toBe(true);
     expect(outcome.error?.message).toBe('Not a valid pubkey');
     expect(getAccountStatus).not.toHaveBeenCalled();
+  });
+
+  // The app's QueryClient (createQueryClient) keeps TanStack's default of 3 retries. A Retry on a
+  // malformed pubkey must not spend them on a throw that can never succeed.
+  it('fails a refetch on a non-hex pubkey at once, without retries, under the app defaults', async () => {
+    const client = createQueryClient();
+    const appWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useAccountStatus('..'), { wrapper: appWrapper });
+
+    const outcome = await result.current.refetch();
+
+    expect(outcome.isError).toBe(true);
+    expect(outcome.failureCount).toBe(1);
+  });
+
+  // A real lookup that fails can be transient, so it keeps the app's default retries.
+  it('still retries a failed lookup for a valid pubkey under the app defaults', async () => {
+    getAccountStatus.mockRejectedValue(new Error('network'));
+    const client = createQueryClient();
+    const appWrapper = ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={client}>{children}</QueryClientProvider>
+    );
+    const { result } = renderHook(() => useAccountStatus(VALID), { wrapper: appWrapper });
+
+    await waitFor(() => expect(result.current.failureCount).toBe(1));
+    // Still retrying: with retry off, this first failure would already be the error.
+    expect(result.current.isError).toBe(false);
+    expect(result.current.fetchStatus).toBe('fetching');
+    client.clear();
+  });
+
+  // The worker accepts only lowercase hex.
+  it('looks an uppercase pubkey up in lowercase', async () => {
+    const { result } = renderHook(() => useAccountStatus(VALID.toUpperCase()), { wrapper });
+
+    await waitFor(() => expect(result.current.isSuccess).toBe(true));
+    expect(getAccountStatus).toHaveBeenCalledExactlyOnceWith(VALID);
   });
 });

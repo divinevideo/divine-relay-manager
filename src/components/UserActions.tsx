@@ -3,7 +3,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
 import { useToast } from '@/hooks/useToast';
-import { useAdminApi } from '@/hooks/useAdminApi';
+import { useAdminApi, type ModeratorApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
@@ -52,18 +52,16 @@ interface UserActionsProps {
    * current.
    */
   statusStale?: boolean;
-  /**
-   * `accountStatusChanged`: the action was a ban, unban, suspend or unsuspend.
-   * The bulk content actions leave the account's status as it was.
-   */
   onActionComplete?: (change: UserActionChange) => void;
 }
 
 /**
- * What a finished action changed. An account action names the account it was
- * taken on, captured when it started: TanStack hands a pending mutation the
- * latest render's callbacks, so a pubkey read at completion is whichever
- * account is on screen by then, not the one acted on.
+ * What a finished action changed. `accountStatusChanged`: the action was a ban,
+ * unban, suspend or unsuspend; the bulk content actions leave the account's
+ * status as it was. `pubkey` is the account the action was taken on, captured
+ * when it started: TanStack hands a pending mutation the latest render's
+ * callbacks, so a pubkey read at completion is whichever account is on screen
+ * by then, not the one acted on.
  */
 // Each account action also drops the acted-on account's authored-content
 // reads, here rather than in each host so every host gets it (report detail,
@@ -91,12 +89,12 @@ export function UserActions({
 }: UserActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
   const restoreEnvironment = useRestoreEnvironment();
-  // Snapshot of the moderator at bulk-job start; a logout/switch during the long
-  // job must not retarget its completion audit write (#178).
-  const bulkModeratorRef = useRef<Promise<string | undefined>>();
+  // The api bound to the moderator's login at bulk-job start; a logout/switch
+  // during the long job must not retarget its completion audit write (#178).
+  const bulkActRef = useRef<ModeratorApi>();
   const navigate = useNavigate();
 
   // An under-16 report must be worked through the Age Review flow, not the
@@ -113,7 +111,6 @@ export function UserActions({
   // Shared: the worker refuses suspend/unsuspend/unban on an account under age
   // review. See useAgeReviewGuardRedirect for why this is not copied per site.
   const redirectIfGuarded = useAgeReviewGuardRedirect();
-  const routeToAgeReviewIfGuarded = (error: Error): boolean => redirectIfGuarded(error, pubkey);
 
   // Whether this account has an open age-review case, which changes the Ban
   // copy (a ban purges content the review may still need). For an underage
@@ -147,19 +144,19 @@ export function UserActions({
   // by invalidateResolutionState.
   // A report legitimately stays unresolved when no row was written (the .catch
   // path), which is correct.
-  // Detached audit write. `moderator` is captured by the caller BEFORE the
-  // authoritative request (so a logout/switch mid-request can't retarget it) and
-  // reused across the action. Waits for the in-flight identity, attributes or
-  // falls back to null, and never blocks the action.
+  // Detached audit write. `act` is the api bound to the moderator's login when
+  // the action started, so a logout or switch mid-request can't retarget it.
+  // Never blocks the action.
   // `note` rides on the audit warning because the app shows one toast at a
   // time: the warning would otherwise replace a note the action just showed.
   const logAudit = (
-    moderator: Promise<string | undefined>,
-    params: Parameters<typeof api.logDecision>[0],
+    act: ModeratorApi,
+    params: Parameters<ModeratorApi['logDecision']>[0],
     note?: string,
   ) =>
-    void moderator.then((moderatorPubkey) =>
-      api.logDecision({ ...params, moderatorPubkey })
+    // Started from a resolved promise so that even a synchronous throw lands in
+    // the catch below rather than failing the action.
+    void Promise.resolve().then(() => act.logDecision(params))
       .then(() => {
         queryClient.invalidateQueries({ queryKey: ['decisions'] });
         invalidateResolutionState(queryClient);
@@ -167,72 +164,67 @@ export function UserActions({
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);
         toast({ title: 'Action applied; audit log not recorded', description: note });
-      }));
+      });
 
   const suspendUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
+    mutationFn: async (target: string) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
-      await runHidingAction(queryClient, target, env, () => api.suspendPubkey(target, 'Suspended by moderator'));
-      logAudit(moderator, {
+      await runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator'));
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: target,
         action: 'suspend_user',
         reason: 'Suspended by moderator',
       });
-      return target;
     },
-    onSuccess: (target) => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User suspended' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'suspend' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const unsuspendUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      const env = restoreEnvironment; // captured before the call, like target
-      await api.unsuspendPubkey(target);
+    mutationFn: async (target: string) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const env = restoreEnvironment; // captured before the call
+      await act.unsuspendPubkey(target);
       void markRestored(queryClient, target, env);
-      logAudit(moderator, {
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: target,
         action: 'unsuspend_user',
         reason: 'Unsuspended by moderator',
       });
-      return target;
     },
-    onSuccess: (target) => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User unsuspended' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const banUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
+    mutationFn: async (target: string) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
-      const outcome = await runHidingAction(queryClient, target, env, () => api.banPubkey(target, 'Banned by moderator'));
-      logAudit(moderator, {
+      const outcome = await runHidingAction(queryClient, target, env, () => act.banPubkey(target, 'Banned by moderator'));
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: target,
         action: 'ban_user',
         reason: 'Banned by moderator',
       }, banSuccessNote(outcome));
-      return { outcome, target };
+      return outcome;
     },
-    onSuccess: ({ outcome, target }) => {
+    onSuccess: (outcome, target) => {
       toast({ title: 'User banned from relay', description: banSuccessNote(outcome) });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'ban' });
     },
@@ -243,26 +235,24 @@ export function UserActions({
   });
 
   const unbanUserMutation = useMutation({
-    mutationFn: async () => {
-      const target = pubkey; // the account acted on, whatever is shown when it lands
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
-      await api.unbanPubkey(target);
+    mutationFn: async (target: string) => {
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      await act.unbanPubkey(target);
       // A ban usually purged the posts, so no restore window: reset only.
       void resetAccountContentReads(queryClient, target);
-      logAudit(moderator, {
+      logAudit(act, {
         targetType: 'pubkey',
         targetId: target,
         action: 'unban_user',
         reason: 'Unbanned by moderator',
       });
-      return target;
     },
-    onSuccess: (target) => {
+    onSuccess: (_data, target) => {
       toast({ title: 'User unbanned' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
     },
-    onError: (error: Error) => {
-      if (routeToAgeReviewIfGuarded(error)) return;
+    onError: (error: Error, target) => {
+      if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
   });
@@ -304,25 +294,26 @@ export function UserActions({
         toast({ title: `${verb} ${job.mediaProcessed} media file(s) across ${job.eventsProcessed} events`, description: extra });
       }
       // Non-critical audit log; never block the action. Attribute to the
-      // moderator snapshotted at job START (not now), so a mid-job logout/switch
-      // can't retarget it.
-      void (bulkModeratorRef.current ?? Promise.resolve(undefined))
-        .then((moderatorPubkey) =>
-          api.logDecision({
-            targetType: 'pubkey',
-            targetId: pubkey,
-            action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
-            reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
-            moderatorPubkey,
-          }))
+      // login taken at job START (not now), so a mid-job logout/switch can't
+      // retarget it. With no start on record, the write goes unattributed
+      // rather than to whoever is signed in now.
+      const act = bulkActRef.current ?? api.asModerator(undefined);
+      void Promise.resolve()
+        .then(() => act.logDecision({
+          targetType: 'pubkey',
+          targetId: pubkey,
+          action: job.action === 'delete-all' ? 'bulk_delete' : 'bulk_age_restrict',
+          reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
+        }))
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
       onActionComplete?.({ accountStatusChanged: false });
     },
-    onError: (error) => {
+    onError: (error, target) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
       // the contexts where the buttons still render (Users tab, non-underage
-      // report on an account that also has an open case).
-      if (routeToAgeReviewIfGuarded(error)) return;
+      // report on an account that also has an open case). The case is the one
+      // for the account enqueued, which may no longer be the one shown.
+      if (redirectIfGuarded(error, target)) return;
       // The enqueue failed, so no job started.
       toast({ title: 'Bulk action failed', description: error.message, variant: 'destructive' });
     },
@@ -376,7 +367,7 @@ export function UserActions({
       {isBanned ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => unbanUserMutation.mutate()} disabled={anyPending}>
+            <Button variant="outline" onClick={() => unbanUserMutation.mutate(pubkey)} disabled={anyPending}>
               <UserCheck className="h-4 w-4 mr-1" />
               {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
             </Button>
@@ -400,7 +391,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                  onClick={() => unsuspendUserMutation.mutate()} disabled={anyPending}>
+                  onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
                   <Play className="h-4 w-4 mr-1" />
                   {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
                 </Button>
@@ -411,7 +402,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-amber-500 text-amber-600 hover:bg-amber-50"
-                  onClick={() => suspendUserMutation.mutate()} disabled={anyPending}>
+                  onClick={() => suspendUserMutation.mutate(pubkey)} disabled={anyPending}>
                   <Pause className="h-4 w-4 mr-1" />
                   {suspendUserMutation.isPending ? 'Suspending...' : 'Suspend User'}
                 </Button>
@@ -433,7 +424,7 @@ export function UserActions({
               : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
-            onConfirm={async () => { await banUserMutation.mutateAsync(); }}
+            onConfirm={async () => { await banUserMutation.mutateAsync(pubkey); }}
             isPending={banUserMutation.isPending}
           />
         </>
@@ -444,7 +435,7 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                onClick={() => { bulkModeratorRef.current = getModeratorPubkey(); bulkJob.start('age-gate-all'); }} disabled={bulkBlocked}>
+                onClick={() => { const token = getModeratorToken(); bulkActRef.current = api.asModerator(token); bulkJob.start('age-gate-all', undefined, token); }} disabled={bulkBlocked}>
                 <ShieldAlert className="h-4 w-4 mr-1" />
                 {bulkJob.runningAction === 'age-gate-all' ? 'Restricting...' : 'Age Restrict All'}
               </Button>
@@ -463,7 +454,7 @@ export function UserActions({
             summary="This will permanently delete all events and media from this user. This cannot be undone."
             confirmLabel="Confirm Delete"
             pendingLabel="Starting..."
-            onConfirm={async () => { bulkModeratorRef.current = getModeratorPubkey(); await bulkJob.startAsync('delete-all'); }}
+            onConfirm={async () => { const token = getModeratorToken(); bulkActRef.current = api.asModerator(token); await bulkJob.startAsync('delete-all', undefined, token); }}
             isPending={bulkJob.runningAction === 'delete-all'}
           />
         </>

@@ -8,6 +8,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Labels } from './Labels';
 import { BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const PUBKEY = 'a'.repeat(64);
 
@@ -18,7 +19,10 @@ const api = vi.hoisted(() => ({
 const toast = vi.hoisted(() => vi.fn());
 const query = vi.hoisted(() => vi.fn());
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const MOD_TOKEN = 'moderator-login-token';
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
+vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ getModeratorToken: () => MOD_TOKEN }) }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 vi.mock('@nostrify/react', () => ({ useNostr: () => ({ nostr: { query } }) }));
 // Children are irrelevant to the ban wiring and drag in their own dependencies.
@@ -57,6 +61,17 @@ describe('Labels ban', () => {
     vi.clearAllMocks();
     query.mockResolvedValue([LABEL_EVENT]);
     api.verifyPubkeyBanned.mockResolvedValue(true);
+  });
+
+  // The worker records the moderator it verifies from the login header and
+  // passes it to Keycast as the ban's actor (#178).
+  it('bans through asModerator(token)', async () => {
+    api.banPubkey.mockResolvedValue({ unconfirmed: null });
+
+    await banFromLabels();
+
+    await waitFor(() => expect(api.banPubkey).toHaveBeenCalled());
+    expect(tokensFor(moderatorApi, 'banPubkey')).toEqual([MOD_TOKEN]);
   });
 
   it('reports an unconfirmed ban as not confirmed, not as a destructive failure', async () => {

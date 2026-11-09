@@ -40,7 +40,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),

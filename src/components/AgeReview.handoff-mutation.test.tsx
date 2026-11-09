@@ -7,6 +7,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { AgeReviewCase } from '../../shared/age-review';
 import { AgeReview } from './AgeReview';
+import { withAsModerator } from '@/test/adminApiMock';
 
 const getAgeReviewCases = vi.fn();
 const getActiveAgeReviewCase = vi.fn();
@@ -26,7 +27,7 @@ vi.mock('@/hooks/useUserStats', () => ({
 
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',
-  useAdminApi: () => ({
+  useAdminApi: () => withAsModerator({
     getAgeReviewCases,
     getActiveAgeReviewCase,
     getAgeReviewCase,
@@ -42,7 +43,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
 vi.mock('@/hooks/useIsMobile', () => ({ useIsMobile: () => false }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: 'f'.repeat(64) } }),
+  useCurrentUser: () => ({ user: { pubkey: 'f'.repeat(64) }, getModeratorToken: () => undefined }),
 }));
 vi.mock('@/hooks/useAuthor', () => ({
   useAuthor: () => ({ data: undefined, isLoading: false }),

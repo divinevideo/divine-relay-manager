@@ -51,6 +51,10 @@ import {
   getBulkKindCounts,
   getLinkedTickets,
   closeTicket,
+  confirmAutoHide,
+  decideSexualQuarantine,
+  suspendPubkey,
+  unsuspendPubkey,
   ApiError,
   BanNotConfirmedError,
   type UnsignedEvent,
@@ -482,7 +486,7 @@ describe('adminApi', () => {
         json: async () => ({ success: true, recorded: true, reconciled: false }),
       });
 
-      const result = await restoreEvent(API_URL, 'event123', 'moderator123', 'Restored after review');
+      const result = await restoreEvent(API_URL, 'event123', 'Restored after review');
 
       expect(result.recorded).toBe(true);
       expect(result.reconciled).toBe(false);
@@ -492,7 +496,6 @@ describe('adminApi', () => {
           body: JSON.stringify({
             action: 'allow_event',
             eventId: 'event123',
-            moderatorPubkey: 'moderator123',
             reason: 'Restored after review',
           }),
         }),
@@ -1219,12 +1222,11 @@ describe('adminApi', () => {
         json: async () => ({ success: true }),
       });
 
-      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm', 'a'.repeat(64));
+      await markAsReviewed(API_URL, 'pubkey', 'pubkey123', 'dismissed', 'False alarm');
 
       const callBody = JSON.parse(mockFetch.mock.calls[0][1].body);
       expect(callBody.tags).toContainEqual(['l', 'dismissed', 'moderation/resolution']);
       expect(callBody.content).toBe('False alarm');
-      expect(callBody.moderatorPubkey).toBe('a'.repeat(64));
       expect(callBody.moderationReason).toBe('False alarm');
     });
 
@@ -1698,7 +1700,6 @@ describe('adminApi', () => {
         targetId: 'event123',
         action: 'deleted',
         reason: 'Spam',
-        moderatorPubkey: 'modpubkey',
         reportId: 'report123',
       });
 
@@ -1711,7 +1712,6 @@ describe('adminApi', () => {
             targetId: 'event123',
             action: 'deleted',
             reason: 'Spam',
-            moderatorPubkey: 'modpubkey',
             reportId: 'report123',
           }),
         })
@@ -2229,17 +2229,17 @@ describe('adminApi', () => {
       await expect(bulkModerate(API_URL, 'a'.repeat(64), 'delete-all')).rejects.toThrow('queue down');
     });
 
-    it('sends the kind and attribution for a kind-scoped delete', async () => {
+    it('sends the kind and report for a kind-scoped delete', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, jobId: 'job-9' }) });
 
       await bulkModerate(API_URL, 'a'.repeat(64), 'delete-kind', 'spam', {
-        kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
+        kind: 7, reportId: 'e'.repeat(64),
       });
 
       const body = JSON.parse((mockFetch.mock.calls[0][1] as RequestInit).body as string);
       expect(body).toEqual({
         pubkey: 'a'.repeat(64), action: 'delete-kind', reason: 'spam',
-        kind: 7, moderatorPubkey: 'd'.repeat(64), reportId: 'e'.repeat(64),
+        kind: 7, reportId: 'e'.repeat(64),
       });
     });
 
@@ -2509,18 +2509,72 @@ describe('adminApi', () => {
   });
 
   describe('closeTicket', () => {
-    it('POSTs /api/tickets/:id/close with the moderator pubkey', async () => {
+    it('POSTs /api/tickets/:id/close with no body and the login header', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
 
-      await closeTicket(API_URL, 555, 'b'.repeat(64));
+      await closeTicket(API_URL, 555, { loginToken: 'tok' });
 
       expect(mockFetch).toHaveBeenCalledWith(
         `${API_URL}/api/tickets/555/close`,
         expect.objectContaining({
           method: 'POST',
-          body: JSON.stringify({ moderatorPubkey: 'b'.repeat(64) }),
+          body: undefined,
+          headers: expect.objectContaining({ 'X-Divine-Login-Token': 'tok' }),
         }),
       );
+    });
+  });
+
+  // The worker records the moderator it verifies from the login header and
+  // ignores any named in a body (#178). The client drops them too, so a caller
+  // that still passes one (an untyped call, a stale object) sends none. Each row
+  // passes every moderator field the old signatures took, where they took it.
+  describe('no attribution request body carries moderatorPubkey, moderator_pubkey or actor', () => {
+    const MOD = 'f'.repeat(64);
+    const named = { moderatorPubkey: MOD, moderator_pubkey: MOD, actor: MOD };
+    const PK = 'a'.repeat(64);
+    // Untyped, as a stale or untyped caller would be.
+    const loose = (fn: unknown) => fn as (...args: unknown[]) => Promise<unknown>;
+    const CALLS: Array<[string, () => Promise<unknown>]> = [
+      ['publishEvent', () => loose(publishEvent)(API_URL, { kind: 1, content: 'x', ...named })],
+      ['publishLabel', () => loose(publishLabel)(API_URL, { targetType: 'event', targetValue: 'e1', namespace: 'ns', labels: ['l'], ...named })],
+      ['publishLabelAndBan', () => loose(publishLabelAndBan)(API_URL, { targetType: 'pubkey', targetValue: PK, namespace: 'ns', labels: ['l'], shouldBan: true, ...named })],
+      ['markAsReviewed', () => loose(markAsReviewed)(API_URL, 'event', 'e1', 'reviewed', 'c', MOD)],
+      ['moderateAction', () => loose(moderateAction)(API_URL, { action: 'hide_event', eventId: 'e1', ...named })],
+      ['restoreEvent', () => loose(restoreEvent)(API_URL, 'e1', MOD, 'r')],
+      ['logDecision', () => loose(logDecision)(API_URL, { targetType: 'event', targetId: 'e1', action: 'x', ...named })],
+      ['closeTicket', () => loose(closeTicket)(API_URL, 55, MOD)],
+      ['confirmAutoHide', () => loose(confirmAutoHide)(API_URL, { eventId: 'e1', ...named })],
+      ['updateAgeReviewCase', () => loose(updateAgeReviewCase)(API_URL, 'case-1', { state: 'x', ...named })],
+      ['bulkModerate', () => loose(bulkModerate)(API_URL, PK, 'delete-kind', 'r', { kind: 7, ...named })],
+      ['decideSexualQuarantine', () => loose(decideSexualQuarantine)(API_URL, 'e1', { revision: 1, decision: 'restore', reason: 'r', ...named })],
+      ['deleteEvent', () => loose(deleteEvent)(API_URL, 'e1', 'r', PK)],
+      ['hideEvent', () => loose(hideEvent)(API_URL, 'e1', 'r')],
+      ['allowPubkey', () => loose(allowPubkey)(API_URL, PK)],
+      ['banPubkey', () => loose(banPubkey)(API_URL, PK, 'r')],
+      ['unbanPubkey', () => loose(unbanPubkey)(API_URL, PK)],
+      ['suspendPubkey', () => loose(suspendPubkey)(API_URL, PK, 'r')],
+      ['unsuspendPubkey', () => loose(unsuspendPubkey)(API_URL, PK)],
+    ];
+
+    it.each(CALLS)('%s', async (_name, invoke) => {
+      mockFetch.mockImplementation(async () => ({
+        ok: true,
+        status: 200,
+        json: async () => ({ success: true, jobId: 'job-1', result: [] }),
+      }));
+
+      await invoke();
+
+      expect(mockFetch).toHaveBeenCalled();
+      for (const [, init] of mockFetch.mock.calls) {
+        const raw = (init as RequestInit).body;
+        if (raw === undefined) continue;
+        const body = JSON.parse(raw as string);
+        expect(body).not.toHaveProperty('moderatorPubkey');
+        expect(body).not.toHaveProperty('moderator_pubkey');
+        expect(body).not.toHaveProperty('actor');
+      }
     });
   });
 

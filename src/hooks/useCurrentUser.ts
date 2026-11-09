@@ -13,7 +13,7 @@ export interface CurrentUser {
 }
 
 export function useCurrentUser() {
-  const { pubkey, signer, getModeratorPubkey } = useDivineSession();
+  const { pubkey, signer, getModeratorToken } = useDivineSession();
 
   const user = useMemo<CurrentUser | undefined>(
     () => (pubkey && signer ? { pubkey, signer } : undefined),
@@ -28,8 +28,10 @@ export function useCurrentUser() {
     user,
     users,
     ...author.data,
-    // Prefer this over user?.pubkey for AUDIT WRITES: it snapshots identity at
-    // action start and survives the boot-resolve window and account switches.
-    getModeratorPubkey,
+    // Attribution goes by this login token: the worker records the moderator it
+    // verifies from it, never a pubkey we send. Synchronous. Take it at the
+    // click (api.asModerator(getModeratorToken())) and keep that value for the
+    // whole action.
+    getModeratorToken,
   };
 }

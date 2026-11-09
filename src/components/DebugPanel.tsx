@@ -65,20 +65,17 @@ let actionId = 0;
 export function DebugPanel() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const api = useAdminApi();
   const restoreEnvironment = useRestoreEnvironment();
   const {
     getWorkerInfo,
-    banPubkey,
-    unbanPubkey,
     listBannedPubkeys,
     listBannedEvents,
     getAllDecisions,
-    callRelayRpc,
-    logDecision,
     verifyPubkeyBanned,
     verifyPubkeyUnbanned,
-  } = useAdminApi();
-  const { getModeratorPubkey } = useCurrentUser();
+  } = api;
+  const { getModeratorToken } = useCurrentUser();
   const [testPubkey, setTestPubkey] = useState("");
   const [rpcMethod, setRpcMethod] = useState("listbannedpubkeys");
   const [rpcParams, setRpcParams] = useState("");
@@ -191,13 +188,13 @@ export function DebugPanel() {
     mutationFn: async (pubkey: string) => {
       const start = Date.now();
       const results: { banResult?: unknown; banError?: string; logResult?: unknown; logError?: string } = {};
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
 
       // Captured before the request, for the restore window (lib/userStatsCache).
       const env = restoreEnvironment;
       // Try to ban via NIP-86 RPC
       try {
-        const banResult = await banPubkey(pubkey, "Debug test ban");
+        const banResult = await act.banPubkey(pubkey, "Debug test ban");
         results.banResult = banResult;
         // The ban landed: the account is hidden again, so end a restore
         // window an earlier unsuspend left open.
@@ -212,12 +209,11 @@ export function DebugPanel() {
 
       // Log to our database regardless
       try {
-        const logResult = await logDecision({
+        const logResult = await act.logDecision({
           targetType: 'pubkey',
           targetId: pubkey,
           action: 'ban_user',
           reason: 'Debug test ban',
-          moderatorPubkey: await moderator,
         });
         results.logResult = logResult;
       } catch (error) {
@@ -303,10 +299,10 @@ export function DebugPanel() {
     mutationFn: async (pubkey: string) => {
       const start = Date.now();
       const results: { unbanResult?: unknown; unbanError?: string; logResult?: unknown; logError?: string } = {};
-      const moderator = getModeratorPubkey(); // capture before the authoritative request
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
 
       try {
-        const unbanResult = await unbanPubkey(pubkey);
+        const unbanResult = await act.unbanPubkey(pubkey);
         results.unbanResult = unbanResult;
         // Reset now, before the audit write below can fail. No restore window:
         // a ban usually purged the posts (lib/userStatsCache).
@@ -318,12 +314,11 @@ export function DebugPanel() {
       }
 
       try {
-        const logResult = await logDecision({
+        const logResult = await act.logDecision({
           targetType: 'pubkey',
           targetId: pubkey,
           action: 'unban_user',
           reason: 'Debug test unban',
-          moderatorPubkey: await moderator,
         });
         results.logResult = logResult;
       } catch (error) {
@@ -406,6 +401,8 @@ export function DebugPanel() {
 
   // Generic RPC call
   const executeRpc = async () => {
+    // A raw RPC can be an account action, which the worker attributes.
+    const act = api.asModerator(getModeratorToken()); // take the login at the click
     const start = Date.now();
     let params: (string | number)[] = [];
     try {
@@ -419,7 +416,7 @@ export function DebugPanel() {
 
     try {
       // Free-form admin RPC: deliberately does not update restore windows or authored-content caches.
-      const result = await callRelayRpc(rpcMethod, params);
+      const result = await act.callRelayRpc(rpcMethod, params);
       const duration = Date.now() - start;
       setRpcResults(prev => [{
         method: rpcMethod,

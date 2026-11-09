@@ -69,11 +69,11 @@ export function DivineLoginButton() {
           title="Your moderator identity could not be loaded, so moderation actions may be recorded without attribution. Moderation itself still works. If signing out and back in does not help, this account may have no Keycast-managed key."
         >
           <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
-          {/* "may be", matching the title: DivineRpcSigner caches the pubkey only
-              on success, so getModeratorPubkey retries the RPC on every action.
-              After a transient failure the banner is latched for the life of the
-              token while attribution has already recovered, and a label that
-              states it as fact would be wrong for exactly that window. */}
+          {/* "may be", matching the title: attribution rests on the worker
+              verifying the login token, not on this pubkey read. After a
+              transient failure the banner is latched for the life of the token
+              while actions can still be attributed, and a label that states it
+              as fact would be wrong for exactly that window. */}
           {/* Widened with the wording: measured against the built CSS in a
               headless browser, this label is 300px natural, so the previous
               16rem (256px) truncated it mid-phrase and cut off the consequence

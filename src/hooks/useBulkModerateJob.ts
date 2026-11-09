@@ -22,7 +22,8 @@ interface UseBulkModerateJobOptions {
   onComplete?: (job: BulkJob) => void;
   // Called if the enqueue fails. A failed status poll is not reported here: the
   // job may still be running, so it is tracking that was lost, not the job.
-  onError?: (error: Error) => void;
+  // `target`: the account the enqueue was for, which may no longer be the one shown.
+  onError?: (error: Error, target: string) => void;
   // Called once each time the status poll gives out while a job is held (see
   // `trackingLost`).
   onTrackingLost?: () => void;
@@ -47,18 +48,19 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
 
   // `target` and `client` are the account and environment when start was
   // called, bound into the variables: the mutation reads its options from the
-  // latest render, so a start that awaits something first (BulkDeleteByKind
-  // resolves the moderator) would otherwise send the account and environment
-  // selected by then, with the confirmed kind and reason.
-  type EnqueueVars = { target: string; client: typeof api; action: BulkAction; options?: BulkJobStart };
+  // latest render, so a start held from an earlier render would otherwise send
+  // the account and environment selected by then, with the confirmed kind and
+  // reason. `loginToken` is the moderator's, taken by the caller at the click.
+  type EnqueueVars = { target: string; client: typeof api; action: BulkAction; options?: BulkJobStart; loginToken: string | undefined };
   const enqueue = useMutation({
-    mutationFn: ({ target, client, action, options }: EnqueueVars) => {
+    mutationFn: ({ target, client, action, options, loginToken }: EnqueueVars) => {
+      const act = client.asModerator(loginToken);
       const reason = options?.reason ?? `Bulk ${action} by moderator`;
-      if (!options) return client.bulkModerate(target, action, reason);
+      if (!options) return act.bulkModerate(target, action, reason);
       // Rest-spread, not a field list, so a new BulkModerateOptions field is
       // forwarded without this line having to learn about it.
       const { reason: _reason, ...scope } = options;
-      return client.bulkModerate(target, action, reason, scope);
+      return act.bulkModerate(target, action, reason, scope);
     },
     onMutate: ({ action }) => { setPendingAction(action); },
     // A job enqueued for an account or environment no longer shown runs
@@ -67,7 +69,7 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
       if (target === currentPubkey.current && client === currentApi.current) setJobId(res.jobId);
       else setPendingAction(null);
     },
-    onError: (error: Error) => { setPendingAction(null); onError?.(error); },
+    onError: (error: Error, { target }) => { setPendingAction(null); onError?.(error, target); },
   });
 
   // Detach from any in-flight job when the target user changes. UserActions is
@@ -130,9 +132,13 @@ export function useBulkModerateJob({ pubkey, onComplete, onError, onTrackingLost
     enqueue.isPending || (jobId !== null && !isTerminal(job?.status) && !statusQuery.isError);
   const runningAction: BulkAction | null = isRunning ? (job?.action ?? pendingAction) : null;
 
+  // The login token is a required argument, so a caller cannot start a job
+  // without deciding whose it is. Take it at the click (getModeratorToken()).
   return {
-    start: (action: BulkAction, options?: BulkJobStart) => enqueue.mutate({ target: pubkey, client: api, action, options }),
-    startAsync: (action: BulkAction, options?: BulkJobStart) => enqueue.mutateAsync({ target: pubkey, client: api, action, options }),
+    start: (action: BulkAction, options: BulkJobStart | undefined, loginToken: string | undefined) =>
+      enqueue.mutate({ target: pubkey, client: api, action, options, loginToken }),
+    startAsync: (action: BulkAction, options: BulkJobStart | undefined, loginToken: string | undefined) =>
+      enqueue.mutateAsync({ target: pubkey, client: api, action, options, loginToken }),
     job,
     isRunning,
     runningAction,

@@ -28,7 +28,7 @@ vi.mock('@/hooks/useAdminApi', () => ({
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD }, getModeratorPubkey: async () => MOD }),
+  useCurrentUser: () => ({ user: { pubkey: MOD }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }) }));
 vi.mock('@/hooks/useDecisionLog', () => ({

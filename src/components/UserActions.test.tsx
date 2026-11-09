@@ -5,6 +5,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { UserActions } from './UserActions';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
+import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
 
@@ -30,12 +31,16 @@ vi.mock('react-router-dom', async (orig) => ({
   useNavigate: () => navigate,
 }));
 
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => api }));
+const moderatorApi = withAsModerator(api);
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
-// Logged-in moderator, so audit writes carry attribution (#178).
+// Logged-in moderator, so actions carry attribution (#178). The live token is
+// read at call time, so a test can switch accounts mid-action.
 const MOD_PUBKEY = 'e'.repeat(64);
+const MOD_TOKEN = 'moderator-login-token';
+const session = vi.hoisted(() => ({ token: undefined as string | undefined }));
 vi.mock('@/hooks/useCurrentUser', () => ({
-  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorPubkey: async () => MOD_PUBKEY }),
+  useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => session.token }),
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -49,6 +54,7 @@ function doneJob(action: 'age-gate-all' | 'delete-all', over: Partial<Record<str
 
 beforeEach(() => {
   vi.clearAllMocks();
+  session.token = MOD_TOKEN;
   api.bulkModerate.mockResolvedValue({ success: true, jobId: 'job-1' });
   api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
   api.getBulkJobNotes.mockResolvedValue({ notes: [], next: null });
@@ -197,15 +203,124 @@ describe('UserActions', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
-  it('attributes the audit write to the logged-in moderator (#178)', async () => {
-    renderWithProvider(<UserActions pubkey={PUBKEY} />);
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
-    await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
+  it.each([
+    { action: 'suspend_user', call: 'suspendPubkey', props: {}, button: /Suspend User/i, confirm: false },
+    { action: 'unsuspend_user', call: 'unsuspendPubkey', props: { isSuspended: true }, button: /Unsuspend User/i, confirm: false },
+    { action: 'ban_user', call: 'banPubkey', props: {}, button: /Ban User/i, confirm: true },
+    { action: 'unban_user', call: 'unbanPubkey', props: { isBanned: true }, button: /Unban User/i, confirm: false },
+  ] as const)('sends $call and its audit write through asModerator(token) (#178)', async ({ action, call, props, button, confirm }) => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+    await waitFor(() => expect(api[call]).toHaveBeenCalled());
     await waitFor(() =>
-      expect(api.logDecision).toHaveBeenCalledWith(
-        expect.objectContaining({ action: 'suspend_user', moderatorPubkey: MOD_PUBKEY }),
-      ),
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action })),
     );
+    expect(tokensFor(moderatorApi, call)).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
+  });
+
+  it('a bulk job and its completion audit carry the token taken at the click, not one switched in mid-job (#178)', async () => {
+    api.getBulkJobStatus.mockResolvedValue(doneJob('age-gate-all'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    session.token = 'other-account-token';
+
+    await waitFor(() =>
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'bulk_age_restrict' })),
+    );
+    expect(tokensFor(moderatorApi, 'bulkModerate')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
+  });
+
+  // ReportDetail keeps this component mounted when the moderator opens another
+  // report, so the pubkey prop can change while an action is in flight. The
+  // completion must name the account the action was taken on, not the one on
+  // screen when it finished.
+  it.each([
+    { action: 'suspend', props: {}, button: /Suspend User/i, call: api.suspendPubkey },
+    { action: 'unsuspend', props: { isSuspended: true }, button: /Unsuspend User/i, call: api.unsuspendPubkey },
+    { action: 'ban', props: {}, button: /Ban User/i, call: api.banPubkey },
+    { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
+  ] as const)('reports the account a $action was taken on, even after the pubkey changes mid-action', async ({ action, props, button, call }) => {
+    const OTHER = 'b'.repeat(64);
+    let finish!: (value: unknown) => void;
+    call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const onActionComplete = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pubkey} {...props} onActionComplete={onActionComplete} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (action === 'ban') {
+      const dialog = await screen.findByRole('alertdialog');
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
+    }
+    await waitFor(() => expect(call).toHaveBeenCalledWith(PUBKEY, ...(action === 'suspend' || action === 'ban' ? [expect.any(String)] : [])));
+
+    rerender(ui(OTHER));
+    finish(action === 'ban' ? { unconfirmed: null } : { success: true });
+
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action });
+    // The decision log names the acted-on account too.
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ targetId: PUBKEY })));
+    expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ targetId: OTHER }));
+  });
+
+  // A refusal because the account is under age review routes to that account's
+  // case. After a switch mid-action it must still be the acted-on account.
+  it.each([
+    { action: 'suspend', props: {}, button: /Suspend User/i, call: api.suspendPubkey },
+    { action: 'unsuspend', props: { isSuspended: true }, button: /Unsuspend User/i, call: api.unsuspendPubkey },
+    { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
+  ] as const)('routes a refused $action to the acted-on account\'s age review, even after the pubkey changes mid-action', async ({ props, button, call }) => {
+    const OTHER = 'b'.repeat(64);
+    let refuse!: (error: Error) => void;
+    call.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pubkey} {...props} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    await waitFor(() => expect(call).toHaveBeenCalled());
+
+    rerender(ui(OTHER));
+    refuse(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
+  });
+
+  it('routes a refused bulk enqueue to the enqueued account\'s age review, even after the pubkey changes', async () => {
+    const OTHER = 'b'.repeat(64);
+    let refuse!: (error: Error) => void;
+    api.bulkModerate.mockImplementationOnce(() => new Promise((_resolve, reject) => { refuse = reject; }));
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const ui = (pubkey: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserActions pubkey={pubkey} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(ui(PUBKEY));
+
+    fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
+    await waitFor(() => expect(api.bulkModerate).toHaveBeenCalled());
+
+    rerender(ui(OTHER));
+    refuse(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+
+    await waitFor(() => expect(navigate).toHaveBeenCalledTimes(1));
+    expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`);
   });
 
   it('warns about evidence when banning an account with an open age-review case', async () => {
@@ -772,31 +887,6 @@ describe('UserActions', () => {
       renderWithProvider(<UserActions pubkey={PUBKEY} isBanned onActionComplete={onActionComplete} />);
       fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
       await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban' }));
-    });
-
-    // TanStack hands a pending mutation the latest render's callbacks, so a
-    // pubkey read at completion is whichever account is on screen by then.
-    // The caller resets that account's cached reads, so it must get the one
-    // the action was taken on.
-    it('names the account the action was taken on, even if another is shown by the time it lands', async () => {
-      const OTHER = 'c'.repeat(64);
-      let land: (v: unknown) => void = () => {};
-      api.suspendPubkey.mockImplementation(() => new Promise(r => { land = r; }));
-      const onActionComplete = vi.fn();
-      const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-      const tree = (pk: string) => (
-        <QueryClientProvider client={qc}>
-          <TooltipProvider><UserActions pubkey={pk} onActionComplete={onActionComplete} /></TooltipProvider>
-        </QueryClientProvider>
-      );
-      const { rerender } = render(tree(PUBKEY));
-      fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
-      await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalledWith(PUBKEY, expect.anything()));
-
-      rerender(tree(OTHER));
-      await act(async () => { land({ success: true }); });
-
-      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'suspend' }));
     });
 
     it('after a bulk content action, which leaves the account as it was', async () => {

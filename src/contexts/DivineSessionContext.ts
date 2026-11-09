@@ -32,12 +32,14 @@ export interface DivineSessionValue {
    */
   identityUnavailable: boolean;
   /**
-   * Snapshot the moderator pubkey for an audit write. Captures the signer at
-   * call time (call at action START so a later logout/switch can't retarget a
-   * long job's attribution) and waits briefly for an in-flight pubkey before
-   * falling back to undefined. Never gate a moderation action on this.
+   * Snapshot the moderator's login token, synchronously. Call it at the click
+   * and keep using that value for the whole action: a later logout or account
+   * switch changes what this returns, never the string already taken. Undefined
+   * when signed out (or the session has no access token), and when the token is
+   * past its expiresAt: that call also starts a refresh and marks the identity
+   * unattributed until a new token arrives.
    */
-  getModeratorPubkey: () => Promise<string | undefined>;
+  getModeratorToken: () => string | undefined;
   startLogin: (returnPath?: string) => Promise<void>;
   logout: () => void;
   refresh: () => Promise<void>;
@@ -52,7 +54,7 @@ export const DivineSessionContext = createContext<DivineSessionValue>({
   isSignedIn: false,
   isResolving: false,
   identityUnavailable: false,
-  getModeratorPubkey: async () => undefined,
+  getModeratorToken: () => undefined,
   startLogin: sdkStartLogin,
   logout: () => {},
   refresh: async () => {},
