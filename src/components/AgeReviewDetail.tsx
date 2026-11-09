@@ -118,12 +118,12 @@ const APPROVABLE_PUBKEY = /^[0-9a-f]{64}$/;
 
 // The active-case lookup's cache keys for a case's pubkey: its own first,
 // then any derived one, the lowercase key the hand-off, the Ban warning and
-// the results panel ask with. A case can store an uppercase pubkey (#313), and
-// the route answers the lowercase key with that case or another open one. So
-// after a transition the own key is written (null once the case closes) and
-// every derived key is dropped, never written. For a case stored in lowercase
-// there is no derived key: the own key is the lowercase key, and a close
-// writes null there.
+// the results panel ask with. Cases are stored in lowercase (#313), so there is
+// normally no derived key: the own key is the lowercase key, and a close writes
+// null there. Only a case opened before #313 under another spelling has one, and
+// the route matches exactly, so that key never answers with this case: after a
+// transition the own key is written (null once the case closes) and every
+// derived key is dropped, never written.
 function activeCaseKeys(pubkey: string | undefined): Array<[string, string | undefined]> {
   return [...new Set([pubkey, pubkey?.toLowerCase()])].map((key) => ['age-review-active-case', key]);
 }
@@ -222,9 +222,9 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         // above. Terminal states have no active case; write that truth.
         const [ownKey, ...derivedKeys] = activeCaseKeys(updated.pubkey);
         queryClient.setQueryData(ownKey, { success: true, case: TERMINAL_STATES.includes(updated.state) ? null : updated });
-        // A derived lowercase key can also answer another open case of the
-        // account (#313), so nothing is written there, open or closed: the
-        // entry is dropped, and the next read asks the worker.
+        // A derived lowercase key never answers with this case (the route
+        // matches exactly, #313), so nothing is written there, open or closed:
+        // the entry is dropped, and the next read asks the worker.
         for (const key of derivedKeys) queryClient.removeQueries({ queryKey: key });
       } else {
         queryClient.invalidateQueries({ queryKey: ['age-review-case', ctx.caseId] });

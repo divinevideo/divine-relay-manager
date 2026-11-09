@@ -332,11 +332,11 @@ describe('AgeReviewDetail', () => {
     expect(screen.queryByText(/Failed to update/)).not.toBeInTheDocument();
   });
 
-  // A case can be stored under an uppercase pubkey (#313), and the hand-off,
-  // the Ban warning and the results panel ask for it in lowercase. That
-  // lowercase key can also answer another open case of the account, so after a
-  // transition the case's own key is written and the lowercase entry is
-  // dropped on every branch: the next read asks the worker. (For a case
+  // A case opened before #313 can be stored under an uppercase pubkey, while
+  // the hand-off, the Ban warning and the results panel ask in lowercase. The
+  // route matches exactly, so the lowercase entry never holds this case: after
+  // a transition the case's own key is written and the lowercase entry is
+  // dropped on every branch, and the next read asks the worker. (For a case
   // stored in lowercase the own key is the lowercase key, so a close writes
   // null there.)
   describe('a case stored under an uppercase pubkey', () => {
