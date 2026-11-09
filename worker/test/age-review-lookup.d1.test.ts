@@ -167,8 +167,12 @@ describe('a case stored under an uppercase pubkey', () => {
     expect(res.outbound).toBe(0);
   });
 
-  it("does not refuse a note's Restore", async () => {
+  // The stubbed media server's answer is not a file record, so the Restore
+  // stops later, at the owner read; what this pins is that the age-review guard
+  // let it past (it went on to call out) rather than refusing it with a 409.
+  it("does not hold a note's Restore at the age-review guard", async () => {
     const res = await send('/api/moderate-media', { sha256: '5'.repeat(64), action: 'SAFE', from: 'QUARANTINE', pubkey: LOWER });
+    expect(res.status).not.toBe(409);
     expect(res.json).not.toMatchObject({ code: 'age_review_active' });
     expect(res.outbound).toBeGreaterThan(0);
   });

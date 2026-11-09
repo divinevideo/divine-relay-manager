@@ -7,8 +7,8 @@ import { type AgeReviewCase, TERMINAL_STATES } from '../../shared/age-review';
 
 /**
  * Returns the single active (non-terminal) age-review case for a pubkey, or
- * null. Every path that opens a case first checks for an active one, so this
- * is unambiguous. Throws on a failed query; each caller decides whether that
+ * null. Every path that opens an active case first checks for one, so this is
+ * unambiguous. Throws on a failed query; each caller decides whether that
  * fails open or closed.
  *
  * The match is exact. Every path opens cases under a lowercase pubkey (#313),
