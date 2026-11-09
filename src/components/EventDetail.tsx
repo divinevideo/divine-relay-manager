@@ -6,6 +6,7 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useUserStats } from "@/hooks/useUserStats";
+import { resetAccountContentReads, runHidingAction, useJustRestored, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { useToast } from "@/hooks/useToast";
 import { getKindInfo, getKindCategory } from "@/lib/kindNames";
@@ -39,7 +40,7 @@ import { ReporterList } from "@/components/ReporterCard";
 import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { extractMediaHashes } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
-import { historyCount, historyStat } from "@/lib/historyCount";
+import { authoredContentStat, historyCount, historyStat } from "@/lib/historyCount";
 import { MediaPreview } from "@/components/MediaPreview";
 import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import {
@@ -70,7 +71,7 @@ import {
 } from "lucide-react";
 import type { NostrEvent, NostrFilter } from "@nostrify/nostrify";
 import { nip19 } from "nostr-tools";
-import { HIGH_PRIORITY_CATEGORIES, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, RECENT_AUTHORED_LIMIT, getReportCategory, hasCsamSignal } from "@/lib/constants";
 
 interface EventDetailProps {
   event: NostrEvent;
@@ -461,6 +462,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   const { verifyPubkeyBanned, verifyPubkeyUnbanned, verifyEventDeleted } = api;
   const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
+  const restoreEnvironment = useRestoreEnvironment();
 
   const [_showRawJson, _setShowRawJson] = useState(false);
   const [confirmBan, setConfirmBan] = useState(false);
@@ -484,6 +486,22 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
   // last known, not in the destructive banner. Right after an Unban it can be
   // exactly wrong. Unban stays on isUserBanned, so the undo remains reachable.
   const userBannedConfirmed = moderationStatus.isUserBanned === true && !moderationStatus.isUserBannedStale;
+  // This tab unsuspended the author moments ago; the relay can lag (userStatsCache).
+  const justRestored = useJustRestored(event.pubkey);
+  // One label for both stats rows (author card and ban dialog), so they cannot
+  // disagree. The relay hides a suspended account's content from the stats read.
+  const eventCountLabel = userStats.data && authoredContentStat({
+    count: userStats.data.postCount,
+    incomplete: userStats.data.authoredContentIncomplete,
+    suspended: moderationStatus.isUserSuspended,
+    suspendedStale: moderationStatus.isUserSuspendedStale,
+    // A read of the suspended list is in flight, so a null suspension may yet
+    // settle: "checking", not "couldn't".
+    suspensionChecking: moderationStatus.isUserSuspensionChecking,
+    justRestored,
+    noun: 'events',
+    limit: RECENT_AUTHORED_LIMIT,
+  });
 
   // readSinceOpened (below) for the query function, which runs outside render:
   // a read since this event was opened has answered, and the latest read did
@@ -549,8 +567,16 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
 
   const banMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason: string }) => {
+      // A ban or unban changes what the relay shows of the account, so a stats
+      // read from before it describes the other state (lib/userStatsCache).
+      // Here, around the relay call, rather than in onSuccess or onSettled:
+      // onSuccess awaits the verification read, and TanStack runs onSettled
+      // only after it, so the reset would wait on it; and the unban below
+      // awaits an audit write that can fail after the relay call. Reset
+      // whatever the ban did: one that could not be confirmed may have landed.
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      const outcome = await act.banPubkey(pubkey, reason);
+      const env = restoreEnvironment; // the environment the action ran in
+      const outcome = await runHidingAction(queryClient, pubkey, env, () => act.banPubkey(pubkey, reason));
       return { pubkey, outcome };
     },
     onSuccess: async ({ pubkey, outcome }) => {
@@ -657,6 +683,10 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       await act.unbanPubkey(pubkey);
+      // As for a ban, above: not held up by the audit write below. No restore
+      // window: a ban usually purged the posts, so "posts can take a few
+      // minutes to reappear" would mislead. Reset only.
+      void resetAccountContentReads(queryClient, pubkey);
       await act.logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
@@ -849,7 +879,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
                   <div className="flex gap-4 text-xs text-muted-foreground p-2 bg-muted/50 rounded">
                     <span className="flex items-center gap-1">
                       <FileText className="h-3 w-3" />
-                      {userStats.data.postCount} events
+                      {eventCountLabel}
                     </span>
                     <span className="flex items-center gap-1">
                       <Flag className="h-3 w-3" />
@@ -1055,7 +1085,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
               <div className="flex gap-4 text-xs text-muted-foreground pt-2 border-t">
                 <span className="flex items-center gap-1">
                   <FileText className="h-3 w-3" />
-                  {userStats.data.postCount} events
+                  {eventCountLabel}
                 </span>
                 <span className="flex items-center gap-1">
                   <Flag className="h-3 w-3" />

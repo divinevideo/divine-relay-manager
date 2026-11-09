@@ -752,6 +752,30 @@ describe('adminApi', () => {
         expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
       });
 
+      // The re-check matches the list the way verifyPubkeyBanned does: a
+      // report's p tag is not normalized, and funnelcake reads back whatever
+      // case banpubkey was handed. The same-case case is the test above.
+      it('resolves as banned when the relay lists the pubkey in upper case', async () => {
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList([pubkey.toUpperCase()]));
+
+        expect(await ban()).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
+      });
+
+      it('resolves as banned when the request was upper case and the relay lists it in lower case', async () => {
+        mockFetch
+          .mockResolvedValueOnce(workerError(500, UNCONFIRMED))
+          .mockResolvedValueOnce(banList([pubkey]));
+
+        const outcome = await banPubkey(API_URL, pubkey.toUpperCase(), 'Spam').then(
+          value => ({ value }),
+          error => ({ error }),
+        );
+
+        expect(outcome).toEqual({ value: { unconfirmed: 'follow_ups_not_run' } });
+      });
+
       it('rethrows a 403 refusal (expired access) without reading the ban list', async () => {
         mockFetch.mockResolvedValueOnce(workerError(403, { success: false, error: 'Forbidden' }));
 
@@ -1417,6 +1441,22 @@ describe('adminApi', () => {
       vi.useRealTimers();
     });
 
+    // Report detail passes a report's p tag as written. Its ban list match
+    // ignores case, and this answer outranks the list, so this must too.
+    it('confirms a ban listed in another case', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [pubkey] }),
+      });
+
+      const promise = verifyPubkeyBanned(API_URL, pubkey.toUpperCase());
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(true);
+      vi.useRealTimers();
+    });
+
     it('returns null instead of claiming success when the check itself fails', async () => {
       vi.useFakeTimers();
       mockFetch.mockRejectedValueOnce(new Error('network down'));
@@ -1431,6 +1471,20 @@ describe('adminApi', () => {
 
   describe('verifyPubkeyUnbanned', () => {
     const pubkey = 'a'.repeat(64);
+
+    it('does not confirm an unban while the pubkey is listed in another case', async () => {
+      vi.useFakeTimers();
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, result: [pubkey] }),
+      });
+
+      const promise = verifyPubkeyUnbanned(API_URL, pubkey.toUpperCase());
+      await vi.advanceTimersByTimeAsync(500);
+
+      await expect(promise).resolves.toBe(false);
+      vi.useRealTimers();
+    });
 
     it('confirms an unban when the pubkey is absent', async () => {
       vi.useFakeTimers();

@@ -30,6 +30,13 @@ single-report policy. No production deployment is established by local tests.
    environment is selected, and can switch only to configured environment pairs.
    Existing `RELAY_URL`, `CDN_DOMAIN`, NIP-86 and Blossom credentials must point at
    the compatible services. No configuration or secret belongs in a PR/log.
+   No `wrangler.*.toml` declares `COOP_URL` or `REVIEWER_BASE_URL`. Bind each as
+   a Worker secret (`npx wrangler secret put COOP_URL --config wrangler.<env>.toml`),
+   or have whoever deploys add it to that environment's `[vars]`. A plaintext
+   variable set in the Cloudflare dashboard is dropped by the next `wrangler
+   deploy`, because the configs do not set `keep_vars = true`. Private-report
+   intake also reads `COOP_URL` and needs `COOP_USER_TYPE_ID`, bound the same
+   way (see [api-webhooks.md](api-webhooks.md), `POST /api/internal/private-reports`).
 4. Validate the safe canary below in staging, then a controlled production canary
    through the deployment workflow. Verify production service identities, access
    and reviews; local or deployment-log evidence is not a live canary.

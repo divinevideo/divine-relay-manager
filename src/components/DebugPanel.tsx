@@ -20,7 +20,8 @@ import {
 import { useToast } from "@/hooks/useToast";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import type { BannedPubkeyEntry } from "@/lib/adminApi";
+import { BanNotConfirmedError, type BannedPubkeyEntry } from "@/lib/adminApi";
+import { markHidden, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 import {
   Bug,
   CheckCircle,
@@ -65,6 +66,7 @@ export function DebugPanel() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
+  const restoreEnvironment = useRestoreEnvironment();
   const {
     getWorkerInfo,
     listBannedPubkeys,
@@ -188,12 +190,21 @@ export function DebugPanel() {
       const results: { banResult?: unknown; banError?: string; logResult?: unknown; logError?: string } = {};
       const act = api.asModerator(getModeratorToken()); // take the login at the click
 
+      // Captured before the request, for the restore window (lib/userStatsCache).
+      const env = restoreEnvironment;
       // Try to ban via NIP-86 RPC
       try {
         const banResult = await act.banPubkey(pubkey, "Debug test ban");
         results.banResult = banResult;
+        // The ban landed: the account is hidden again, so end a restore
+        // window an earlier unsuspend left open.
+        void markHidden(queryClient, pubkey, env);
       } catch (error) {
         results.banError = String(error);
+        // Not confirmed: it may still have landed, so end the restore window
+        // as for one that did. Refused or failed: only reset.
+        if (error instanceof BanNotConfirmedError) void markHidden(queryClient, pubkey, env);
+        else void resetAccountContentReads(queryClient, pubkey);
       }
 
       // Log to our database regardless
@@ -293,8 +304,13 @@ export function DebugPanel() {
       try {
         const unbanResult = await act.unbanPubkey(pubkey);
         results.unbanResult = unbanResult;
+        // Reset now, before the audit write below can fail. No restore window:
+        // a ban usually purged the posts (lib/userStatsCache).
+        void resetAccountContentReads(queryClient, pubkey);
       } catch (error) {
         results.unbanError = String(error);
+        // Unban was not confirmed; only reset the reads.
+        void resetAccountContentReads(queryClient, pubkey);
       }
 
       try {
@@ -399,6 +415,7 @@ export function DebugPanel() {
     }
 
     try {
+      // Free-form admin RPC: deliberately does not update restore windows or authored-content caches.
       const result = await act.callRelayRpc(rpcMethod, params);
       const duration = Date.now() - start;
       setRpcResults(prev => [{

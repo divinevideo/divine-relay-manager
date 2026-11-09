@@ -1,10 +1,13 @@
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
+import { MemoryRouter } from 'react-router-dom';
+import { TooltipProvider } from '@/components/ui/tooltip';
 import { ApiError } from '@/lib/adminApi';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
+import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 
 // AgeReviewDetail reads relay content-presence via useUserStats (which needs a
 // NostrProvider). This unit test isolates the case-action logic, so stub it with
@@ -23,6 +26,7 @@ vi.mock('@/hooks/useUserStats', () => ({
 }));
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
+const suspendPubkey = vi.fn().mockResolvedValue({ success: true });
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
 const getAccountStatus = vi
@@ -48,6 +52,7 @@ const moderatorApi = withAsModerator({
   getActiveAgeReviewCase,
   moderateMedia,
   logDecision,
+  suspendPubkey,
 });
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',
@@ -119,6 +124,31 @@ describe('AgeReviewDetail', () => {
   it.each(['greenlight_application', 'report'])('identifies the family consent request on a %s case', (created_via) => {
     renderDetail(makeCase({ created_via, greenlight_requested_at: '2026-10-01T00:00:00Z' }));
     expect(screen.getByText('Family requested Greenlight')).toBeInTheDocument();
+  });
+
+  const PRIVATE_REPORT_LABEL = 'Private DM report: the reporter named this account in an encrypted message. '
+    + 'It is an unverified allegation, and nothing was published.';
+
+  it('marks a case opened by a private DM report as an unverified, unpublished allegation', () => {
+    // A private report has no public report event, so no report_id.
+    renderDetail(makeCase({ created_via: 'private_report', report_id: null }));
+    expect(screen.getByText(PRIVATE_REPORT_LABEL)).toBeInTheDocument();
+  });
+
+  it('marks a Greenlight case a private report attached to', () => {
+    // A private report attaches its reporter but no report event.
+    renderDetail(makeCase({ created_via: 'greenlight_application', reporter_pubkey: 'b'.repeat(64), report_id: null }));
+    expect(screen.getByText(PRIVATE_REPORT_LABEL)).toBeInTheDocument();
+  });
+
+  it.each(['report', 'greenlight_application', 'minor_onboarding', null])('does not mark a %s case with a public report as a private report', (created_via) => {
+    renderDetail(makeCase({ created_via }));
+    expect(screen.queryByText(PRIVATE_REPORT_LABEL)).not.toBeInTheDocument();
+  });
+
+  it('does not mark a Greenlight case no report attached to', () => {
+    renderDetail(makeCase({ created_via: 'greenlight_application', reporter_pubkey: null, report_id: null }));
+    expect(screen.queryByText(PRIVATE_REPORT_LABEL)).not.toBeInTheDocument();
   });
 
   beforeEach(() => {
@@ -1013,6 +1043,239 @@ describe('AgeReviewDetail', () => {
 
 // Which failed enforcement steps converge on their own: only the
 // protected-minor ones, which the deadline cron retries.
+// Restrict suspends the account, clear unsuspends it and deny bans it, so each
+// changes what the relay shows of it. The shared authored-content reads
+// (report detail, event detail) would otherwise keep the other state's count
+// for their staleTime (lib/userStatsCache).
+describe('AgeReviewDetail drops cached authored-content reads after a decision', () => {
+  const STATS_KEY = ['user-stats', 'wss://relay.test', 'a'.repeat(64)];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    updateAgeReviewCase.mockResolvedValue({ success: true });
+  });
+
+  it('after a restrict', async () => {
+    const { queryClient } = renderDetail(makeCase());
+    queryClient.setQueryData(STATS_KEY, { postCount: 3 });
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => expect(queryClient.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  it('after a clear, which also starts the unsuspend window', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      // The window needs the relay's unsuspend confirmed in the response, and
+      // a case that had suspended the account (a restricted state).
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+      const { queryClient } = renderDetail(makeCase({ state: 'restricted_pending_user_response' }));
+      queryClient.setQueryData(STATS_KEY, { postCount: 0 });
+
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
+
+      await waitFor(() => expect(queryClient.getQueryData(STATS_KEY)).toBeUndefined());
+      const { result } = renderHook(() => useJustRestored('a'.repeat(64)));
+      expect(result.current).toBe(true);
+      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  // The account actions embedded under a denied case (when auto-delete is off)
+  // are UserActions', which resets on its own (item: every host gets it).
+  it("after an account action from the denied case's embedded actions", async () => {
+    getAgeReviewConfig.mockResolvedValue({ auto_delete_on_deny: false });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    queryClient.setQueryData(STATS_KEY, { postCount: 3 });
+    // UserActions routes guard refusals to the case, so it needs a router.
+    render(
+      <MemoryRouter>
+        <QueryClientProvider client={queryClient}>
+          <TooltipProvider><AgeReviewDetail caseData={makeCase({ state: 'denied_closed' })} /></TooltipProvider>
+        </QueryClientProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /Suspend User/i }));
+
+    await waitFor(() => expect(suspendPubkey).toHaveBeenCalled());
+    await waitFor(() => expect(queryClient.getQueryData(STATS_KEY)).toBeUndefined());
+  });
+
+  // The window says the account was just restored. Only a clear whose relay
+  // unsuspend the worker confirmed restored it; the reset is harmless either way.
+  describe('opens the restore window only when the relay restoration is confirmed', () => {
+    // A restricted case by default: restricting is what suspends the account.
+    const clearCase = async (pk: string, state: AgeReviewState = 'restricted_pending_user_response') => {
+      const { queryClient } = renderDetail(makeCase({ pubkey: pk, state }));
+      queryClient.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 0 });
+      fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      return queryClient;
+    };
+
+    it('not after a rejected clear, but still resets', async () => {
+      const pk = '4'.repeat(64);
+      updateAgeReviewCase.mockRejectedValue(new ApiError('Case was modified by another request', 409, 'Conflict', 'version_conflict', 5));
+
+      const queryClient = await clearCase(pk);
+
+      await waitFor(() => expect(queryClient.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+      expect(renderHook(() => useJustRestored(pk)).result.current).toBe(false);
+    });
+
+    it('not when the relay leg failed', async () => {
+      const pk = '5'.repeat(64);
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcementComplete: false, enforcement: { relay: 'failed', bulk: 'ok', keycast: 'ok' } });
+
+      const queryClient = await clearCase(pk);
+
+      await waitFor(() => expect(queryClient.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+      expect(renderHook(() => useJustRestored(pk)).result.current).toBe(false);
+    });
+
+    // Restrict suspends the account; its relay leg succeeding hides it.
+    it('not after a restrict, whose relay leg also reports ok', async () => {
+      const pk = '7'.repeat(64);
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+      const { queryClient } = renderDetail(makeCase({ pubkey: pk }));
+      queryClient.setQueryData(['user-stats', 'wss://relay.test', pk], { postCount: 3 });
+
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+      await waitFor(() => expect(queryClient.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+      expect(renderHook(() => useJustRestored(pk)).result.current).toBe(false);
+    });
+
+    // Restrict suspends and deny bans: a window left from an earlier restore
+    // would print "just restored" for an account hidden again.
+    it('ends a window left open when a restrict hides the account again', async () => {
+      const pk = '8'.repeat(64);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+      renderDetail(makeCase({ pubkey: pk }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+      await waitFor(() => expect(result.current).toBe(false));
+    });
+
+    it('ends a window left open when a deny bans the account', async () => {
+      const pk = '0f'.repeat(32);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'not_attempted', keycast: 'ok' } });
+      renderDetail(makeCase({ pubkey: pk, suspected_age_band: 'age_13_15', state: 'restricted_pending_user_response' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+
+      await waitFor(() => expect(result.current).toBe(false));
+    });
+
+    // A deny bans first and purges after. The worker reports the relay leg
+    // failed when only the purge was not confirmed (worker/src/age-review.ts,
+    // failUnlessPurgeConfirmed), but the ban is in effect, so the window ends.
+    it('ends a window when a deny banned the account but its content removal was not confirmed', async () => {
+      const pk = '2e'.repeat(32);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({
+        success: false,
+        enforcementComplete: false,
+        enforcement: {
+          relay: 'failed',
+          relayError: 'Ban applied; content removal not confirmed: purge timed out',
+          bulk: 'not_attempted',
+          keycast: 'ok',
+        },
+      });
+      renderDetail(makeCase({ pubkey: pk, suspected_age_band: 'age_13_15', state: 'restricted_pending_user_response' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+
+      await waitFor(() => expect(result.current).toBe(false));
+    });
+
+    // The ban itself failed: the account is not hidden, so the window stays.
+    it('keeps the window when a deny\'s ban did not apply', async () => {
+      const pk = '3f'.repeat(32);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({
+        success: false,
+        enforcementComplete: false,
+        enforcement: { relay: 'failed', relayError: 'banpubkey RPC failed', bulk: 'not_attempted', keycast: 'ok' },
+      });
+      const { queryClient } = renderDetail(makeCase({ pubkey: pk, suspected_age_band: 'age_13_15', state: 'restricted_pending_user_response' }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Deny & Close' }));
+
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      expect(result.current).toBe(true);
+    });
+
+    it("keeps the window when the restrict's relay leg failed", async () => {
+      const pk = '9'.repeat(64);
+      const { result } = renderHook(() => useJustRestored(pk));
+      await act(async () => { await markRestored(new QueryClient(), pk, undefined); });
+      updateAgeReviewCase.mockResolvedValue({ success: false, enforcementComplete: false, enforcement: { relay: 'failed', bulk: 'ok', keycast: 'ok' } });
+      const { queryClient } = renderDetail(makeCase({ pubkey: pk }));
+
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+      await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+      await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+      expect(result.current).toBe(true);
+    });
+
+    // The worker calls unsuspendpubkey on every clear, but only entering a
+    // restricted state suspends. A case cleared from review never suspended
+    // the account, so nothing was lifted: reset the reads, open no window.
+    it('not after a clear of a case that never restricted the account', async () => {
+      const pk = '1d'.repeat(32);
+      updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+
+      const queryClient = await clearCase(pk, 'under_moderator_review');
+
+      await waitFor(() => expect(queryClient.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
+      expect(renderHook(() => useJustRestored(pk)).result.current).toBe(false);
+    });
+
+    it('when the relay leg succeeded and another leg failed', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        const pk = '6'.repeat(64);
+        // The worker answers success: false when any leg failed (enforcementComplete).
+        updateAgeReviewCase.mockResolvedValue({ success: false, enforcementComplete: false, enforcement: { relay: 'ok', bulk: 'failed', keycast: 'ok' } });
+
+        await clearCase(pk);
+
+        expect(renderHook(() => useJustRestored(pk)).result.current).toBe(true);
+        await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  it('keeps them after an edit that is not a decision', async () => {
+    const { queryClient } = renderDetail(makeCase());
+    queryClient.setQueryData(STATS_KEY, { postCount: 3 });
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Pause Clock' }));
+
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    expect(queryClient.getQueryData(STATS_KEY)).toEqual({ postCount: 3 });
+  });
+});
+
 describe('AgeReviewDetail enforcement-incomplete toast', () => {
   beforeEach(() => {
     updateAgeReviewCase.mockReset();
