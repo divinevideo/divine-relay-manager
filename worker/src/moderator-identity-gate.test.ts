@@ -80,6 +80,43 @@ describe('moderator login check in the fetch handler', () => {
     expect(nostrCalls).toBe(0);
   });
 
+  describe('fresh check for suspended-content views', () => {
+    function viewer(path: string, method = 'POST'): Request {
+      return new Request(`https://worker.test${path}`, {
+        method,
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'test-admin-key', 'X-Divine-Login-Token': 'tok' },
+        ...(method === 'POST' ? { body: '{}' } : {}),
+      });
+    }
+
+    it('POST /api/suspended-content/event verifies fresh on every request', async () => {
+      await worker.fetch(viewer('/api/suspended-content/event'), env, ctx);
+      await worker.fetch(viewer('/api/suspended-content/event'), env, ctx);
+      expect(nostrCalls).toBe(2);
+    });
+
+    it('POST /api/suspended-content/account verifies fresh on every request', async () => {
+      await worker.fetch(viewer('/api/suspended-content/account'), env, ctx);
+      await worker.fetch(viewer('/api/suspended-content/account'), env, ctx);
+      expect(nostrCalls).toBe(2);
+    });
+
+    it('the quarantine snapshot=1 GET verifies fresh, and its plain poll uses the cache', async () => {
+      const id = 'd'.repeat(64);
+      await worker.fetch(viewer(`/api/report-watcher/sexual-quarantine/${id}?snapshot=1`, 'GET'), env, ctx);
+      await worker.fetch(viewer(`/api/report-watcher/sexual-quarantine/${id}?snapshot=1`, 'GET'), env, ctx);
+      expect(nostrCalls).toBe(2);
+      await worker.fetch(viewer(`/api/report-watcher/sexual-quarantine/${id}`, 'GET'), env, ctx);
+      expect(nostrCalls).toBe(2);
+    });
+
+    it('other routes still use the cache', async () => {
+      await worker.fetch(post({ 'X-Admin-Key': 'test-admin-key', 'X-Divine-Login-Token': 'tok' }), env, ctx);
+      await worker.fetch(post({ 'X-Admin-Key': 'test-admin-key', 'X-Divine-Login-Token': 'tok' }), env, ctx);
+      expect(nostrCalls).toBe(1);
+    });
+  });
+
   describe('proceeds with the action, unattributed, when the login check fails', () => {
     beforeEach(() => vi.spyOn(console, 'warn').mockImplementation(() => {}));
 

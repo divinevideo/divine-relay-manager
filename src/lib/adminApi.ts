@@ -46,8 +46,11 @@ export interface SexualQuarantineAudit { at: number; action: string; revision?: 
 const SEXUAL_QUARANTINE = '/api/report-watcher/sexual-quarantine';
 export const getSexualQuarantineCases = (apiUrl: string, cursor?: string) =>
   apiRequest<{ cases: SexualCase[]; nextCursor?: string }>(apiUrl, SEXUAL_QUARANTINE + (cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''), 'GET');
-export const getSexualQuarantineCase = (apiUrl: string, eventId: string) =>
-  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'GET');
+// `snapshot: true` asks for a suspended author's snapshot, which the worker
+// serves only to a verified login and records as a view; pass the login with it.
+export const getSexualQuarantineCase = (apiUrl: string, eventId: string, opts?: { snapshot?: boolean } & LoginOpts) =>
+  apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}${opts?.snapshot ? '?snapshot=1' : ''}`, 'GET',
+    undefined, { loginToken: opts?.loginToken });
 export const getSexualQuarantineHistory = (apiUrl: string, eventId: string) =>
   apiRequest<SexualQuarantineAudit[]>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}/history`, 'GET');
 export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { revision: number; decision: 'restore' | 'remove'; reason: string }, opts?: LoginOpts) =>

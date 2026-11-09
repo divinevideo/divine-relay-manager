@@ -117,7 +117,7 @@ export function getManagementUrl(env: Pick<Nip86Env, 'RELAY_URL' | 'MANAGEMENT_P
  */
 export async function callNip86Rpc(
   method: string,
-  params: (string | number | undefined)[],
+  params: ReadonlyArray<string | number | Record<string, unknown> | undefined>,
   env: Nip86Env,
   timeoutMs: number = NIP86_RPC_TIMEOUT_MS,
 ): Promise<Nip86RpcResult> {
