@@ -8,8 +8,8 @@ import worker from '../src/index';
 import { ensureSchema } from '../src/db';
 import { getActiveAgeReviewCase } from '../src/age-review-lookup';
 import { ageReviewActiveGuard } from '../src/age-review';
-import { handleBulkModerateEnqueue, processBulkJob } from '../src/bulk-moderate';
-import type { BulkJobMessage } from '../../shared/bulk-moderation';
+import { handleBulkJobStatus, handleBulkModerateEnqueue, processBulkJob } from '../src/bulk-moderate';
+import type { BulkEnqueueResponse, BulkJob, BulkJobMessage } from '../../shared/bulk-moderation';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -219,6 +219,7 @@ describe('a case stored under an uppercase pubkey', () => {
       method: 'POST', body: JSON.stringify({ pubkey: LOWER, action: 'un-age-restrict-all' }),
     }), env(), {});
     expect(enqueued.status).toBe(200);
+    const { jobId } = await enqueued.json() as BulkEnqueueResponse;
     await insertCase(LOWER, 'open_reported'); // opened after the job was queued
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
     try {
@@ -227,5 +228,8 @@ describe('a case stored under an uppercase pubkey', () => {
     } finally {
       fetchSpy.mockRestore();
     }
+    const job = await (await handleBulkJobStatus(jobId, env(), {})).json() as BulkJob;
+    expect(job.status).toBe('failed');
+    expect(job.failures.join('\n')).toContain(`stopped: ${LOWER} is under age review`);
   });
 });
