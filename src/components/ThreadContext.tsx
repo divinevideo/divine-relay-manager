@@ -9,13 +9,14 @@ import { Button } from "@/components/ui/button";
 import { useAuthor } from "@/hooks/useAuthor";
 import {
   ExternalLink, ChevronDown, ChevronUp,
-  AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX,
+  AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX, EyeOff,
 } from "lucide-react";
 import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
 import { useState } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import type { FetchSource } from "@/hooks/useThread";
+import type { GoneCause } from "@/lib/goneCause";
 
 interface ThreadContextProps {
   ancestors: NostrEvent[];
@@ -49,6 +50,12 @@ interface ThreadContextProps {
    * wrong.
    */
   isUserBannedStale?: boolean;
+  /**
+   * Why a gone post is gone (lib/goneCause), decided by ReportDetail so its
+   * badge and this panel give the same reason. Only a cause the badge states
+   * itself, or none passed, keeps the green "deleted" line.
+   */
+  goneCause?: GoneCause;
   /** Something still on its way can settle the ban (useModerationStatus's isUserBanChecking) */
   isUserBanChecking?: boolean;
   /** When the moderation status was last verified */
@@ -287,6 +294,7 @@ export function ThreadContext({
   isEventDeleted,
   isUserBanned,
   isUserBannedStale = false,
+  goneCause,
   isUserBanChecking = false,
   checkedAt,
   onRecheck,
@@ -348,11 +356,29 @@ export function ThreadContext({
         <div className="space-y-3">
           {/* Moderation status results */}
           <div className="rounded-md border bg-muted/30 p-3 space-y-2">
-            {isEventDeleted === true && (
+            {isEventDeleted === true && goneCause?.kind === 'suspended' && (
+              // Not green: nothing here confirms the post was removed. The
+              // relay withholds it while the account is suspended.
+              <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
+              </div>
+            )}
+            {isEventDeleted === true && (goneCause?.kind === 'unknown' || goneCause?.kind === 'none-found') && (
+              // Not green either: the post may still exist (unknown cause), or
+              // be withheld for something nothing here reads (none found).
+              <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
+              </div>
+            )}
+            {isEventDeleted === true && (goneCause === undefined || goneCause.kind === 'explained') && (
+              // A cause the badge states itself, in its own words: "deleted"
+              // only for a recorded delete (and when no cause is passed).
               <div className="flex items-center gap-2 p-2 rounded bg-green-100 dark:bg-green-950/50">
                 <ShieldX className="h-4 w-4 text-green-600 shrink-0" />
                 <span className="text-sm font-medium text-green-700 dark:text-green-400">
-                  Event has been deleted from the relay
+                  {goneCause?.line ?? 'Event has been deleted from the relay'}
                 </span>
               </div>
             )}

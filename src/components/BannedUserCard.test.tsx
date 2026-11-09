@@ -2,7 +2,7 @@
 // ABOUTME: banned comment-spam accounts must not show "No posts found" (#159)
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
@@ -10,9 +10,11 @@ import { RECENT_CONTENT_KINDS } from '@/lib/constants';
 import { AppProvider } from '@/components/AppProvider';
 import { BannedUserCard } from './BannedUserCard';
 
+// The card reads through queryStrict, which drives nostr.req and needs EOSE to
+// count a read as finished. NPool.query would resolve [] on a failed read.
 const relayQuery = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock('@nostrify/react', () => ({
-  useNostr: () => ({ nostr: { query: relayQuery.fn } }),
+  useNostr: () => ({ nostr: { req: relayQuery.fn } }),
 }));
 
 // Profile loading is useAuthor's concern (tested elsewhere); these tests
@@ -60,26 +62,43 @@ const AUTHORED: NostrEvent[] = [
 ];
 
 // Point the relay mock's content query at a specific fixture set (profiles
-// go through the mocked useAuthor, so every nostr.query call here is the
-// content query). Returns a copy — the component sorts its results, and a
-// shared-reference fixture would be mutated across tests.
+// go through the mocked useAuthor, so every nostr.req call here is the
+// content query): the events, then EOSE. Yields copies — the component sorts
+// its results, and a shared-reference fixture would be mutated across tests.
 function setAuthored(events: NostrEvent[]) {
-  relayQuery.fn.mockImplementation(async () => [...events]);
+  relayQuery.fn.mockImplementation(async function* () {
+    for (const e of events) yield ['EVENT', 'sub', { ...e }];
+    yield ['EOSE', 'sub'];
+  });
 }
 
-function renderCard() {
+/** A read the relay cut short: Funnelcake's "could not complete query" close. */
+function setReadCutShort() {
+  relayQuery.fn.mockImplementation(async function* () {
+    yield ['CLOSED', 'sub', 'error: could not complete query'];
+  });
+}
+
+/** A read that never answers. */
+function setReadHangs() {
+  relayQuery.fn.mockImplementation(() => ({
+    [Symbol.asyncIterator]: () => ({ next: () => new Promise(() => {}) }),
+  }));
+}
+
+function renderCard(props: Partial<React.ComponentProps<typeof BannedUserCard>> = {}) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
-  return render(
+  return { client, ...render(
     <AppProvider storageKey="test-app-config" defaultConfig={{ theme: 'light', relayUrl: 'wss://relay.test', apiUrl: 'https://api.test' }}>
       <QueryClientProvider client={client}>
         <MemoryRouter>
-          <BannedUserCard pubkey={PUBKEY} />
+          <BannedUserCard pubkey={PUBKEY} {...props} />
         </MemoryRouter>
       </QueryClientProvider>
     </AppProvider>
-  );
+  ) };
 }
 
 beforeEach(() => {
@@ -243,6 +262,104 @@ describe('BannedUserCard', () => {
 
     // Newest 3 targets only — the 2 never-rendered comments are not resolved
     expect(titleCalls.targets.at(-1)).toEqual(['f'.repeat(64), 'e'.repeat(64), 'd'.repeat(64)]);
+  });
+});
+
+describe('BannedUserCard event count', () => {
+  it('does not print a read the relay cut short as zero', async () => {
+    setReadCutShort();
+    renderCard();
+
+    expect(await screen.findByText(/events on relay unavailable/, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText(/0 events on relay/)).not.toBeInTheDocument();
+  });
+
+  it('does not say the account has no content when the read was cut short', async () => {
+    setReadCutShort();
+    renderCard();
+    await screen.findByText(/events on relay unavailable/, {}, { timeout: 4000 });
+
+    fireEvent.click(screen.getByRole('button', { name: /toggle details/i }));
+
+    expect(screen.queryByText(/No recent content found/)).not.toBeInTheDocument();
+    expect(screen.getByText(/Couldn't load this account's content/)).toBeInTheDocument();
+  });
+
+  it('does not print a read that has not answered as zero', () => {
+    setReadHangs();
+    renderCard();
+
+    expect(screen.getByText(/checking events on relay/)).toBeInTheDocument();
+    expect(screen.queryByText(/0 events on relay/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /toggle details/i }));
+    expect(screen.queryByText(/No recent content found/)).not.toBeInTheDocument();
+  });
+
+  // The card asks the relay for at most 50 events, so a full page may not be
+  // the account's total.
+  it('marks a count that reached the read limit as a floor', async () => {
+    setAuthored(Array.from({ length: 50 }, (_, i) => event(1, `note ${i}`, i.toString(16).padStart(2, '0'), [], T + i)));
+    renderCard();
+
+    expect(await screen.findByText(/50\+ events on relay/)).toBeInTheDocument();
+    // The floor is right only because the read asked for exactly 50.
+    const postFilter = relayQuery.fn.mock.calls.map(args => args[0]?.[0]).find(f => f?.authors);
+    expect(postFilter?.limit).toBe(50);
+  });
+
+  it('prints a count under the read limit exactly', async () => {
+    setAuthored(Array.from({ length: 49 }, (_, i) => event(1, `note ${i}`, i.toString(16).padStart(2, '0'), [], T + i)));
+    renderCard();
+
+    expect(await screen.findByText(/^49 events on relay$/)).toBeInTheDocument();
+  });
+
+  // The read throws on failure now, so it gets ReporterCard's one retry: a
+  // single dropped subscription should not show "unavailable".
+  it('retries a failed read once before saying it is unavailable', async () => {
+    setReadCutShort();
+    renderCard();
+
+    await screen.findByText(/events on relay unavailable/, {}, { timeout: 4000 });
+    expect(relayQuery.fn).toHaveBeenCalledTimes(2);
+  });
+
+  // React Query keeps the last good data when a refresh fails. A count kept that
+  // way is what the relay said before, not what it says now.
+  it('marks a kept count as last known when a refresh fails', async () => {
+    setAuthored([]);
+    const { client } = renderCard();
+    expect(await screen.findByText(/^0 events on relay$/)).toBeInTheDocument();
+
+    setReadCutShort();
+    await act(async () => { await client.refetchQueries(); });
+
+    expect(await screen.findByText(/^0 events on relay \(last known\)$/, {}, { timeout: 4000 })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /toggle details/i }));
+    expect(screen.queryByText(/^No recent content found on this relay$/)).not.toBeInTheDocument();
+    expect(screen.getByText(/latest refresh failed/)).toBeInTheDocument();
+  });
+
+  it('still says a completed empty read is empty', async () => {
+    setAuthored([]);
+    renderCard();
+
+    expect(await screen.findByText(/0 events on relay/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /toggle details/i }));
+    expect(screen.getByText(/No recent content found on this relay/)).toBeInTheDocument();
+  });
+
+  it("says a suspended account's empty read is the suspension, not an empty account", async () => {
+    setAuthored([]);
+    renderCard({ suspended: true });
+
+    expect(await screen.findByText(/events on relay hidden \(account suspended\)/)).toBeInTheDocument();
+    expect(screen.queryByText(/0 events on relay/)).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: /toggle details/i }));
+    expect(screen.queryByText(/No recent content found/)).not.toBeInTheDocument();
+    expect(screen.getByText(/relay hides a suspended account's content/)).toBeInTheDocument();
   });
 });
 

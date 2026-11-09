@@ -25,6 +25,7 @@ import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
+import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -45,6 +46,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const redirectIfGuarded = useAgeReviewGuardRedirect();
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const restoreEnvironment = useRestoreEnvironment();
   const { callRelayRpc, banPubkey, verifyPubkeyBanned, verifyPubkeyUnbanned, unbanPubkey, unsuspendPubkey, logDecision } = useAdminApi();
   const { getModeratorPubkey } = useCurrentUser();
   const [newPubkey, setNewPubkey] = useState("");
@@ -65,6 +67,20 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     queryClient.invalidateQueries({ queryKey: ['suspended-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
   };
+
+  // After an account action, the acted-on account's authored-content reads
+  // describe the other state: the relay hides a banned or suspended account's
+  // content (lib/userStatsCache). Each mutation below handles that inside its
+  // mutationFn, right after the relay call, so a failed audit write (awaited
+  // after it) cannot skip it. A ban resets whatever the call did: one whose
+  // confirmation failed may still have landed, and a reset after a failed call
+  // only costs a re-read. A ban that landed also ends a restore window an
+  // earlier unsuspend left open (markHidden). Unsuspend opens the restore
+  // window only once the call succeeded: after a failed one the account is
+  // still hidden, and "just restored" would be wrong. Unban and allow only reset
+  // the reads: a ban usually purged the posts, so "posts can take a few minutes
+  // to reappear" would mislead. The selected user's UserActions does the same
+  // for its own actions.
 
   // Query for banned users
   const { data: bannedUsers, isLoading: loadingBanned, error: bannedError } = useQuery({
@@ -88,7 +104,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const banUserMutation = useMutation({
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
-      const outcome = await banPubkey(pubkey, reason || 'Account banned by moderator');
+      const env = restoreEnvironment; // the environment the action ran in
+      const outcome = await runHidingAction(queryClient, pubkey, env, () => banPubkey(pubkey, reason || 'Account banned by moderator'));
       // Log to D1 for audit trail. The ban has already landed, so a failed write
       // must not fail the mutation: that would read as "Failed to ban user" and
       // invite a retry of an applied ban.
@@ -136,6 +153,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     mutationFn: async ({ pubkey, reason }: { pubkey: string; reason?: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
       await callRelayRpc('unbanpubkey', [pubkey, reason]);
+      // A ban usually purged the posts, so no restore window: reset only.
+      void resetAccountContentReads(queryClient, pubkey);
       // Log to D1 for audit trail
       await logDecision({
         targetType: 'pubkey',
@@ -213,6 +232,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
       await unbanPubkey(pubkey);
+      // A ban usually purged the posts, so no restore window: reset only.
+      void resetAccountContentReads(queryClient, pubkey);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
@@ -246,7 +267,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const unsuspendUserMutation = useMutation({
     mutationFn: async ({ pubkey }: { pubkey: string }) => {
       const moderator = getModeratorPubkey(); // snapshot identity at action start
+      const env = restoreEnvironment; // captured before the call
       await unsuspendPubkey(pubkey);
+      void markRestored(queryClient, pubkey, env);
       await logDecision({
         targetType: 'pubkey',
         targetId: pubkey,
@@ -518,6 +541,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                       key={index}
                       pubkey={user.pubkey}
                       reason={user.reason}
+                      suspended
                       actionButton={
                         <Button
                           variant="outline"

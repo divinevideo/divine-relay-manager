@@ -82,6 +82,21 @@ export { HIGH_PRIORITY_CATEGORIES } from "../../shared/report-classification";
 // child-safety are a separate, non-reversible path, not age review.
 export const UNDERAGE_REPORT_CATEGORY = 'NS-underageUser';
 
+// useUserStats' authored-content read is one capped page, not a walk, so a
+// count at this limit is a floor and the cards print it as one ("20+ events").
+// Here rather than in the hook module so the screens that print the floor do
+// not depend on every factory mock of useUserStats remembering a constant.
+export const RECENT_AUTHORED_LIMIT = 20;
+
+// useUserStats' cache key, also invalidated by ReportDetail after an action.
+// Built in one place: a hand-written copy without the relay URL matched
+// nothing, and the card kept a stale count for the hook's staleTime. relayUrl
+// is in the key because the QueryClient is a singleton and these events are
+// shown as evidence, so a cached read must never cross environments.
+export function userStatsQueryKey(relayUrl: string | undefined, pubkey: string | null | undefined) {
+  return ['user-stats', relayUrl, pubkey] as const;
+}
+
 // Authored-content kinds surfaced on moderation review cards (report detail's
 // useUserStats and BannedUserCard). Video kinds per NIP-71: 21/22/34235/34236.
 // 1111 (NIP-22 comments) and 6/16 (reposts) matter for moderation because

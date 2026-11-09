@@ -30,6 +30,7 @@ import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
+import { deriveGoneCause } from "@/lib/goneCause";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
 import { AccountTypeLabel } from "@/components/AccountTypeBadge";
@@ -55,11 +56,11 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions, type UserActionChange } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
-import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal, userStatsQueryKey } from "@/lib/constants";
 import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
-import { Flag, CheckCircle, History, Ban, ShieldX, User, Repeat2, FileCode, RefreshCw, EyeOff, Eye } from "lucide-react";
+import { Flag, CheckCircle, History, Ban, ShieldX, User, Repeat2, FileCode, RefreshCw, EyeOff, Eye, AlertTriangle } from "lucide-react";
 import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
@@ -202,6 +203,27 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // D1 decisions are audit log only, not status indicators
   const isUserBanned = moderationStatus.isUserBanned;
   const isEventDeleted = moderationStatus.isEventGone;
+  // Why a gone post is gone, from what has actually answered (lib/goneCause).
+  // The badge (label, icon, tooltip) and the thread panel all read this one answer.
+  const goneCause = deriveGoneCause({
+    eventGone: isEventDeleted,
+    recordedDelete: !!decisionLog.isDeleted,
+    autoHidden: decisionLog.isAutoHidden,
+    decisionsUnread: decisionLog.isPending ? 'checking' : decisionLog.error ? 'failed' : null,
+    userBanned: isUserBanned,
+    userBannedStale: moderationStatus.isUserBannedStale,
+    eventBanned: moderationStatus.isEventBanned,
+    eventBannedStale: moderationStatus.isEventBannedStale,
+    suspended: moderationStatus.isUserSuspended,
+    suspendedStale: moderationStatus.isUserSuspendedStale,
+    // Per status, so each unknown says "still checking" or "couldn't check"
+    // for its own read (the ban part agrees with the thread panel's ban line).
+    checking: {
+      suspension: moderationStatus.isUserSuspensionChecking,
+      accountBan: moderationStatus.isUserBanChecking,
+      eventBan: moderationStatus.isEventBanChecking,
+    },
+  });
   const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
   // The banner names what handled the report, not a skip logged after it.
   const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
@@ -547,7 +569,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     invalidateResolutionState(queryClient);
     queryClient.invalidateQueries({ queryKey: ['media-status'] });
-    queryClient.invalidateQueries({ queryKey: ['user-stats', context.reportedUser.pubkey] });
     // Reflect any ticket the action auto-closed so the panel flips to "Closed ✓".
     queryClient.invalidateQueries({ queryKey: ['linked-tickets'] });
     if (change?.accountStatusChanged) {
@@ -562,7 +583,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // changed, so only its entry is refreshed. It comes from UserActions, not
       // from this pane: the moderator may have opened another report since.
       refreshAccountStatusAfterMirror(queryClient, change.pubkey);
+      // UserActions drops the acted-on account's authored-content reads itself
+      // (and opens the restore window after an unsuspend).
     } else {
+      queryClient.invalidateQueries({ queryKey: userStatsQueryKey(config.relayUrl, context.reportedUser.pubkey) });
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
@@ -764,44 +788,38 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                   </Badge>
                 )
               )}
-              {isEventDeleted && (
+              {isEventDeleted && goneCause.kind !== 'not-gone' && (
                 <Tooltip>
                   <TooltipTrigger asChild>
-                    <Badge variant="destructive" className="flex items-center gap-1 cursor-help">
-                      <ShieldX className="h-3 w-3" />
-                      {/* isAutoHidden covers the states that need a check too:
-                          the worker writes those only after the relay ban
-                          landed, so the content is hidden either way. Worded
-                          as the queue row and header badge word a plain one. */}
-                      {decisionLog.isDeleted ? 'Removed by Moderation'
-                        : decisionLog.isAutoHidden ? SWITCH_STATE_LABELS['auto-hidden']
-                        : isUserBanned ? (moderationStatus.isUserBannedStale ? 'Banned (last known)' : 'User Banned')
-                        : moderationStatus.isEventBanned ? 'Event Banned'
-                        : 'Not Found on Relay'}
+                    {/* Label, icon and tooltip all come from goneCause, so they
+                        rank causes the way the thread panel does. Red and
+                        ShieldX state a removal the badge names; a post withheld
+                        for a suspension, or one nobody has explained, is not one. */}
+                    <Badge
+                      variant={goneCause.tone === 'removal' ? 'destructive' : 'outline'}
+                      className={`flex items-center gap-1 cursor-help${goneCause.tone === 'removal' ? '' : ' text-muted-foreground'}`}
+                    >
+                      {goneCause.tone === 'withheld' ? <EyeOff className="h-3 w-3" />
+                        : goneCause.tone === 'unknown' ? <AlertTriangle className="h-3 w-3" />
+                        : <ShieldX className="h-3 w-3" />}
+                      {goneCause.badge}
                     </Badge>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    {decisionLog.isDeleted ? (
+                    {goneCause.kind === 'explained' && goneCause.by === 'delete' ? (
                       <p className="text-xs">
                         Deleted via relay admin
                         {decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')?.created_at &&
                           ` on ${new Date(decisionLog.decisions.find(d => d.action === 'delete_event' || d.action === 'delete')!.created_at).toLocaleDateString()}`
                         }
                       </p>
-                    ) : decisionLog.isAutoHidden ? (
-                      <p className="text-xs">Auto-hidden by AI classification</p>
-                    ) : isUserBanned ? (
-                      <p className="text-xs">
-                        {!moderationStatus.isUserBannedStale
-                          ? 'User is banned — event removed as part of ban'
-                          : moderationStatus.isUserBanChecking
-                            ? 'The user was banned at the last good read, which would explain the removal. Checking the ban now.'
-                            : 'The user was banned at the last good read, which would explain the removal. The latest check could not confirm the ban.'}
-                      </p>
-                    ) : moderationStatus.isEventBanned ? (
-                      <p className="text-xs">Event is in the relay ban list</p>
                     ) : (
-                      <p className="text-xs">Event not found on relay. May have been self-deleted by the author or never stored here.</p>
+                      // goneCause's own line, which the thread panel shows too,
+                      // so the two give the same reason. An auto-hide covers the
+                      // states that need a check as well: the worker writes those
+                      // only after the relay ban landed, so the content is hidden
+                      // either way.
+                      <p className="text-xs">{goneCause.line}</p>
                     )}
                   </TooltipContent>
                 </Tooltip>
@@ -980,6 +998,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 isEventDeleted={moderationStatus.isEventGone}
                 isUserBanned={moderationStatus.isUserBanned}
                 isUserBannedStale={moderationStatus.isUserBannedStale}
+                goneCause={goneCause}
                 isUserBanChecking={moderationStatus.isUserBanChecking}
                 checkedAt={moderationStatus.checkedAt}
                 onRecheck={moderationStatus.recheck}
@@ -1152,6 +1171,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             stats={context.userStats}
             isLoading={false}
             isFunnelcakeUser={context.reportedUser.isFunnelcakeUser}
+            isSuspended={moderationStatus.isUserSuspended}
+            isSuspendedStale={moderationStatus.isUserSuspendedStale}
+            isSuspensionChecking={moderationStatus.isUserSuspensionChecking}
             hideMediaByDefault={mediaShownByDefault === null ? null : !mediaShownByDefault}
             onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this
@@ -1365,7 +1387,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 mediaHashes={mediaHashes}
                 thumbnailHashes={thumbnailHashes}
                 mediaHashStatuses={mediaStatus.results}
-                isEventBanned={isEventDeleted ?? undefined}
+                // The banned-events list confirmed this post is not banned (a
+                // false is never stale), whatever else explains it being gone:
+                // a suspension, nothing at all, or a cause still unknown because
+                // another read failed. So no "Restore Event / reverses the
+                // ban", and Ban and Delete stay. Only an unknown event-ban
+                // status keeps the old fallback.
+                isEventBanned={moderationStatus.isEventBanned === false ? false : (isEventDeleted ?? undefined)}
                 hasBlockedMedia={videoIsBlocked}
                 hasRestrictedMedia={videoIsRestricted}
                 // Not isLoading, which covers only a first load that is fetching. A

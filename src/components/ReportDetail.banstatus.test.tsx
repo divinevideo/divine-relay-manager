@@ -555,9 +555,10 @@ describe('ReportDetail user ban-status panel', () => {
     expect(removedBadge).toBeDefined();
     fireEvent.focus(removedBadge!);
     const tip = await screen.findByRole('tooltip');
-    expect(tip.textContent).toMatch(/could not confirm the ban/i);
+    // The kept ban is named as last known, and its check as failed.
+    expect(tip.textContent).toMatch(/Couldn't check whether the account is still banned, as it was at the last good read/);
     expect(tip.textContent).not.toMatch(/event removed as part of ban/i);
-    expect(tip.textContent).not.toMatch(/checking/i);
+    expect(tip.textContent).not.toMatch(/Still checking/);
   });
 
   it('says the kept ban behind a removed post is being checked while the check runs', async () => {
@@ -573,8 +574,8 @@ describe('ReportDetail user ban-status panel', () => {
     expect(removedBadge).toBeDefined();
     fireEvent.focus(removedBadge!);
     const tip = await screen.findByRole('tooltip');
-    expect(tip.textContent).toMatch(/checking the ban now/i);
-    expect(tip.textContent).not.toMatch(/could not confirm/i);
+    expect(tip.textContent).toMatch(/Still checking whether the account is still banned, as it was at the last good read/);
+    expect(tip.textContent).not.toMatch(/Couldn't check/);
   });
 
   it('says the check could not confirm the kept ban behind a removed post while only the suspension is loading', async () => {
@@ -590,7 +591,7 @@ describe('ReportDetail user ban-status panel', () => {
     expect(removedBadge).toBeDefined();
     fireEvent.focus(removedBadge!);
     const tip = await screen.findByRole('tooltip');
-    expect(tip.textContent).toMatch(/could not confirm the ban/i);
-    expect(tip.textContent).not.toMatch(/checking/i);
+    expect(tip.textContent).toMatch(/Couldn't check whether the account is still banned, as it was at the last good read/);
+    expect(tip.textContent).not.toMatch(/Still checking/);
   });
 });

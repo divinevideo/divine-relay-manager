@@ -7,6 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LabelPublisher, LabelPublisherInline } from './LabelPublisher';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banSuccessNote } from '@/lib/banFeedback';
+import { act, renderHook } from '@testing-library/react';
+import { markRestored, useJustRestored } from '@/lib/userStatsCache';
 
 const api = vi.hoisted(() => ({
   publishLabel: vi.fn(),
@@ -19,10 +21,14 @@ vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 
 function renderWith(ui: React.ReactElement) {
   const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+  client.setQueryData(STATS_KEY, { postCount: 0 });
   const invalidate = vi.spyOn(client, 'invalidateQueries');
   render(<QueryClientProvider client={client}>{ui}</QueryClientProvider>);
-  return { invalidate };
+  return { invalidate, client };
 }
+
+const TARGET = 'a'.repeat(64);
+const STATS_KEY = ['user-stats', 'wss://relay.test', TARGET];
 
 async function labelAndBanInline() {
   const rendered = renderWith(<LabelPublisherInline targetType="pubkey" targetValue={'a'.repeat(64)} />);
@@ -103,5 +109,52 @@ describe.each([
         description: banSuccessNote({ unconfirmed: 'removal_error' }),
       })),
     );
+  });
+});
+
+// "Also ban" hides the account again, so a restore window an earlier unban or
+// unsuspend left open would print "just restored" for it (lib/userStatsCache).
+describe.each([
+  ['inline form', labelAndBanInline],
+  ['dialog', labelAndBanDialog],
+] as const)('LabelPublisher %s, label + ban and the restore window', (_name, labelAndBan) => {
+  beforeEach(() => { vi.clearAllMocks(); });
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('ends the window when the ban landed', async () => {
+    const { result } = renderHook(() => useJustRestored(TARGET));
+    await act(async () => { await markRestored(new QueryClient(), TARGET, undefined); });
+    api.publishLabelAndBan.mockResolvedValue(published({ banned: true, banOutcome: { unconfirmed: null } }));
+
+    const { client } = await labelAndBan();
+
+    await waitFor(() => expect(result.current).toBe(false));
+    expect(client.getQueryData(STATS_KEY)).toBeUndefined();
+  });
+
+  // The ban may have landed even though it could not be confirmed, so "just
+  // restored" could be wrong: the window ends and the reads reset. Nothing
+  // else claims the account is hidden.
+  it('ends the window when the ban could not be confirmed', async () => {
+    const { result } = renderHook(() => useJustRestored(TARGET));
+    await act(async () => { await markRestored(new QueryClient(), TARGET, undefined); });
+    api.publishLabelAndBan.mockResolvedValue(published({ banError: new BanNotConfirmedError('timed out') }));
+
+    const { client } = await labelAndBan();
+
+    await waitFor(() => expect(result.current).toBe(false));
+    expect(client.getQueryData(STATS_KEY)).toBeUndefined();
+  });
+
+  // A ban the relay refused did not land: the reads reset, the window stays.
+  it('only resets the reads when the ban was refused', async () => {
+    const { result } = renderHook(() => useJustRestored(TARGET));
+    await act(async () => { await markRestored(new QueryClient(), TARGET, undefined); });
+    api.publishLabelAndBan.mockResolvedValue(published({ banError: new ApiError('refused', 403, 'Forbidden') }));
+
+    const { client } = await labelAndBan();
+
+    await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+    expect(result.current).toBe(true);
   });
 });
