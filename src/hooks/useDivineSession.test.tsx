@@ -142,9 +142,11 @@ describe('DivineSessionProvider / useDivineSession', () => {
     await act(async () => {
       releaseSession({ bunkerUrl: 'bunker://x', accessToken: 'tok' });
     });
-    // The generation guard must discard it and re-clear storage; stays signed out.
+    // The generation guard must discard it; stays signed out. Clearing what the
+    // refresh re-persisted is getSession's job, under the session lock: a second
+    // clear here would run outside the lock and could delete a newer sign-in.
     expect(screen.getByTestId('token')).toHaveTextContent('none');
-    expect(logout).toHaveBeenCalledTimes(2); // logout + guard's re-clear
+    expect(logout).toHaveBeenCalledTimes(1); // the sign-out only
     expect(screen.getByTestId('resolving')).toHaveTextContent('false');
   });
 

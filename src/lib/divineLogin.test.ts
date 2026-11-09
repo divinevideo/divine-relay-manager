@@ -7,6 +7,7 @@ const { oauth, createDivineClient } = vi.hoisted(() => {
     getAuthorizationUrl: vi.fn(),
     parseCallback: vi.fn(),
     exchangeCode: vi.fn(),
+    getSession: vi.fn(),
     getSessionWithRefresh: vi.fn(),
     logout: vi.fn(),
   };
@@ -196,6 +197,62 @@ describe('divineLogin', () => {
     } finally {
       delete (navigator as { locks?: unknown }).locks;
     }
+  });
+
+  // Another tab's lock can be held for the length of a refresh. A logout while
+  // this read waits must stop it reading, or refreshing, the signed-out session,
+  // and must still hold once the lock is granted: the holder's refresh may have
+  // saved the old session after the logout cleared it. This read cannot tell
+  // that from a sign-in made meanwhile, so it fails closed and clears storage.
+  it('getSession skips the refresh and clears storage when a logout lands while it waits for the lock', async () => {
+    let grant!: () => void;
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'old' });
+      const pending = getSession();
+      logout();
+      grant();
+      expect(await pending).toBeNull();
+      expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+      expect(oauth.logout).toHaveBeenCalledTimes(2); // the sign-out, then the clear under the lock
+    } finally {
+      delete (navigator as { locks?: unknown }).locks;
+    }
+  });
+
+  // The SDK can persist a refresh that finishes after a logout. That session is
+  // cleared; anything else in storage by then was written by a newer sign-in in
+  // another tab, and is left alone.
+  it.each([
+    ['clears the session a refresh re-persisted after a logout', 'old', 2],
+    ['leaves a newer sign-in alone when a refresh finishes after a logout', 'newer', 1],
+  ] as const)('getSession %s', async (_name, storedToken, logoutCalls) => {
+    let release!: (v: { bunkerUrl: string; accessToken: string }) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    oauth.getSession.mockReturnValue({ bunkerUrl: 'bunker://x', accessToken: storedToken });
+    const pending = getSession();
+    await Promise.resolve();
+    logout();
+    release({ bunkerUrl: 'bunker://x', accessToken: 'old' });
+    expect(await pending).toBeNull();
+    expect(oauth.logout).toHaveBeenCalledTimes(logoutCalls);
+  });
+
+  // Nothing to match on: a session without an access token is not proof that
+  // storage holds this read's write, and an empty storage may hold another
+  // tab's sign-in in progress (its PKCE verifier), which logout would delete.
+  it('getSession clears nothing after a logout when the stale refresh has no access token', async () => {
+    let release!: (v: { bunkerUrl: string }) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+    oauth.getSession.mockReturnValue(null);
+    const pending = getSession();
+    await Promise.resolve();
+    logout();
+    release({ bunkerUrl: 'bunker://x' });
+    expect(await pending).toBeNull();
+    expect(oauth.logout).toHaveBeenCalledTimes(1); // the sign-out only
   });
 
   it('logout delegates to the SDK', () => {

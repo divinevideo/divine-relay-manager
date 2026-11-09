@@ -4,7 +4,7 @@ import type { StoredCredentials } from '@divinevideo/login';
 import { useState } from 'react';
 
 const { oauth, getPublicKey } = vi.hoisted(() => ({
-  oauth: { getSessionWithRefresh: vi.fn(), logout: vi.fn() },
+  oauth: { getSession: vi.fn(), getSessionWithRefresh: vi.fn(), logout: vi.fn() },
   getPublicKey: vi.fn(),
 }));
 vi.mock('@divinevideo/login', () => ({ createDivineClient: () => ({ oauth }) }));
@@ -73,6 +73,7 @@ it.each([
     }))
     .mockImplementation(async () => stored);
   oauth.logout.mockImplementation(() => { stored = null; });
+  oauth.getSession.mockImplementation(() => stored);
   getPublicKey.mockResolvedValue('a'.repeat(64));
   render(<DivineSessionProvider><Probe /></DivineSessionProvider>);
   expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);

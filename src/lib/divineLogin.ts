@@ -110,13 +110,28 @@ export function getSession(): Promise<StoredCredentials | null> {
   if (inFlight) return inFlight;
   const generation = sessionGeneration;
   const read = async () => {
-    if (generation !== sessionGeneration) return null;
+    if (generation !== sessionGeneration) {
+      // A logout landed while this read waited for the lock. The holder's
+      // refresh may have saved the old session after the logout cleared it,
+      // and nothing here can tell that from a sign-in made meanwhile, so fail
+      // closed: clear it. A sign-in that loses this way just signs in again;
+      // an old session that survives could attribute a later moderator's
+      // actions to the one who signed out.
+      getClient().oauth.logout();
+      return null;
+    }
     const session = await getClient().oauth.getSessionWithRefresh();
     if (generation !== sessionGeneration) {
       // Refresh can re-persist credentials after logout. Clear them before this
       // callback releases the Web Lock, not in a reaction to locks.request():
       // the next holder can otherwise read them before that reaction runs.
-      getClient().oauth.logout();
+      // Only if storage still holds what this read got: anything else there was
+      // written since by a sign-in in another tab, and is not this read's to
+      // delete. The SDK's logout also drops the PKCE verifier, so a sign-in
+      // another tab has started but not finished can still fail here; the
+      // moderator signs in again.
+      const oauth = getClient().oauth;
+      if (session?.accessToken && oauth.getSession()?.accessToken === session.accessToken) oauth.logout();
       return null;
     }
     return session;

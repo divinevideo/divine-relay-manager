@@ -1103,6 +1103,8 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
 
     await waitFor(() => expect(suspendPubkey).toHaveBeenCalled());
     await waitFor(() => expect(queryClient.getQueryData(STATS_KEY)).toBeUndefined());
+    // The embedded suspend goes through asModerator(token) like the case's own actions (#178).
+    expect(tokensFor(moderatorApi, 'suspendPubkey')).toEqual([MOD_TOKEN]);
   });
 
   // The window says the account was just restored. Only a clear whose relay

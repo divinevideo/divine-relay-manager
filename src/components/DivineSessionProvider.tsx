@@ -44,7 +44,8 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [resolvedForToken, setResolvedForToken] = useState<string | undefined>(undefined);
 
   // Bumped on logout so an in-flight refresh that started earlier can detect it
-  // lost the race and undo any session the SDK re-persisted mid-refresh.
+  // lost the race and discard its result. getSession clears anything the SDK
+  // re-persisted mid-refresh (lib/divineLogin).
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -77,9 +78,11 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     }
     if (!mountedRef.current) return undefined;
     if (gen !== generationRef.current) {
-      // A logout landed while this resolve was in flight; getSessionWithRefresh
-      // may have re-persisted a refreshed session, so clear it again and bail.
-      sdkLogout();
+      // A logout landed while this resolve was in flight: discard the result.
+      // getSession already cleared anything its refresh re-persisted, inside
+      // the read (under the session lock, unless the wait for it timed out).
+      // Clearing again here would run after the lock is released, and could
+      // delete a sign-in another tab has made since.
       return undefined;
     }
     setCredentials(creds);

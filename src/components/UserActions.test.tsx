@@ -203,14 +203,20 @@ describe('UserActions', () => {
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
-  it('sends the action and its audit write through asModerator(token) (#178)', async () => {
-    renderWithProvider(<UserActions pubkey={PUBKEY} />);
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
-    await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
+  it.each([
+    { action: 'suspend_user', call: 'suspendPubkey', props: {}, button: /Suspend User/i, confirm: false },
+    { action: 'unsuspend_user', call: 'unsuspendPubkey', props: { isSuspended: true }, button: /Unsuspend User/i, confirm: false },
+    { action: 'ban_user', call: 'banPubkey', props: {}, button: /Ban User/i, confirm: true },
+    { action: 'unban_user', call: 'unbanPubkey', props: { isBanned: true }, button: /Unban User/i, confirm: false },
+  ] as const)('sends $call and its audit write through asModerator(token) (#178)', async ({ action, call, props, button, confirm }) => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} {...props} />);
+    fireEvent.click(screen.getByRole('button', { name: button }));
+    if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+    await waitFor(() => expect(api[call]).toHaveBeenCalled());
     await waitFor(() =>
-      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'suspend_user' })),
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action })),
     );
-    expect(tokensFor(moderatorApi, 'suspendPubkey')).toEqual([MOD_TOKEN]);
+    expect(tokensFor(moderatorApi, call)).toEqual([MOD_TOKEN]);
     expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 

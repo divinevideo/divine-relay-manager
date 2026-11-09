@@ -298,6 +298,9 @@ describe('UserManagement drops cached authored-content reads after an account ac
     fireEvent.click(await screen.findByRole('button', { name: /^Unsuspend$/i }));
 
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+    // The unsuspend and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'unsuspendPubkey')).toEqual([MOD_TOKEN]);
   });
 
   it('after an unban', async () => {
@@ -309,6 +312,9 @@ describe('UserManagement drops cached authored-content reads after an account ac
     fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
 
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
+    // The unban and its audit write go through asModerator(token) (#178).
+    await waitFor(() => expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]));
+    expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
   });
 
   it('after an allow', async () => {
