@@ -23,7 +23,7 @@ vi.mock('@/hooks/useAppContext', () => ({
 const RELAY_URL = 'wss://relay.example';
 
 const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]> = [
-  ['publishEvent', (a) => a.publishEvent({ kind: 1, content: 'x' })],
+  ['publishEvent', (a) => a.publishEvent({ kind: 1985, content: 'x' })],
   ['publishLabel', (a) => a.publishLabel({ targetType: 'event', targetValue: 'e1', namespace: 'ns', labels: ['l'] })],
   ['publishLabelAndBan', (a) => a.publishLabelAndBan({ targetType: 'pubkey', targetValue: PK, namespace: 'ns', labels: ['l'], shouldBan: true })],
   ['markAsReviewed', (a) => a.markAsReviewed('event', 'e1', 'reviewed', 'c')],
