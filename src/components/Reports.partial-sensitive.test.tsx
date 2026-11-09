@@ -66,7 +66,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useEventTitles', () => ({ useEventTitles: () => ({ titles: new Map(), isLoading: false }) }));
 vi.mock('@/components/ThreadContext', () => ({ ThreadContext: () => null }));
 vi.mock('@/components/AISummary', () => ({ AISummary: () => null }));

@@ -1,6 +1,6 @@
 // ABOUTME: Moderator-facing indicator of a target's account type and what
 // ABOUTME: enforcement is actually effective, plus a partial compliance checklist.
-import { Badge } from '@/components/ui/badge';
+import { AccountTypeBadge } from '@/components/AccountTypeBadge';
 import type { AccountStatusResponse } from '@/lib/adminApi';
 import { deriveAccountVerdict, type LegState } from '@/lib/accountVerdict';
 
@@ -12,18 +12,6 @@ interface Props {
   contentPresenceKnown: boolean;
   ticketLinked: boolean;
 }
-
-const TYPE_LABEL = {
-  divine: 'Divine account',
-  self_custody: 'Self-custody (not in keycast)',
-  unknown: 'Account status unavailable',
-} as const;
-
-const TYPE_CLASS = {
-  divine: 'bg-sky-600 text-white hover:bg-sky-600',
-  self_custody: 'bg-muted text-foreground', // informational, not destructive
-  unknown: 'bg-muted text-muted-foreground',
-} as const;
 
 const LEG_LABEL: Record<LegState, string> = {
   done: 'done',
@@ -38,13 +26,6 @@ const LEG_CLASS: Record<LegState, string> = {
   na: 'text-muted-foreground',
   not_tracked: 'text-muted-foreground italic',
 };
-
-const SIGN_IN_LABEL = {
-  active: 'sign-in active',
-  blocked: 'sign-in blocked',
-  unknown: 'sign-in status unavailable',
-  not_applicable: '',
-} as const;
 
 export function AccountTypeIndicator({
   accountStatus,
@@ -68,14 +49,11 @@ export function AccountTypeIndicator({
 
   return (
     <div className="space-y-2 rounded-md border p-3">
-      <div className="flex items-center gap-2 flex-wrap">
-        <Badge className={TYPE_CLASS[v.accountType]}>{TYPE_LABEL[v.accountType]}</Badge>
-        {v.accountType === 'divine' ? (
-          <span className="text-xs text-muted-foreground">
-            {SIGN_IN_LABEL[v.signInStatus]}
-          </span>
-        ) : null}
-      </div>
+      <AccountTypeBadge
+        accountStatus={accountStatus}
+        accountStatusError={accountStatusError}
+        accountStatusLoading={accountStatusLoading}
+      />
 
       {v.contentPresence === 'hidden_suspended' ? (
         <p className="text-xs text-muted-foreground">

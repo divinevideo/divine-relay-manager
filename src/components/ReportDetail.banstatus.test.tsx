@@ -23,6 +23,8 @@ const CHECKED_AT = new Date('2026-08-10T12:00:00Z');
 // Set in beforeEach; tests change single fields.
 const status = vi.hoisted(() => ({ value: {} as ModerationStatus }));
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
@@ -60,7 +62,7 @@ vi.mock('@/hooks/useModerationStatus', () => ({
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 
 // A user report by default: no event target, which is the branch that renders
 // the ban-status panel. Tests that need the thread panel switch to an event.
@@ -212,6 +214,45 @@ describe('ReportDetail user ban-status panel', () => {
 
     expect(status.value.recheckAfterAction).toHaveBeenCalledTimes(1);
     expect(status.value.recheck).not.toHaveBeenCalled();
+  });
+
+  // The reported user's sign-in label shares the account-status query with age
+  // review, and a ban or suspend flips what it should say. Without this the label
+  // keeps its pre-action answer for the query's whole minute of staleness.
+  it('refreshes the reported user\'s account-status entry, and only that one, when an account action completes', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+
+      onActionComplete({ accountStatusChanged: true });
+
+      const call = invalidate.mock.calls
+        .map(([filters]) => filters)
+        .find((filters) => JSON.stringify(filters?.queryKey) === JSON.stringify(['account-status']));
+      expect(call?.predicate).toBeTypeOf('function');
+      const matches = (pubkey: string) =>
+        call!.predicate!({ queryKey: ['account-status', 'https://api.example', pubkey] } as never);
+      expect(matches(REPORTED_PUBKEY)).toBe(true);
+      expect(matches(MOD_PUBKEY)).toBe(false);
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
+  it('leaves the account-status entry alone when a content action completes', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: { accountStatusChanged: boolean }) => void;
+
+      onActionComplete({ accountStatusChanged: false });
+
+      const keys = invalidate.mock.calls.map(([filters]) => JSON.stringify(filters?.queryKey));
+      expect(keys).not.toContain(JSON.stringify(['account-status']));
+    } finally {
+      invalidate.mockRestore();
+    }
   });
 
   it('runs a plain check, re-reading the account lists, when a content action completes', () => {

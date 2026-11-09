@@ -11,6 +11,9 @@ export default defineConfig({
   test: {
     include: ['test/**/*.d1.test.ts'],
     environment: 'node',
+    // Reuse connections to the local workerd so a full run doesn't exhaust
+    // macOS ephemeral ports (#349). See the file for details.
+    setupFiles: ['test/setup/miniflare-keepalive.ts'],
     testTimeout: 30000,
     hookTimeout: 30000,
   },

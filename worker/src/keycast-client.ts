@@ -263,7 +263,15 @@ export interface UserStatusResult {
   error?: string;
 }
 
-export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<UserStatusResult> {
+// No timeout by default. ReportWatcher's approved-minor fallback reads any failed
+// lookup as "not an approved minor", so a timeout there could open a deadline case
+// on a protected minor; it waits for an answer. Display callers, which can say
+// "unavailable", pass a timeout.
+export async function getUserStatus(
+  pubkey: string,
+  env: KeycastEnv,
+  options: { timeoutMs?: number } = {},
+): Promise<UserStatusResult> {
   if (!env.KEYCAST_URL || !env.KEYCAST_SERVICE_TOKEN) {
     return { success: false, error: 'not configured' };
   }
@@ -277,6 +285,7 @@ export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<Us
   try {
     const res = await fetch(`${env.KEYCAST_URL}/api/admin/users/${pubkey}/status`, {
       headers: { 'Authorization': `Bearer ${token}` },
+      ...(options.timeoutMs !== undefined ? { signal: AbortSignal.timeout(options.timeoutMs) } : {}),
     });
     if (!res.ok) {
       const text = await res.text();
@@ -304,6 +313,9 @@ export async function getUserStatus(pubkey: string, env: KeycastEnv): Promise<Us
       verified_minor_at: typeof data.verified_minor_at === 'string' ? data.verified_minor_at : undefined,
     };
   } catch (err) {
+    if (err instanceof Error && err.name === 'TimeoutError') {
+      console.warn(`[keycast] status lookup timed out after ${options.timeoutMs}ms`);
+    }
     const msg = err instanceof Error ? err.message : String(err);
     return { success: false, error: msg };
   }

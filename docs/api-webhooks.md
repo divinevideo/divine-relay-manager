@@ -273,7 +273,7 @@ an action that is not a string is refused (400 `invalid_action`).
 | 409 | `media_record_missing` | The media server has no record of the file, so the owner cannot be checked. Not retryable. |
 | 503 | `owner_unreadable` | The media server could not be read for the owner. Retryable. |
 | 503 | `age_review_check_failed` | The open-case lookup could not run. Retryable. |
-| 503 | `state_unreadable` | An `AGE_RESTRICTED` during an open case, and moderation-service's record could not be read. Retryable. |
+| 503 | `state_unreadable` | An `AGE_RESTRICTED` during an open case, and moderation-service's record could not be read: the read failed or took longer than 10 seconds, or, on the lift check below, this worker's credentials for moderation-service could not be built. Retryable. |
 
 **Response:**
 ```json
@@ -296,20 +296,275 @@ an action that is not a string is refused (400 `invalid_action`).
 
 ---
 
-### GET /api/check-result/:sha256
+### POST /api/moderate-media/lift-check
 
-Check the moderation status of a media file.
+Asks whether a `SAFE` or `AGE_RESTRICTED` may go ahead. It writes no media
+decision and makes no moderation change of its own. Like every route that
+reads age-review cases, the first request a worker instance serves may run the
+idempotent schema setup first, and that setup also backfills fields on older
+age-review rows (case closure times and two protected-minor fields). It runs the age-review lift guard of
+`POST /api/moderate-media` above, the same code, so the two give the same
+answer on that guard. It checks nothing else: `pubkey` and `from` are ignored
+here, so `/api/moderate-media` can still refuse a request this allows, for
+example with `state_mismatch`. It is for a caller that writes media decisions
+itself and must not restate the rules, such as moderation-service's
+dashboard.
 
-**Response:**
+In addition to the credentials described under Authentication above, it
+accepts moderation-service's relay key, sent in the `X-Admin-Key` header (the
+worker's `MOD_RELAY_ADMIN_KEY` binding), as `POST /api/relay-rpc` does.
+`/api/moderate-media` still refuses that key.
+
+**Request:**
 ```json
 {
-  "success": true,
   "sha256": "abc123...",
-  "action": "PERMANENT_BAN",
-  "reason": "Blocked by moderator",
-  "created_at": "2025-01-05T12:00:00Z"
+  "action": "SAFE"
 }
 ```
+
+**Responses:**
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 200 | `{ "success": true, "allowed": true, "checked": true, "sha256": "..." }` | The lift may go ahead. `sha256` is the hash, lowercased; write that one. |
+| 200 | `{ "success": true, "allowed": true, "checked": false }` | The action is not one the guard checks (`PERMANENT_BAN`, `QUARANTINE`, `DELETE`, `REVIEW`). Nothing was read. |
+| 400 | `code: "invalid_action"` | `action` is missing, not a string, or not one of the six actions above. |
+| 400 | no `code` | `sha256` is missing. |
+| 409, 503, 400 | the lift guard's refusal | Exactly what `/api/moderate-media` would answer, from the table above. |
+| 500 | | The body is not JSON, or is `null`. |
+
+Anything but a 200 with `"allowed": true` is a refusal.
+
+The answer is a check, not a lock: a case opened between it and the caller's
+write is not seen, as with `/api/moderate-media`'s own check and write. A caller
+that cannot get an answer should refuse the lift.
+
+---
+
+### POST /api/internal/private-reports
+
+moderation-service's handoff of a private report: one a user sent the moderation
+account as an encrypted direct message instead of a public kind-1984 event. The
+route puts the reported account in front of a moderator and does nothing else.
+
+- `underage_user` opens an age-review case for the reported account, through the
+  same routine a kind-1984 under-16 report uses: one active case per account, and
+  an approved minor is recorded as already cleared. The case has `created_via =
+  'private_report'`, the reporter in `reporter_pubkey`, and no `report_id`, since
+  there is no report event to look up. The decision log row carries the
+  `reportId` but not the reporter. If the account already has a family's
+  Greenlight case with no report on it, the report is attached there instead:
+  the reporter, still with no `report_id`. The case pane labels both shapes as
+  an unverified private report. A later public under-16 report attaches over a
+  private one, as it would have before; a second private report does not
+  replace the first.
+- Every other type becomes a Coop `nostr_user` item, routed by `report_reason`:
+
+  | `reportType` | `report_reason` |
+  |---|---|
+  | `csam` | `csam` |
+  | `child_safety` | `child_safety` |
+  | `sexual_content` | `nudity` |
+  | `violence` | `violence` |
+  | `harassment` | `harassment` |
+  | `spam` | `spam` |
+  | `ai_generated` | `ai_generated` |
+  | anything else | `other` |
+
+  Coop gives the first five their own queues, CSAM and Child Safety first, and
+  sends the rest to General Review. The item carries only the account and the
+  reason: `{"items":[{"id": <pubkey>, "typeId": COOP_USER_TYPE_ID, "data":
+  {"pubkey": <pubkey>, "report_reason": <token>}}]}`.
+
+Nothing is published to a relay, no Zendesk ticket is filed, and nothing is
+hidden, restricted or banned. The reported message and the reporter's note never
+reach this worker: moderation-service keeps them.
+
+**Authentication.** The admin gate. moderation-service reaches the route in one
+of two ways, as its other relay-admin calls do:
+
+- *Over its `RELAY_ADMIN` service binding,* with its relay key in the
+  `X-Admin-Key` header (this worker's `MOD_RELAY_ADMIN_KEY` binding). A service
+  binding does not pass through Cloudflare Access, so the key is what the gate
+  checks. It is accepted on `POST` only, as for `POST /api/relay-rpc` and
+  `POST /api/moderate-media/lift-check`, and opens no other route.
+- *Over the public edge at `RELAY_ADMIN_URL`,* its fallback when the binding is
+  unavailable, with its Cloudflare Access service token
+  (`CF-Access-Client-Id` and `CF-Access-Client-Secret`) and no `X-Admin-Key`.
+  Access admits the token and adds a `Cf-Access-Jwt-Assertion`, which the gate
+  verifies against the API's Access application (`API_ACCESS_AUD`). No
+  path-scoped Access application covers this path, so it falls under the
+  hostname-wide one, whose policy must allow the token, as relay-rpc's
+  fallback already requires.
+
+`ADMIN_API_KEY` and a moderator's Access login are accepted too, as on every
+admin route.
+
+**Request:**
+```json
+{
+  "reportId": "6f1c2b9e-3d4a-4f8b-9c2d-1e5f7a8b9c0d",
+  "reportedPubkey": "<64 hex>",
+  "reporterPubkey": "<64 hex>",
+  "reportType": "csam",
+  "reportedAt": "2026-11-07T10:00:00.000Z",
+  "hasExcerpt": true,
+  "giftWrapId": "<64 hex>"
+}
+```
+
+`reportId` is a UUID, or the 64-hex gift wrap id when the report carried none.
+Identifiers are stored and sent lowercase. `reportType` is moderation-service's
+lowercase report type.
+The worker converts a hex `reportId` to a domain-separated SHA-256 lookup token
+before storage or logging, including the decision log. UUID lookup keys are
+unchanged. A retry uses the same original request id and derives the same token.
+
+**Idempotency.** The key is the reporter and `reportId` together, as
+moderation-service keys its own intake. A report that completed answers again
+with its stored outcome and `duplicate: true`, and nothing is redone. While the
+first row still names its reporter, another reporter's report under the same
+`reportId` is a report of its own: it gets a Coop submission, or
+`age_review_exists` when the account already has a case. Once retention has
+redacted that row (see Retention below), it no longer names a reporter, so any
+report with the same `reportId`, account and type, from whoever sends it,
+answers `duplicate: true` with the stored outcome if the row completed, or
+`400 report_expired` if it expired unfinished; a different account or type
+under that `reportId` is still a new report.
+
+One that failed is retried by the next request. A request for a report another
+request is still handling answers `503` `attempt_in_progress`, and the
+attempt's lease lapses after two minutes if it never finishes. One gap remains: if Coop accepts
+the item and the write recording that then fails, the retry submits it again.
+An unfinished handoff older than a year is redacted by retention and answers
+later retries with `400 report_expired`, without restoring its reporter link.
+An attempt already running when the row expires still records its result, and
+until it finishes another request gets `503` `attempt_in_progress`.
+
+**Responses:**
+
+| Status | Body | Meaning |
+|--------|------|---------|
+| 200 | `{ "success": true, "outcome": "queued_in_coop" \| "age_review_opened" \| "age_review_exists", "duplicate": false }` | Handed over. `age_review_opened` includes an approved minor's case, opened already cleared. |
+| 200 | the same, with `"duplicate": true` | This reporter's `reportId` already completed, or a redacted row with the same `reportId`, account and type did; the stored outcome. |
+| 400 | `code: "invalid_body"` | The body is not a JSON object, or a field is missing or malformed. Do not retry. |
+| 400 | `code: "report_id_conflict"` | This reporter already used this `reportId` for a different account or type. Do not retry. |
+| 400 | `code: "report_expired"` | An unfinished handoff expired a year after first receipt. Do not retry; no reporter link is restored. |
+| 401 | | Missing or wrong key. |
+| 503 | `code: "coop_not_configured"` | A Coop setting below is missing, its credentials cannot be used, or `COOP_URL` is not HTTPS. Retry. |
+| 503 | `code: "coop_unreachable"`, `"coop_status_<n>"` | Coop could not be reached, or did not answer 2xx (a redirect is not followed). Retry. |
+| 503 | `code: "age_review_failed"`, `"db_unavailable"`, `"attempt_in_progress"` | Retry. |
+
+**Configuration.** Per environment, for the Coop handoff:
+
+- `COOP_URL`, Coop's base URL. It must be `https://` for this route, whether or
+  not an Access pair is bound, because the item names an account and a reason
+  such as `csam` and the request carries the ingestion key. Only a loopback
+  host (`localhost`, `127.0.0.0/8`, `[::1]`) may use `http://`, for the local
+  stack. The sexual-quarantine handoff keeps its own rule.
+- `COOP_API_KEY`, the ingestion key, a secret.
+- `COOP_USER_TYPE_ID`, Coop's id for the `nostr_user` item type (the value
+  Osprey has as `DIVINE_COOP_USER_TYPE_ID`).
+- When Coop is behind Cloudflare Access, the dedicated `COOP_ACCESS_CLIENT_ID`
+  and `COOP_ACCESS_CLIENT_SECRET` pair. They are sent only over HTTPS, and only
+  when both are bound.
+
+These are the sexual-quarantine handoff's settings (see
+[sexual-quarantine-rollout.md](sexual-quarantine-rollout.md)) plus
+`COOP_USER_TYPE_ID`. Under-16 reports need none of them.
+
+**Binding `COOP_URL` and `COOP_USER_TYPE_ID`.** No `wrangler.*.toml` declares
+either, and their values belong to whoever runs each environment. Bind each one
+as a Worker secret (`npx wrangler secret put COOP_URL --config
+wrangler.<env>.toml`, and the same for `COOP_USER_TYPE_ID`), or have whoever
+deploys add it to that environment's `[vars]` in `wrangler.<env>.toml`. Do not
+set either as a plaintext variable in the Cloudflare dashboard: the configs do
+not set `keep_vars = true`, so the next `wrangler deploy` drops dashboard
+variables. Secrets survive a deploy.
+
+Until both are bound, every private report except `underage_user` gets `503`
+`coop_not_configured` and stays pending, and moderation-service retries it.
+That shows up in three places:
+
+- the worker's log line `[private-reports] Coop handoff not configured:
+  COOP_URL, COOP_USER_TYPE_ID unset`, naming whichever are missing (`npx
+  wrangler tail --config wrangler.<env>.toml`);
+- the report's `private_report_intake` row, with `last_error =
+  'coop_not_configured'` and `completed_at` still NULL;
+- moderation-service's own log of the 503 and its code.
+
+**Storage.** One `private_report_intake` row per reporter and `reportId`: the
+reported and reporting accounts, the type, the gift wrap id, whether an excerpt
+exists, the outcome and case id, and attempt timestamps.
+
+**Retention.** The hourly retention run clears the reporter link
+(`reporter_pubkey` and `gift_wrap_id`) from completed and expired unfinished rows, on the
+schedules below. A redacted row keeps `reportId`, the reported account, the
+type and the outcome, which is what answers a late resend (see Idempotency);
+nothing is written back. An unfinished row keeps its link for at most 365 days
+from first receipt. The retained `reportId` is the lookup token described above,
+not a gift-wrap event id.
+
+- *An under-16 report's row follows its age-review case.* The
+  `private-report-redaction` stage clears the link once the case is redacted,
+  30 days after it closes, or no longer exists. A legal hold that keeps the
+  case's detail keeps the link too.
+- *A Coop handoff's link is cleared a year after the handoff completed.* The
+  `private-report-coop-redaction` stage does this (`RETENTION_DAYS.privateReportCoopLink`),
+  as moderation-service deletes its own DM copy after a year. The review item
+  is in Coop, so there is no case here to follow, and `retention_legal_holds`
+  has no record type for these rows, so no legal hold can keep one.
+- *An unfinished handoff expires a year after first receipt.* The
+  `private-report-pending-redaction` stage clears its reporter and gift-wrap
+  link, retaining a tombstone. A late resend answers `400 report_expired`
+  instead of queueing it or writing its reporter back. This stage has no legal
+  hold record type, as for the Coop-link stage.
+- *The decision log never names a private reporter.* The
+  `age_review_case_created` row an under-16 private report writes carries the
+  `reportId` and no `reporter_pubkey`. `moderation_decisions` has no disposal
+  stage, so it must not hold a link retention is meant to clear. A kind-1984
+  report's row still records its reporter, whose report is public on the relay.
+
+---
+
+### GET /api/check-result/:sha256
+
+Check the moderation status of a media file. The worker passes moderation-service's answer through.
+
+**Response, with a decision** (an excerpt; the full record also carries `blocked`, `quarantined`, `age_restricted`, `needs_review`, `provider`, `scores`, `categories`, `videoseal` and `moderated_at`):
+```json
+{
+  "sha256": "<64-char hex>",
+  "status": "permanent_ban",
+  "moderated": true,
+  "action": "PERMANENT_BAN",
+  "reviewed_by": "...",
+  "reviewed_at": "..."
+}
+```
+
+**Response, with no decision:** a 200 with no `action`.
+```json
+{
+  "sha256": "<64-char hex>",
+  "status": "unknown",
+  "moderated": false,
+  "blocked": false,
+  "age_restricted": false
+}
+```
+
+**Errors**, all `{ "success": false, "error": "..." }`:
+
+| Status | When |
+|--------|------|
+| 400 | `Invalid sha256`: the path is not a 64-character hex hash. |
+| 502 | `Moderation service error: 404`: moderation-service rejected the request (for example an unknown host). It returns 404 only then, never for "no decision". |
+| Upstream status | `Moderation service error: <status>`: any other moderation-service error, passed through. |
+| 500 | The error's message: the call failed, or the reply was not JSON. |
+
+A caller must treat any error as "status unknown", never as "no decision": read as open, a blocked file would be offered Age Restrict, which weakens it.
 
 ---
 

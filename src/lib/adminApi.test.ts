@@ -29,6 +29,9 @@ import {
   publishLabelAndBan,
   markAsReviewed,
   moderateMedia,
+  deleteMedia,
+  checkMediaStatus,
+  readMediaStatus,
   getAgeReviewBulkNotesJob,
   getBulkJobNotes,
   verifyAgeRestricted,
@@ -113,6 +116,15 @@ describe('adminApi', () => {
   });
 
   describe('getAccountStatus', () => {
+    it('escapes path separators in the pubkey', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: false }) });
+      await getAccountStatus(API_URL, '../info');
+      expect(mockFetch).toHaveBeenCalledWith(
+        `${API_URL}/api/account-status/..%2Finfo`,
+        expect.objectContaining({ method: 'GET' }),
+      );
+    });
+
     it('GETs /api/account-status/:pubkey and returns the parsed status', async () => {
       const pubkey = 'a'.repeat(64);
       mockFetch.mockResolvedValueOnce({
@@ -1294,6 +1306,25 @@ describe('adminApi', () => {
       expect(callBody).toEqual({ sha256: 'hash123', action: 'SAFE', reason: 'Restriction removed by moderator', from: 'QUARANTINE' });
     });
 
+    // A file with no moderation record: the worker reads its state as UNKNOWN.
+    it('sends UNKNOWN for a file expected to have no moderation record', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await moderateMedia(API_URL, 'hash123', 'PERMANENT_BAN', 'Blocked by moderator', 'UNKNOWN');
+
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body)).toMatchObject({ action: 'PERMANENT_BAN', from: 'UNKNOWN' });
+    });
+
+    // A delete names no state: it can't open a file or weaken its state.
+    it('sends a delete with no expected state', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
+
+      await deleteMedia(API_URL, 'hash123', 'Permanently deleted by moderator');
+
+      expect(JSON.parse(mockFetch.mock.calls[0][1].body))
+        .toEqual({ sha256: 'hash123', action: 'DELETE', reason: 'Permanently deleted by moderator' });
+    });
+
     it("sends the account the file belongs to when given one, for the worker's account check", async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
 
@@ -1541,6 +1572,48 @@ describe('adminApi', () => {
     });
   });
 
+  describe('readMediaStatus', () => {
+    // Full-length 64-char hex hash, never truncated.
+    const HASH = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068';
+
+    it('returns the stored decision', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ sha256: HASH, action: 'PERMANENT_BAN' }) });
+
+      await expect(readMediaStatus(API_URL, HASH)).resolves.toEqual({ sha256: HASH, action: 'PERMANENT_BAN' });
+    });
+
+    it('reads "no decision" in both shapes the worker sends', async () => {
+      // moderation-service's own answer, passed through.
+      const none = { sha256: HASH, status: 'unknown', moderated: false, blocked: false, age_restricted: false };
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => none });
+      const status = await readMediaStatus(API_URL, HASH);
+      expect(status?.action).toBeUndefined();
+      expect(isBlockedMediaAction(status?.action)).toBe(false);
+
+      // A worker deployed before this change.
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => null });
+      await expect(readMediaStatus(API_URL, HASH)).resolves.toBeNull();
+    });
+
+    it('throws when the status cannot be read, so "unknown" is not mistaken for "no decision"', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
+      await expect(readMediaStatus(API_URL, HASH)).rejects.toThrow();
+
+      // A 404 is the request being rejected, not "no decision".
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 404, statusText: 'Not Found' });
+      await expect(readMediaStatus(API_URL, HASH)).rejects.toThrow();
+
+      mockFetch.mockRejectedValueOnce(new Error('network'));
+      await expect(readMediaStatus(API_URL, HASH)).rejects.toThrow();
+    });
+
+    it('leaves checkMediaStatus reading an unreadable status as null, for the verify helpers', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: false, status: 500, statusText: 'Internal Server Error' });
+
+      await expect(checkMediaStatus(API_URL, HASH)).resolves.toBeNull();
+    });
+  });
+
   describe('isBlockedMediaAction', () => {
     it('treats permanently banned media as blocked', () => {
       expect(isBlockedMediaAction('PERMANENT_BAN')).toBe(true);
@@ -1732,7 +1805,7 @@ describe('adminApi', () => {
       expect(hashes).toContain('abc123def4567890abc123def4567890abc123def4567890abc123def4567890');
     });
 
-    it('should ignore imeta image thumbnail hashes for video moderation actions', () => {
+    it('keeps imeta image thumbnail hashes out of the video media list (#66; thumbnails come back separately)', () => {
       const videoHash = '81661ca024bec2be842557ff7e07c833660038f134203f10293568f5ea11863f';
       const thumbnailHash = 'b06e68dbec25463be257e44b06b0bcbb376d3cd1d5fa47e41747ead9e290e068';
       const tags = [

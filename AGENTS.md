@@ -301,7 +301,7 @@ All relay queries are subject to network latency (500ms-2s per round-trip). Use 
 ### Authentication layers
 
 1. **CF Access** (edge): Enforced on the frontend and API domains. Service bindings (moderation-service) reach the worker without passing through Access.
-2. **Worker auth** (`verifyAdminAccess()`): Accepts an `X-Admin-Key` (`ADMIN_API_KEY`, or `MOD_RELAY_ADMIN_KEY` on `/api/relay-rpc`), or a `Cf-Access-Jwt-Assertion` that verifies against the team certs (`ACCESS_TEAM_DOMAIN`) and the API Access application's audience (`API_ACCESS_AUD`, a `[vars]` entry). The header's presence alone is not enough. Without `API_ACCESS_AUD` or `ACCESS_TEAM_DOMAIN`, no Access login is accepted. The admin UI reaches the API through a shared Access service token, so the verified token does not identify the moderator.
+2. **Worker auth** (`verifyAdminAccess()`): Accepts an `X-Admin-Key` (`ADMIN_API_KEY`, or `MOD_RELAY_ADMIN_KEY` on `POST /api/relay-rpc`, `POST /api/moderate-media/lift-check` and `POST /api/internal/private-reports`), or a `Cf-Access-Jwt-Assertion` that verifies against the team certs (`ACCESS_TEAM_DOMAIN`) and the API Access application's audience (`API_ACCESS_AUD`, a `[vars]` entry). The header's presence alone is not enough. Without `API_ACCESS_AUD` or `ACCESS_TEAM_DOMAIN`, no Access login is accepted. The admin UI reaches the API through a shared Access service token, so the verified token does not identify the moderator.
 3. **Zendesk endpoints**: Exempt from admin auth. Use HMAC signature verification (webhooks) or JWT validation (mobile SDK).
 
 ### Secrets
@@ -329,6 +329,7 @@ Schema is created on-demand via `ensureDecisionsTable()` and `ensureZendeskTable
 | `moderation_decisions` | Append-only decision log (action, reason, target, moderator, timestamp) |
 | `moderation_targets` | Per-target state tracking (`ever_human_reviewed` prevents auto-hide override) |
 | `zendesk_tickets` | Maps Zendesk ticket IDs to Nostr event IDs and pubkeys |
+| `private_report_intake` | One row per private DM report moderation-service handed over; the idempotency record for `POST /api/internal/private-reports` |
 
 ## Local Development
 

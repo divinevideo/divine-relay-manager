@@ -13,6 +13,8 @@ const OTHER_EVENT = '9'.repeat(64);
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
@@ -50,7 +52,7 @@ vi.mock('@/hooks/useModerationStatus', () => ({
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false, error: null }) }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 
 const TARGET_EVENT_OBJ: NostrEvent = {
   id: TARGET_EVENT,

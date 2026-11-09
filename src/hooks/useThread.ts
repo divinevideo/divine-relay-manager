@@ -5,8 +5,9 @@ import { useNostr } from "@nostrify/react";
 import { useQuery } from "@tanstack/react-query";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { NRelay1 } from "@nostrify/nostrify";
+import { isHex64 } from "@/lib/constants";
 import { fetchFunnelcakeEvent } from "@/lib/funnelcakeApi";
-import { isRepostKind } from "@/lib/nip18";
+import { checkedEventWithId, isRepostKind, verifiedRepostedEvent } from "@/lib/nip18";
 import { buildThreadReplyFilters } from "@/lib/threadFilters";
 import { isListKind } from "../../shared/list-report";
 
@@ -16,6 +17,11 @@ export interface ThreadResult {
   ancestors: NostrEvent[];  // ordered from root to parent
   event: NostrEvent | null;
   replies: NostrEvent[];
+  /**
+   * The original a repost names, set only once it checks out: the event its e
+   * tag names, with a valid signature (checkedEventWithId). Callers act on its
+   * files without checking again, so nothing else may be put here (#337).
+   */
   repostedEvent: NostrEvent | null;
   isRepost: boolean;
   /** Where the main event was fetched from, or null if not found */
@@ -114,32 +120,33 @@ export function useThread(
 
       if (isRepost) {
         const originalEventTag = event.tags.find(t => t[0] === 'e');
-        if (originalEventTag) {
-          if (event.content) {
-            try {
-              const parsed = JSON.parse(event.content);
-              if (parsed && parsed.id && parsed.pubkey && parsed.kind !== undefined) {
-                repostedEvent = parsed as NostrEvent;
-              }
-            } catch {
-              // Content is not JSON, fetch the event
-            }
-          }
+        // The tag is the reposter's writing and its value goes into a request
+        // URL and a relay filter, so only an event id is looked up at all.
+        if (originalEventTag && isHex64(originalEventTag[1])) {
+          // The media buttons act on the original's files, so the original counts
+          // only when it is the event the e tag names, with a valid signature
+          // (#337). The embedded copy is the reposter's writing, and a fetched
+          // event is checked too, since the external relay hint is the
+          // reporter's.
+          // Lower-case, as ids are on the wire: a relay matches them exactly.
+          const targetId = originalEventTag[1].toLowerCase();
+          const checked = (candidate: NostrEvent | null | undefined) => checkedEventWithId(candidate, targetId);
+          repostedEvent = verifiedRepostedEvent(event);
 
           if (!repostedEvent) {
             if (apiUrl) {
-              repostedEvent = await fetchFunnelcakeEvent(apiUrl, originalEventTag[1]) || null;
+              repostedEvent = checked(await fetchFunnelcakeEvent(apiUrl, targetId));
             }
             if (!repostedEvent) {
               const [fetchedOriginal] = await nostr.query(
-                [{ ids: [originalEventTag[1]], limit: 1 }],
+                [{ ids: [targetId], limit: 1 }],
                 { signal: combinedSignal }
               );
-              repostedEvent = fetchedOriginal || null;
+              repostedEvent = checked(fetchedOriginal);
             }
             // Try external relay for repost original too
             if (!repostedEvent && relayHint) {
-              repostedEvent = await fetchFromExternalRelay(relayHint, originalEventTag[1]);
+              repostedEvent = checked(await fetchFromExternalRelay(relayHint, targetId));
             }
           }
         }
@@ -169,6 +176,12 @@ export function useThread(
           ancestorIds.push(upperETags[0][1]);
         }
       }
+
+      // A repost is not a reply, however its tags are marked: its e tag is what
+      // it reposts, read above only once it checks out. A marked e tag or an
+      // upper-case E tag is no parent either, and fetching one here would bring
+      // back an original that did not check out, shown with the author it claims.
+      if (isRepost) ancestorIds.length = 0;
 
       // Fetch ancestors: REST → local WS → external relay for any still missing
       let ancestorEvents: NostrEvent[] = [];

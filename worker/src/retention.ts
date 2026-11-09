@@ -29,6 +29,7 @@ export interface RetentionResult {
   pendingProjectionsOverdue: number;
   unknownReasonsAlerted: number;
   consentVideosDeleted: number;
+  privateReportsRedacted: number;
 }
 
 function emptyResult(): RetentionResult {
@@ -37,7 +38,7 @@ function emptyResult(): RetentionResult {
     projectionsDeleted: 0, bindingsDeleted: 0, operationsCompacted: 0,
     subjectsDeleted: 0, pendingOperationsOverdue: 0,
     pendingProjectionsOverdue: 0, unknownReasonsAlerted: 0,
-    consentVideosDeleted: 0,
+    consentVideosDeleted: 0, privateReportsRedacted: 0,
   };
 }
 
@@ -357,6 +358,48 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
       .bind(...ids);
     const outcomes = await db.batch([...notes, cases]);
     result.casesDeleted = outcomes[outcomes.length - 1].meta.changes;
+  });
+
+  // A private report's reporter link follows its age-review case: once the
+  // case is redacted, or no longer exists, the intake row loses it too. A
+  // legal hold that keeps the case's detail therefore keeps this link. Runs
+  // after case-delete so a case deleted in this run is caught in it.
+  await runStage('private-report-redaction', async () => {
+    const redacted = await db.prepare(`UPDATE private_report_intake
+      SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
+      WHERE id IN (SELECT i.id FROM private_report_intake i
+        WHERE i.redacted_at IS NULL AND i.case_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM age_review_cases c WHERE c.id = i.case_id AND c.redacted_at IS NULL)
+        LIMIT ${BATCH_LIMIT})`).run();
+    result.privateReportsRedacted += redacted.meta.changes;
+  });
+
+  // A Coop handoff has no case here to follow, so its reporter link is cleared
+  // a year after the handoff completed, as moderation-service deletes its own
+  // copy. retention_legal_holds has no record type for these rows, so no hold
+  // applies. Unfinished handoffs have their own bounded stage below.
+  await runStage('private-report-coop-redaction', async () => {
+    // completed_at is written by toISOString(), so a cutoff in the same form
+    // compares correctly as text, and the partial index can serve the range.
+    const cutoff = new Date(Date.now() - RETENTION_DAYS.privateReportCoopLink * 24 * 60 * 60 * 1000).toISOString();
+    const redacted = await db.prepare(`UPDATE private_report_intake
+      SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
+      WHERE id IN (SELECT id FROM private_report_intake
+        WHERE redacted_at IS NULL AND outcome = 'queued_in_coop' AND completed_at <= ?
+        LIMIT ${BATCH_LIMIT})`).bind(cutoff).run();
+    result.privateReportsRedacted += redacted.meta.changes;
+  });
+
+  // A caller may stop retrying without completing a handoff. Expire its link
+  // from first receipt, retaining a tombstone so a late retry cannot restore it.
+  await runStage('private-report-pending-redaction', async () => {
+    const cutoff = new Date(Date.now() - RETENTION_DAYS.privateReportPendingLink * 24 * 60 * 60 * 1000).toISOString();
+    const redacted = await db.prepare(`UPDATE private_report_intake
+      SET reporter_pubkey = NULL, gift_wrap_id = NULL, redacted_at = datetime('now')
+      WHERE id IN (SELECT id FROM private_report_intake
+        WHERE redacted_at IS NULL AND completed_at IS NULL AND first_received_at <= ?
+        LIMIT ${BATCH_LIMIT})`).bind(cutoff).run();
+    result.privateReportsRedacted += redacted.meta.changes;
   });
 
   return result;

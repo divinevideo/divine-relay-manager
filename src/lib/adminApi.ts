@@ -15,7 +15,11 @@ import {
   type BulkNotesPage,
   KIND_COUNTS_REQUEST_TIMEOUT_MS,
 } from "../../shared/bulk-moderation";
-import { extractMediaHashes as extractSharedMediaHashes } from "../../shared/media-hashes";
+import {
+  extractMediaFiles as extractSharedMediaFiles,
+  extractMediaHashes as extractSharedMediaHashes,
+  type MediaFiles,
+} from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 
@@ -844,7 +848,8 @@ export type MediaStatusAction = ModerationAction;
 
 export interface MediaStatus {
   sha256: string;
-  action: MediaStatusAction;
+  /** Absent when there is no decision (moderation-service's status 'unknown'). */
+  action?: MediaStatusAction;
   reason?: string;
   created_at?: string;
   source?: string;
@@ -853,6 +858,10 @@ export interface MediaStatus {
 export function isBlockedMediaAction(action: MediaStatusAction | null | undefined): boolean {
   return action === 'PERMANENT_BAN' || action === 'QUARANTINE';
 }
+
+// The state a media write can expect: a stored action, or UNKNOWN for a file
+// with no moderation record (check-result's status 'unknown').
+export type ExpectedMediaState = ModerationAction | 'UNKNOWN';
 
 // `from`, when given, is the state the caller expects the file to be in. The
 // worker then writes only if the moderation record still shows it, and
@@ -873,7 +882,7 @@ export async function moderateMedia(
   sha256: string,
   action: ModerationAction,
   reason?: string,
-  from?: ModerationAction,
+  from?: ExpectedMediaState,
   pubkey?: string,
 ): Promise<ApiResponse> {
   const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate-media', 'POST', {
@@ -889,23 +898,31 @@ export async function moderateMedia(
   return data;
 }
 
-// Check media moderation status
+// Read media moderation status. A status that could not be read throws, so a
+// caller can tell "unknown" from "no decision". No decision comes back as a
+// record with no action (moderation-service's status 'unknown'), or as null from
+// a worker deployed before its check-result proxy stopped turning an upstream
+// 404 into null. Any failed response, a 404 included, is unread.
+export async function readMediaStatus(apiUrl: string, sha256: string): Promise<MediaStatus | null> {
+  const response = await fetchWithTimeout(`${apiUrl}/api/check-result/${sha256}`, {
+    method: 'GET',
+    headers: getApiHeaders(),
+  }, 'Media status check', { mutates: false });
+
+  if (!response.ok) {
+    throw new ApiError(`HTTP ${response.status}: ${response.statusText}`);
+  }
+
+  const data = await response.json();
+  if (data === null) return null;
+  return data as MediaStatus;
+}
+
+// Check media moderation status, reading a status that could not be read as null.
+// Kept for the verify helpers, which only ask whether an action landed.
 export async function checkMediaStatus(apiUrl: string, sha256: string): Promise<MediaStatus | null> {
   try {
-    const response = await fetchWithTimeout(`${apiUrl}/api/check-result/${sha256}`, {
-      method: 'GET',
-      headers: getApiHeaders(),
-    }, 'Media status check', { mutates: false });
-
-    if (!response.ok) {
-      if (response.status === 404) return null;
-      throw new ApiError(`HTTP ${response.status}: ${response.statusText}`);
-    }
-
-    const data = await response.json();
-    // Returns null if no moderation action exists
-    if (data === null) return null;
-    return data as MediaStatus;
+    return await readMediaStatus(apiUrl, sha256);
   } catch (error) {
     console.error('Failed to check media status:', error);
     return null;
@@ -1192,6 +1209,11 @@ export async function verifyModerationAction(
 // Extract sha256 hashes from media URLs in content or tags
 export function extractMediaHashes(content: string, tags: string[][]): string[] {
   return extractSharedMediaHashes(content, tags);
+}
+
+// The same files, with a video's separately uploaded thumbnails kept apart
+export function extractMediaFiles(content: string, tags: string[][]): MediaFiles {
+  return extractSharedMediaFiles(content, tags);
 }
 
 // Scene classification from VLM
@@ -1603,7 +1625,9 @@ export async function getAccountStatus(
 ): Promise<AccountStatusResponse> {
   return apiRequest<AccountStatusResponse>(
     apiUrl,
-    `/api/account-status/${pubkey}`,
+    // Encoded so a report's attacker-authored p tag can't add path segments. This
+    // doesn't stop a bare '..'; the report view only passes 64-hex pubkeys.
+    `/api/account-status/${encodeURIComponent(pubkey)}`,
     'GET',
   );
 }

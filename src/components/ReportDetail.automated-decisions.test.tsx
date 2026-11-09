@@ -19,6 +19,8 @@ const decisionsByTarget = vi.hoisted(() => ({ value: {} as Record<string, Modera
 // The report's target, when a test needs a post instead of the account.
 const reportTarget = vi.hoisted(() => ({ value: null as { type: 'event' | 'pubkey'; value: string } | null }));
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
@@ -45,7 +47,7 @@ vi.mock('@/hooks/useModerationStatus', () => ({
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
     target: reportTarget.value ?? { type: 'pubkey', value: REPORTED_PUBKEY },

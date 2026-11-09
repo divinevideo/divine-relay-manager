@@ -3205,6 +3205,16 @@ describe('ReportWatcher', () => {
       expect(await autoClearReason()).toMatch(/^Under-16 report auto-cleared: verified minor via keycast \(case [0-9a-f-]{36}\)$/);
     });
 
+    // Any failed keycast lookup reads as "not an approved minor", so a timeout here
+    // could open a deadline case on a protected minor. This call must wait.
+    it('asks keycast with no timeout, since a timed-out lookup would read as no approval', async () => {
+      routeRegistryLookup(new Error('D1 unavailable'));
+      mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: true });
+      await sendUnderageReport('registry_throw_2', 'f'.repeat(64));
+      await vi.waitFor(() => expect(mockGetUserStatus).toHaveBeenCalled(), { timeout: 2000 });
+      for (const call of mockGetUserStatus.mock.calls) expect(call[2]?.timeoutMs).toBeUndefined();
+    });
+
     it('opens a normal case when neither the registry nor keycast knows the account', async () => {
       routeRegistryLookup(null);
       mockGetUserStatus.mockResolvedValue({ success: true, status: 'active', verified_minor: false });

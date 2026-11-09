@@ -19,6 +19,8 @@ const history = vi.hoisted(() => ({
   summary: { data: null as { summary: string; riskLevel: 'low' } | null, isLoading: false, error: null as Error | null },
 }));
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()),
   useNavigate: () => vi.fn(),
@@ -56,7 +58,7 @@ vi.mock('@/hooks/useModerationStatus', () => ({
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => history.summary }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 
 // An event report whose content loaded, the branch that renders the AI summary.
 const TARGET_EVENT_OBJ: NostrEvent = {

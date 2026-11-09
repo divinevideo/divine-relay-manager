@@ -57,7 +57,7 @@ const statusValue = vi.hoisted(() => ({ value: {} as unknown }));
 vi.mock('@/hooks/useModerationStatus', () => ({ useModerationStatus: () => statusValue.value }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useEventTitles', () => ({ useEventTitles: () => ({ titles: new Map(), isLoading: false }) }));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: (report: NostrEvent) => {
@@ -84,6 +84,8 @@ vi.mock('@/hooks/useReportContext', () => ({
     };
   },
 }));
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('@/components/ThreadContext', () => ({ ThreadContext: () => <div data-testid="thread" /> }));
 vi.mock('@/components/AISummary', () => ({ AISummary: () => null }));
 vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));

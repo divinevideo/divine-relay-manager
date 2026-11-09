@@ -1,5 +1,5 @@
-// ABOUTME: Pure synthesis of an age-review target's account type, enforcement
-// ABOUTME: compliance legs, and a one-line "what's effective" verdict. No I/O.
+// ABOUTME: Pure synthesis of an account's type and sign-in state from Keycast, plus
+// ABOUTME: age review's enforcement compliance legs and one-line verdict. No I/O.
 import type { AccountStatusResponse } from './adminApi';
 
 export type AccountType = 'divine' | 'self_custody' | 'unknown';
@@ -32,9 +32,17 @@ export interface DeriveInput {
   ticketLinked: boolean;
 }
 
-export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
-  const { accountStatus, accountStatusError, postCount, contentPresenceKnown, ticketLinked } = input;
+export interface AccountIdentity {
+  accountType: AccountType;
+  signInStatus: SignInStatus;
+}
 
+// What a Keycast status lookup says about an account, on its own: shared by the
+// age-review indicator and the report view's account label.
+export function deriveAccountIdentity(
+  accountStatus: AccountStatusResponse | undefined,
+  accountStatusError: boolean,
+): AccountIdentity {
   // Account type is data-first: if TanStack keeps cached success data after a
   // failed background refetch, the UI should not contradict that cached status.
   let accountType: AccountType;
@@ -48,10 +56,25 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
     accountType = 'unknown';
   }
 
+  // Both suspended and banned block sign-in.
+  const signInBlocked = accountStatus?.status === 'suspended' || accountStatus?.status === 'banned';
+  const signInStatus: SignInStatus =
+    accountType === 'self_custody' ? 'not_applicable'
+    : accountType === 'unknown' ? 'unknown'
+    : signInBlocked ? 'blocked'
+    : accountStatus?.status === 'active' ? 'active'
+    : 'unknown';
+
+  return { accountType, signInStatus };
+}
+
+export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
+  const { accountStatus, accountStatusError, postCount, contentPresenceKnown, ticketLinked } = input;
+  const { accountType, signInStatus } = deriveAccountIdentity(accountStatus, accountStatusError);
+
+  // Kept separate from sign-in blocking because only *suspend* hides content
+  // reversibly; ban purges it.
   const suspended = accountStatus?.status === 'suspended';
-  // Both suspended and banned block sign-in. Kept separate from `suspended`
-  // because only *suspend* hides content reversibly — ban purges it.
-  const signInBlocked = suspended || accountStatus?.status === 'banned';
   const hasContent = (postCount ?? 0) > 0;
   // Suspension hides content, so 'hidden_suspended' is the honest read there
   // regardless of the relay result. Otherwise, an unresolved read is 'unknown'
@@ -67,13 +90,6 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   // yet (deps #123). Only a confirmed-empty account marks them n/a.
   const contentApplicable = contentPresence !== 'none';
   const contentLegState: LegState = contentApplicable ? 'not_tracked' : 'na';
-
-  const signInStatus: SignInStatus =
-    accountType === 'self_custody' ? 'not_applicable'
-    : accountType === 'unknown' ? 'unknown'
-    : signInBlocked ? 'blocked'
-    : accountStatus?.status === 'active' ? 'active'
-    : 'unknown';
 
   const signinState: LegState =
     signInStatus === 'not_applicable' ? 'na'

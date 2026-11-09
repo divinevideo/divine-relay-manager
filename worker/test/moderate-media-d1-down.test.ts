@@ -116,6 +116,6 @@ describe('/api/moderate-media with D1 down on a cold isolate', () => {
     expect(await res.json()).toMatchObject({ success: false, code: 'age_review_check_failed' });
     expect(writes()).toHaveLength(0);
     expect(statements.some(isSchemaStep)).toBe(true);
-    expect(errors.mock.calls.some((c) => String(c[0]).includes('[handleModerateMedia] age-review schema bootstrap failed'))).toBe(true);
+    expect(errors.mock.calls.some((c) => String(c[0]).includes('[ensureAgeReviewSchema] age-review schema bootstrap failed'))).toBe(true);
   });
 });

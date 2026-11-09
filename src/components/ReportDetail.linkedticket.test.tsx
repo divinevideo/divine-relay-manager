@@ -14,6 +14,8 @@ const MOD = 'e'.repeat(64);
 const ctx = vi.hoisted(() => ({ target: { type: 'event', value: '7'.repeat(64) } as { type: string; value: string } }));
 const getLinkedTickets = vi.hoisted(() => vi.fn(async () => []));
 
+// The account-type label has its own tests; here it would need the account-status query.
+vi.mock('@/components/AccountTypeBadge', () => ({ AccountTypeLabel: () => null }));
 vi.mock('react-router-dom', async (orig) => ({
   ...(await orig<typeof import('react-router-dom')>()), useNavigate: () => vi.fn(),
 }));
@@ -39,7 +41,7 @@ vi.mock('@/hooks/useModerationStatus', async () => {
 });
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
-vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({}) }));
+vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
     target: ctx.target,

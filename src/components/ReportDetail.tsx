@@ -24,7 +24,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { useToast } from "@/hooks/useToast";
 import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
-import { isRepostKind } from "@/lib/nip18";
+import { isRepostKind, looksLikeEventCopy, verifiedRepostedEvent } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
@@ -32,6 +32,7 @@ import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
+import { AccountTypeLabel } from "@/components/AccountTypeBadge";
 import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
@@ -42,7 +43,7 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
 import { overflowLine } from "@/lib/overflowLine";
 import { invalidateResolutionState } from "@/lib/queueInvalidation";
-import { extractMediaHashes, type ResolutionStatus } from "@/lib/adminApi";
+import { extractMediaFiles, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
 import { HiveAIReport } from "@/components/HiveAIReport";
@@ -354,27 +355,84 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     },
   });
 
-  // Extract media hashes from the reported event AND reposted event if it's a repost
-  const mediaHashes = useMemo(() => {
-    const hashes = new Set<string>();
+  // The original a repost names, only once it checks out as that event (#337):
+  // useThread's, which is checked, or else the repost's own copy when its id
+  // and signature check (a banned repost shown from the ban list, or one whose
+  // fetch missed). The media buttons and the original's preview both use it,
+  // so the moderator sees what the buttons act on. A copy that does not check
+  // out is the reposter's writing, and gets neither.
+  const isRepostEvent = !!displayEvent && isRepostKind(displayEvent.kind);
+  // Content that looks like JSON is taken as the repost's copy of the original,
+  // well formed or not: only a copy that checks out is read, so a malformed or
+  // cut-off one cannot pass its files on as text. Decided once, here, so the
+  // card, the preview and the buttons below cannot disagree about it.
+  const repostHasCopy = isRepostEvent && !!displayEvent && looksLikeEventCopy(displayEvent.content);
+  const checkedOriginal = useMemo(
+    () => context.thread?.repostedEvent ?? (displayEvent && isRepostEvent ? verifiedRepostedEvent(displayEvent) : null),
+    [context.thread?.repostedEvent, displayEvent, isRepostEvent],
+  );
+  const repostCopyUnchecked = repostHasCopy && !checkedOriginal;
+  // The same for an original that is itself a repost: its JSON content is its own
+  // copy of another event, never checked, and read as text it would give up that
+  // event's id and author key as files and its URLs to a preview. Plain text in
+  // an out-of-spec one is read as any post's is.
+  const originalHasCopy = !!checkedOriginal && isRepostKind(checkedOriginal.kind)
+    && looksLikeEventCopy(checkedOriginal.content);
+  // The checked original as its preview in the repost card shows it.
+  const originalPreviewEvent = useMemo(
+    () => (checkedOriginal && originalHasCopy ? { ...checkedOriginal, content: '' } : checkedOriginal),
+    [checkedOriginal, originalHasCopy],
+  );
+  // The reported repost as its own media preview shows it: without a copy of
+  // the original in its content, so the preview never shows files the buttons
+  // were refused. A checked original has its own preview, in the repost card.
+  const displayPreviewEvent = useMemo(
+    () => (displayEvent && repostHasCopy ? { ...displayEvent, content: '' } : displayEvent),
+    [displayEvent, repostHasCopy],
+  );
 
-    // From the reported event itself (or banned event fallback)
-    if (displayEvent) {
-      const eventHashes = extractMediaHashes(displayEvent.content, displayEvent.tags);
-      eventHashes.forEach(h => hashes.add(h));
+  // Extract media hashes from the reported event AND reposted event if it's a repost.
+  // A video's own thumbnails are kept apart so EventActions acts on them after the
+  // video, and a thumbnail failure never fails the video's action.
+  const { mediaHashes, thumbnailHashes } = useMemo(() => {
+    const media = new Set<string>();
+    const thumbnails = new Set<string>();
+    const add = (content: string, tags: string[][]) => {
+      const files = extractMediaFiles(content, tags);
+      files.media.forEach(h => media.add(h));
+      files.thumbnails.forEach(h => thumbnails.add(h));
+    };
+    // A repost's content is the original event as JSON, the reposter's copy of
+    // it. Its tags still count, and the original's files come from
+    // checkedOriginal only: content that looks like JSON is never read for files,
+    // well formed or not. Some out-of-spec reposts carry a media URL as plain
+    // text instead, which the preview shows, so that is read too, as any post's
+    // text is.
+    if (displayEvent && isRepostEvent) {
+      add('', displayEvent.tags);
+      if (checkedOriginal) add(originalHasCopy ? '' : checkedOriginal.content, checkedOriginal.tags);
+      if (!repostHasCopy) add(displayEvent.content, []);
+    } else if (displayEvent) {
+      add(displayEvent.content, displayEvent.tags);
     }
+    // As within one extraction, a file any source names as a thumbnail stays one:
+    // a repost's text linking the original's thumbnail does not make it a video,
+    // which Unblock Media and Remove Restriction would lift.
+    return {
+      mediaHashes: Array.from(media).filter(h => !thumbnails.has(h)),
+      thumbnailHashes: Array.from(thumbnails),
+    };
+  }, [displayEvent, isRepostEvent, repostHasCopy, checkedOriginal, originalHasCopy]);
 
-    // From the reposted original event
-    if (context.thread?.repostedEvent) {
-      const repostHashes = extractMediaHashes(context.thread.repostedEvent.content, context.thread.repostedEvent.tags);
-      repostHashes.forEach(h => hashes.add(h));
-    }
-
-    return Array.from(hashes);
-  }, [displayEvent, context.thread?.repostedEvent]);
-
-  // Check media status from moderation service
-  const mediaStatus = useMediaStatus(mediaHashes);
+  // Check media status from moderation service. Thumbnails are included, so a
+  // gated thumbnail gets its own undo button and Age Restrict skips a blocked one.
+  const allMediaHashes = useMemo(() => [...mediaHashes, ...thumbnailHashes], [mediaHashes, thumbnailHashes]);
+  const mediaStatus = useMediaStatus(allMediaHashes);
+  // Which buttons show follows the video, so a thumbnail blocked on its own can't
+  // swap the video's Block and Age Restrict for the undo buttons.
+  const videoStatuses = mediaStatus.results.filter(r => mediaHashes.includes(r.hash));
+  const videoIsBlocked = videoStatuses.some(r => r.isBlocked);
+  const videoIsRestricted = videoStatuses.some(r => r.isRestricted);
 
   // undefined while loading, then true/false once reports are available. A
   // sensitive report in hand is true even when the reports may not be all of
@@ -495,6 +553,19 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
+      // The reported user's sign-in label reads the shared account-status query,
+      // and the worker mirrors this action into Keycast. Refresh it, or the label
+      // keeps its pre-action answer for the query's minute of staleness. The mirror
+      // runs after the worker responds, so this read can still beat it. Key shape:
+      // ['account-status', apiUrl, pubkey], lowercased as AccountTypeLabel looks it
+      // up. Only this account changed, so only its entry is refreshed.
+      const subject = context.reportedUser.pubkey?.toLowerCase();
+      if (subject) {
+        queryClient.invalidateQueries({
+          queryKey: ['account-status'],
+          predicate: (query) => query.queryKey[2] === subject,
+        });
+      }
     } else {
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.
@@ -793,6 +864,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                             navigate(`/events?pubkey=${pubkey}`);
                           }}
                         />
+                        <AccountTypeLabel pubkey={r.pubkey} />
                       </div>
                       {/* Report details */}
                       <div className="flex items-center gap-2 mb-1 min-w-0">
@@ -836,6 +908,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       navigate(`/events?pubkey=${pubkey}`);
                     }}
                   />
+                  <AccountTypeLabel pubkey={report.pubkey} />
                   <ReportClientText reports={[report]} />
                 </div>
                 {report.content ? (
@@ -926,7 +999,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           )}
 
           {/* Repost Original Content - show when the reported event is a repost */}
-          {context.thread?.isRepost && (
+          {(context.thread?.isRepost || isRepostEvent) && (
             <Card className="border-blue-200 bg-blue-50/50 dark:bg-blue-950/20">
               <CardHeader className="py-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-blue-700 dark:text-blue-400">
@@ -935,13 +1008,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 </CardTitle>
               </CardHeader>
               <CardContent className="py-0 pb-3">
-                {context.thread?.repostedEvent ? (
+                {checkedOriginal ? (
                   <div className="space-y-3">
                     {/* Original author */}
                     <div className="flex items-center gap-2">
                       <span className="text-xs text-muted-foreground">Original author:</span>
                       <UserIdentifier
-                        pubkey={context.thread.repostedEvent.pubkey}
+                        pubkey={checkedOriginal.pubkey}
                         showAvatar
                         hideAvatarImage={hasHighPriorityReports !== false}
                         avatarSize="sm"
@@ -952,12 +1025,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     {/* Original content */}
                     <div className="bg-background p-3 rounded-lg border">
                       <p className="text-sm whitespace-pre-wrap break-words">
-                        {context.thread.repostedEvent.content}
+                        {checkedOriginal.content}
                       </p>
                       <div className="flex items-center gap-2 mt-2 text-xs text-muted-foreground">
-                        <span>Kind {context.thread.repostedEvent.kind}</span>
+                        <span>Kind {checkedOriginal.kind}</span>
                         <span>·</span>
-                        <span>{new Date(context.thread.repostedEvent.created_at * 1000).toLocaleString()}</span>
+                        <span>{new Date(checkedOriginal.created_at * 1000).toLocaleString()}</span>
                       </div>
                     </div>
                     {/* Media in original post. Keyed by report, like the other
@@ -965,14 +1038,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         report. */}
                     <MediaPreview
                       key={report.id}
-                      event={context.thread.repostedEvent}
+                      event={originalPreviewEvent ?? checkedOriginal}
                       showByDefault={mediaShownByDefault}
                       maxItems={6}
                     />
                   </div>
                 ) : (
                   <p className="text-sm text-muted-foreground italic">
-                    Could not load the original event that was reposted
+                    {repostCopyUnchecked
+                      ? "No copy of the original that checks out was found, so its files aren't offered"
+                      : 'Could not load the original event that was reposted'}
                   </p>
                 )}
               </CardContent>
@@ -986,10 +1061,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               on the same event with the same default would keep a Show the
               moderator made on this one. A fresh mount starts from
               showByDefault. */}
-          {displayEvent && (
+          {displayPreviewEvent && (
             <MediaPreview
               key={report.id}
-              event={displayEvent}
+              event={displayPreviewEvent}
               showByDefault={mediaShownByDefault}
               maxItems={6}
             />
@@ -1073,6 +1148,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           {(context.reportedUser.pubkey || (!context.isLoading && !isBannedEventLoading)) && (
           <>
           <h4 className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Reported User</h4>
+          <AccountTypeLabel pubkey={context.reportedUser.pubkey} />
           <UserProfileCard
             key={report.id}
             profile={context.reportedUser.profile}
@@ -1291,10 +1367,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 eventId={context.target.value}
                 pubkey={context.reportedUser.pubkey || ''}
                 mediaHashes={mediaHashes}
+                thumbnailHashes={thumbnailHashes}
                 mediaHashStatuses={mediaStatus.results}
                 isEventBanned={isEventDeleted ?? undefined}
-                hasBlockedMedia={mediaStatus.hasBlockedMedia}
-                hasRestrictedMedia={mediaStatus.hasRestrictedMedia}
+                hasBlockedMedia={videoIsBlocked}
+                hasRestrictedMedia={videoIsRestricted}
+                // Not isLoading, which covers only a first load that is fetching. A
+                // re-check after an action keeps showing the old status until it
+                // answers (isFetching), a first load held back offline has no
+                // status at all yet (isPending), and a re-check held back offline
+                // shows the old status while neither pending nor fetching (isPaused).
+                mediaStatusLoading={mediaStatus.isPending || mediaStatus.isFetching || mediaStatus.isPaused}
                 onActionComplete={handleActionComplete}
               />
             )}
