@@ -73,10 +73,11 @@ describe('getActiveAgeReviewCase', () => {
   });
 });
 
-// Every path opens cases under a lowercase pubkey (#313), and production held
-// no case in another spelling before or after that deploy, so the lookup
-// matches exactly everywhere. A case stored in another spelling is not found:
-// these pin that no caller widens the match again.
+// Every path opens cases under a lowercase pubkey (#313), so the lookup matches
+// exactly everywhere. A case stored in another spelling is not found, and each
+// negative test below is paired with one where the same caller does find the
+// lowercase case, so they pin both that no caller widens the match again and
+// that each caller still holds on the case it should.
 describe('a case stored under an uppercase pubkey', () => {
   const MIXED = 'Ab'.repeat(32);
   const LOWER = MIXED.toLowerCase();
@@ -88,9 +89,21 @@ describe('a case stored under an uppercase pubkey', () => {
     expect(await getActiveAgeReviewCase(LOWER, { DB })).toBeNull();
   });
 
+  it('leaves the lowercase case to be found', async () => {
+    await insertCase(LOWER, 'open_reported'); // c2; c1 is the uppercase one
+    expect((await getActiveAgeReviewCase(LOWER, { DB }))?.id).toBe('c2');
+  });
+
   it('does not hold the guard, even when it fails closed', async () => {
     expect(await ageReviewActiveGuard(LOWER, { DB } as never, {}, 'held', { failClosed: true })).toBeNull();
     expect(await ageReviewActiveGuard(LOWER, { DB } as never, {}, 'held')).toBeNull();
+  });
+
+  it('leaves the guard holding on the lowercase case', async () => {
+    await insertCase(LOWER, 'open_reported');
+    const held = await ageReviewActiveGuard(LOWER, { DB } as never, {}, 'held', { failClosed: true });
+    expect(held?.status).toBe(409);
+    expect(await held?.json()).toMatchObject({ code: 'age_review_active', caseId: 'c2' });
   });
 
   let queued: BulkJobMessage[] = [];
@@ -134,10 +147,24 @@ describe('a case stored under an uppercase pubkey', () => {
     expect(res.json).toMatchObject({ success: true, case: null });
   });
 
+  it('leaves the active-case route answering the lowercase case', async () => {
+    await insertCase(LOWER, 'open_reported');
+    const res = await send(`/api/age-review/active-case?pubkey=${LOWER}`);
+    expect(res.json).toMatchObject({ success: true, case: { id: 'c2' } });
+  });
+
   it('does not refuse relay-RPC unbanpubkey', async () => {
     const res = await send('/api/relay-rpc', { method: 'unbanpubkey', params: [LOWER] });
     expect(res).toMatchObject({ status: 200, json: { success: true } });
     expect(res.outbound).toBeGreaterThan(0);
+  });
+
+  it('leaves relay-RPC unbanpubkey refused for the lowercase case, sending nothing', async () => {
+    await insertCase(LOWER, 'open_reported');
+    const res = await send('/api/relay-rpc', { method: 'unbanpubkey', params: [LOWER] });
+    expect(res.status).toBe(409);
+    expect(res.json).toMatchObject({ code: 'age_review_active', caseId: 'c2' });
+    expect(res.outbound).toBe(0);
   });
 
   // The per-chunk check the bulk queue consumer runs for a loosening job.
@@ -150,6 +177,21 @@ describe('a case stored under an uppercase pubkey', () => {
     try {
       await processBulkJob(queued[0], env());
       expect(fetchSpy).toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it('leaves a queued Un-age-restrict All stopping at its next chunk for the lowercase case', async () => {
+    const enqueued = await handleBulkModerateEnqueue(new Request('https://relay.example/api/bulk-moderate', {
+      method: 'POST', body: JSON.stringify({ pubkey: LOWER, action: 'un-age-restrict-all' }),
+    }), env(), {});
+    expect(enqueued.status).toBe(200);
+    await insertCase(LOWER, 'open_reported'); // opened after the job was queued
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
+    try {
+      await processBulkJob(queued[0], env());
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       fetchSpy.mockRestore();
     }
