@@ -17,6 +17,7 @@ const MOD_PUBKEY = 'e'.repeat(64);
 // what the summary hook would otherwise hand back.
 const history = vi.hoisted(() => ({
   target: { type: 'event', value: 'c'.repeat(64) } as { type: 'event' | 'pubkey'; value: string },
+  decisions: [] as { id: number; action: string; reason?: string; created_at: string; moderator_pubkey: string }[],
   userStats: undefined as { reportsIncomplete: boolean; labelsIncomplete: boolean } | undefined,
   summary: { data: null as { summary: string; riskLevel: 'low' } | null, isLoading: false, error: null as Error | null },
 }));
@@ -43,17 +44,25 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
 }));
+// The target's own log reads history.decisions; the author's log (an event
+// report's second read) stays empty.
 vi.mock('@/hooks/useDecisionLog', () => ({
-  useDecisionLog: () => ({
-    hasDecisions: false,
-    isPendingReview: false,
-    isDeleted: false,
-    isAutoHidden: false,
-    isAutoHideRestored: false,
-    decisions: [],
-    latestDecision: null,
-    refetch: vi.fn(),
-  }),
+  useDecisionLog: (targetId: string | null | undefined) => {
+    const decisions = targetId === history.target.value ? history.decisions : [];
+    const latestHandlingDecision = decisions[0];
+    return {
+      hasDecisions: decisions.length > 0,
+      hasHandlingDecisions: latestHandlingDecision !== undefined,
+      latestHandlingDecision,
+      isPendingReview: false,
+      isDeleted: false,
+      isAutoHidden: false,
+      isAutoHideRestored: false,
+      decisions,
+      latestDecision: decisions[0] ?? null,
+      refetch: vi.fn(),
+    };
+  },
 }));
 vi.mock('@/hooks/useModerationStatus', () => ({
   useModerationStatus: () => ({ isUserBanned: false, isEventGone: false, recheck: vi.fn() }),
@@ -112,7 +121,11 @@ const REPORT: NostrEvent = {
 function renderDetail(props: {
   allReportsForTarget?: NostrEvent[];
   allReportsForTargetTruncated?: boolean;
-  handledBeforeHistory?: { action: string; at: number | null }[];
+  handledBefore?: {
+    history: { action: string; at: number | null }[];
+    via: 'own' | 'author';
+    ban?: { kind: 'account' | 'author'; since: number | null };
+  };
 } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -129,6 +142,7 @@ function renderDetail(props: {
 beforeEach(() => {
   vi.clearAllMocks();
   history.target = { type: 'event', value: TARGET_EVENT };
+  history.decisions = [];
   history.userStats = { reportsIncomplete: false, labelsIncomplete: false };
   history.summary = { data: null, isLoading: false, error: null };
 });
@@ -200,33 +214,42 @@ describe('ReportDetail AI summary with an unreadable account history', () => {
 // dated, so the moderator sees what was decided before and when.
 describe('ReportDetail history for a report on an item handled before', () => {
   const day = (at: number) => new Date(at * 1000).toLocaleDateString();
+  // Newest first, as handlingByTarget orders it: handled again after a reopen,
+  // which ended the handling before it, and an undated row last.
   const HISTORY = [
+    { action: 'reviewed', at: 1751600000 },
     { action: 'reopened', at: 1751500000 },
     { action: 'unban_user', at: 1751400000 },
     { action: 'resolution_label', at: 1751300000 },
     { action: 'ban_user', at: null },
   ];
+  const OWN = { history: HISTORY, via: 'own' as const };
   const PROMPT = "This account was handled before. Does this report, with the account's current state, change the call?";
+  const AUTHOR_LINE = "History of the post's author";
+  const cardOf = () => screen.getByText('Handled before').closest('.rounded-lg') as HTMLElement;
 
   it('titles the card Handled before and lists every entry with its date', () => {
-    renderDetail({ handledBeforeHistory: HISTORY });
+    renderDetail({ handledBefore: OWN });
 
     const card = screen.getByText('Handled before').closest('.rounded-lg') as HTMLElement;
     expect(card).not.toBeNull();
     const rows = within(card).getAllByTestId('handled-before-entry');
     expect(rows.map(r => r.textContent)).toEqual([
+      `reviewed${day(1751600000)}`,
       `reopened${day(1751500000)}`,
       `unban user${day(1751400000)}`,
       `resolution label${day(1751300000)}`,
       'ban userdate unknown',
     ]);
-    // A post is not an account: no account prompt.
+    // A post is not an account: no account prompt. Its own history: no author line.
     expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+    expect(screen.queryByText(AUTHOR_LINE)).not.toBeInTheDocument();
+    expect(within(card).queryByText(/banned/i)).not.toBeInTheDocument();
   });
 
   it('asks for a fresh look at an account', () => {
     history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
-    renderDetail({ handledBeforeHistory: HISTORY });
+    renderDetail({ handledBefore: OWN });
 
     expect(screen.getByText('Handled before')).toBeInTheDocument();
     expect(screen.getByText(PROMPT)).toBeInTheDocument();
@@ -238,5 +261,52 @@ describe('ReportDetail history for a report on an item handled before', () => {
 
     expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
     expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+  });
+
+  // Spec decision 5: a banned account's report says since when.
+  it("names a banned account's ban and its date in the card", () => {
+    history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
+    renderDetail({ handledBefore: { ...OWN, ban: { kind: 'account', since: 1751400000 } } });
+
+    expect(within(cardOf()).getByText(`Banned since ${day(1751400000)}`)).toBeInTheDocument();
+  });
+
+  // Spec decision 3: a post handled before only through its banned author
+  // lists the author's history, and says whose it is.
+  it("says the history is the post author's, and since when the author is banned", () => {
+    renderDetail({
+      handledBefore: { history: [{ action: 'ban_user', at: 1751400000 }], via: 'author', ban: { kind: 'author', since: 1751400000 } },
+    });
+
+    const card = cardOf();
+    expect(within(card).getByText(AUTHOR_LINE)).toBeInTheDocument();
+    expect(within(card).getByText(`Author banned since ${day(1751400000)}`)).toBeInTheDocument();
+    expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+  });
+
+  // The Handled before card lists only handling; the decision log card stays
+  // below it with each decision's reason and the rows that handle nothing.
+  it('keeps the decision log, with its reasons, below the Handled before card', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail({ handledBefore: OWN });
+
+    const handledBefore = cardOf();
+    const log = screen.getByText(/^Decision History/).closest('.rounded-lg') as HTMLElement;
+    expect(log).not.toBe(handledBefore);
+    expect(within(log).getByText('Checked, no violation')).toBeInTheDocument();
+    expect(screen.queryByText(/Already Handled/)).not.toBeInTheDocument();
+    expect(log.className).not.toMatch(/green/);
+    expect(handledBefore.compareDocumentPosition(log) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps calling a handled log Already Handled for any other report', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.getByText(/^Already Handled/)).toBeInTheDocument();
   });
 });

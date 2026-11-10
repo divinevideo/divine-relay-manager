@@ -264,7 +264,6 @@ describe('useDecisionLog reopen', () => {
     expect(result.current.hasDecisions).toBe(true);
     expect(result.current.hasHandlingDecisions).toBe(false);
     expect(result.current.latestHandlingDecision).toBeUndefined();
-    expect(result.current.isReopened).toBe(true);
   });
 
   it('counts handling recorded after the reopen', async () => {
@@ -278,7 +277,6 @@ describe('useDecisionLog reopen', () => {
 
     expect(result.current.hasHandlingDecisions).toBe(true);
     expect(result.current.latestHandlingDecision?.action).toBe('ban_user');
-    expect(result.current.isReopened).toBe(false);
   });
 
   // The newest reopen is the cutoff, not the oldest: handling between two
@@ -295,7 +293,6 @@ describe('useDecisionLog reopen', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(result.current.hasHandlingDecisions).toBe(false);
-    expect(result.current.isReopened).toBe(true);
   });
 
   // A reopen is not a decision about the target, so it never names one.
@@ -306,16 +303,14 @@ describe('useDecisionLog reopen', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(result.current.latestHandlingDecision).toBeUndefined();
-    expect(result.current.isReopened).toBe(true);
   });
 
-  it('is not reopened when no reopen was recorded', async () => {
+  it('counts handling when no reopen was recorded', async () => {
     getDecisions.mockResolvedValue([{ action: 'reviewed', moderator_pubkey: 'e'.repeat(64) }]);
 
     const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     expect(result.current.hasHandlingDecisions).toBe(true);
-    expect(result.current.isReopened).toBe(false);
   });
 });

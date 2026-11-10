@@ -14,8 +14,12 @@ const RELAY_URL = 'wss://relay.example';
 const TARGET = 'c'.repeat(64);
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ handledBeforeHistory }: { handledBeforeHistory?: unknown }) => (
-    <div data-testid="detail" data-handled-before={JSON.stringify(handledBeforeHistory ?? null)} />
+  ReportDetail: ({ handledBefore }: { handledBefore?: { history: unknown; via: string } }) => (
+    <div
+      data-testid="detail"
+      data-handled-before={JSON.stringify(handledBefore?.history ?? null)}
+      data-handled-before-via={handledBefore?.via ?? ''}
+    />
   ),
 }));
 
@@ -471,13 +475,16 @@ describe('items handled before a newer report', () => {
     events,
     handlingRows,
     reportArrivals,
+    bannedPubkeys = [],
   }: {
     events: unknown[];
     // undefined: a worker from before #324, which sends no handling rows.
     handlingRows?: unknown[];
     reportArrivals?: Record<string, number>;
+    // What the relay's listbannedpubkeys answers.
+    bannedPubkeys?: string[];
   }) {
-    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) {
@@ -494,7 +501,10 @@ describe('items handled before a newer report', () => {
           ...(handlingRows ? { handling_rows: handlingRows } : {}),
         });
       }
-      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      if (url.includes('/api/relay-rpc')) {
+        const listsPubkeys = String(init?.body ?? '').includes('listbannedpubkeys');
+        return jsonResponse({ success: true, result: listsPubkeys ? bannedPubkeys.map(pubkey => ({ pubkey })) : [] });
+      }
       return jsonResponse({ success: true });
     }));
   }
@@ -619,5 +629,106 @@ describe('items handled before a newer report', () => {
 
     await user.click(row(`pubkey:${NEVER_HANDLED}`)!);
     await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', 'null'));
+  });
+
+  // Spec decision 6: with Hide resolved on, the count always shows, even at
+  // none, so a moderator can tell "none" from "not shown".
+  it('shows the count at none, with nothing to open', async () => {
+    stubDated({ events: [C_NEW, D_OLD], handlingRows: [handled(HANDLED, T + 100)] });
+    renderQueue();
+
+    const header = await screen.findByRole('button', { name: '0 new on items already handled' });
+    expect(header).toBeDisabled();
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  // Spec decisions 3 and 5: a handled-before item on a banned account, or a
+  // post handled before through its banned author, says since when, and sorts
+  // below the other handled-before items, each group in the chosen sort.
+  describe('on banned accounts', () => {
+    const BANNED = 'e5'.repeat(32);
+    const AUTHOR = 'f6'.repeat(32);
+    const POST = '7a'.repeat(32);
+    const day = (at: number) => new Date(at * 1000).toLocaleDateString();
+    const ban = (target_id: string, at: number) =>
+      ({ target_type: 'pubkey', target_id, action: 'ban_user', moderator_pubkey: MODERATOR, at });
+    // Three reports, so the default sort (most reports first) would list it first.
+    const bannedReports = [1, 2, 3].map(n => profileReport(`2${n}`.repeat(32), BANNED, T + n));
+    const POST_REPORT = {
+      id: '31'.repeat(32),
+      pubkey: 'e'.repeat(64),
+      created_at: T + 30,
+      kind: 1984,
+      tags: [['e', POST, 'spam'], ['p', AUTHOR, 'spam']],
+      content: 'reported',
+      sig: 'e'.repeat(128),
+    };
+    const fixture = {
+      events: [...bannedReports, POST_REPORT, A_OLD, A_NEW, C_NEW],
+      handlingRows: [handled(HANDLED_BEFORE_A, T - 50), ban(BANNED, T - 50), ban(AUTHOR, T - 40)],
+      bannedPubkeys: [BANNED, AUTHOR],
+    };
+
+    it('labels them, and lists them last in the section', async () => {
+      stubDated(fixture);
+      const user = userEvent.setup();
+      renderQueue();
+
+      await user.click(await screen.findByRole('button', { name: '3 new on items already handled' }));
+      const a = row(`pubkey:${HANDLED_BEFORE_A}`)!;
+      const banned = row(`pubkey:${BANNED}`)!;
+      const post = row(`event:${POST}`)!;
+      expect(within(banned).getByText(`Banned since ${day(T - 50)}`)).toBeInTheDocument();
+      expect(within(banned).getByText('Handled before')).toBeInTheDocument();
+      expect(within(post).getByText(`Author banned since ${day(T - 40)}`)).toBeInTheDocument();
+      expect(within(post).getByText('Handled before')).toBeInTheDocument();
+      expect(within(a).queryByText(/banned/i)).not.toBeInTheDocument();
+      // A first, then the banned two in the chosen sort (three reports, then one).
+      expect(a.compareDocumentPosition(banned) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+      expect(banned.compareDocumentPosition(post) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    });
+
+    it('lists them last in place with Hide resolved off', async () => {
+      stubDated(fixture);
+      const user = userEvent.setup();
+      renderQueue();
+
+      await screen.findByRole('button', { name: /already handled/ });
+      await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+      await waitFor(() => expect(row(`pubkey:${BANNED}`)).not.toBeNull());
+      const keys = [...document.querySelectorAll('[data-row-key]')].map(el => el.getAttribute('data-row-key'));
+      // The history view sorts newest first, which would put the post (T+30)
+      // and the account (T+3) above A (T+10) and C (T): they come last anyway.
+      expect(keys.slice(-2)).toEqual([`event:${POST}`, `pubkey:${BANNED}`]);
+      expect(within(row(`pubkey:${BANNED}`)!).getByText(`Banned since ${day(T - 50)}`)).toBeInTheDocument();
+    });
+
+    it('labels a banned report in the All tab', async () => {
+      stubDated(fixture);
+      const user = userEvent.setup();
+      renderQueue();
+
+      await screen.findByRole('button', { name: /already handled/ });
+      await user.click(screen.getByRole('tab', { name: /^All/ }));
+      await user.click(await screen.findByRole('button', { name: '5 new on items already handled' }));
+      expect(within(row(POST_REPORT.id)!).getByText(`Author banned since ${day(T - 40)}`)).toBeInTheDocument();
+      expect(within(row(bannedReports[0].id)!).getByText(`Banned since ${day(T - 50)}`)).toBeInTheDocument();
+      expect(within(row(A_NEW.id)!).queryByText(/banned/i)).not.toBeInTheDocument();
+      // The banned ones last.
+      const keys = [...document.querySelectorAll('#handled-before-items [data-row-key]')].map(el => el.getAttribute('data-row-key'));
+      expect(keys[0]).toBe(A_NEW.id);
+    });
+
+    it("hands the pane the author's history for a post handled before through its author", async () => {
+      stubDated(fixture);
+      const user = userEvent.setup();
+      renderQueue();
+
+      await user.click(await screen.findByRole('button', { name: /already handled/ }));
+      await user.click(row(`event:${POST}`)!);
+      await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before-via', 'author'));
+      expect(screen.getByTestId('detail')).toHaveAttribute(
+        'data-handled-before', JSON.stringify([{ action: 'ban_user', at: T - 40 }]));
+    });
   });
 });

@@ -65,14 +65,19 @@ import { historyCount } from "@/lib/historyCount";
 import {
   consolidatedHandling,
   datedHandling,
-  groupResolutionStatus,
+  groupResolutionVerdict,
+  handledBeforeBanText,
+  handledBeforeView,
   queueResolution,
   reportHandling,
   reportResolutionStatus,
+  reportResolutionVerdict,
+  sortsLowest,
+  type HandledBeforeView,
   type HandlingVerdict,
   type QueueResolution,
 } from "@/lib/reportResolution";
-import type { HandlingEntry, ReportStatus } from "../../shared/handling";
+import type { ReportStatus } from "../../shared/handling";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
 import { historyFooterState } from "@/lib/historyFooter";
@@ -246,15 +251,32 @@ function SwitchStateBadge({ state }: { state?: SwitchState }) {
   );
 }
 
-// Marks a row whose item a person handled before a newer report came (#324).
-// Text, not colour alone, so it reads the same to every moderator.
-function HandledBeforeBadge({ show }: { show?: boolean }) {
-  if (!show) return null;
+// Marks a row whose item a person handled before a newer report came (#324),
+// and, on a banned account or a banned author's post, since when (spec
+// decisions 3 and 5). Text, not colour alone, so it reads the same to every
+// moderator.
+function HandledBeforeBadge({ handling }: { handling?: HandlingVerdict }) {
+  if (handling?.status !== 'handled_before') return null;
   return (
-    <Badge variant="outline" className="text-xs">
-      Handled before
-    </Badge>
+    <>
+      <Badge variant="outline" className="text-xs">
+        Handled before
+      </Badge>
+      {handling.ban && (
+        <Badge variant="outline" className="text-xs">
+          {handledBeforeBanText(handling.ban)}
+        </Badge>
+      )}
+    </>
   );
+}
+
+// Spec decisions 3 and 5: banned handled-before items sort lowest. A stable
+// split, so each group keeps the moderator's chosen sort.
+function withBannedLast<T>(items: T[], handlingOf: (item: T) => HandlingVerdict | undefined): T[] {
+  const low = items.filter(item => sortsLowest(handlingOf(item)));
+  if (low.length === 0) return items;
+  return [...items.filter(item => !sortsLowest(handlingOf(item))), ...low];
 }
 
 function handledBeforeCountText(count: number): string {
@@ -265,6 +287,8 @@ function handledBeforeCountText(count: number): string {
 // the main list and wait here, below it: counted, collapsed until opened, so a
 // moderator always sees that they exist without them crowding never-handled
 // work. The header is the count, as a real button that says whether it is open.
+// It shows at none too (spec decision 6: the count always shows), with
+// nothing to open.
 function HandledBeforeSection({
   count,
   open,
@@ -276,20 +300,22 @@ function HandledBeforeSection({
   onToggle: () => void;
   children: React.ReactNode;
 }) {
+  const expanded = open && count > 0;
   return (
     <div className="pt-2 border-t">
       <button
         type="button"
-        aria-expanded={open}
-        aria-controls={open ? 'handled-before-items' : undefined}
+        aria-expanded={expanded}
+        aria-controls={expanded ? 'handled-before-items' : undefined}
         onClick={onToggle}
-        className="w-full flex items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+        disabled={count === 0}
+        className="w-full flex items-center gap-1.5 py-1 text-xs text-muted-foreground enabled:hover:text-foreground disabled:cursor-default transition-colors"
       >
-        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
         <History className="h-3 w-3" />
         {handledBeforeCountText(count)}
       </button>
-      {open && (
+      {expanded && (
         <div id="handled-before-items" className="space-y-2 pt-2">
           {children}
         </div>
@@ -303,14 +329,15 @@ function ConsolidatedReportItem({
   isSelected,
   onClick,
   switchState,
-  handledBefore = false,
+  handling,
   countTruncated = false,
 }: {
   consolidated: ConsolidatedReport;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
-  handledBefore?: boolean;
+  // The row's standing; tagged only when 'handled_before'.
+  handling?: HandlingVerdict;
   // The reports of this target may be more than the count: the read that
   // loaded them stopped early. Shown as "N+", as in the open pane.
   countTruncated?: boolean;
@@ -361,7 +388,7 @@ function ConsolidatedReportItem({
               {consolidated.target.type === 'event' ? 'Event' : 'User'}
             </Badge>
             <SwitchStateBadge state={switchState} />
-            <HandledBeforeBadge show={handledBefore} />
+            <HandledBeforeBadge handling={handling} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -394,13 +421,14 @@ function IndividualReportItem({
   isSelected,
   onClick,
   switchState,
-  handledBefore = false,
+  handling,
 }: {
   report: NostrEvent;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
-  handledBefore?: boolean;
+  // The row's standing; tagged only when 'handled_before'.
+  handling?: HandlingVerdict;
 }) {
   const category = getReportCategory(report);
   const target = getReportTarget(report);
@@ -443,7 +471,7 @@ function IndividualReportItem({
               </Badge>
             )}
             <SwitchStateBadge state={switchState} />
-            <HandledBeforeBadge show={handledBefore} />
+            <HandledBeforeBadge handling={handling} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -1220,17 +1248,22 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // the dated rule answers this). With Hide resolved on, the main list keeps
   // only 'new' targets. The 'handled_before' ones outside the switch are the
   // targets the queue sets apart as already handled; switch members keep their
-  // place behind the switch, whatever their standing.
-  const groupStatusByTarget = useMemo(
-    () => new Map<string, ReportStatus>(
-      allConsolidated.map(c => [reportTargetKey(c.target), groupResolutionStatus(c, resolution)]),
+  // place behind the switch, whatever their standing. Kept as the whole
+  // verdict: a handled-before row also shows and sorts by its ban.
+  const groupVerdictByTarget = useMemo(
+    () => new Map<string, HandlingVerdict>(
+      allConsolidated.map(c => [reportTargetKey(c.target), groupResolutionVerdict(c, resolution)]),
     ),
     [allConsolidated, resolution],
   );
+  const groupVerdictOf = useCallback(
+    (c: ConsolidatedReport): HandlingVerdict =>
+      groupVerdictByTarget.get(reportTargetKey(c.target)) ?? groupResolutionVerdict(c, resolution),
+    [groupVerdictByTarget, resolution],
+  );
   const groupStatusOf = useCallback(
-    (c: ConsolidatedReport): ReportStatus =>
-      groupStatusByTarget.get(reportTargetKey(c.target)) ?? groupResolutionStatus(c, resolution),
-    [groupStatusByTarget, resolution],
+    (c: ConsolidatedReport): ReportStatus => groupVerdictOf(c).status,
+    [groupVerdictOf],
   );
 
   // The reports the switch classifies: the needs-attention feed plus deep-linked
@@ -1355,12 +1388,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     });
 
+    items = withBannedLast(items, groupVerdictOf);
     if (!splitHandledBefore) return { consolidated: items, handledBeforeConsolidated: [] };
     return {
       consolidated: items.filter(c => groupStatusOf(c) === 'new'),
       handledBeforeConsolidated: items.filter(c => groupStatusOf(c) === 'handled_before'),
     };
-  }, [allConsolidated, hideResolved, showPendingReview, groupStatusOf, switchMembership, filterCategory, filterTargetType, sortBy]);
+  }, [allConsolidated, hideResolved, showPendingReview, groupStatusOf, groupVerdictOf, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const authorByTarget = useMemo(() => new Map(
     allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
@@ -1385,7 +1419,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // row (the grouped tab by the target's group, the All tab by the report
   // itself), so the pane and the queue cannot disagree. Undefined for any
   // other report, and always against a worker without handling dates.
-  const selectedHandledBefore = useMemo<HandlingEntry['history'] | undefined>(() => {
+  const selectedHandledBefore = useMemo<HandledBeforeView | undefined>(() => {
     if (resolution.rule !== 'dated' || !selectedReport) return undefined;
     let verdict: HandlingVerdict | undefined;
     if (viewMode === 'consolidated') {
@@ -1404,18 +1438,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         );
       }
     }
-    return verdict?.status === 'handled_before' ? verdict.entry?.history : undefined;
+    return handledBeforeView(verdict);
   }, [resolution, selectedReport, viewMode, selectedPaneGroup, authorByTarget]);
 
   // Each listed report's own standing, by `resolution`, for the All tab: its
   // place (main list or section), its tag, and the resolved count read it.
   // Each report by its own time (#324): its arrival by id, else its created_at.
-  const reportStatusById = useMemo(() => {
-    const statuses = new Map<string, ReportStatus>();
+  const reportVerdictById = useMemo(() => {
+    const verdicts = new Map<string, HandlingVerdict>();
     for (const report of listReports ?? []) {
       const target = getReportTarget(report);
       if (!target) continue;
-      statuses.set(report.id, reportResolutionStatus(
+      verdicts.set(report.id, reportResolutionVerdict(
         {
           target,
           authorPubkey: authorByTarget.get(reportTargetKey(target)),
@@ -1425,7 +1459,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         resolution,
       ));
     }
-    return statuses;
+    return verdicts;
   }, [listReports, authorByTarget, resolution]);
 
   // Filter individual reports when hideResolved is on. Placed as targets are
@@ -1453,7 +1487,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       // (#324). Those newer than a handling go to the section, below.
       // Reports without targets have no standing and stay.
       if (hideResolved) {
-        items = items.filter(report => reportStatusById.get(report.id) !== 'handled');
+        items = items.filter(report => reportVerdictById.get(report.id)?.status !== 'handled');
       }
     }
 
@@ -1499,12 +1533,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     });
 
+    items = withBannedLast(items, report => reportVerdictById.get(report.id));
     if (!splitHandledBefore) return { filteredReports: items, handledBeforeReports: [] };
     return {
-      filteredReports: items.filter(report => reportStatusById.get(report.id) !== 'handled_before'),
-      handledBeforeReports: items.filter(report => reportStatusById.get(report.id) === 'handled_before'),
+      filteredReports: items.filter(report => reportVerdictById.get(report.id)?.status !== 'handled_before'),
+      handledBeforeReports: items.filter(report => reportVerdictById.get(report.id)?.status === 'handled_before'),
     };
-  }, [listReports, hideResolved, showPendingReview, reportStatusById, switchMembership, filterCategory, filterTargetType, sortBy]);
+  }, [listReports, hideResolved, showPendingReview, reportVerdictById, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
@@ -1547,11 +1582,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     ? consolidated.filter(c => isListedTargetResolved(c.target, groupStatusOf(c))).length
     : filteredReports.filter(report => {
         const target = getReportTarget(report);
-        const status = reportStatusById.get(report.id);
+        const status = reportVerdictById.get(report.id)?.status;
         if (!target || !status) return false;
         return isListedTargetResolved(target, status);
       }).length,
-  [viewMode, consolidated, filteredReports, isListedTargetResolved, groupStatusOf, reportStatusById]);
+  [viewMode, consolidated, filteredReports, isListedTargetResolved, groupStatusOf, reportVerdictById]);
 
   // The failure a failed Load more left (see refreshFailed), remembered against
   // the cached query's own error: src/lib/loadMoreFailure.ts says why it is not
@@ -1637,7 +1672,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // hidden from the list while its detail pane is open.
   //
   // Scoped to DEEP-LINK selections only. Unscoped, this fights the moderator:
-  // the resolution state (then `resolvedTargets`, now `groupStatusByTarget`)
+  // the resolution state (then `resolvedTargets`, now `groupVerdictByTarget`)
   // is a dependency and changes on every poll and after every
   // action, so opening a report and actioning it force-cleared Hide resolved
   // underneath them, and clicking it back on re-ran the same branch and cleared
@@ -1657,7 +1692,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     const target = getReportTarget(selectedReport);
     if (!target) return;
     const key = reportTargetKey(target);
-    const status = groupStatusByTarget.get(key) ?? reportResolutionStatus(
+    const status = groupVerdictByTarget.get(key)?.status ?? reportResolutionStatus(
       { target, authorPubkey: authorByTarget.get(key), id: selectedReport.id, created_at: selectedReport.created_at },
       resolution,
     );
@@ -1665,7 +1700,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       hideResolvedBeforeCourtesyRef.current = hideResolved;
       setHideResolved(false);
     }
-  }, [hideResolved, selectedReport, groupStatusByTarget, resolution, authorByTarget, switchMembershipKnown]);
+  }, [hideResolved, selectedReport, groupVerdictByTarget, resolution, authorByTarget, switchMembershipKnown]);
 
   // Memoized because the deep-link effect below depends on it; it reads
   // hideResolved, filterCategory and filterTargetType, so it changes only when
@@ -2160,7 +2195,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         targetLeftList={selectedTargetLeftList}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
-        handledBeforeHistory={selectedHandledBefore}
+        handledBefore={selectedHandledBefore}
       />
     </ErrorBoundary>
   );
@@ -2171,6 +2206,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       <p className="text-sm">No reports found</p>
     </div>
   );
+
+  // The handled-before section shows with Hide resolved on in the default view.
+  // Under the dated rule it shows even at none (spec decision 6: the count
+  // always shows). Against a worker without handling dates nothing is ever
+  // handled before, so a count of none would say nothing, and it stays away.
+  const showHandledBeforeSection = (count: number) =>
+    !showPendingReview && hideResolved && (count > 0 || resolution.rule === 'dated');
 
   // One row each, wherever it is listed: the main list, the handled-before
   // section, or behind the switch. The tag follows the row's own standing.
@@ -2183,7 +2225,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         isSelected={selectedReport?.id === item.latestReport.id}
         onClick={() => handleSelectReport(item.latestReport)}
         switchState={switchMembership.get(key)}
-        handledBefore={groupStatusOf(item) === 'handled_before'}
+        handling={groupVerdictOf(item)}
         countTruncated={key === selectedSwitchKey
           ? selectedTargetCountTruncated
           : targetCountTruncated(key)}
@@ -2200,7 +2242,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         isSelected={selectedReport?.id === report.id}
         onClick={() => handleSelectReport(report)}
         switchState={key ? switchMembership.get(key) : undefined}
-        handledBefore={reportStatusById.get(report.id) === 'handled_before'}
+        handling={reportVerdictById.get(report.id)}
       />
     );
   };
@@ -2530,7 +2572,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   ) : (
                     consolidated.map(renderConsolidatedRow)
                   )}
-                  {handledBeforeConsolidated.length > 0 && (
+                  {showHandledBeforeSection(handledBeforeConsolidated.length) && (
                     <HandledBeforeSection
                       count={handledBeforeConsolidated.length}
                       open={handledBeforeOpen}
@@ -2547,7 +2589,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   ) : (
                     filteredReports.map(renderIndividualRow)
                   )}
-                  {handledBeforeReports.length > 0 && (
+                  {showHandledBeforeSection(handledBeforeReports.length) && (
                     <HandledBeforeSection
                       count={handledBeforeReports.length}
                       open={handledBeforeOpen}

@@ -8,7 +8,7 @@ import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { consolidateReports } from '@/lib/consolidateReports';
-import { datedHandling, groupResolutionStatus, reportResolutionStatus } from '@/lib/reportResolution';
+import { datedHandling, groupResolutionVerdict, reportResolutionVerdict } from '@/lib/reportResolution';
 import { Reports } from './Reports';
 
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
@@ -24,8 +24,8 @@ vi.mock('@/lib/reportResolution', async importOriginal => {
   // should rebuild.
   return {
     ...actual,
-    groupResolutionStatus: vi.fn(actual.groupResolutionStatus),
-    reportResolutionStatus: vi.fn(actual.reportResolutionStatus),
+    groupResolutionVerdict: vi.fn(actual.groupResolutionVerdict),
+    reportResolutionVerdict: vi.fn(actual.reportResolutionVerdict),
     datedHandling: vi.fn(actual.datedHandling),
   };
 });
@@ -104,15 +104,15 @@ describe('grouping the needs-attention feed', () => {
     renderQueue();
     expect(await screen.findByText(nip19.noteEncode(FIRST_EVENT))).toBeInTheDocument();
     expect(screen.getByText('just now')).toBeInTheDocument();
-    expect(vi.mocked(groupResolutionStatus)).toHaveBeenCalled();
+    expect(vi.mocked(groupResolutionVerdict)).toHaveBeenCalled();
 
-    vi.mocked(groupResolutionStatus).mockClear();
-    vi.mocked(reportResolutionStatus).mockClear();
+    vi.mocked(groupResolutionVerdict).mockClear();
+    vi.mocked(reportResolutionVerdict).mockClear();
     await act(async () => { vi.advanceTimersByTime(5000); });
 
     expect(screen.getByText('5s ago')).toBeInTheDocument();
-    expect(vi.mocked(groupResolutionStatus)).not.toHaveBeenCalled();
-    expect(vi.mocked(reportResolutionStatus)).not.toHaveBeenCalled();
+    expect(vi.mocked(groupResolutionVerdict)).not.toHaveBeenCalled();
+    expect(vi.mocked(reportResolutionVerdict)).not.toHaveBeenCalled();
   });
 
   // The handled-before rule (#324) reads every decision row on record. A feed
@@ -144,12 +144,12 @@ describe('grouping the needs-attention feed', () => {
     expect(vi.mocked(datedHandling)).toHaveBeenCalled();
 
     vi.mocked(datedHandling).mockClear();
-    vi.mocked(groupResolutionStatus).mockClear();
+    vi.mocked(groupResolutionVerdict).mockClear();
     await act(async () => { await queryClient.refetchQueries({ queryKey: ['reports', 'wss://relay.example'] }); });
 
     // The poll did land and was read: the rows were re-dated by it.
     expect(polls).toBeGreaterThan(1);
-    await waitFor(() => expect(vi.mocked(groupResolutionStatus)).toHaveBeenCalled());
+    await waitFor(() => expect(vi.mocked(groupResolutionVerdict)).toHaveBeenCalled());
     expect(vi.mocked(datedHandling)).not.toHaveBeenCalled();
   });
 });

@@ -395,7 +395,8 @@ describe('Reports sensitive pending-review switch', () => {
       await screen.findByText(NOTE_SPAM);
       await waitFor(() => expect(switchLabelText()).toBe('Pending review (sensitive)1'));
       expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
-      expect(screen.queryByRole('button', { name: /already handled/ })).not.toBeInTheDocument();
+      // The section's count, which always shows under this rule, does not count it.
+      expect(screen.getByRole('button', { name: '0 new on items already handled' })).toBeInTheDocument();
 
       await turnSwitchOn(user);
       expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();

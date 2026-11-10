@@ -66,7 +66,7 @@ import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
-import type { HandlingEntry } from "../../shared/handling";
+import { handledBeforeBanText, type HandledBeforeView } from "@/lib/reportResolution";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getKindLabel(kind: number): string {
@@ -106,15 +106,16 @@ interface ReportDetailProps {
   switchState?: SwitchState;
   // Set only when the queue counts this report as handled before (#324): a
   // person handled its item, then this report came. The history of that
-  // handling, newest first, as the queue read it (shared/handling.ts), so the
-  // pane and the queue row cannot disagree. The history card then lists it.
-  handledBeforeHistory?: HandlingEntry['history'];
+  // handling (newest first), whose it is, and a relay ban on the account or
+  // the post's author, as the queue read them, so the pane and the queue row
+  // cannot disagree. The Handled before card lists it.
+  handledBefore?: HandledBeforeView;
 }
 
 const ACCOUNT_HANDLED_BEFORE_PROMPT =
   "This account was handled before. Does this report, with the account's current state, change the call?";
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBeforeHistory }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBefore }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
@@ -251,6 +252,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
   // The banner names what handled the report, not a skip logged after it.
   const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
+
+  // The decision log card's "Already Handled" title and colour.
+  const showAlreadyHandled = decisionLog.hasHandlingDecisions && !handledBefore;
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
@@ -969,8 +973,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           {/* Handled before (#324): a person handled this item, then this
               report came. Every entry of that handling's history, dated,
               reopens and reversals included, and for an account a prompt to
-              look again at its current state. */}
-          {handledBeforeHistory && (
+              look again at its current state. The decision log card stays
+              below it for the reasons and the rows that handle nothing. */}
+          {handledBefore && (
             <Card className="border-amber-200 bg-amber-50/50 dark:bg-amber-950/20">
               <CardHeader className="py-3">
                 <CardTitle className="text-sm flex items-center gap-2 text-amber-700 dark:text-amber-400">
@@ -979,11 +984,20 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 </CardTitle>
               </CardHeader>
               <CardContent className="py-0 pb-3 space-y-2">
+                {handledBefore.ban && (
+                  <Badge variant="outline" className="text-xs">
+                    {handledBeforeBanText(handledBefore.ban)}
+                  </Badge>
+                )}
                 {context.target?.type === 'pubkey' && (
                   <p className="text-sm">{ACCOUNT_HANDLED_BEFORE_PROMPT}</p>
                 )}
+                {/* Through the post's banned author: not the post's own handling. */}
+                {handledBefore.via === 'author' && (
+                  <p className="text-xs text-muted-foreground">History of the post's author</p>
+                )}
                 <div className="space-y-2">
-                  {handledBeforeHistory.map((entry, i) => (
+                  {handledBefore.history.map((entry, i) => (
                     <div
                       key={i}
                       data-testid="handled-before-entry"
@@ -1002,13 +1016,15 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             </Card>
           )}
 
-          {/* Decision History - show if target already has decisions */}
-          {!handledBeforeHistory && decisionLog.hasDecisions && (
-            <Card className={decisionLog.hasHandlingDecisions ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
+          {/* Decision History - show if target already has decisions. For a
+              report handled before (#324) it is never "Already Handled": this
+              report is the one no one has answered. */}
+          {decisionLog.hasDecisions && (
+            <Card className={showAlreadyHandled ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
               <CardHeader className="py-3">
-                <CardTitle className={`text-sm flex items-center gap-2 ${decisionLog.hasHandlingDecisions ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
+                <CardTitle className={`text-sm flex items-center gap-2 ${showAlreadyHandled ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
                   <History className="h-4 w-4" />
-                  {decisionLog.hasHandlingDecisions ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
+                  {showAlreadyHandled ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
                 </CardTitle>
               </CardHeader>
               <CardContent className="py-0 pb-3">

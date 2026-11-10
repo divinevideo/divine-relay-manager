@@ -52,8 +52,6 @@ export function useDecisionLog(targetId: string | null | undefined) {
     d => isHumanHandling(d) || PANE_HANDLING_AUTO_HIDE_ACTIONS.includes(d.action),
   );
   const hasHandlingDecisions = latestHandlingDecision !== undefined;
-  // Reopened, and no one has handled the target since.
-  const isReopened = reopenIndex !== -1 && !hasHandlingDecisions;
 
   // Get the most recent decision
   const latestDecision = data?.[0];
@@ -91,7 +89,6 @@ export function useDecisionLog(targetId: string | null | undefined) {
     hasDecisions,
     hasHandlingDecisions,
     latestHandlingDecision,
-    isReopened,
     latestDecision,
     isBanned,
     isDeleted,

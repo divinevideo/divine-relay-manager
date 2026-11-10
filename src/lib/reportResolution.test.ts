@@ -4,6 +4,8 @@ import {
   consolidatedStatus,
   datedHandling,
   groupResolutionStatus,
+  handledBeforeBanText,
+  isBanDecision,
   isConsolidatedReportResolved,
   queueResolution,
   reportHandling,
@@ -227,7 +229,7 @@ describe('reportHandling', () => {
 
   it("carries the target's own entry for a report that came after it", () => {
     const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, own]]) });
-    expect(reportHandling(profileReport(150), ctx)).toEqual({ status: 'handled_before', entry: own });
+    expect(reportHandling(profileReport(150), ctx)).toEqual({ status: 'handled_before', entry: own, via: 'own' });
   });
 
   it('carries no entry for a handled or a new report', () => {
@@ -238,7 +240,12 @@ describe('reportHandling', () => {
 
   it("carries the banned author's entry for a post with none of its own", () => {
     const ctx = ctxWith({ bannedPubkeys: new Set([AUTHOR]), handling: new Map([[`pubkey:${AUTHOR}`, authors]]) });
-    expect(reportHandling(eventReport(150, AUTHOR), ctx)).toEqual({ status: 'handled_before', entry: authors });
+    expect(reportHandling(eventReport(150, AUTHOR), ctx)).toEqual({
+      status: 'handled_before',
+      entry: authors,
+      via: 'author',
+      ban: { kind: 'author', since: 120 },
+    });
   });
 
   it("keeps the post's own entry when the author's ban predates the report too", () => {
@@ -246,7 +253,48 @@ describe('reportHandling', () => {
       bannedPubkeys: new Set([AUTHOR]),
       handling: new Map([[`event:${EVENT}`, own], [`pubkey:${AUTHOR}`, authors]]),
     });
-    expect(reportHandling(eventReport(150, AUTHOR), ctx)).toEqual({ status: 'handled_before', entry: own });
+    // The author is still banned, and the report came after that ban too, so
+    // it carries the author's ban (spec decision 3) beside the post's history.
+    expect(reportHandling(eventReport(150, AUTHOR), ctx)).toEqual({
+      status: 'handled_before',
+      entry: own,
+      via: 'own',
+      ban: { kind: 'author', since: 120 },
+    });
+  });
+
+  // Spec decision 5: a banned account's newer reports show, labelled with
+  // the ban's date from the decision log.
+  it('carries the ban of a relay-banned account, dated by its latest dated ban decision', () => {
+    const banned: HandlingEntry = {
+      handledAt: 130,
+      history: [
+        { action: 'reviewed', at: 130 },
+        { action: 'ban_user', at: 120 },
+        { action: 'unban_user', at: 110 },
+        { action: 'ban', at: 100 },
+        { action: 'ban_user', at: null },
+      ],
+    };
+    const ctx = ctxWith({ bannedPubkeys: new Set([PROFILE]), handling: new Map([[`pubkey:${PROFILE}`, banned]]) });
+    expect(reportHandling(profileReport(150), ctx)).toEqual({
+      status: 'handled_before',
+      entry: banned,
+      via: 'own',
+      ban: { kind: 'account', since: 120 },
+    });
+  });
+
+  it('dates a ban the decision log holds no dated ban for as unknown', () => {
+    // The relay lists the ban; the log has only an undated ban row for it.
+    const undatedBan: HandlingEntry = { handledAt: 100, history: [{ action: 'reviewed', at: 100 }, { action: 'ban_user', at: null }] };
+    const ctx = ctxWith({ bannedPubkeys: new Set([PROFILE]), handling: new Map([[`pubkey:${PROFILE}`, undatedBan]]) });
+    expect(reportHandling(profileReport(150), ctx).ban).toEqual({ kind: 'account', since: null });
+  });
+
+  it('carries no ban for an account the relay does not list', () => {
+    const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, authors]]) });
+    expect(reportHandling(profileReport(150), ctx).ban).toBeUndefined();
   });
 
   it('agrees with reportHandlingStatus', () => {
@@ -266,11 +314,33 @@ describe('consolidatedHandling', () => {
   const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, own]]) });
 
   it('carries the entry of the report no one has answered', () => {
-    expect(consolidatedHandling(group([50, 150]), ctx)).toEqual({ status: 'handled_before', entry: own });
+    expect(consolidatedHandling(group([50, 150]), ctx)).toEqual({ status: 'handled_before', entry: own, via: 'own' });
   });
 
   it('carries no entry when every report is handled', () => {
     expect(consolidatedHandling(group([20, 50]), ctx)).toEqual({ status: 'handled' });
+  });
+});
+
+describe('isBanDecision', () => {
+  it('reads the account bans the decision log records', () => {
+    expect(isBanDecision('ban_user')).toBe(true);
+    expect(isBanDecision('ban')).toBe(true);
+    expect(isBanDecision('unban_user')).toBe(false);
+    expect(isBanDecision('ban_event')).toBe(false);
+    expect(isBanDecision('suspend_user')).toBe(false);
+  });
+});
+
+describe('handledBeforeBanText', () => {
+  const day = (at: number) => new Date(at * 1000).toLocaleDateString();
+  it('names the ban and its date', () => {
+    expect(handledBeforeBanText({ kind: 'account', since: 1751000000 })).toBe(`Banned since ${day(1751000000)}`);
+    expect(handledBeforeBanText({ kind: 'author', since: 1751000000 })).toBe(`Author banned since ${day(1751000000)}`);
+  });
+  it('says the date is unknown when the log has none', () => {
+    expect(handledBeforeBanText({ kind: 'account', since: null })).toBe('Banned, date unknown');
+    expect(handledBeforeBanText({ kind: 'author', since: null })).toBe('Author banned, date unknown');
   });
 });
 
