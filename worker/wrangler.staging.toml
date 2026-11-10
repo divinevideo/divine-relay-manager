@@ -130,6 +130,12 @@ KEYCAST_URL = "https://login.staging.divine.video"
 # the frontend's VITE_DIVINE_LOGIN_URL (src/lib/divineLogin.ts): a token from one
 # Keycast fails verification at another, and attribution silently records null.
 MODERATOR_LOGIN_URL = "https://login.divine.video"
+# "true" makes every write from the admin UI need a verified Divine login,
+# checked against MODERATOR_LOGIN_URL. Fails closed: if Keycast can't confirm the
+# login, the action is refused. Turn on once every moderator is confirmed signing
+# in; set back to "false" and redeploy to reopen moderation during an extended
+# Keycast outage. Server callers on an admin key are never affected.
+REQUIRE_MODERATOR_LOGIN = "false"
 PROTECTED_MINOR_REPLACEMENT_ENABLED = "false"
 # Greenlight consent reviewer playback: the dedicated Access application's
 # team domain. CONSENT_ACCESS_AUD is set only once that path-scoped Access

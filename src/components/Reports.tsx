@@ -57,6 +57,7 @@ import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
@@ -107,7 +108,8 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 // and the closed summary. A real button, so the keyboard reaches it, and the
 // whole chip is the target rather than the small X. labelId marks the
 // visible label alone, for a description that should not read "Clear".
-function ActiveCategoryChip({ category, onClear, labelId }: { category: string; onClear: () => void; labelId?: string }) {
+// `name` is the chip's display name (filterCategory holds the name, not a raw spelling).
+function ActiveCategoryChip({ name, onClear, labelId }: { name: string; onClear: () => void; labelId?: string }) {
   return (
     <button
       type="button"
@@ -115,7 +117,7 @@ function ActiveCategoryChip({ category, onClear, labelId }: { category: string; 
       className={cn(badgeVariants({ variant: 'default' }), 'cursor-pointer pr-1')}
     >
       <span className="sr-only">Clear category filter: </span>
-      <span id={labelId}>{getCategoryLabel(category)}</span>
+      <span id={labelId}>{name}</span>
       <X className="h-3 w-3 ml-1" aria-hidden="true" />
     </button>
   );
@@ -1042,14 +1044,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     ? Math.max(...activeTruncationBounds)
     : null;
 
-  // Get all unique categories from reports for filter chips
+  // Filter chips, one per category name. filterCategory holds the chip's name,
+  // so picking it matches every spelling clients send for that category.
   const availableCategories = useMemo(() => {
     if (!listReports) return [];
-    const categories = new Set<string>();
-    for (const report of listReports) {
-      categories.add(getReportCategory(report));
-    }
-    return Array.from(categories).sort();
+    return categoryChips(listReports.map(report => getReportCategory(report)));
   }, [listReports]);
 
   // The needs-attention feed plus deep-linked reports (`reports`), grouped,
@@ -1130,7 +1129,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Filter by category
     if (filterCategory) {
-      items = items.filter(c => c.categories.includes(filterCategory));
+      items = items.filter(c => c.categories.some(cat => categoryMatchesChip(cat, filterCategory)));
     }
 
     // Filter by target type
@@ -1243,7 +1242,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Filter by category
     if (filterCategory) {
-      items = items.filter(report => getReportCategory(report) === filterCategory);
+      items = items.filter(report => categoryMatchesChip(getReportCategory(report), filterCategory));
     }
 
     // Filter by target type
@@ -2070,7 +2069,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                     {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
                   </span>
                   {filterCategory && (
-                    <ActiveCategoryChip category={filterCategory} onClear={clearCategory} labelId="filters-summary-category" />
+                    <ActiveCategoryChip name={filterCategory} onClear={clearCategory} labelId="filters-summary-category" />
                   )}
                 </div>
               )}
@@ -2149,19 +2148,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   <Label className="text-xs text-muted-foreground">Category</Label>
                   <div className="flex flex-wrap gap-1">
                     {filterCategory && (
-                      <ActiveCategoryChip category={filterCategory} onClear={clearCategory} />
+                      <ActiveCategoryChip name={filterCategory} onClear={clearCategory} />
                     )}
-                    {!filterCategory && availableCategories.map(cat => (
+                    {!filterCategory && availableCategories.map(chip => (
                       <Badge
-                        key={cat}
-                        variant={HIGH_PRIORITY_CATEGORIES.includes(cat) ? 'destructive' : 'outline'}
+                        key={chip.label}
+                        variant={chip.highPriority ? 'destructive' : 'outline'}
                         className="text-xs cursor-pointer hover:bg-muted"
-                        onClick={() => setFilterCategory(cat)}
+                        onClick={() => setFilterCategory(chip.label)}
                       >
-                        {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
+                        {chip.highPriority && (
                           <AlertTriangle className="h-3 w-3 mr-1" />
                         )}
-                        {getCategoryLabel(cat)}
+                        {chip.label}
                       </Badge>
                     ))}
                   </div>

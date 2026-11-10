@@ -11,6 +11,14 @@ export interface ModeratorLoginEnv {
    * another, and every decision then records no moderator, with no error shown.
    */
   MODERATOR_LOGIN_URL?: string;
+  /**
+   * "true" makes every write from the admin UI need a verified login
+   * (needsModeratorLogin). Anything else leaves writes open and unattributed
+   * when there is no login. Off by default so it can be turned on once every
+   * moderator is confirmed signing in, and turned off again without a code
+   * change if Keycast has an extended outage.
+   */
+  REQUIRE_MODERATOR_LOGIN?: string;
 }
 
 const HEX_64 = /^[0-9a-f]{64}$/;
@@ -127,4 +135,37 @@ export function requireVerifiedModerator(
     );
   }
   return { pubkey: verified };
+}
+
+/** True only for the exact setting "true", so a typo leaves enforcement off, never half on. */
+export function moderatorLoginRequired(env: ModeratorLoginEnv): boolean {
+  return env.REQUIRE_MODERATOR_LOGIN === 'true';
+}
+
+// POST routes that only read. Everything else that isn't GET or HEAD is a
+// write, so a new route needs a login unless it is added here on purpose.
+const READ_ONLY_POSTS = new Set(['/api/summarize-user', '/api/moderate-media/lift-check']);
+
+// NIP-86 reads: list* and get* methods, plus supportedmethods. Exact lowercase
+// names only; anything else is treated as a write.
+const RELAY_READ_METHOD = /^(list[a-z]+|get[a-z]+|supportedmethods)$/;
+
+/**
+ * Whether a request changes something, and so needs a verified moderator login
+ * when REQUIRE_MODERATOR_LOGIN is on. Reads the relay-rpc method from a clone,
+ * leaving the body for the handler. A relay-rpc body that can't be read counts
+ * as a write: refusing it costs nothing, the handler would reject it anyway.
+ */
+export async function needsModeratorLogin(request: Request, path: string): Promise<boolean> {
+  if (request.method === 'GET' || request.method === 'HEAD') return false;
+  if (READ_ONLY_POSTS.has(path)) return false;
+  if (path === '/api/relay-rpc') {
+    try {
+      const body = (await request.clone().json()) as { method?: unknown };
+      return !(typeof body.method === 'string' && RELAY_READ_METHOD.test(body.method));
+    } catch {
+      return true;
+    }
+  }
+  return true;
 }

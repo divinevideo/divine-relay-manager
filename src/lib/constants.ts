@@ -25,6 +25,7 @@ const LABELS: Record<string, string> = {
   'NS-sexualContent': 'Sexual Content',
   'NS-sexual-content': 'Sexual Content',
   'NS-copyright': 'Copyright',
+  'NS-impersonation': 'Impersonation',
   'NS-falseInformation': 'Misinformation',
   'NS-false-information': 'Misinformation',
   'NS-aiGenerated': 'AI Generated',

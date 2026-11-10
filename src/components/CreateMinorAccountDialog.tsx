@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useToast } from "@/hooks/useToast";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -16,6 +17,7 @@ import { CopyableId } from "@/components/CopyableId";
 
 export function CreateMinorAccountDialog() {
   const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const [open, setOpen] = useState(false);
@@ -28,7 +30,8 @@ export function CreateMinorAccountDialog() {
   const createAccount = useMutation({
     mutationFn: () => {
       const ticketId = zendeskTicketId ? parseInt(zendeskTicketId, 10) : undefined;
-      return api.createMinorAccount(username.trim(), displayName.trim() || undefined, ticketId, provisioningOperationId);
+      return api.asModerator(getModeratorToken()) // take the login at the click
+        .createMinorAccount(username.trim(), displayName.trim() || undefined, ticketId, provisioningOperationId);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['age-review-cases'] });

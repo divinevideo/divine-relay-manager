@@ -9,12 +9,13 @@ import * as adminApi from '@/lib/adminApi';
  * Hook that provides admin API functions pre-bound to the current environment's apiUrl.
  * Components using this hook automatically use the correct worker based on the selected environment.
  *
- * The plain result has the reads only. Every call that records who acted
- * (ban, delete, label, decision log, and the rest) is reachable only through
- * `asModerator(token)`, so tsc rejects a moderation action made without the
- * moderator's login. callRelayRpc stays on the plain result for reads such as
- * RelaySettings' relay-config methods; an account action through it still
- * goes through asModerator.
+ * The plain result has the reads only. Every write (ban, delete, label,
+ * decision log, media actions, settings, and the rest) is reachable only
+ * through `asModerator(token)`, so tsc rejects a write made without the
+ * moderator's login: the worker records the moderator from it, and refuses a
+ * write without it once REQUIRE_MODERATOR_LOGIN is on. callRelayRpc stays on
+ * the plain result for relay reads (list*, get*); a relay write goes through
+ * asModerator.
  *
  * @example
  * ```tsx
@@ -36,8 +37,8 @@ export function useAdminApi(): PlainAdminApi {
     // Sends no login header. Kept for reads; see the hook doc.
     callRelayRpc: buildAttributionApi(apiUrl).callRelayRpc,
     /**
-     * The same API with the moderator's login token bound to every call that
-     * records who acted. Take the token once at the click
+     * The same API with the moderator's login token bound to every write. Take
+     * the token once at the click
      * (`api.asModerator(getModeratorToken())`) and use the result for every
      * request in that action, so a sign-out or account switch mid-action
      * cannot change who it is recorded as.
@@ -66,8 +67,10 @@ export function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: str
 }
 
 /**
- * Every call that writes an attribution. They pass `{ loginToken }` on here, in
- * one place, so a caller cannot forget it, and `login` is in scope nowhere else,
+ * Every call that writes: those that record a moderator, and every other write,
+ * since REQUIRE_MODERATOR_LOGIN refuses a write without a login. They pass
+ * `{ loginToken }` on here, in one place, so a caller cannot forget it, and
+ * `login` is in scope nowhere else,
  * so a new call that needs it has to be added here, which also keeps it off the
  * plain api. useAdminApi.attribution.test.ts holds a row per call; a new one
  * belongs there too.
@@ -131,6 +134,25 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
     // Age review
     updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>
       adminApi.updateAgeReviewCase(apiUrl, caseId, updates, login),
+    updateAgeReviewConfig: (config: Partial<adminApi.AgeReviewConfig>) =>
+      adminApi.updateAgeReviewConfig(apiUrl, config, login),
+    createMinorAccount: (username: string, displayName?: string, zendeskTicketId?: number, provisioningOperationId?: string) =>
+      adminApi.createMinorAccount(apiUrl, username, displayName, zendeskTicketId, provisioningOperationId, login),
+
+    // Media moderation. /api/moderate-media records no moderator, but it is a
+    // write, so it needs the login once REQUIRE_MODERATOR_LOGIN is on.
+    moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string, from?: adminApi.ExpectedMediaState, pubkey?: string) =>
+      adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey, login),
+    deleteMedia: (sha256: string, reason?: string) =>
+      adminApi.deleteMedia(apiUrl, sha256, reason, login),
+    unblockMedia: (sha256: string, reason?: string) =>
+      adminApi.unblockMedia(apiUrl, sha256, reason, login),
+
+    // Decision log cleanup and AI detection: writes, so they carry the login too.
+    deleteDecisions: (targetId: string, targetType?: 'event' | 'pubkey') =>
+      adminApi.deleteDecisions(apiUrl, targetId, targetType, login),
+    submitAIDetection: (videoUrl: string, sha256: string, eventId?: string) =>
+      adminApi.submitAIDetection(apiUrl, videoUrl, sha256, eventId, login),
 
     // Bulk moderation
     bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
@@ -142,7 +164,7 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
   };
 }
 
-/** Every call that records no moderator: reads, and writes the worker does not attribute. */
+/** Reads only. Every write lives in buildAttributionApi, so it carries the login. */
 function buildReadApi(apiUrl: string, relayUrl: string) {
   return {
     getSexualQuarantineCases: (cursor?: string) => adminApi.getSexualQuarantineCases(apiUrl, cursor),
@@ -177,20 +199,14 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
       adminApi.fetchResolutionLabelTargets(apiUrl, opts),
 
     // Media moderation
-    moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string, from?: adminApi.ExpectedMediaState, pubkey?: string) =>
-      adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey),
     readMediaStatus: (sha256: string) =>
       adminApi.readMediaStatus(apiUrl, sha256),
-    unblockMedia: (sha256: string, reason?: string) =>
-      adminApi.unblockMedia(apiUrl, sha256, reason),
 
     // Decision log
     getDecisions: (targetId: string) =>
       adminApi.getDecisions(apiUrl, targetId),
     getAllDecisions: (opts?: { timeoutMs?: number }) =>
       adminApi.getAllDecisions(apiUrl, opts),
-    deleteDecisions: (targetId: string, targetType?: 'event' | 'pubkey') =>
-      adminApi.deleteDecisions(apiUrl, targetId, targetType),
 
     // Classifier data (scene classification + topic profile)
     getClassifierData: (sha256: string) =>
@@ -199,8 +215,6 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     // AI Detection (proxied through worker to handle CF Access)
     getAIDetectionResult: (eventId: string) =>
       adminApi.getAIDetectionResult(apiUrl, eventId),
-    submitAIDetection: (videoUrl: string, sha256: string, eventId?: string) =>
-      adminApi.submitAIDetection(apiUrl, videoUrl, sha256, eventId),
 
     // Verification
     verifyPubkeyBanned: (pubkey: string) =>
@@ -236,17 +250,9 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     getAgeReviewBulkNotesJob: (caseId: string) => adminApi.getAgeReviewBulkNotesJob(apiUrl, caseId),
     getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
 
-    // Delete operations
-    deleteMedia: (sha256: string, reason?: string) =>
-      adminApi.deleteMedia(apiUrl, sha256, reason),
-
     // Age review config
     getAgeReviewConfig: () =>
       adminApi.getAgeReviewConfig(apiUrl),
-    updateAgeReviewConfig: (config: Partial<adminApi.AgeReviewConfig>) =>
-      adminApi.updateAgeReviewConfig(apiUrl, config),
-    createMinorAccount: (username: string, displayName?: string, zendeskTicketId?: number, provisioningOperationId?: string) =>
-      adminApi.createMinorAccount(apiUrl, username, displayName, zendeskTicketId, provisioningOperationId),
 
     // Zendesk tickets linked to a report target
     getLinkedTickets: (target: { eventId?: string; pubkey?: string }) =>

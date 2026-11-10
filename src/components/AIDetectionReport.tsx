@@ -33,6 +33,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useToast } from "@/hooks/useToast";
 import type {
   AIDetectionResult,
@@ -268,7 +269,9 @@ export function AIDetectionReport({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const queryClient = useQueryClient();
   const { toast } = useToast();
-  const { getAIDetectionResult, submitAIDetection } = useAdminApi();
+  const api = useAdminApi();
+  const { getAIDetectionResult } = api;
+  const { getModeratorToken } = useCurrentUser();
 
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
   const videoUrl = providedVideoUrl || (eventTags ? extractVideoUrlFromTags(eventTags) : null);
@@ -296,7 +299,8 @@ export function AIDetectionReport({
 
     setIsSubmitting(true);
     try {
-      const submitResult = await submitAIDetection(videoUrl, sha256, eventId);
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
+      const submitResult = await act.submitAIDetection(videoUrl, sha256, eventId);
       if (submitResult) {
         // Invalidate and refetch
         queryClient.invalidateQueries({ queryKey: ['ai-detection', eventId] });
