@@ -34,11 +34,9 @@ interface ModerationResult {
     medical?: number;
     gambling?: number;
   };
-  reason?: string;
   // When the record was written, not always a scan: a report writes it and a later
   // report can move it forward, while a moderator action leaves it as it was.
   moderated_at?: string;
-  categoryVerifications?: Record<string, 'confirmed' | 'rejected' | null>;
 }
 
 // Extract sha256 from event tags (x tag, imeta, or URL patterns)
@@ -202,23 +200,14 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
           <div className="space-y-2">
             {significantScores.map(([category, score]) => {
               const config = CATEGORY_CONFIG[category] || { label: category, color: 'bg-gray-500', severity: 1 };
-              const verification = result.categoryVerifications?.[category];
               const percentage = Math.round((score || 0) * 100);
 
               return (
                 <div key={category} className="space-y-1">
                   <div className="flex items-center justify-between text-xs">
-                    <div className="flex items-center gap-2">
-                      <Badge className={`${config.color} text-white text-xs`}>
-                        {config.label}
-                      </Badge>
-                      {verification === 'confirmed' && (
-                        <Badge variant="destructive" className="text-xs">Confirmed</Badge>
-                      )}
-                      {verification === 'rejected' && (
-                        <Badge variant="outline" className="text-xs text-green-600">Rejected</Badge>
-                      )}
-                    </div>
+                    <Badge className={`${config.color} text-white text-xs`}>
+                      {config.label}
+                    </Badge>
                     <span className="text-muted-foreground">{percentage}%</span>
                   </div>
                   <Progress
@@ -231,13 +220,6 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
           </div>
         ) : (
           <p className="text-xs text-muted-foreground">No significant detections</p>
-        )}
-
-        {/* Reason if provided */}
-        {result.reason && (
-          <p className="text-xs text-muted-foreground border-t pt-2">
-            {result.reason}
-          </p>
         )}
 
         {/* Timestamp */}
