@@ -162,6 +162,20 @@ describe('Filters toggle', () => {
 
     expect(within(chips).queryByRole('button', { name: /clear category filter/i })).not.toBeInTheDocument();
     expect(within(chips).getByText('Spam')).toBeInTheDocument();
+    expect(await filtersToggle()).toHaveFocus();
+  });
+
+  it('puts focus back on Filters after the summary clears the category', async () => {
+    const user = userEvent.setup();
+    renderReports();
+    const label = await screen.findByText('Category');
+    await user.click(within(label.nextElementSibling as HTMLElement).getByText('Spam'));
+    await user.click(await filtersToggle());
+
+    screen.getByRole('button', { name: 'Clear category filter: Spam' }).focus();
+    await user.keyboard('{Enter}');
+
+    expect(await filtersToggle()).toHaveFocus();
   });
 
   it('remembers that it was closed', async () => {

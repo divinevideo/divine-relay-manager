@@ -398,6 +398,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     setFiltersOpen(open);
     writeFiltersOpen(open);
   };
+  // Clearing removes the chip that held focus. Hand focus to the Filters
+  // toggle, which is rendered open or closed, rather than letting it drop to
+  // the page.
+  const filtersToggleRef = useRef<HTMLButtonElement>(null);
+  const clearCategory = () => {
+    setFilterCategory(null);
+    filtersToggleRef.current?.focus();
+  };
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
   // The resolution sources a moderator has explicitly chosen to proceed without.
   // A Set rather than a boolean: the blocked pane names the sources it is
@@ -2033,7 +2041,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           <Collapsible open={filtersOpen} onOpenChange={onFiltersOpenChange} className="mt-3 pt-3 border-t">
             <div className="flex items-center gap-2 min-w-0">
               <CollapsibleTrigger asChild>
-                <Button variant="ghost" size="sm" className="h-7 px-1 -ml-1 text-xs font-medium shrink-0">
+                <Button ref={filtersToggleRef} variant="ghost" size="sm" className="h-7 px-1 -ml-1 text-xs font-medium shrink-0">
                   <ChevronDown className={`h-3 w-3 mr-1 transition-transform motion-reduce:transition-none ${filtersOpen ? '' : '-rotate-90'}`} />
                   Filters
                 </Button>
@@ -2045,7 +2053,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                     {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
                   </span>
                   {filterCategory && (
-                    <ActiveCategoryChip category={filterCategory} onClear={() => setFilterCategory(null)} />
+                    <ActiveCategoryChip category={filterCategory} onClear={clearCategory} />
                   )}
                 </div>
               )}
@@ -2124,7 +2132,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   <Label className="text-xs text-muted-foreground">Category</Label>
                   <div className="flex flex-wrap gap-1">
                     {filterCategory && (
-                      <ActiveCategoryChip category={filterCategory} onClear={() => setFilterCategory(null)} />
+                      <ActiveCategoryChip category={filterCategory} onClear={clearCategory} />
                     )}
                     {!filterCategory && availableCategories.map(cat => (
                       <Badge
