@@ -145,10 +145,23 @@ describe('Filters toggle', () => {
     expect(summary).toHaveTextContent('Events');
     expect(summary).toHaveTextContent('Spam');
 
-    await user.click(screen.getByRole('button', { name: 'Clear category filter' }));
+    await user.click(screen.getByRole('button', { name: 'Clear category filter: Spam' }));
     expect(screen.getByTestId('filters-summary')).not.toHaveTextContent('Spam');
     // Still closed: clearing from the summary doesn't open the panel.
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'false');
+  });
+
+  it('clears the category from the open panel with a button', async () => {
+    const user = userEvent.setup();
+    renderReports();
+    const label = await screen.findByText('Category');
+    const chips = label.nextElementSibling as HTMLElement;
+    await user.click(within(chips).getByText('Spam'));
+
+    await user.click(within(chips).getByRole('button', { name: 'Clear category filter: Spam' }));
+
+    expect(within(chips).queryByRole('button', { name: /clear category filter/i })).not.toBeInTheDocument();
+    expect(within(chips).getByText('Spam')).toBeInTheDocument();
   });
 
   it('remembers that it was closed', async () => {

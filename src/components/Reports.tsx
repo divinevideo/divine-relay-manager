@@ -9,6 +9,8 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { badgeVariants } from "@/components/ui/badge-variants";
+import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -100,6 +102,23 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'oldest', label: 'Oldest First' },
   { value: 'category', label: 'By Category' },
 ];
+
+// The chosen category as a chip that clears it, the same in the open panel
+// and the closed summary. A real button, so the keyboard reaches it, and the
+// whole chip is the target rather than the small X.
+function ActiveCategoryChip({ category, onClear }: { category: string; onClear: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      className={cn(badgeVariants({ variant: 'default' }), 'cursor-pointer pr-1')}
+    >
+      <span className="sr-only">Clear category filter: </span>
+      {getCategoryLabel(category)}
+      <X className="h-3 w-3 ml-1" aria-hidden="true" />
+    </button>
+  );
+}
 
 // The Filters section's open state, per browser. Open unless the moderator
 // closed it. Storage can throw (private mode, storage disabled): then it opens
@@ -2026,17 +2045,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                     {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
                   </span>
                   {filterCategory && (
-                    <Badge variant="default" className="text-xs pr-1">
-                      {getCategoryLabel(filterCategory)}
-                      <button
-                        type="button"
-                        aria-label="Clear category filter"
-                        className="ml-1 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
-                        onClick={() => setFilterCategory(null)}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
-                    </Badge>
+                    <ActiveCategoryChip category={filterCategory} onClear={() => setFilterCategory(null)} />
                   )}
                 </div>
               )}
@@ -2115,14 +2124,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   <Label className="text-xs text-muted-foreground">Category</Label>
                   <div className="flex flex-wrap gap-1">
                     {filterCategory && (
-                      <Badge
-                        variant="default"
-                        className="text-xs cursor-pointer pr-1"
-                        onClick={() => setFilterCategory(null)}
-                      >
-                        {getCategoryLabel(filterCategory)}
-                        <X className="h-3 w-3 ml-1" />
-                      </Badge>
+                      <ActiveCategoryChip category={filterCategory} onClear={() => setFilterCategory(null)} />
                     )}
                     {!filterCategory && availableCategories.map(cat => (
                       <Badge
