@@ -223,15 +223,13 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
         )}
 
         {/* Timestamp */}
-        <div className="flex items-center justify-between text-xs text-muted-foreground border-t pt-2">
-          <div className="flex items-center gap-2">
-            <Clock className="h-3 w-3" />
-            {checkedAt ? (
-              <span>Checked: {formatDate(checkedAt)}</span>
-            ) : (
-              <span>Check time unknown</span>
-            )}
-          </div>
+        <div className="flex items-center gap-2 text-xs text-muted-foreground border-t pt-2">
+          <Clock className="h-3 w-3" />
+          {checkedAt ? (
+            <span>Checked: {formatDate(checkedAt)}</span>
+          ) : (
+            <span>Check time unknown</span>
+          )}
         </div>
 
         {/* Hash reference */}
