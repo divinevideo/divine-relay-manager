@@ -1,11 +1,9 @@
 // ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
-// ABOUTME: Shows confidence scores, classification categories, timestamps, and re-check ability
+// ABOUTME: Shows confidence scores, classification categories and timestamps (read-only)
 
 import { getApiHeaders, type MediaStatusAction } from "@/lib/adminApi";
-import { useState } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -15,13 +13,12 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye, Clock, RefreshCw, Loader2 } from "lucide-react";
+import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye, Clock } from "lucide-react";
 import { CopyableId } from "@/components/CopyableId";
 import { useApiUrl } from "@/hooks/useAdminApi";
 
 interface HiveAIReportProps {
   sha256?: string;
-  videoUrl?: string;
   eventTags?: string[][];
   className?: string;
 }
@@ -112,37 +109,6 @@ const ACTION_CONFIG: Record<string, { label: string; icon: typeof ShieldCheck; c
   PERMANENT_BAN: { label: 'Banned', icon: ShieldX, color: 'text-red-600' },
 };
 
-// Extract video URL from event tags
-function extractVideoUrlFromTags(tags: string[][]): string | null {
-  // Check imeta tags for video URLs
-  for (const tag of tags) {
-    if (tag[0] === 'imeta') {
-      for (let i = 1; i < tag.length; i++) {
-        const part = tag[i];
-        if (part.startsWith('url ')) {
-          const url = part.slice(4);
-          // Match video extensions and divine.video URLs
-          if (/\.(mp4|webm|mov|m4v|avi)(\?|$)/i.test(url) || url.includes('divine.video')) {
-            return url;
-          }
-        }
-      }
-    }
-  }
-
-  // Check url tags
-  for (const tag of tags) {
-    if (tag[0] === 'url' && tag[1]) {
-      const url = tag[1];
-      if (/\.(mp4|webm|mov|m4v|avi|jpg|jpeg|png|gif|webp)(\?|$)/i.test(url) || url.includes('divine.video')) {
-        return url;
-      }
-    }
-  }
-
-  return null;
-}
-
 function formatDate(dateStr: string | undefined): string {
   if (!dateStr) return 'Unknown';
   try {
@@ -158,16 +124,17 @@ function formatDate(dateStr: string | undefined): string {
   }
 }
 
-export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUrl, eventTags, className }: HiveAIReportProps) {
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const queryClient = useQueryClient();
+// Read-only. Re-analysis isn't offered here: moderation-service runs reactive
+// moderation only (its queue skips every scan request) and skips videos that
+// already have a result, so a re-check button could never do anything (#406).
+// The AI detection card is the on-demand check.
+export function HiveAIReport({ sha256: providedSha256, eventTags, className }: HiveAIReportProps) {
   const apiUrl = useApiUrl();
 
   // Determine sha256 from props or tags
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
-  const videoUrl = providedVideoUrl || (eventTags ? extractVideoUrlFromTags(eventTags) : null);
 
-  const { data: result, isLoading, error, refetch } = useQuery({
+  const { data: result, isLoading, error } = useQuery({
     queryKey: ['hive-moderation', sha256],
     queryFn: async (): Promise<ModerationResult | null> => {
       if (!sha256) return null;
@@ -205,32 +172,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
     );
   }
 
-  // Trigger re-check
-  const handleRecheck = async () => {
-    if (!sha256 || !videoUrl) return;
-
-    setIsSubmitting(true);
-    try {
-      // Call the worker to trigger a moderation check
-      const response = await fetch(`${apiUrl}/api/moderate-check`, {
-        method: 'POST',
-        headers: getApiHeaders(),
-        body: JSON.stringify({ url: videoUrl, sha256 }),
-      });
-
-      if (response.ok) {
-        // Invalidate and refetch
-        queryClient.invalidateQueries({ queryKey: ['hive-moderation', sha256] });
-        refetch();
-      }
-    } catch (err) {
-      console.error('Failed to trigger moderation check:', err);
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  // No result found - show option to trigger check
+  // No result found
   if (!result || error) {
     return (
       <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
@@ -241,25 +183,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
           </CardTitle>
         </CardHeader>
         <CardContent className="py-2 px-3">
-          <div className="flex items-center justify-between">
-            <p className="text-xs text-muted-foreground">Not analyzed yet</p>
-            {videoUrl && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={handleRecheck}
-                disabled={isSubmitting}
-                className="h-7 text-xs"
-              >
-                {isSubmitting ? (
-                  <Loader2 className="h-3 w-3 mr-1 animate-spin" />
-                ) : (
-                  <RefreshCw className="h-3 w-3 mr-1" />
-                )}
-                Analyze
-              </Button>
-            )}
-          </div>
+          <p className="text-xs text-muted-foreground">Not analyzed yet</p>
           <CopyableId value={sha256} type="hash" label="sha256:" size="xs" className="mt-2" />
         </CardContent>
       </Card>
@@ -333,7 +257,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
           </p>
         )}
 
-        {/* Timestamp and re-check */}
+        {/* Timestamp */}
         <div className="flex items-center justify-between text-xs text-muted-foreground border-t pt-2">
           <div className="flex items-center gap-2">
             <Clock className="h-3 w-3" />
@@ -343,30 +267,6 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
               <span>Check time unknown</span>
             )}
           </div>
-          {videoUrl && (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    onClick={handleRecheck}
-                    disabled={isSubmitting}
-                    className="h-6 text-xs px-2"
-                  >
-                    {isSubmitting ? (
-                      <Loader2 className="h-3 w-3 animate-spin" />
-                    ) : (
-                      <RefreshCw className="h-3 w-3" />
-                    )}
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>
-                  <p>Re-analyze content</p>
-                </TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
         </div>
 
         {/* Hash reference */}
