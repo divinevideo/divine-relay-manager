@@ -124,9 +124,11 @@ describe('HiveAIReport', () => {
 
     expect(await screen.findByText('Deleted')).toBeInTheDocument();
     expect(screen.queryByText('Needs Review')).not.toBeInTheDocument();
+    // No moderated_at in this record, so the card says the update time is unknown.
+    expect(screen.getByText('Update time unknown')).toBeInTheDocument();
   });
 
-  it('shows an unparseable check time as stored instead of "Invalid Date"', async () => {
+  it('shows an unparseable update time as stored instead of "Invalid Date"', async () => {
     respond(200, JSON.stringify({ sha256: SHA, action: 'SAFE', scores: {}, moderated_at: 'not-a-date' }));
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
