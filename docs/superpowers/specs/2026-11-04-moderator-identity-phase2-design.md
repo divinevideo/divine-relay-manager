@@ -26,7 +26,7 @@ Phase 2 makes the worker work out who acted from the moderator's Divine login, a
 
 ## Non-goals
 
-- Refusing actions that have no verified moderator. #178 settled no. Once phase 2 records who acted, the share of unattributed actions will show whether to revisit that.
+- Refusing actions that have no verified moderator. #178 settled no. Once phase 2 records who acted, the share of unattributed actions will show whether to revisit that. **Revisited 2026-11-10:** most decisions were still landing unattributed, so `REQUIRE_MODERATOR_LOGIN` now refuses a write from the admin UI without a verified login. It fails closed (a Keycast outage refuses actions too; Matt's call, with the setting as the off switch) and ships off, to be turned on once every moderator is confirmed signing in. See `DEPLOYMENT.md`.
 - Restricting anything to Keycast's support-admin list (decision 5).
 - Asking Keycast for a narrower login scope (decision 6, a follow-up issue).
 - A new Keycast endpoint (decision 1, option D, a follow-up).

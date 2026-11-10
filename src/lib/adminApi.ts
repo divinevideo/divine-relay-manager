@@ -31,7 +31,9 @@ export interface LoginOpts {
 
 const MODERATOR_LOGIN_HEADER = 'X-Divine-Login-Token';
 
-function loginHeader(loginToken: string | undefined): Record<string, string> {
+// Exported for the few components that send a write with fetch directly
+// rather than through useAdminApi's asModerator.
+export function loginHeader(loginToken: string | undefined): Record<string, string> {
   return loginToken ? { [MODERATOR_LOGIN_HEADER]: loginToken } : {};
 }
 
@@ -904,6 +906,7 @@ export async function moderateMedia(
   reason?: string,
   from?: ExpectedMediaState,
   pubkey?: string,
+  opts?: LoginOpts,
 ): Promise<ApiResponse> {
   const data = await apiRequest<ApiResponse>(apiUrl, '/api/moderate-media', 'POST', {
     sha256,
@@ -911,7 +914,7 @@ export async function moderateMedia(
     reason,
     ...(from === undefined ? {} : { from }),
     ...(pubkey === undefined ? {} : { pubkey }),
-  });
+  }, opts);
   if (!data.success) {
     throw new ApiError(data.error || 'Failed to moderate media');
   }
@@ -1058,13 +1061,16 @@ export async function getAllDecisions(
 export async function deleteDecisions(
   apiUrl: string,
   targetId: string,
-  targetType?: 'event' | 'pubkey'
+  targetType?: 'event' | 'pubkey',
+  opts?: LoginOpts,
 ): Promise<{ deleted: number; labelCleanupFailed: boolean }> {
   const qs = targetType ? `?targetType=${targetType}` : '';
   const data = await apiRequest<{ success: boolean; deleted: number; labelCleanupFailed?: boolean }>(
     apiUrl,
     `/api/decisions/${targetId}${qs}`,
-    'DELETE'
+    'DELETE',
+    undefined,
+    opts,
   );
   return { deleted: data.deleted || 0, labelCleanupFailed: data.labelCleanupFailed === true };
 }
@@ -1383,12 +1389,13 @@ export async function submitAIDetection(
   apiUrl: string,
   videoUrl: string,
   sha256: string,
-  eventId?: string
+  eventId?: string,
+  opts?: LoginOpts,
 ): Promise<{ jobId: string; status: string } | null> {
   try {
     const response = await fetchWithTimeout(`${apiUrl}/api/realness/analyze`, {
       method: 'POST',
-      headers: getApiHeaders(),
+      headers: { ...getApiHeaders(), ...loginHeader(opts?.loginToken) },
       body: JSON.stringify({
         videoUrl,
         mediaHash: sha256,
@@ -1697,12 +1704,13 @@ export async function createMinorAccount(
   displayName?: string,
   zendeskTicketId?: number,
   provisioningOperationId?: string,
+  opts?: LoginOpts,
 ): Promise<CreateMinorAccountResponse> {
   const body: Record<string, unknown> = { username };
   if (displayName != null) body.display_name = displayName;
   if (zendeskTicketId != null) body.zendesk_ticket_id = zendeskTicketId;
   if (provisioningOperationId != null) body.provisioning_operation_id = provisioningOperationId;
-  return apiRequest<CreateMinorAccountResponse>(apiUrl, '/api/age-review/create-minor-account', 'POST', body);
+  return apiRequest<CreateMinorAccountResponse>(apiUrl, '/api/age-review/create-minor-account', 'POST', body, opts);
 }
 
 // Bulk moderation
@@ -1765,8 +1773,8 @@ export async function getBulkKindCounts(apiUrl: string, pubkey: string): Promise
 }
 
 // Delete media (convenience wrapper)
-export async function deleteMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
-  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator');
+export async function deleteMedia(apiUrl: string, sha256: string, reason?: string, opts?: LoginOpts): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'DELETE', reason || 'Deleted by moderator', undefined, undefined, opts);
 }
 
 // Age review config
@@ -1781,6 +1789,7 @@ export async function getAgeReviewConfig(apiUrl: string): Promise<AgeReviewConfi
 export async function updateAgeReviewConfig(
   apiUrl: string,
   config: Partial<AgeReviewConfig>,
+  opts?: LoginOpts,
 ): Promise<AgeReviewConfig> {
-  return apiRequest<AgeReviewConfig>(apiUrl, '/api/age-review/config', 'PUT', config);
+  return apiRequest<AgeReviewConfig>(apiUrl, '/api/age-review/config', 'PUT', config, opts);
 }

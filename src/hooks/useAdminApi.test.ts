@@ -47,10 +47,10 @@ describe('useAdminApi', () => {
   it('forwards the expected current state to moderateMedia', () => {
     const { result } = renderHook(() => useAdminApi());
 
-    result.current.moderateMedia('f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+    result.current.asModerator('tok').moderateMedia('f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
 
     // The account, too: dropped, the worker's account check never runs.
-    expect(moderateMedia).toHaveBeenCalledWith(API_URL, 'f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64));
+    expect(moderateMedia).toHaveBeenCalledWith(API_URL, 'f'.repeat(64), 'SAFE', 'r', 'QUARANTINE', 'a'.repeat(64), { loginToken: 'tok' });
   });
 
   it("forwards the case id to the case's kept-notes read", () => {
@@ -73,17 +73,17 @@ describe('useAdminApi', () => {
   it('forwards the reopen target type through to adminApi', () => {
     const { result } = renderHook(() => useAdminApi());
 
-    result.current.deleteDecisions('abc', 'pubkey');
+    result.current.asModerator('tok').deleteDecisions('abc', 'pubkey');
 
-    expect(deleteDecisions).toHaveBeenCalledWith(API_URL, 'abc', 'pubkey');
+    expect(deleteDecisions).toHaveBeenCalledWith(API_URL, 'abc', 'pubkey', { loginToken: 'tok' });
   });
 
   it('leaves the target type undefined when the caller omits it', () => {
     const { result } = renderHook(() => useAdminApi());
 
-    result.current.deleteDecisions('abc');
+    result.current.asModerator('tok').deleteDecisions('abc');
 
-    expect(deleteDecisions).toHaveBeenCalledWith(API_URL, 'abc', undefined);
+    expect(deleteDecisions).toHaveBeenCalledWith(API_URL, 'abc', undefined, { loginToken: 'tok' });
   });
 
   // Both resolution sources are read with a timeout, and both are subtractive:

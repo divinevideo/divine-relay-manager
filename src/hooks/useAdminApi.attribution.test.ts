@@ -47,6 +47,14 @@ const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]
   ['callRelayRpc', (a) => a.callRelayRpc('unbanpubkey', [PK])],
   ['banEvent', (a) => a.banEvent('e1', 'r')],
   ['allowEvent', (a) => a.allowEvent('e1')],
+  // Writes that record no moderator still need the login once
+  // REQUIRE_MODERATOR_LOGIN is on, or the worker refuses them.
+  ['moderateMedia', (a) => a.moderateMedia('f'.repeat(64), 'SAFE', 'r')],
+  ['deleteMedia', (a) => a.deleteMedia('f'.repeat(64), 'r')],
+  ['deleteDecisions', (a) => a.deleteDecisions('e1', 'event')],
+  ['updateAgeReviewConfig', (a) => a.updateAgeReviewConfig({ auto_delete_on_deny: true })],
+  ['createMinorAccount', (a) => a.createMinorAccount('kid', 'Kid', 12, 'op-1')],
+  ['submitAIDetection', (a) => a.submitAIDetection('https://v.example/x.mp4', 'f'.repeat(64), 'e1')],
 ];
 
 const mockFetch = vi.fn();

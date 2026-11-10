@@ -108,7 +108,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
-  const { deleteDecisions } = api;
   const { getModeratorToken } = useCurrentUser();
 
   // Audit logging is a non-critical side effect. Fire-and-forget so a failing
@@ -314,12 +313,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const reopenMutation = useMutation({
     mutationFn: async (target: ReopenTarget | null) => {
       if (!target) throw new Error('No target');
+      const act = api.asModerator(getModeratorToken()); // take the login at the click
       // Delete all decisions for this target
-      const primary = await deleteDecisions(target.value, target.type);
+      const primary = await act.deleteDecisions(target.value, target.type);
       // Also delete decisions for the pubkey if this is an event report
       let secondary = { labelCleanupFailed: false };
       if (target.type === 'event' && target.reportedPubkey) {
-        secondary = await deleteDecisions(target.reportedPubkey, 'pubkey');
+        secondary = await act.deleteDecisions(target.reportedPubkey, 'pubkey');
       }
       return { labelCleanupFailed: primary.labelCleanupFailed || secondary.labelCleanupFailed };
     },

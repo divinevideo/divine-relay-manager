@@ -66,8 +66,10 @@ export function buildAdminApi(apiUrl: string, relayUrl: string, loginToken?: str
 }
 
 /**
- * Every call that writes an attribution. They pass `{ loginToken }` on here, in
- * one place, so a caller cannot forget it, and `login` is in scope nowhere else,
+ * Every call that writes: those that record a moderator, and every other write,
+ * since REQUIRE_MODERATOR_LOGIN refuses a write without a login. They pass
+ * `{ loginToken }` on here, in one place, so a caller cannot forget it, and
+ * `login` is in scope nowhere else,
  * so a new call that needs it has to be added here, which also keeps it off the
  * plain api. useAdminApi.attribution.test.ts holds a row per call; a new one
  * belongs there too.
@@ -131,6 +133,23 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
     // Age review
     updateAgeReviewCase: (caseId: string, updates: Record<string, unknown>) =>
       adminApi.updateAgeReviewCase(apiUrl, caseId, updates, login),
+    updateAgeReviewConfig: (config: Partial<adminApi.AgeReviewConfig>) =>
+      adminApi.updateAgeReviewConfig(apiUrl, config, login),
+    createMinorAccount: (username: string, displayName?: string, zendeskTicketId?: number, provisioningOperationId?: string) =>
+      adminApi.createMinorAccount(apiUrl, username, displayName, zendeskTicketId, provisioningOperationId, login),
+
+    // Media moderation. /api/moderate-media records no moderator, but it is a
+    // write, so it needs the login once REQUIRE_MODERATOR_LOGIN is on.
+    moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string, from?: adminApi.ExpectedMediaState, pubkey?: string) =>
+      adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey, login),
+    deleteMedia: (sha256: string, reason?: string) =>
+      adminApi.deleteMedia(apiUrl, sha256, reason, login),
+
+    // Decision log cleanup and AI detection: writes, so they carry the login too.
+    deleteDecisions: (targetId: string, targetType?: 'event' | 'pubkey') =>
+      adminApi.deleteDecisions(apiUrl, targetId, targetType, login),
+    submitAIDetection: (videoUrl: string, sha256: string, eventId?: string) =>
+      adminApi.submitAIDetection(apiUrl, videoUrl, sha256, eventId, login),
 
     // Bulk moderation
     bulkModerate: (pubkey: string, action: adminApi.BulkAction, reason?: string, options?: adminApi.BulkModerateOptions) =>
@@ -177,8 +196,6 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
       adminApi.fetchResolutionLabelTargets(apiUrl, opts),
 
     // Media moderation
-    moderateMedia: (sha256: string, action: adminApi.ModerationAction, reason?: string, from?: adminApi.ExpectedMediaState, pubkey?: string) =>
-      adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey),
     readMediaStatus: (sha256: string) =>
       adminApi.readMediaStatus(apiUrl, sha256),
     unblockMedia: (sha256: string, reason?: string) =>
@@ -189,8 +206,6 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
       adminApi.getDecisions(apiUrl, targetId),
     getAllDecisions: (opts?: { timeoutMs?: number }) =>
       adminApi.getAllDecisions(apiUrl, opts),
-    deleteDecisions: (targetId: string, targetType?: 'event' | 'pubkey') =>
-      adminApi.deleteDecisions(apiUrl, targetId, targetType),
 
     // Classifier data (scene classification + topic profile)
     getClassifierData: (sha256: string) =>
@@ -199,8 +214,6 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     // AI Detection (proxied through worker to handle CF Access)
     getAIDetectionResult: (eventId: string) =>
       adminApi.getAIDetectionResult(apiUrl, eventId),
-    submitAIDetection: (videoUrl: string, sha256: string, eventId?: string) =>
-      adminApi.submitAIDetection(apiUrl, videoUrl, sha256, eventId),
 
     // Verification
     verifyPubkeyBanned: (pubkey: string) =>
@@ -237,16 +250,10 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
 
     // Delete operations
-    deleteMedia: (sha256: string, reason?: string) =>
-      adminApi.deleteMedia(apiUrl, sha256, reason),
 
     // Age review config
     getAgeReviewConfig: () =>
       adminApi.getAgeReviewConfig(apiUrl),
-    updateAgeReviewConfig: (config: Partial<adminApi.AgeReviewConfig>) =>
-      adminApi.updateAgeReviewConfig(apiUrl, config),
-    createMinorAccount: (username: string, displayName?: string, zendeskTicketId?: number, provisioningOperationId?: string) =>
-      adminApi.createMinorAccount(apiUrl, username, displayName, zendeskTicketId, provisioningOperationId),
 
     // Zendesk tickets linked to a report target
     getLinkedTickets: (target: { eventId?: string; pubkey?: string }) =>
