@@ -1074,15 +1074,19 @@ export async function getAllDecisions(
   };
 }
 
-// Delete all decisions for a target (reopens the report).
-// labelCleanupFailed means the relay-side resolution labels could not be fully
-// cleared -- the read failed, the read filled its page so there may be more
-// beyond it, or a label was read but could not be removed. Any of those leaves
-// labels alive that keep the report hidden even though its decisions are gone,
-// so callers must surface it rather than reporting a clean reopen.
-// targetType lets the worker query only the label tag that can match ('e' for
-// an event, 'p' for a pubkey). Omitting it is safe: the worker then checks
-// both, which is what an older frontend gets.
+// Reopen a target (#324). The name and DELETE route predate the change. The
+// worker writes one dated `reopened` decision row per call and removes
+// nothing: the target's decisions and resolution labels stay as history, and
+// only handling recorded after the newest reopen counts. `deleted` is the
+// number of rows written (1, or 2 when no targetType is sent, since the worker
+// then reopens the id as both an event and a pubkey).
+// labelCleanupFailed is always false from the current worker, and labelsDeleted
+// is always 0. They are kept for older frontends. A worker from before #324
+// deleted the decisions, banned the labels, and set labelCleanupFailed when a
+// label might have survived, so callers still surface it for a rolled-back
+// worker.
+// targetType names the row's target type. Always send it: omitting it reopens
+// both types.
 export async function deleteDecisions(
   apiUrl: string,
   targetId: string,

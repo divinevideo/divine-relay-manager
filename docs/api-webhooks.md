@@ -771,36 +771,43 @@ Get all decisions for a target.
 
 ### DELETE /api/decisions/:targetId
 
-Delete all decisions for a target (reopen a dismissed report), and remove the
-target's relay-side resolution labels (kind 1985, `L=moderation/resolution`).
+Reopen a target (#324). The method and path are older than this behavior and
+are kept so older frontends keep working. Each call writes one dated
+`moderation_decisions` row: `action: "reopened"`, `reason: "Reopened"`,
+`moderator_pubkey: NULL`, with `created_at` set by D1. Nothing is deleted or
+changed. The target's earlier decisions stay as history, and so do its
+relay-side resolution labels (kind 1985, `L=moderation/resolution`).
+
+A reopen resets the target's cutoff: only a person's decision or a resolution
+label dated strictly after the newest `reopened` row counts as handling. So
+every report filed before the reopen counts as new again, and later handling
+works as usual (`handlingByTarget` in `shared/handling.ts`).
 
 **Query parameters:**
 
 | Name | Values | Default |
 |------|--------|---------|
-| `targetType` | `event` \| `pubkey` | both label tags are queried |
+| `targetType` | `event` \| `pubkey` | the id is reopened as both an event and a pubkey |
 
-A resolution label carries an `e` tag for an event target or a `p` tag for a
-pubkey target, never both, so naming the type skips the query that could not
-match. Any other value — absent, empty, wrong case, junk — falls back to
-querying both, which is what an older frontend gets.
+The row is written under the type given. Any other value (absent, empty,
+wrong case, junk) reopens the id under both types and returns `deleted: 2`.
+This matches the old delete, which matched the id whatever its type. An
+unrecognised value is logged.
 
 **Response:**
 ```json
 {
   "success": true,
-  "deleted": 2,
-  "labelsDeleted": 1,
+  "deleted": 1,
+  "labelsDeleted": 0,
   "labelCleanupFailed": false
 }
 ```
 
-The D1 decision rows are deleted unconditionally; the relay-side label cleanup
-is best-effort. `labelCleanupFailed: true` means at least one resolution label
-may have survived — the label read failed, it filled its page so there may be
-more beyond it, or a label was read but could not be removed. A surviving label
-keeps the report hidden even though its decisions are gone, so callers must
-surface this rather than reporting a clean reopen.
+`deleted` is the number of `reopened` rows written. `labelsDeleted` is always
+`0` and `labelCleanupFailed` always `false`, because no label is touched. Both
+fields are kept for older frontends, which read them. A failed write returns
+`500` with `success: false`.
 
 ---
 

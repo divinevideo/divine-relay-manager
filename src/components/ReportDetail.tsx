@@ -329,11 +329,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
-      // Resolution labels also gate whether the report reappears, so a reopen
-      // that does not refresh them can leave the target hidden for a poll cycle
-      // -- a full minute on the label source. The helper above refreshes the
-      // report feeds: a reopen moves the target out of resolved history and
-      // back into the needs-attention feed.
+      // The helper above refreshes the report feeds: a reopen moves the target
+      // out of resolved history and back into the needs-attention feed. Reopen
+      // no longer changes resolution labels (#324): the reopen row makes older
+      // labels stop counting. The label refresh is kept for a rolled-back
+      // worker, which bans them, and without a refresh that target would stay
+      // hidden for a poll cycle, a full minute on the label source.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
@@ -384,10 +385,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           });
     },
     onError: (error: Error) => {
-      // The first delete may already have committed server-side before the
-      // second threw, so the cached decision state can be stale even though
-      // the action reports failure. Refresh it rather than leaving the panel
-      // showing decisions the server no longer has.
+      // The post's reopen row may already be written when the author's call
+      // throws. Nothing is removed, but the post now reads as reopened, so the
+      // cached decisions and the queue's view can be stale even though the
+      // action reports failure. Refresh them rather than leaving the panel
+      // calling the post handled.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
