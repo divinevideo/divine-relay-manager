@@ -39,6 +39,20 @@ const HARASSMENT = {
   ],
 };
 
+// An NS-csam report puts its target behind the Pending review switch, which
+// shows only while something is waiting.
+const CSAM = {
+  ...base,
+  id: '4'.repeat(64),
+  pubkey: 'd'.repeat(64),
+  created_at: 1751000020,
+  tags: [
+    ['p', '5'.repeat(64), 'illegal'],
+    ['L', 'social.nos.ontology'],
+    ['l', 'NS-csam', 'social.nos.ontology'],
+  ],
+};
+
 const OPEN_KEY = 'reports:filters-open';
 
 function jsonResponse(body: unknown) {
@@ -49,6 +63,7 @@ function jsonResponse(body: unknown) {
 // store here (same pattern as AttributionNotice.test.tsx). Restored after each.
 let consoleError: MockInstance;
 let originalStorage: Storage;
+let feed: unknown[];
 function useStorage(value: Partial<Storage>) {
   Object.defineProperty(window, 'localStorage', { value, writable: true });
 }
@@ -62,10 +77,11 @@ beforeEach(() => {
     clear: () => store.clear(),
   });
   consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+  feed = [SPAM, HARASSMENT];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
-    if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [SPAM, HARASSMENT] });
+    if (url.includes('/api/reports')) return jsonResponse({ success: true, events: feed });
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
@@ -101,15 +117,18 @@ describe('Filters toggle', () => {
   });
 
   it('folds sort, type and category away but keeps both queue switches', async () => {
+    feed = [SPAM, HARASSMENT, CSAM];
     const user = userEvent.setup();
     renderReports();
     await screen.findByText('Category');
+    await screen.findByRole('switch', { name: /pending review/i });
     await user.click(await filtersToggle());
 
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('combobox')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'Users' })).not.toBeInTheDocument();
     expect(screen.queryByText('Category')).not.toBeInTheDocument();
+    expect(screen.getByRole('switch', { name: /pending review/i })).toBeInTheDocument();
     expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeInTheDocument();
   });
 
