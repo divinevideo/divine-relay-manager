@@ -2655,7 +2655,9 @@ function invalidUploaderResponse(corsHeaders: Record<string, string>): Response 
 // Remove Restriction or Age Restrict on a single post, an automated caller, a
 // stale screen, or moderation-service's own dashboard, which writes without
 // coming through here and so is meant to ask /api/moderate-media/lift-check first
-// (moderation-service#231).
+// (moderation-service#231). When the lift check names the account
+// moderation-service records as the file's uploader, that account's open case
+// holds the file the same way.
 // Both routes run this function, so they give the same answer to a request
 // that names no account: /api/moderate-media runs it only when no `pubkey`
 // is sent, and the lift check ignores `pubkey`. The lift check can also pass
