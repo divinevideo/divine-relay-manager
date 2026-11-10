@@ -140,6 +140,13 @@ describe('REQUIRE_MODERATOR_LOGIN on', () => {
     const res = await call({ url: `https://api.test${path}`, body: {}, headers: await browser() });
     expect(res.code).not.toBe('moderator_login_required');
   });
+
+  // The ReportWatcher health workflow restarts a stopped watcher with the Access
+  // service token alone; the restart is an idempotent nudge, not a moderation action.
+  it('leaves the watcher restart POST /api/report-watcher/start alone', async () => {
+    const res = await call({ url: 'https://api.test/api/report-watcher/start', body: {}, headers: await browser() });
+    expect(res.code).not.toBe('moderator_login_required');
+  });
 });
 
 describe('REQUIRE_MODERATOR_LOGIN off', () => {
@@ -180,6 +187,21 @@ describe('needsModeratorLogin: which requests are writes', () => {
 
   it.each(['/api/summarize-user', '/api/moderate-media/lift-check'])('POST %s is a read', async (path) => {
     expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(false);
+  });
+
+  it('POST /api/report-watcher/start needs no login', async () => {
+    const path = '/api/report-watcher/start';
+    expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(false);
+  });
+
+  it.each(['PUT', 'PATCH', 'DELETE'])('%s /api/report-watcher/start still needs a login', async (method) => {
+    const path = '/api/report-watcher/start';
+    expect(await needsModeratorLogin(req(method, path, '{}'), path)).toBe(true);
+  });
+
+  it('POST /api/report-watcher/stop still needs a login', async () => {
+    const path = '/api/report-watcher/stop';
+    expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(true);
   });
 
   it.each([['POST', '/api/moderate-media'], ['POST', '/api/decisions'], ['DELETE', '/api/decisions/x'], ['PUT', '/api/age-review/config']])(

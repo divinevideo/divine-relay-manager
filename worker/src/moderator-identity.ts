@@ -146,6 +146,12 @@ export function moderatorLoginRequired(env: ModeratorLoginEnv): boolean {
 // write, so a new route needs a login unless it is added here on purpose.
 const READ_ONLY_POSTS = new Set(['/api/summarize-user', '/api/moderate-media/lift-check']);
 
+// POST routes that change state but are not moderation actions, so nothing
+// goes unattributed by leaving them alone. The ReportWatcher health workflow
+// restarts a stopped watcher with the Access service token alone (no login, no
+// admin key), and /start is an idempotent nudge. Exact paths only.
+const OPERATIONAL_POSTS = new Set(['/api/report-watcher/start']);
+
 // NIP-86 reads: list* and get* methods, plus supportedmethods. Exact lowercase
 // names only; anything else is treated as a write.
 const RELAY_READ_METHOD = /^(list[a-z]+|get[a-z]+|supportedmethods)$/;
@@ -159,6 +165,7 @@ const RELAY_READ_METHOD = /^(list[a-z]+|get[a-z]+|supportedmethods)$/;
 export async function needsModeratorLogin(request: Request, path: string): Promise<boolean> {
   if (request.method === 'GET' || request.method === 'HEAD') return false;
   if (READ_ONLY_POSTS.has(path)) return false;
+  if (request.method === 'POST' && OPERATIONAL_POSTS.has(path)) return false;
   if (path === '/api/relay-rpc') {
     try {
       const body = (await request.clone().json()) as { method?: unknown };
