@@ -9,6 +9,8 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { badgeVariants } from "@/components/ui/badge-variants";
+import { cn } from "@/lib/utils";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -40,6 +42,7 @@ import {
   EyeOff,
   Copy,
   Check,
+  ChevronDown,
 } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
@@ -52,6 +55,7 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailure";
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
 import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
@@ -99,6 +103,45 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'oldest', label: 'Oldest First' },
   { value: 'category', label: 'By Category' },
 ];
+
+// The chosen category as a chip that clears it, the same in the open panel
+// and the closed summary. A real button, so the keyboard reaches it, and the
+// whole chip is the target rather than the small X. labelId marks the
+// visible label alone, for a description that should not read "Clear".
+// `name` is the chip's display name (filterCategory holds the name, not a raw spelling).
+function ActiveCategoryChip({ name, onClear, labelId }: { name: string; onClear: () => void; labelId?: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClear}
+      className={cn(badgeVariants({ variant: 'default' }), 'cursor-pointer pr-1')}
+    >
+      <span className="sr-only">Clear category filter: </span>
+      <span id={labelId}>{name}</span>
+      <X className="h-3 w-3 ml-1" aria-hidden="true" />
+    </button>
+  );
+}
+
+// The Filters section's open state, per browser. Open unless the moderator
+// closed it. Storage can throw (private mode, storage disabled): then it opens
+// by default, and a toggle lasts only while the queue stays mounted. Leaving
+// the Reports tab or switching environment opens it again.
+const FILTERS_OPEN_KEY = 'reports:filters-open';
+function readFiltersOpen(): boolean {
+  try {
+    return localStorage.getItem(FILTERS_OPEN_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+function writeFiltersOpen(open: boolean): void {
+  try {
+    localStorage.setItem(FILTERS_OPEN_KEY, open ? '1' : '0');
+  } catch {
+    // Remembering is a convenience; the toggle already changed on screen.
+  }
+}
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
@@ -354,6 +397,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [showPendingReview, setShowPendingReview] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(readFiltersOpen);
+  const onFiltersOpenChange = (open: boolean) => {
+    setFiltersOpen(open);
+    writeFiltersOpen(open);
+  };
+  // Clearing removes the chip that held focus. Hand focus to the Filters
+  // toggle, which is rendered open or closed, rather than letting it drop to
+  // the page.
+  const filtersToggleRef = useRef<HTMLButtonElement>(null);
+  const clearCategory = () => {
+    setFilterCategory(null);
+    filtersToggleRef.current?.focus();
+  };
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
   // The resolution sources a moderator has explicitly chosen to proceed without.
   // A Set rather than a boolean: the blocked pane names the sources it is
@@ -1309,12 +1365,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // been read to its end. While it is loading, failed, cut short or has more,
   // the footer below says so, and the list must not read as empty (#186, #221).
   const listEmptyIsFinal = !historyView || footerState.kind === 'ended';
-  // The note under the sort control, while a sort other than Newest First
+  // The note on the sort's scope, while a sort other than Newest First
   // orders a history that has more pages to load. Shown only where the footer
   // states its count ('more'), so the note's number is the footer's: not once
   // history has ended, and not while a count is withheld for an unread source
   // or a failed re-read.
   const showSortScopeNote = historyView && sortBy !== 'newest' && footerState.kind === 'more';
+  // Rendered under the sort row while Filters is open and under the Filters
+  // row while it is closed (see the Collapsible below).
+  const sortScopeNote = showSortScopeNote && (
+    <p id="sort-scope-note" className="mt-2 text-[10px] italic leading-tight opacity-70">
+      Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
+    </p>
+  );
 
   // Sync selected report with URL
   useEffect(() => {
@@ -1970,108 +2033,150 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             </TabsList>
           </Tabs>
 
-          {/* Sort and Filter Controls */}
-          <div className="space-y-3 mt-3 pt-3 border-t">
-            {/* Sort dropdown */}
-            <div className="flex items-center gap-2">
-              <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
-              <Select
-                value={sortBy}
-                onValueChange={(v) => setSortBy(v as SortOption)}
-              >
-                <SelectTrigger
-                  className="h-8 text-xs flex-1"
-                  aria-describedby={showSortScopeNote ? 'sort-scope-note' : undefined}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {SORT_OPTIONS.map(option => (
-                    <SelectItem key={option.value} value={option.value} className="text-xs">
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {/* Sorted history covers only the pages loaded so far. */}
-            {showSortScopeNote && (
-              <p id="sort-scope-note" className="text-[10px] italic leading-tight opacity-70">
-                Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
-              </p>
-            )}
-
-            {/* Target type filter */}
-            <div className="flex items-center gap-2">
-              <Filter className="h-3 w-3 text-muted-foreground shrink-0" />
-              <div className="flex gap-1 flex-1">
+          {/* Sort, type and category fold behind Filters, open by default and
+              remembered per browser. Closed, the summary still names the sort
+              and every active filter, so a narrowed list is never unexplained.
+              The two queue switches below never fold: they change which queue
+              is on screen, and hiding that state is how "the toggles don't
+              work" reports started. */}
+          <Collapsible open={filtersOpen} onOpenChange={onFiltersOpenChange} className="pt-3 border-t">
+            <div className="flex items-center gap-2 min-w-0">
+              <CollapsibleTrigger asChild>
+                {/* Closed, the toggle is described by the summary's sort and
+                    type, the chosen category's name (not the chip's "Clear"
+                    action) and the sort-scope note when shown, so a screen
+                    reader says what is narrowing the list along with
+                    "collapsed". */}
                 <Button
-                  variant={filterTargetType === 'all' ? 'secondary' : 'ghost'}
+                  ref={filtersToggleRef}
+                  variant="ghost"
                   size="sm"
-                  className="h-7 text-xs px-2 flex-1"
-                  onClick={() => setFilterTargetType('all')}
+                  className="h-7 px-1 -ml-1 text-xs font-medium shrink-0"
+                  aria-describedby={filtersOpen ? undefined : [
+                    'filters-summary',
+                    filterCategory && 'filters-summary-category',
+                    showSortScopeNote && 'sort-scope-note',
+                  ].filter(Boolean).join(' ')}
                 >
-                  All
+                  <ChevronDown className={`h-3 w-3 mr-1 transition-transform motion-reduce:transition-none ${filtersOpen ? '' : '-rotate-90'}`} />
+                  Filters
                 </Button>
-                <Button
-                  variant={filterTargetType === 'pubkey' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 text-xs px-2 flex-1"
-                  onClick={() => setFilterTargetType('pubkey')}
-                >
-                  <User className="h-3 w-3 mr-1" />
-                  Users
-                </Button>
-                <Button
-                  variant={filterTargetType === 'event' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 text-xs px-2 flex-1"
-                  onClick={() => setFilterTargetType('event')}
-                >
-                  <FileText className="h-3 w-3 mr-1" />
-                  Events
-                </Button>
-              </div>
-            </div>
-
-            {/* Category filter chips */}
-            {availableCategories.length > 0 && (
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Category</Label>
-                <div className="flex flex-wrap gap-1">
+              </CollapsibleTrigger>
+              {!filtersOpen && (
+                <div data-testid="filters-summary" className="flex items-center gap-1 flex-wrap min-w-0 text-xs text-muted-foreground">
+                  <span id="filters-summary">
+                    {SORT_OPTIONS.find(o => o.value === sortBy)?.label}
+                    {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
+                  </span>
                   {filterCategory && (
-                    <Badge
-                      variant="default"
-                      className="text-xs cursor-pointer pr-1"
-                      onClick={() => setFilterCategory(null)}
-                    >
-                      {filterCategory}
-                      <X className="h-3 w-3 ml-1" />
-                    </Badge>
+                    <ActiveCategoryChip name={filterCategory} onClear={clearCategory} labelId="filters-summary-category" />
                   )}
-                  {!filterCategory && availableCategories.map(chip => (
-                    <Badge
-                      key={chip.label}
-                      variant={chip.highPriority ? 'destructive' : 'outline'}
-                      className="text-xs cursor-pointer hover:bg-muted"
-                      onClick={() => setFilterCategory(chip.label)}
-                    >
-                      {chip.highPriority && (
-                        <AlertTriangle className="h-3 w-3 mr-1" />
-                      )}
-                      {chip.label}
-                    </Badge>
-                  ))}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+            {/* Closed, the note moves out of the fold: closing Filters hides
+                the sort control, not this caveat on the order of the list
+                below. Open, it sits under the sort row as before. The closed
+                content unmounts, so only one copy (and one id) is ever on
+                the page. */}
+            {!filtersOpen && sortScopeNote}
+            <CollapsibleContent className="space-y-3 mt-2">
+              {/* Sort and type share a row, wrapping to two on narrow screens. */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Sort dropdown */}
+                <div className="flex items-center gap-2 flex-1 min-w-[10rem]">
+                  <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <Select
+                    value={sortBy}
+                    onValueChange={(v) => setSortBy(v as SortOption)}
+                  >
+                    <SelectTrigger
+                      className="h-8 text-xs flex-1"
+                      aria-describedby={showSortScopeNote ? 'sort-scope-note' : undefined}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SORT_OPTIONS.map(option => (
+                        <SelectItem key={option.value} value={option.value} className="text-xs">
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {/* Target type filter */}
+                <div className="flex items-center gap-2 flex-1 min-w-[13rem]">
+                  <Filter className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <div className="flex gap-1 flex-1">
+                    <Button
+                      variant={filterTargetType === 'all' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-7 text-xs px-2 flex-1"
+                      onClick={() => setFilterTargetType('all')}
+                    >
+                      All
+                    </Button>
+                    <Button
+                      variant={filterTargetType === 'pubkey' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-7 text-xs px-2 flex-1"
+                      onClick={() => setFilterTargetType('pubkey')}
+                    >
+                      <User className="h-3 w-3 mr-1" />
+                      Users
+                    </Button>
+                    <Button
+                      variant={filterTargetType === 'event' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-7 text-xs px-2 flex-1"
+                      onClick={() => setFilterTargetType('event')}
+                    >
+                      <FileText className="h-3 w-3 mr-1" />
+                      Events
+                    </Button>
+                  </div>
+                </div>
 
+              </div>
+              {/* Sorted history covers only the pages loaded so far. */}
+              {sortScopeNote}
+
+              {/* Category filter chips */}
+              {availableCategories.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Category</Label>
+                  <div className="flex flex-wrap gap-1">
+                    {filterCategory && (
+                      <ActiveCategoryChip name={filterCategory} onClear={clearCategory} />
+                    )}
+                    {!filterCategory && availableCategories.map(chip => (
+                      <Badge
+                        key={chip.label}
+                        variant={chip.highPriority ? 'destructive' : 'outline'}
+                        className="text-xs cursor-pointer hover:bg-muted"
+                        onClick={() => setFilterCategory(chip.label)}
+                      >
+                        {chip.highPriority && (
+                          <AlertTriangle className="h-3 w-3 mr-1" />
+                        )}
+                        {chip.label}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
+
+          {/* Queue switches share one row and wrap on narrow screens. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 pt-3 border-t">
             {/* Pending review filter */}
             {/* Stays rendered while on, even at zero: finishing the last item
                 would otherwise remove the only way back, since Hide resolved
                 is disabled while this is on. */}
             {(pendingReviewCount > 0 || showPendingReview) && (
-              <div className="flex items-center justify-between pt-2 border-t">
+              <div className="flex items-center gap-2">
                 <Label htmlFor="pending-review" className="text-xs text-muted-foreground flex items-center gap-1.5">
                   <EyeOff className="h-3 w-3 text-orange-500" />
                   Pending review (sensitive)
@@ -2097,7 +2202,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             )}
 
             {/* Hide resolved toggle */}
-            <div className="flex items-center justify-between pt-2 border-t">
+            <div className="flex items-center gap-2">
               <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
                 <CheckCircle className="h-3 w-3 text-green-500" />
                 Hide resolved
