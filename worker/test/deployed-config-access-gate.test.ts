@@ -1,4 +1,5 @@
-// Deployed wrangler configs must carry both settings the admin API gate needs.
+// Deployed wrangler configs must carry both settings the admin API gate needs,
+// and the one the moderator login check behind it needs.
 //
 // verifyAdminAccess accepts a Cf-Access-Jwt-Assertion only when it verifies
 // against ACCESS_TEAM_DOMAIN's certs and API_ACCESS_AUD's audience. Without
@@ -7,6 +8,10 @@
 // after a deploy. The audience tag identifies the Access application; it is
 // not a credential, because every token Access issues for the application
 // carries it.
+//
+// MODERATOR_LOGIN_URL fails the other way: unset or naming another Keycast,
+// every login check fails, and every action records no human moderator with
+// only a worker log line to show for it.
 import { describe, it, expect } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -42,5 +47,12 @@ describe.each(['wrangler.staging.toml', 'wrangler.prod.toml'])('%s', (tomlPath) 
   it('sets the API Access application audience tag', () => {
     // Access AUD tags are 64 lowercase hex characters.
     expect(varOf(tomlPath, 'API_ACCESS_AUD')).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  it('pins MODERATOR_LOGIN_URL to production Keycast', () => {
+    // The frontend's login host, VITE_DIVINE_LOGIN_URL, defaults to this one
+    // (src/lib/divineLogin.ts) and is not set in .env.production. Change both
+    // together: this test does not read the frontend side.
+    expect(varOf(tomlPath, 'MODERATOR_LOGIN_URL')).toBe('https://login.divine.video');
   });
 });

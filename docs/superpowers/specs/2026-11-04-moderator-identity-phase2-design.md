@@ -47,9 +47,9 @@ Phase 2 makes the worker work out who acted from the moderator's Divine login, a
 
 The browser sends the moderator's Divine login access token with each request, in a new header `X-Divine-Login-Token`. The worker verifies it by calling Keycast's `POST /api/nostr` with `{"method":"get_public_key","params":[]}` and the token as a Bearer credential, the same call the app's signer already makes. A 2xx with a 64-hex lowercase `result` is the verified pubkey. Anything else is "not verified."
 
-Why this call: Keycast has no token-check endpoint for other services. This one needs no Keycast change. On current Keycast main it refuses an expired token, and it refuses a revoked authorization within about 5 seconds, because cached sessions are rechecked against the database (`AUTHORIZATION_RECHECK_INTERVAL` in `api/src/api/http/nostr_rpc.rs`, added in keycast `3048a5d`). Whether that commit is deployed to production Keycast is not verified. Lighter options (a lookup that doesn't see revocation, or verifying the token inside the worker) were rejected because they miss revocation, and Keycast doesn't publish the key the worker would need. The cost is small: Keycast loads the moderator's key only when it has no cached session for the token.
+Why this call: Keycast has no token-check endpoint for other services. This one needs no Keycast change. On current Keycast main it refuses an expired token, and it refuses a revoked authorization within about 5 seconds, because cached sessions are rechecked against the database (`AUTHORIZATION_RECHECK_INTERVAL` in `api/src/api/http/nostr_rpc.rs`, added in keycast `3048a5d`). Confirm that commit is deployed to production Keycast before relying on revocation. Lighter options (a lookup that doesn't see revocation, or verifying the token inside the worker) were rejected because they miss revocation, and Keycast doesn't publish the key the worker would need. The cost is small: Keycast loads the moderator's key only when it has no cached session for the token.
 
-**Signing out of the app does not end the login.** The SDK's `logout()` only clears browser storage, and Keycast's `/api/auth/logout` only clears a cookie. A token captured before sign-out keeps verifying until it expires: 24 hours by default (`TOKEN_EXPIRY_SECONDS`; the production value is not verified) or until the authorization is revoked in Keycast. Accepted for phase 2 (decision 9).
+**App sign-out and the login.** Making the app's sign-out also revoke the login in Keycast is decision 9, a follow-up.
 
 ### 2. Which Keycast verifies logins
 
@@ -57,7 +57,7 @@ The app always signs in at production Keycast (`login.divine.video`), even when 
 
 The existing `KEYCAST_URL` keeps driving suspend, unsuspend, ban and minor-status calls. It must not be repointed: on staging that would act on real production accounts.
 
-Accepted cost: the staging worker receives real production login tokens, which can sign as the moderator. It is the same Cloudflare account behind the same Access gate, and the token is used only for the check: never logged, never stored, only its hash kept in memory.
+Accepted cost: the staging worker also receives production login tokens. It is the same Cloudflare account behind the same Access gate, and the token is used only for the check: never logged, never stored, only its hash kept in memory.
 
 `wrangler.local.toml` leaves the setting unset. `worker/test/local-config-targets-local-stack.test.ts` keeps local config off deployed services. Locally, nothing is attributed and the strict check refuses. That is a change from today, when local runs record the browser's claimed pubkey.
 
@@ -67,7 +67,7 @@ After phase 2 the frontend stops sending a claimed moderator. The worker ignores
 
 ### 4. How long a verified login is remembered
 
-- A successful check is cached in memory per isolate for **60 seconds**, keyed on the SHA-256 of the token, never the token itself. A revocation takes effect within about a minute. App sign-out doesn't revoke anything (decision 1).
+- A successful check is cached in memory per isolate for **60 seconds**, keyed on the SHA-256 of the token, never the token itself. A revocation takes effect within about a minute. Revoking on app sign-out is decision 9.
 - Each Keycast call has a **3-second** timeout.
 - Failures are never cached, so the next request tries again and a fresh sign-in works at once.
 - No in-flight checks are shared across requests (the same Workers rule PR #352 follows).
@@ -79,7 +79,7 @@ Not in phase 2. Access already decides who is a moderator, and that list would n
 
 ### 6. Login scope
 
-The login grants full signing rights; the app asks for no narrower scope. This becomes a follow-up issue, not a blocker. The handling rules in decision 2 apply meanwhile.
+Asking Keycast for a narrower login scope becomes a follow-up issue, not a blocker. The handling rules in decision 2 apply meanwhile.
 
 ### 7. Build approach
 
@@ -94,9 +94,9 @@ A fresh branch off main (`feat/178-phase2-moderator-identity`). An earlier, unpu
 
 Rewriting the body or passing the identity in a worker-set internal header is left to the builder. If it's a header, the worker must first strip any copy the client sent.
 
-### 9. App sign-out doesn't end the login: accepted for now (Matt, 2026-11-04)
+### 9. Sign-out revokes the login in a follow-up (Matt, 2026-11-04)
 
-Recording who acted stays correct, because a token only ever names its owner. A follow-up issue makes the app's sign-out also revoke the login in Keycast. That follow-up must land before the suspended-content viewer (#212) relies on strict mode, because the viewer needs to know who is looking, not just whose token was used.
+Recording who acted stays correct, because a token only ever names its owner. A follow-up issue makes the app's sign-out also revoke the login in Keycast. That follow-up must land before the suspended-content viewer (#212) relies on strict mode.
 
 ### 10. Keycast status calls name the moderator (Matt, 2026-11-04)
 
@@ -137,7 +137,8 @@ Rules:
 
 - The verification runs once per request, near the access gate, before the handler. The handler receives the verified pubkey as an argument. Handlers no longer read a moderator from the body.
 - **Bulk moderate:** the check runs when the request arrives. Only the verified pubkey goes into the queue job. The token never enters the queue. The existing fallback to the worker's admin pubkey for unattributed bulk work stays as it is.
-- **ReportWatcher and Zendesk sync** receive the verified pubkey where they're called from these routes. Their existing format checks stay.
+- **ReportWatcher** receives the verified pubkey where it's called from these routes. Its existing format check stays.
+- **Zendesk sync** keeps naming the worker's admin key on publish, moderate and bulk. Ticket close and the sexual-quarantine decision, which already passed a moderator, pass the verified one, or their "no human named" value (the plan's call, Matt's answer 1).
 - **Age review (my call):** no frontend code sends `moderator_pubkey` on the PATCH today, so the column is never set in practice, and it gates greenlight attachment and voluntary-case detection (`worker/src/age-review.ts`, the `moderator_pubkey IS NULL` checks). Phase 2 does not start setting it. The PATCH stops accepting it from the body (ignored, not refused, as in decision 3). The Keycast audit actor on the minor-status calls (`minorFlagActor`) becomes the verified moderator making this request, with no fallback to the stored column.
 - `POST /api/age-review/create-minor-account` and the protected-minor routes take no moderator from the body (checked).
 

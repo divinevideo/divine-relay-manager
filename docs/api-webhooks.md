@@ -19,6 +19,17 @@ CF-Access-Client-Id: <your-client-id>
 CF-Access-Client-Secret: <your-client-secret>
 ```
 
+### Moderator attribution
+
+Routes that record who acted take the moderator from the `X-Divine-Login-Token`
+header, which carries the moderator's Divine login token. The worker checks it
+with Keycast and records the verified pubkey. A missing header or a failed check
+never refuses the request; the action records the route's "no human named" value
+instead, as listed under
+[Goals](superpowers/specs/2026-11-04-moderator-identity-phase2-design.md#goals) in
+the phase 2 design. A moderator named in the request body (`moderatorPubkey`,
+`moderator_pubkey`, `actor`) is never recorded.
+
 ### Webhook Signature Verification
 
 For Zendesk webhooks, requests are verified using HMAC-SHA256:
@@ -692,7 +703,7 @@ Content-Type: application/json
 
 ### POST /api/decisions
 
-Log a moderation decision (called automatically by action endpoints).
+Log a moderation decision. The app calls this after an action; the action endpoints don't call it.
 
 **Request:**
 ```json
@@ -701,13 +712,11 @@ Log a moderation decision (called automatically by action endpoints).
   "targetId": "abc123...",
   "action": "ban_user",
   "reason": "Spam account",
-  "moderatorPubkey": "<64-character hex pubkey>",
-  "reportId": "report-id...",
-  "zendeskTicketId": 12345
+  "reportId": "report-id..."
 }
 ```
 
-`moderatorPubkey` is optional: send a 64-character hex string, or omit it and the decision is recorded with no moderator. Any other value gets a `400`, including the worker's own `auto` marker.
+The decision records the moderator verified from the `X-Divine-Login-Token` header (see Moderator attribution above), or no moderator when there is no verified login. A `moderatorPubkey` in the body is ignored.
 
 ---
 
@@ -726,8 +735,8 @@ Get all decisions for a target.
       "target_id": "abc123...",
       "action": "ban_user",
       "reason": "Spam",
-      "moderator_email": "agent@example.com",
-      "created_at": "2025-01-05T12:00:00Z"
+      "moderator_pubkey": "<64-character hex pubkey>",
+      "created_at": "2025-01-05 12:00:00"
     }
   ]
 }
