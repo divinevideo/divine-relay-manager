@@ -105,8 +105,9 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
 
 // The chosen category as a chip that clears it, the same in the open panel
 // and the closed summary. A real button, so the keyboard reaches it, and the
-// whole chip is the target rather than the small X.
-function ActiveCategoryChip({ category, onClear }: { category: string; onClear: () => void }) {
+// whole chip is the target rather than the small X. labelId marks the
+// visible label alone, for a description that should not read "Clear".
+function ActiveCategoryChip({ category, onClear, labelId }: { category: string; onClear: () => void; labelId?: string }) {
   return (
     <button
       type="button"
@@ -114,7 +115,7 @@ function ActiveCategoryChip({ category, onClear }: { category: string; onClear: 
       className={cn(badgeVariants({ variant: 'default' }), 'cursor-pointer pr-1')}
     >
       <span className="sr-only">Clear category filter: </span>
-      {getCategoryLabel(category)}
+      <span id={labelId}>{getCategoryLabel(category)}</span>
       <X className="h-3 w-3 ml-1" aria-hidden="true" />
     </button>
   );
@@ -2041,19 +2042,34 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           <Collapsible open={filtersOpen} onOpenChange={onFiltersOpenChange} className="mt-3 pt-3 border-t">
             <div className="flex items-center gap-2 min-w-0">
               <CollapsibleTrigger asChild>
-                <Button ref={filtersToggleRef} variant="ghost" size="sm" className="h-7 px-1 -ml-1 text-xs font-medium shrink-0">
+                {/* Closed, the toggle is described by the summary's sort and
+                    type, the chosen category's name (not the chip's "Clear"
+                    action) and the sort-scope note when shown, so a screen
+                    reader says what is narrowing the list along with
+                    "collapsed". */}
+                <Button
+                  ref={filtersToggleRef}
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 px-1 -ml-1 text-xs font-medium shrink-0"
+                  aria-describedby={filtersOpen ? undefined : [
+                    'filters-summary',
+                    filterCategory && 'filters-summary-category',
+                    showSortScopeNote && 'sort-scope-note',
+                  ].filter(Boolean).join(' ')}
+                >
                   <ChevronDown className={`h-3 w-3 mr-1 transition-transform motion-reduce:transition-none ${filtersOpen ? '' : '-rotate-90'}`} />
                   Filters
                 </Button>
               </CollapsibleTrigger>
               {!filtersOpen && (
                 <div data-testid="filters-summary" className="flex items-center gap-1 flex-wrap min-w-0 text-xs text-muted-foreground">
-                  <span>
+                  <span id="filters-summary">
                     {SORT_OPTIONS.find(o => o.value === sortBy)?.label}
                     {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
                   </span>
                   {filterCategory && (
-                    <ActiveCategoryChip category={filterCategory} onClear={clearCategory} />
+                    <ActiveCategoryChip category={filterCategory} onClear={clearCategory} labelId="filters-summary-category" />
                   )}
                 </div>
               )}

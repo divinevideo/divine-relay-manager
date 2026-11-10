@@ -151,6 +151,19 @@ describe('Filters toggle', () => {
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'false');
   });
 
+  it('describes the closed toggle with its summary, for screen readers', async () => {
+    const user = userEvent.setup();
+    renderReports();
+    const label = await screen.findByText('Category');
+    await user.click(within(label.nextElementSibling as HTMLElement).getByText('Spam'));
+    expect(await filtersToggle()).not.toHaveAccessibleDescription();
+
+    await user.click(await filtersToggle());
+
+    // The sort and the category's name, not the chip's "Clear" action.
+    expect(await filtersToggle()).toHaveAccessibleDescription('Most Reports Spam');
+  });
+
   it('clears the category from the open panel with a button', async () => {
     const user = userEvent.setup();
     renderReports();

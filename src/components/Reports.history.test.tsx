@@ -964,6 +964,7 @@ describe('the sort in the history view', () => {
     expect(filters).toHaveAttribute('aria-expanded', 'false');
     expect(screen.getByText(SORT_NOTE(3))).toBeInTheDocument();
     expect(document.querySelectorAll('#sort-scope-note')).toHaveLength(1);
+    expect(filters).toHaveAccessibleDescription(`Most Reports ${SORT_NOTE(3)}`);
   });
 
   it('says nothing about the sort under Newest First', async () => {
