@@ -9,12 +9,13 @@ import * as adminApi from '@/lib/adminApi';
  * Hook that provides admin API functions pre-bound to the current environment's apiUrl.
  * Components using this hook automatically use the correct worker based on the selected environment.
  *
- * The plain result has the reads only. Every call that records who acted
- * (ban, delete, label, decision log, and the rest) is reachable only through
- * `asModerator(token)`, so tsc rejects a moderation action made without the
- * moderator's login. callRelayRpc stays on the plain result for reads such as
- * RelaySettings' relay-config methods; an account action through it still
- * goes through asModerator.
+ * The plain result has the reads only. Every write (ban, delete, label,
+ * decision log, media actions, settings, and the rest) is reachable only
+ * through `asModerator(token)`, so tsc rejects a write made without the
+ * moderator's login: the worker records the moderator from it, and refuses a
+ * write without it once REQUIRE_MODERATOR_LOGIN is on. callRelayRpc stays on
+ * the plain result for relay reads (list*, get*); a relay write goes through
+ * asModerator.
  *
  * @example
  * ```tsx
@@ -144,6 +145,8 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
       adminApi.moderateMedia(apiUrl, sha256, action, reason, from, pubkey, login),
     deleteMedia: (sha256: string, reason?: string) =>
       adminApi.deleteMedia(apiUrl, sha256, reason, login),
+    unblockMedia: (sha256: string, reason?: string) =>
+      adminApi.unblockMedia(apiUrl, sha256, reason, login),
 
     // Decision log cleanup and AI detection: writes, so they carry the login too.
     deleteDecisions: (targetId: string, targetType?: 'event' | 'pubkey') =>
@@ -161,7 +164,7 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
   };
 }
 
-/** Every call that records no moderator: reads, and writes the worker does not attribute. */
+/** Reads only. Every write lives in buildAttributionApi, so it carries the login. */
 function buildReadApi(apiUrl: string, relayUrl: string) {
   return {
     getSexualQuarantineCases: (cursor?: string) => adminApi.getSexualQuarantineCases(apiUrl, cursor),
@@ -198,8 +201,6 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     // Media moderation
     readMediaStatus: (sha256: string) =>
       adminApi.readMediaStatus(apiUrl, sha256),
-    unblockMedia: (sha256: string, reason?: string) =>
-      adminApi.unblockMedia(apiUrl, sha256, reason),
 
     // Decision log
     getDecisions: (targetId: string) =>
@@ -248,8 +249,6 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     getBulkJobNotes: (jobId: string, after?: string) => adminApi.getBulkJobNotes(apiUrl, jobId, after),
     getAgeReviewBulkNotesJob: (caseId: string) => adminApi.getAgeReviewBulkNotesJob(apiUrl, caseId),
     getBulkKindCounts: (pubkey: string) => adminApi.getBulkKindCounts(apiUrl, pubkey),
-
-    // Delete operations
 
     // Age review config
     getAgeReviewConfig: () =>

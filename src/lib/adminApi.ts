@@ -953,8 +953,8 @@ export async function checkMediaStatus(apiUrl: string, sha256: string): Promise<
 }
 
 // Unblock media (set back to SAFE)
-export async function unblockMedia(apiUrl: string, sha256: string, reason?: string): Promise<ApiResponse> {
-  return moderateMedia(apiUrl, sha256, 'SAFE', reason || 'Unblocked by moderator');
+export async function unblockMedia(apiUrl: string, sha256: string, reason?: string, opts?: LoginOpts): Promise<ApiResponse> {
+  return moderateMedia(apiUrl, sha256, 'SAFE', reason || 'Unblocked by moderator', undefined, undefined, opts);
 }
 
 // Decision log types

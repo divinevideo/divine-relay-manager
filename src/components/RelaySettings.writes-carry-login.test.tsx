@@ -29,7 +29,7 @@ beforeEach(() => {
 describe('RelaySettings relay writes', () => {
   it('sends a relay name change through the login, not the plain read call', async () => {
     const user = userEvent.setup();
-    render(<TestApp><RelaySettings /></TestApp>);
+    render(<TestApp><RelaySettings relayUrl="wss://relay.example" /></TestApp>);
 
     await user.type(await screen.findByPlaceholderText('My Awesome Relay'), 'Divine');
     await user.click(screen.getByRole('button', { name: /update name/i }));

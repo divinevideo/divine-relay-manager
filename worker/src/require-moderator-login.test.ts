@@ -95,6 +95,25 @@ describe('REQUIRE_MODERATOR_LOGIN on', () => {
     expect((await call({ headers: { 'X-Admin-Key': 'admin-key' } })).status).toBe(404);
   });
 
+  it('leaves moderation-service alone on its relay key, for relay writes', async () => {
+    // moderation-service bans and suspends over relay-rpc with MOD_RELAY_ADMIN_KEY.
+    // If that key stopped counting as a server caller, turning the setting on
+    // would silently refuse automated enforcement.
+    const env = { ...baseEnv, MOD_RELAY_ADMIN_KEY: { get: async () => 'mod-relay-key' } };
+    const res = await call(
+      { url: 'https://api.test/api/relay-rpc', body: { method: 'banpubkey', params: ['c'.repeat(64)] }, headers: { 'X-Admin-Key': 'mod-relay-key' } },
+      env,
+    ).catch(() => ({ status: 0, code: 'handler-ran' }));
+    // Past the gate the relay handler runs against a stub env; all that matters
+    // here is that the login gate did not refuse it.
+    expect(res.code).not.toBe('moderator_login_required');
+  });
+
+  it('refuses before a real write route runs, not only on unmatched paths', async () => {
+    expect(await call({ url: 'https://api.test/api/moderate', body: { action: 'delete_event', eventId: 'e'.repeat(64) }, headers: await browser() }))
+      .toEqual(REFUSED);
+  });
+
   it('still requires a login when a wrong admin key rides along with the Access token', async () => {
     // A browser build can carry a local-dev admin key. Only a key that matches
     // counts as a server caller.

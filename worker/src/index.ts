@@ -463,7 +463,9 @@ const ACCESS_UNAVAILABLE = {
 //      header alone proves nothing: service bindings reach this Worker without
 //      passing through Access, and so would workers.dev or preview URLs.
 // The keys are checked first so server-to-server calls never fetch Access certs.
-// Returns null if authorized, or the status and error to answer with if not.
+// Returns which credential let the request in ('admin-key' for a matching key,
+// 'access' for a verified Access token), or the status and error to answer with.
+// The login gate keys off `via`: only 'access' requests are the admin UI.
 async function verifyAdminAccess(
   request: Request,
   env: Env,

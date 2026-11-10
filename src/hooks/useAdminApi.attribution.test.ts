@@ -1,5 +1,5 @@
-// ABOUTME: Pins that every attribution call made through asModerator(token) sends
-// ABOUTME: the X-Divine-Login-Token header, and the plain useAdminApi() has none of them (#178).
+// ABOUTME: Pins that every write made through asModerator(token) sends the
+// ABOUTME: X-Divine-Login-Token header, and the plain useAdminApi() has none of them (#178).
 import { renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildAdminApi, useAdminApi, type ModeratorApi, type PlainAdminApi } from './useAdminApi';
@@ -51,6 +51,7 @@ const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]
   // REQUIRE_MODERATOR_LOGIN is on, or the worker refuses them.
   ['moderateMedia', (a) => a.moderateMedia('f'.repeat(64), 'SAFE', 'r')],
   ['deleteMedia', (a) => a.deleteMedia('f'.repeat(64), 'r')],
+  ['unblockMedia', (a) => a.unblockMedia('f'.repeat(64), 'r')],
   ['deleteDecisions', (a) => a.deleteDecisions('e1', 'event')],
   ['updateAgeReviewConfig', (a) => a.updateAgeReviewConfig({ auto_delete_on_deny: true })],
   ['createMinorAccount', (a) => a.createMinorAccount('kid', 'Kid', 12, 'op-1')],
@@ -184,6 +185,20 @@ export function plainApiHasNoAttributionCalls(api: PlainAdminApi): void {
   void api.bulkModerate;
   // @ts-expect-error attribution calls go through asModerator(token)
   void api.closeTicket;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.moderateMedia;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.deleteMedia;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.unblockMedia;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.deleteDecisions;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.updateAgeReviewConfig;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.createMinorAccount;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.submitAIDetection;
   // Reads stay, and so does callRelayRpc.
   void api.listBannedPubkeys;
   void api.callRelayRpc;
