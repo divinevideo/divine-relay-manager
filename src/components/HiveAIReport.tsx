@@ -175,7 +175,9 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
 
   const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
   const ActionIcon = actionConfig.icon;
-  const checkedAt = result.moderated_at;
+  // moderated_at is the record's last write, not the scan time: a report can
+  // advance it without a new scan (moderation-service report-review).
+  const recordUpdatedAt = result.moderated_at;
 
   // Filter scores above threshold (0.3)
   const significantScores = Object.entries(result.scores || {})
@@ -227,10 +229,10 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
         {/* Timestamp */}
         <div className="flex items-center gap-2 text-xs text-muted-foreground border-t pt-2">
           <Clock className="h-3 w-3" />
-          {checkedAt ? (
-            <span>Checked: {formatDate(checkedAt)}</span>
+          {recordUpdatedAt ? (
+            <span>Record updated: {formatDate(recordUpdatedAt)}</span>
           ) : (
-            <span>Check time unknown</span>
+            <span>Update time unknown</span>
           )}
         </div>
 

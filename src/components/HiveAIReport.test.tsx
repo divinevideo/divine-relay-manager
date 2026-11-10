@@ -108,8 +108,9 @@ describe('HiveAIReport', () => {
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
     expect(await screen.findByText('Nudity')).toBeInTheDocument();
-    expect(screen.getByText(/Checked:/)).toBeInTheDocument();
-    expect(screen.queryByText('Check time unknown')).not.toBeInTheDocument();
+    expect(screen.getByText(/Record updated:/)).toBeInTheDocument();
+    expect(screen.queryByText(/Checked:/)).not.toBeInTheDocument();
+    expect(screen.queryByText('Update time unknown')).not.toBeInTheDocument();
     // The only button left is the hash's copy control (the re-check icon had no
     // accessible name, so count rather than look it up by name).
     expect(screen.getAllByRole('button')).toHaveLength(1);
@@ -129,7 +130,7 @@ describe('HiveAIReport', () => {
     respond(200, JSON.stringify({ sha256: SHA, action: 'SAFE', scores: {}, moderated_at: 'not-a-date' }));
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
-    expect(await screen.findByText('Checked: not-a-date')).toBeInTheDocument();
+    expect(await screen.findByText('Record updated: not-a-date')).toBeInTheDocument();
   });
 
   it('bounds the read with the API timeout', async () => {
