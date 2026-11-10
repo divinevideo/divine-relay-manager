@@ -17,25 +17,43 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
-function methods() {
-  return fetchMock.mock.calls.map(([, init]) => (init as RequestInit | undefined)?.method ?? 'GET');
+// A fresh Response per call: a body can be read only once, so a shared instance
+// would fail any second fetch (a refetch, a second reader) for the wrong reason.
+function respond(status: number, body: string) {
+  fetchMock.mockImplementation(async () => new Response(body, { status }));
+}
+
+// Every request the card sent, whether it passed a Request or a URL and init.
+function requests() {
+  return fetchMock.mock.calls.map(([input, init]) => ({
+    url: input instanceof Request ? input.url : String(input),
+    method: (init as RequestInit | undefined)?.method ?? (input instanceof Request ? input.method : 'GET'),
+  }));
+}
+
+function expectOnlyReads() {
+  expect(fetchMock).toHaveBeenCalled();
+  for (const { url, method } of requests()) {
+    expect(method).toBe('GET');
+    expect(url).not.toContain('/api/moderate-check');
+  }
 }
 
 describe('HiveAIReport', () => {
   it('shows "Not analyzed yet" with no button when there is no result', async () => {
-    fetchMock.mockResolvedValue(new Response('not found', { status: 404 }));
+    respond(404, 'not found');
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
     expect(await screen.findByText('Not analyzed yet')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /analyze/i })).not.toBeInTheDocument();
     expect(screen.getAllByRole('button')).toHaveLength(1);
-    expect(methods().every(m => m === 'GET')).toBe(true);
+    expectOnlyReads();
   });
 
   it('shows an existing result with no re-check button', async () => {
-    fetchMock.mockResolvedValue(new Response(JSON.stringify({
+    respond(200, JSON.stringify({
       action: 'SAFE', scores: { nudity: 0.8 }, processedAt: '2026-11-01T10:00:00Z',
-    }), { status: 200 }));
+    }));
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
     expect(await screen.findByText('Nudity')).toBeInTheDocument();
@@ -43,7 +61,6 @@ describe('HiveAIReport', () => {
     // The only button left is the hash's copy control (the re-check icon had no
     // accessible name, so count rather than look it up by name).
     expect(screen.getAllByRole('button')).toHaveLength(1);
-    expect(fetchMock.mock.calls.some(([url]) => String(url).includes('/api/moderate-check'))).toBe(false);
-    expect(methods().every(m => m === 'GET')).toBe(true);
+    expectOnlyReads();
   });
 });
