@@ -459,7 +459,11 @@ describe('a logout in another tab', () => {
 
   // The fence, not the removal, makes the sign-out hold (see the cross-tab
   // integration test), so a failed removal is logged and the sign-out goes on.
-  it('logout does not throw when the removal fails, and returns its message', () => {
+  it('logout does not throw when the removal fails, and returns its message', async () => {
+    // A fresh module instance: no session accepted yet, so the only session
+    // logout can fence is the one storage holds.
+    vi.resetModules();
+    const { logout } = await import('./divineLogin');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     localStorage.setItem(REVISION_KEY, 'rev-before');
     oauth.getSession.mockReturnValue({ bunkerUrl: 'bunker://x', accessToken: OLD });
@@ -468,11 +472,9 @@ describe('a logout in another tab', () => {
       expect(logout()).toEqual({ type: 'signed-out', endedRevision: 'rev-before' });
       expect(warn).toHaveBeenCalledWith('[divine-login] could not remove the session; later reads refuse it:', 'SecurityError');
       // Fenced for a reload too, by fingerprint only.
-      // (It may also hold the session an earlier test accepted in this
-      // module instance: logout fences the tab's last accepted session too.)
       const fence: string[] = JSON.parse(localStorage.getItem('divine-login:ended-sessions')!);
-      expect(fence.length).toBeGreaterThan(0);
-      for (const fp of fence) expect(fp).toMatch(/^[0-9a-f]{16}$/);
+      expect(fence).toHaveLength(1);
+      expect(fence[0]).toMatch(/^[0-9a-f]{16}$/);
     } finally {
       warn.mockRestore();
     }
