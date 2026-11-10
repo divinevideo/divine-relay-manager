@@ -199,6 +199,19 @@ describe('Filters toggle', () => {
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'false');
   });
 
+  it('remembers that it was opened again', async () => {
+    localStorage.setItem(OPEN_KEY, '0');
+    const user = userEvent.setup();
+    const first = renderReports();
+    expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'false');
+    await user.click(await filtersToggle());
+    expect(localStorage.getItem(OPEN_KEY)).toBe('1');
+    first.unmount();
+
+    renderReports();
+    expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'true');
+  });
+
   it('opens by default when storage is unavailable', async () => {
     const getItem = vi.fn(() => { throw new Error('denied'); });
     const setItem = vi.fn(() => { throw new Error('denied'); });
