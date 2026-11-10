@@ -1337,12 +1337,19 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // been read to its end. While it is loading, failed, cut short or has more,
   // the footer below says so, and the list must not read as empty (#186, #221).
   const listEmptyIsFinal = !historyView || footerState.kind === 'ended';
-  // The note under the sort control, while a sort other than Newest First
+  // The note on the sort's scope, while a sort other than Newest First
   // orders a history that has more pages to load. Shown only where the footer
   // states its count ('more'), so the note's number is the footer's: not once
   // history has ended, and not while a count is withheld for an unread source
   // or a failed re-read.
   const showSortScopeNote = historyView && sortBy !== 'newest' && footerState.kind === 'more';
+  // Rendered under the sort row while Filters is open and under the Filters
+  // row while it is closed (see the Collapsible below).
+  const sortScopeNote = showSortScopeNote && (
+    <p id="sort-scope-note" className="mt-2 text-[10px] italic leading-tight opacity-70">
+      Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
+    </p>
+  );
 
   // Sync selected report with URL
   useEffect(() => {
@@ -2034,6 +2041,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 </div>
               )}
             </div>
+            {/* Closed, the note moves out of the fold: closing Filters hides
+                the sort control, not this caveat on the order of the list
+                below. Open, it sits under the sort row as before. The closed
+                content unmounts, so only one copy (and one id) is ever on
+                the page. */}
+            {!filtersOpen && sortScopeNote}
             <CollapsibleContent className="space-y-3 mt-2">
               {/* Sort and type share a row, wrapping to two on narrow screens. */}
               <div className="flex flex-wrap items-center gap-2">
@@ -2094,11 +2107,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
               </div>
               {/* Sorted history covers only the pages loaded so far. */}
-              {showSortScopeNote && (
-                <p id="sort-scope-note" className="text-[10px] italic leading-tight opacity-70">
-                  Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
-                </p>
-              )}
+              {sortScopeNote}
 
               {/* Category filter chips */}
               {availableCategories.length > 0 && (

@@ -945,6 +945,27 @@ describe('the sort in the history view', () => {
     expect(await screen.findByText(SORT_NOTE(3))).toBeInTheDocument();
   });
 
+  it('keeps saying what the sort is sorted among with Filters closed', async () => {
+    twoPages();
+    const user = userEvent.setup();
+    renderQueue();
+    await openHistory(user);
+    await screen.findByText('Showing 3 resolved. More further back.');
+    await chooseSort('Most Reports');
+    await screen.findByText(SORT_NOTE(3));
+    // One note while open, inside the panel under the sort row.
+    const filters = screen.getByRole('button', { name: /^filters/i });
+    expect(document.querySelectorAll('#sort-scope-note')).toHaveLength(1);
+    expect(document.getElementById(filters.getAttribute('aria-controls')!))
+      .toContainElement(document.getElementById('sort-scope-note'));
+
+    await user.click(filters);
+
+    expect(filters).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.getByText(SORT_NOTE(3))).toBeInTheDocument();
+    expect(document.querySelectorAll('#sort-scope-note')).toHaveLength(1);
+  });
+
   it('says nothing about the sort under Newest First', async () => {
     twoPages();
     const user = userEvent.setup();
