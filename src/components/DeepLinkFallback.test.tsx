@@ -1,5 +1,5 @@
 // ABOUTME: Pins how the gone-report pane lists a target's prior moderation actions:
-// ABOUTME: a Reopen row (#324) alone is not a prior action, and names no moderator.
+// ABOUTME: a Reopen row (#324) alone is not a prior action, and an unattributed one names no moderator.
 
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
@@ -9,9 +9,10 @@ import type { ModerationDecision } from '@/lib/adminApi';
 const TARGET = { type: 'event' as const, value: 'c'.repeat(64) };
 const MODERATOR = 'e'.repeat(64);
 
-// What a Reopen writes: a dated `reopened` row with no moderator. An untyped
-// reopen writes one under both target types, so one can stand alone on a
-// target that was never handled.
+// What a Reopen writes without a verified login: a dated `reopened` row with
+// no moderator. (With one, the row names the moderator like any other row.) An
+// untyped reopen writes one under both target types, so one can stand alone on
+// a target that was never handled.
 const REOPEN: ModerationDecision = {
   id: 2,
   target_type: 'event',

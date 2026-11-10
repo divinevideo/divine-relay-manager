@@ -774,7 +774,11 @@ Get all decisions for a target.
 Reopen a target (#324). The method and path are older than this behavior and
 are kept so older frontends keep working. Each call writes one dated
 `moderation_decisions` row: `action: "reopened"`, `reason: "Reopened"`,
-`moderator_pubkey: NULL`, with `created_at` set by D1. Nothing is deleted or
+`created_at` set by D1, and `moderator_pubkey` set to the moderator verified
+from the `X-Divine-Login-Token` login, as on `POST /api/decisions`. It is
+`NULL` when there is no verified login (an `X-Admin-Key` caller, or a failed
+check while `REQUIRE_MODERATOR_LOGIN` is off). Readers decide a reopen by its
+action, so the moderator changes no handling. Nothing is deleted or
 changed. The target's earlier decisions stay as history, and so do its
 relay-side resolution labels (kind 1985, `L=moderation/resolution`).
 

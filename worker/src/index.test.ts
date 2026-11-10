@@ -3305,11 +3305,69 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
       const writes = decisionWrites();
       expect(writes).toHaveLength(1);
       expect(writes[0].sql).toMatch(/^\s*INSERT INTO moderation_decisions/);
-      // No moderator: the route has no verified login to name. created_at is left
-      // to the column default, which dates the row; the D1 test pins that.
+      // The moderator is bound like any other field. An admin-key caller has no
+      // verified login, so it records NULL. created_at is left to the column
+      // default, which dates the row; the D1 test pins that.
       expect(writes[0].sql.replace(/\s+/g, ' '))
-        .toMatch(/\(target_type, target_id, action, reason, moderator_pubkey\) VALUES \(\?, \?, \?, \?, NULL\)/);
-      expect(writes[0].binds).toEqual(['event', 'a'.repeat(64), 'reopened', 'Reopened']);
+        .toMatch(/\(target_type, target_id, action, reason, moderator_pubkey\) VALUES \(\?, \?, \?, \?, \?\)/);
+      expect(writes[0].binds).toEqual(['event', 'a'.repeat(64), 'reopened', 'Reopened', null]);
+    });
+
+    // The admin UI sends the moderator's login on Reopen (#405), so the row
+    // names who reopened it, the same as POST /api/decisions does.
+    it('records the moderator verified from the login on the reopen row', async () => {
+      __clearModeratorLoginCache();
+      const VERIFIED = 'c'.repeat(64);
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+        const url = input instanceof Request ? input.url : String(input);
+        if (url.endsWith('/api/nostr')) return new Response(JSON.stringify({ result: VERIFIED }), { status: 200 });
+        return new Response('{}', { status: 200 });
+      });
+      try {
+        const { db, decisionWrites } = recordingDb();
+        const req = reopen('a'.repeat(64));
+        req.headers.set('X-Divine-Login-Token', 'tok');
+
+        const res = await worker.fetch(
+          req,
+          { ...(reportsEnv as object), DB: db, MODERATOR_LOGIN_URL: 'https://login.example.test' } as never,
+          ctx,
+        );
+
+        expect(res.status).toBe(200);
+        // Both rows of a typeless reopen carry it.
+        expect(decisionWrites().map((w) => w.binds)).toEqual([
+          ['event', 'a'.repeat(64), 'reopened', 'Reopened', VERIFIED],
+          ['pubkey', 'a'.repeat(64), 'reopened', 'Reopened', VERIFIED],
+        ]);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    });
+
+    // With REQUIRE_MODERATOR_LOGIN off, a login that fails to verify does not
+    // block the reopen; the row records NULL, never a pubkey the client named.
+    it('records no moderator when the login does not verify', async () => {
+      __clearModeratorLoginCache();
+      const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response('{}', { status: 401 }));
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const { db, decisionWrites } = recordingDb();
+        const req = reopen('a'.repeat(64), '?targetType=event');
+        req.headers.set('X-Divine-Login-Token', 'tok');
+
+        const res = await worker.fetch(
+          req,
+          { ...(reportsEnv as object), DB: db, MODERATOR_LOGIN_URL: 'https://login.example.test' } as never,
+          ctx,
+        );
+
+        expect(res.status).toBe(200);
+        expect(decisionWrites().map((w) => w.binds)).toEqual([['event', 'a'.repeat(64), 'reopened', 'Reopened', null]]);
+      } finally {
+        warn.mockRestore();
+        fetchSpy.mockRestore();
+      }
     });
 
     it('sends nothing to the relay', async () => {
@@ -3338,7 +3396,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
         ctx,
       );
 
-      expect(decisionWrites().map((w) => w.binds)).toEqual([['pubkey', 'b'.repeat(64), 'reopened', 'Reopened']]);
+      expect(decisionWrites().map((w) => w.binds)).toEqual([['pubkey', 'b'.repeat(64), 'reopened', 'Reopened', null]]);
     });
 
     // The request is canonicalized, so an older tab asking with a report's
@@ -3370,8 +3428,8 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
 
       expect((await res.json() as { deleted: number }).deleted).toBe(2);
       expect(decisionWrites().map((w) => w.binds)).toEqual([
-        ['event', 'a'.repeat(64), 'reopened', 'Reopened'],
-        ['pubkey', 'a'.repeat(64), 'reopened', 'Reopened'],
+        ['event', 'a'.repeat(64), 'reopened', 'Reopened', null],
+        ['pubkey', 'a'.repeat(64), 'reopened', 'Reopened', null],
       ]);
     });
 

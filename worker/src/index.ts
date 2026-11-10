@@ -806,7 +806,7 @@ export default {
         if (rawType !== null && targetType === undefined) {
           console.warn('[reopen] unrecognised targetType, reopening both types:', rawType);
         }
-        return handleReopenTarget(targetId, env, corsHeaders, targetType);
+        return handleReopenTarget(targetId, env, corsHeaders, moderator, targetType);
       }
 
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
@@ -2405,6 +2405,7 @@ async function handleReopenTarget(
   targetId: string,
   env: Env,
   corsHeaders: Record<string, string>,
+  moderator: string | undefined,
   targetType?: 'event' | 'pubkey'
 ): Promise<Response> {
   try {
@@ -2416,14 +2417,17 @@ async function handleReopenTarget(
 
     const types = targetType ? [targetType] : (['event', 'pubkey'] as const);
     for (const type of types) {
-      // No moderator: the route has never been given a verified login to name,
-      // and NULL is what a person's decision with no login records. created_at
-      // is left to the column default, so D1 dates the row; an undated reopen
-      // would cut off nothing.
+      // The moderator is the one verified from the login the admin UI sends
+      // (#405), as on POST /api/decisions. No verified login (an admin-key
+      // caller, or a failed check while REQUIRE_MODERATOR_LOGIN is off) records
+      // NULL, never the worker's own 'auto'. Readers decide a reopen by its
+      // action, so who wrote it changes no handling. created_at is left to the
+      // column default, so D1 dates the row; an undated reopen would cut off
+      // nothing.
       await env.DB.prepare(`
         INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey)
-        VALUES (?, ?, ?, ?, NULL)
-      `).bind(type, targetId, REOPENED_ACTION, 'Reopened').run();
+        VALUES (?, ?, ?, ?, ?)
+      `).bind(type, targetId, REOPENED_ACTION, 'Reopened', moderator ?? null).run();
     }
 
     return jsonResponse({

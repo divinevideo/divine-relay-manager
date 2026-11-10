@@ -238,7 +238,7 @@ describe('human decision persistence', () => {
 
       const reopens = sqlLog.filter(s => s.sql.includes('INSERT INTO moderation_decisions'));
       expect(reopens.length).toBe(1);
-      expect(reopens[0].bindings).toEqual(['event', 'event_abc123', 'reopened', 'Reopened']);
+      expect(reopens[0].bindings).toEqual(['event', 'event_abc123', 'reopened', 'Reopened', null]); // admin key: no verified moderator
       expect(sqlLog.filter(s => s.sql.includes('DELETE FROM moderation_decisions'))).toHaveLength(0);
 
       // Should NOT have any DELETE/UPDATE on moderation_targets
