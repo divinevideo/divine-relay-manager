@@ -7,57 +7,22 @@ import { type AgeReviewCase, TERMINAL_STATES } from '../../shared/age-review';
 
 /**
  * Returns the single active (non-terminal) age-review case for a pubkey, or
- * null. ReportWatcher guarantees at most one active case per pubkey, so this is
- * unambiguous. Throws on a failed query; each caller decides whether that fails
- * open or closed.
+ * null. Every path that opens an active case first checks for one, so this is
+ * unambiguous. Throws on a failed query; each caller decides whether that
+ * fails open or closed.
  *
- * `anyCase` matches the pubkey in any case. Before #313 a case stored the
- * report's `p` tag as written, which can be uppercase; every path now opens
- * cases in lowercase, but older rows may remain, while every caller asks with
- * lowercase hex. Callers pass it only where missing such a case would lift a
- * hold the case keeps:
- * - ageReviewActiveGuard when it fails closed: relay-RPC unsuspend and unban,
- *   the loosening bulk enqueue (age-gate-all, un-age-restrict-all), a
- *   note's Restore and any SAFE or AGE_RESTRICTED (moderate-media's account
- *   check and lift guard);
- * - the bulk queue consumer's per-chunk check, which only loosening jobs run;
- * - the active-case route (the case hand-off, the Ban warning and the results
- *   panel's pause).
- * The rest match exactly, as before: ageReviewActiveGuard for relay-RPC
- * suspend and the enforcing bulk enqueue (delete-all, delete-kind,
- * age-restrict-all), where matching in any case would keep no hold and only
- * refuse enforcement, and the Greenlight start (handleStartGreenlight).
- * With `anyCase` the query gives up the pubkey index and keeps the state
- * index, on a small table.
- *
- * While an uppercase row opened before #313 is still active, an account can
- * have an open case under each spelling (a lowercase case opened since,
- * beside the older uppercase one).
- * With `anyCase` the case stored exactly as asked comes first (the ORDER BY's
- * `pubkey = ?` compares bytes), then the oldest, so the answer is the one the
- * exact match gives whenever there is one, and the same on every read.
- *
- * TODO(#313): drop the case-insensitive match once existing rows read zero (intake stores lowercase since #313).
+ * The match is exact. Every path opens cases under a lowercase pubkey (#313),
+ * and every caller asks with lowercase hex.
  */
 export async function getActiveAgeReviewCase(
   pubkey: string,
   env: { DB?: D1Database },
-  opts: { anyCase?: boolean } = {},
 ): Promise<AgeReviewCase | null> {
   if (!env.DB) return null;
-  const notTerminal = `state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})`;
-  const statement = opts.anyCase
-    ? env.DB.prepare(`
-      SELECT * FROM age_review_cases
-      WHERE pubkey = ? COLLATE NOCASE AND ${notTerminal}
-      ORDER BY (pubkey = ?) DESC, created_at, id
-      LIMIT 1
-    `).bind(pubkey, ...TERMINAL_STATES, pubkey)
-    : env.DB.prepare(`
-      SELECT * FROM age_review_cases
-      WHERE pubkey = ? AND ${notTerminal}
-      LIMIT 1
-    `).bind(pubkey, ...TERMINAL_STATES);
-  const row = await statement.first<AgeReviewCase>();
+  const row = await env.DB.prepare(`
+    SELECT * FROM age_review_cases
+    WHERE pubkey = ? AND state NOT IN (${TERMINAL_STATES.map(() => '?').join(',')})
+    LIMIT 1
+  `).bind(pubkey, ...TERMINAL_STATES).first<AgeReviewCase>();
   return row ?? null;
 }

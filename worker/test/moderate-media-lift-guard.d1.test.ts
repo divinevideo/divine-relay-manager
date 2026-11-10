@@ -92,19 +92,20 @@ describe('/api/moderate-media lift guard on a real database', () => {
     expect(writes).toBe(0);
   });
 
-  // A case's pubkey is the report's `p` tag as written (#313); the media
-  // server's owner is lowercased.
-  it('refuses an Unblock while the owner has an open case stored in uppercase', async () => {
+  // Cases are stored under a lowercase pubkey (#313), as the media server's
+  // owner is, and the guard's lookup matches exactly: a case in another
+  // spelling is not the owner's.
+  it.each(['SAFE', 'AGE_RESTRICTED'])('lets a %s of a blocked file through when the only open case is stored in uppercase', async (action) => {
     await clearCases();
     await insertCase(OWNER.toUpperCase(), 'open_reported');
-    const res = await unblock();
-    expect(res).toMatchObject({ status: 409, json: { code: 'age_review_active', caseId: `c${seq}` } });
-    expect(writes).toBe(0);
+    const res = await unblock(action);
+    expect(res.status).toBe(200);
+    expect(writes).toBe(1);
   });
 
-  it('refuses an Age Restrict of a blocked file while the owner has an open case stored in uppercase, and writes nothing', async () => {
+  it('refuses an Age Restrict of a blocked file while the owner has an open case, and writes nothing', async () => {
     await clearCases();
-    await insertCase(OWNER.toUpperCase(), 'open_reported');
+    await insertCase(OWNER, 'open_reported');
     const res = await unblock('AGE_RESTRICTED');
     expect(res).toMatchObject({ status: 409, json: { code: 'age_review_active', caseId: `c${seq}` } });
     expect(writes).toBe(0);
