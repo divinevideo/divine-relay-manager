@@ -116,20 +116,24 @@ export interface HandledBeforeBan {
   since: number | null;
 }
 
-// The decision rows that record an account ban. The moderation screens log
-// `ban_user` (UserActions, UserManagement, EventDetail, DebugPanel); `ban` is
-// the older spelling useDecisionLog's isBanned also reads. The relay call
-// (`banpubkey`) and the moderate route's `ban_pubkey` write no decision row.
+// The decision rows that record an account ban. UserActions, UserManagement
+// and DebugPanel log `ban_user`; `ban` is an older spelling. EventDetail and
+// Labels ban without a decision row (EventDetail logs only its `unban_user`),
+// and so do the relay call (`banpubkey`) and the moderate route's `ban_pubkey`.
 const BAN_DECISION_ACTIONS: readonly string[] = ['ban_user', 'ban'];
+const UNBAN_DECISION_ACTION = 'unban_user';
 
 export function isBanDecision(action: string): boolean {
   return BAN_DECISION_ACTIONS.includes(action);
 }
 
 // History is newest first and undated last (shared/handling.ts), so the first
-// ban is the latest dated one, or undated only when no ban is dated.
+// ban is the latest dated one, or undated only when no ban is dated. An unban
+// newer than it means the ban the relay lists now came later, by a path that
+// writes no row (see BAN_DECISION_ACTIONS), so its date is unknown.
 function latestBanAt(entry: HandlingEntry): number | null {
-  return entry.history.find(h => isBanDecision(h.action))?.at ?? null;
+  const latest = entry.history.find(h => isBanDecision(h.action) || h.action === UNBAN_DECISION_ACTION);
+  return latest && latest.action !== UNBAN_DECISION_ACTION ? latest.at : null;
 }
 
 // Spec decisions 3 and 5: a handled-before item on a banned account, or on a

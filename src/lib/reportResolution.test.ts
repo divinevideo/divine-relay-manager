@@ -293,6 +293,25 @@ describe('reportHandling', () => {
     expect(reportHandling(profileReport(150), ctx).ban).toEqual({ kind: 'account', since: null });
   });
 
+  // Some ban paths (EventDetail, Labels) write no decision row. An account
+  // unbanned after its latest ban row and banned again that way is banned
+  // now, but not since that row's date, so the date is unknown.
+  it('dates the ban as unknown when an unban is newer than the latest ban row', () => {
+    const rebanned: HandlingEntry = {
+      handledAt: 130,
+      history: [
+        { action: 'reviewed', at: 130 },
+        { action: 'unban_user', at: 125 },
+        { action: 'ban_user', at: 120 },
+      ],
+    };
+    const ctx = ctxWith({ bannedPubkeys: new Set([PROFILE]), handling: new Map([[`pubkey:${PROFILE}`, rebanned]]) });
+    expect(reportHandling(profileReport(150), ctx).ban).toEqual({ kind: 'account', since: null });
+
+    const authorCtx = ctxWith({ bannedPubkeys: new Set([AUTHOR]), handling: new Map([[`pubkey:${AUTHOR}`, rebanned]]) });
+    expect(reportHandling(eventReport(150, AUTHOR), authorCtx).ban).toEqual({ kind: 'author', since: null });
+  });
+
   it('carries no ban for an account the relay does not list', () => {
     const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, authors]]) });
     expect(reportHandling(profileReport(150), ctx).ban).toBeUndefined();
