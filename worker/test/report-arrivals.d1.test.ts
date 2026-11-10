@@ -54,4 +54,44 @@ describe('report_arrivals', () => {
   it('returns an empty map for no ids', async () => {
     expect((await readReportArrivals(DB, [])).size).toBe(0);
   });
+
+  // The feed reads arrivals for every report it walks (thousands of ids), so
+  // the chunks go to D1 in one batch rather than one round trip each.
+  it('sends every chunk in one batch, and no query at all for no ids', async () => {
+    const all = Array.from({ length: 250 }, (_, i) => `id${i}`);
+    for (const id of all.filter((_, i) => i % 3 === 0)) await recordReportArrival(DB, id, 9);
+    const batches: number[] = [];
+    let singles = 0;
+    // Real statements, so DB.batch accepts them; only their one-at-a-time
+    // runners are wrapped to count.
+    const countRunners = (stmt: D1PreparedStatement) => {
+      const s = stmt as unknown as Record<string, (...a: unknown[]) => unknown>;
+      for (const name of ['all', 'first', 'run', 'raw']) {
+        const original = s[name].bind(stmt);
+        s[name] = (...a: unknown[]) => { singles += 1; return original(...a); };
+      }
+      return stmt;
+    };
+    const counting = {
+      prepare: (sql: string) => {
+        const stmt = DB.prepare(sql);
+        const bind = stmt.bind.bind(stmt);
+        (stmt as unknown as { bind: unknown }).bind = (...args: unknown[]) => countRunners(bind(...args));
+        return countRunners(stmt);
+      },
+      batch: (stmts: D1PreparedStatement[]) => {
+        batches.push(stmts.length);
+        return DB.batch(stmts);
+      },
+    } as unknown as D1Database;
+
+    const found = await readReportArrivals(counting, all);
+    expect(batches).toEqual([3]);
+    expect(singles).toBe(0);
+    expect(found).toEqual(await readReportArrivals(DB, all));
+    expect(found.size).toBe(84);
+
+    await readReportArrivals(counting, []);
+    expect(batches).toEqual([3]);
+  });
 });

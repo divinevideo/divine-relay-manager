@@ -19,14 +19,10 @@ export interface RelayReport {
   tags: string[][];
 }
 
-// The targets the worker can call resolved, split by who resolved them. The
-// feed and resolved history read only `automated` from this now; whether a
-// report is handled is the dated rule in shared/handling.ts (#324).
-//
-// `resolved`: handled -- any resolution label, and any event or pubkey decision
-// getResolvedTargets returns without the `automated` flag, so one a person made.
-// Auto-hide actions are never here (getResolvedTargets leaves them out): auto-
-// hidden content is waiting FOR review, not handled.
+// The targets the worker can call resolved, split by who resolved them. Only
+// `automated` is read now; whether a report is handled is the dated rule in
+// shared/handling.ts (#324). `resolved` (labels and a person's decisions) is
+// what takes a target out of `automated`.
 //
 // `automated`: resolved only by decisions the worker wrote itself (today
 // age_review_case_created), with no label either. No person has looked at
@@ -218,28 +214,24 @@ export async function readResolutionKeys(
 // the page, never a read of the whole table. A report with no row compares by
 // its created_at (reportTime).
 //
-// A failed read falls back to created_at for every report rather than failing
-// the request. That is the rule as it stood before arrivals were recorded, and
-// the spec's fallback for any report with no row; blocking the queue on it
-// would cost more than a comparison by the reporter's clock.
-async function readArrivalsFor(db: D1Database, reports: readonly RelayReport[]): Promise<Map<string, number>> {
+// A failed read throws, failing the request like every other source (#221).
+// Falling back to created_at for every report would let a backdated report the
+// watcher saw arrive after the handling drop out of the feed unflagged.
+function readArrivalsFor(db: D1Database, reports: readonly RelayReport[]): Promise<Map<string, number>> {
   const ids = reports.map(report => report?.id).filter((id): id is string => typeof id === 'string');
-  try {
-    return await readReportArrivals(db, ids);
-  } catch (error) {
-    console.error('Read report arrivals error, comparing by created_at:', error);
-    return new Map();
-  }
+  return readReportArrivals(db, ids);
 }
 
 function failure(status: number, error: unknown) {
   return { status, body: { success: false, error: error instanceof Error ? error.message : String(error) } };
 }
 
-// GET /api/reports?needs_attention=1. Every report whose target still needs a
-// moderator, at any age. Any failed source fails the request: resolution sets
-// are subtractive, so a silent empty makes the queue bigger and wrong rather
-// than smaller and safe (#221).
+// GET /api/reports?needs_attention=1. Every report a moderator still needs to
+// see, at any age: those on targets nobody handled, those newer than their
+// target's handling (#324), and every report on a target pending review. Any
+// failed source -- reports, labels, decisions, auto-hide states or arrivals --
+// fails the request: resolution sets are subtractive, so a silent empty makes
+// the queue wrong rather than safe (#221).
 export async function getReportsNeedingAttention(
   db: D1Database | undefined,
   relayUrl: string,

@@ -86,6 +86,10 @@ export async function getResolvedTargets(
     for (const row of rows) {
       const key = `${row.target_type}:${row.target_id}`;
       if (row.action === REOPENED_ACTION) {
+        // By id, so a human row written in the same second after a reopen
+        // resolves the target here, where handlingByTarget needs a strictly
+        // later time. They differ only within that second, and only an old
+        // Pages build reads this list.
         targets.delete(key);
         continue;
       }

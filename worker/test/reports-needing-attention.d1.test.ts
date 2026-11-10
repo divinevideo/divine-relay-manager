@@ -219,6 +219,38 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
       expect(lines).toEqual(['[needs-attention] handled before: 2 targets, by last handling {"dismissed":1,"reviewed":1}']);
     });
 
+    // A failed arrival read is a failed source (#221). Comparing every report by
+    // created_at instead would drop a backdated report the watcher saw arrive
+    // after the handling, with nothing to say so.
+    it('fails the feed and resolved history, rather than dropping a report, when the arrival read fails', async () => {
+      stubRelay([report(1, DECIDED_AT_S - 100, [['e', E(1)]])]);
+      const brokenMf = new Miniflare({
+        modules: true,
+        script: 'export default { fetch() { return new Response("ok"); } };',
+        compatibilityDate: '2024-12-01',
+        compatibilityFlags: ['nodejs_compat'],
+        d1Databases: ['DB'],
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const brokenDb = (await brokenMf.getD1Database('DB')) as unknown as D1Database;
+        await ensureSchema(brokenDb);
+        await brokenDb.prepare('INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?)')
+          .bind('event', E(1), 'reviewed', 'f'.repeat(64), DECIDED_AT).run();
+        await brokenDb.exec('DROP TABLE report_arrivals');
+
+        const feed = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video');
+        expect(feed.status).toBe(502);
+        expect(feed.body).not.toHaveProperty('events');
+
+        const history = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video');
+        expect(history.status).toBe(502);
+        expect(history.body).not.toHaveProperty('events');
+      } finally {
+        await brokenMf.dispose();
+      }
+    });
+
     it('treats a report as new again after a reopen, until a person handles the target again', async () => {
       stubRelay([report(1, DECIDED_AT_S + 100, [['e', E(1)]]), report(2, DECIDED_AT_S + 100, [['e', E(2)]])]);
       await decide('event', E(1), 'reviewed', 'f'.repeat(64), '2025-12-31 00:00:00');

@@ -12,20 +12,30 @@ export async function recordReportArrival(db: D1Database, reportId: string, seen
     .run();
 }
 
-/** Ids with no row (never seen live) are absent from the map. */
+/**
+ * Ids with no row (never seen live) are absent from the map. One statement per
+ * chunk of ids, all sent in a single batch: the feed asks for thousands of ids,
+ * and one round trip per chunk would add up to hundreds of serial queries.
+ */
 export async function readReportArrivals(
   db: D1Database,
   reportIds: readonly string[],
 ): Promise<Map<string, number>> {
   const arrivals = new Map<string, number>();
+  const statements: D1PreparedStatement[] = [];
   for (let i = 0; i < reportIds.length; i += READ_CHUNK) {
     const chunk = reportIds.slice(i, i + READ_CHUNK);
     const placeholders = chunk.map(() => '?').join(', ');
-    const { results } = await db
-      .prepare(`SELECT report_id, first_seen_at FROM report_arrivals WHERE report_id IN (${placeholders})`)
-      .bind(...chunk)
-      .all<{ report_id: string; first_seen_at: number }>();
-    for (const row of results ?? []) arrivals.set(row.report_id, row.first_seen_at);
+    statements.push(
+      db
+        .prepare(`SELECT report_id, first_seen_at FROM report_arrivals WHERE report_id IN (${placeholders})`)
+        .bind(...chunk),
+    );
+  }
+  if (statements.length === 0) return arrivals;
+  const results = await db.batch<{ report_id: string; first_seen_at: number }>(statements);
+  for (const result of results) {
+    for (const row of result.results ?? []) arrivals.set(row.report_id, row.first_seen_at);
   }
   return arrivals;
 }
