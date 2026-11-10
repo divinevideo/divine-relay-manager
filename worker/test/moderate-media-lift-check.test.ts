@@ -37,6 +37,12 @@ let blobStatus: string;
 let blobReads: string[];
 // What moderation-service's record says, or a number for a failed read.
 let recordStatus: string | number;
+// Reads left hanging, held until the next test starts. Node's Request follows
+// the signal it was built with only through a weak reference, so a hanging
+// request nothing else holds can be collected before the test aborts it, and
+// the abort never reaches the read: the test then times out, whenever a
+// garbage collection happens to land in that window.
+let hungReads: Request[];
 
 const moderationApi = {
   async fetch(request: Request): Promise<Response> {
@@ -47,6 +53,7 @@ const moderationApi = {
       if (typeof recordStatus === 'number') return new Response('err', { status: recordStatus });
       // A read that never answers, unless its request is aborted.
       if (recordStatus === 'hang') {
+        hungReads.push(request);
         return new Promise((_, reject) => {
           request.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
         });
@@ -126,6 +133,7 @@ beforeEach(() => {
   blobStatus = 'banned';
   blobReads = [];
   recordStatus = 'permanent_ban';
+  hungReads = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
   // The allowed calls to /api/moderate-media in the parity table below log a
   // line each from syncZendeskAfterAction.
