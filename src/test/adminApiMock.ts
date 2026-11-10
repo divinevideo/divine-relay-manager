@@ -10,6 +10,10 @@ type ApiDouble = Record<string, unknown>;
  * works, and records each call in `moderatorCall` (a vi.fn, so clearAllMocks
  * resets it) as `(fn, token, args)`. A call made through the plain api is not
  * recorded, so a test can tell an attributed call from an unattributed one.
+ * Every call made through the scoped api is recorded, including the read api's
+ * moderateMedia and deleteMedia (writes the worker does not attribute), but the
+ * real hook sends the login only with the calls in useAdminApi's
+ * buildAttributionApi. Assert tokens for those calls only.
  */
 export function withAsModerator<T extends ApiDouble>(api: T) {
   const moderatorCall = vi.fn<(fn: string, token: string | undefined, args: unknown[]) => void>();

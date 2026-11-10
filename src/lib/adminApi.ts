@@ -75,8 +75,10 @@ export function getApiHeaders(contentType = 'application/json'): Record<string, 
   return headers;
 }
 
+// What POST /api/publish accepts. The worker signs only kind 1985 labels and
+// refuses any other kind with a 400.
 export interface UnsignedEvent {
-  kind: number;
+  kind: 1985;
   content: string;
   tags?: string[][];
   created_at?: number;
@@ -286,7 +288,8 @@ export async function getWorkerInfo(apiUrl: string): Promise<InfoResponse> {
   return apiRequest<InfoResponse>(apiUrl, '/api/info', 'GET');
 }
 
-// Publish endpoint - for general event publishing
+// Publish endpoint: the worker signs a kind 1985 label with its own key and
+// refuses any other kind. Labels go through publishLabel below.
 export async function publishEvent(apiUrl: string, event: UnsignedEvent, opts?: LoginOpts): Promise<ApiResponse> {
   const data = await apiRequest<ApiResponse>(apiUrl, '/api/publish', 'POST', withoutModerator(event), opts);
   if (!data.success) {

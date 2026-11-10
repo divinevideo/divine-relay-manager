@@ -142,8 +142,10 @@ describe('BulkNotesPanel', () => {
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({
       targetType: 'media', targetId: HIDDEN_A, action: 'remove_restriction',
     })));
-    // The restore and its audit write go through asModerator(token) (#178).
-    expect(tokensFor(moderatorApi, 'moderateMedia')).toEqual([MOD_TOKEN]);
+    // The audit write carries the moderator's login (#178). The restore itself
+    // sends none: moderateMedia is on the read api, so a token recorded for it
+    // here would not show that the real request carried one. It goes out once.
+    expect(api.moderateMedia).toHaveBeenCalledTimes(1);
     expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 
