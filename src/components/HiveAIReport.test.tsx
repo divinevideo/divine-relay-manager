@@ -45,10 +45,15 @@ function expectOnlyReads() {
 
 describe('HiveAIReport', () => {
   it('shows "Not analyzed yet" with no button when there is no result', async () => {
-    respond(404, 'not found');
+    // What moderation-service's handlePublicCheckResult answers for a file it
+    // has no record of: a 200 with no action, not a 404.
+    respond(200, JSON.stringify({
+      sha256: SHA, status: 'unknown', moderated: false, blocked: false, age_restricted: false,
+    }));
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
     expect(await screen.findByText('Not analyzed yet')).toBeInTheDocument();
+    expect(screen.queryByText('Needs Review')).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /analyze/i })).not.toBeInTheDocument();
     expect(screen.getAllByRole('button')).toHaveLength(1);
     expectOnlyReads();

@@ -17,7 +17,8 @@ interface HiveAIReportProps {
 }
 
 interface ModerationResult {
-  action: MediaStatusAction | 'FLAGGED';
+  // Absent when there is no record: check-result then answers 200 with status 'unknown'.
+  action?: MediaStatusAction | 'FLAGGED';
   scores: {
     nudity?: number;
     violence?: number;
@@ -152,8 +153,8 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
     );
   }
 
-  // No result found
-  if (!result || error) {
+  // No record, so no action to show
+  if (!result?.action || error) {
     return (
       <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
         <CardHeader className="py-2 px-3">
