@@ -15,7 +15,7 @@
 // It never writes to moderation-service, and it accepts moderation-service's
 // key, which /api/moderate-media does not.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import worker from '../src/index';
+import worker, { mediaLiftGuard } from '../src/index';
 import { STATUS_READ_TIMEOUT_MS } from '../src/media-server';
 
 const SHA = '5'.repeat(64);
@@ -25,13 +25,24 @@ const MOD_KEY = 'mod-relay-key';
 type Call = { url: string; method: string; body: unknown };
 let calls: Call[];
 let sqls: Array<{ sql: string; binds: unknown[] }>;
+// The file owner's open case, if any, and any other account's. A lookup finds
+// the one on the account it asks about.
 let openCase: Record<string, unknown> | null;
+let otherCases: Array<Record<string, unknown>>;
 let lookupThrows: boolean;
+// Accounts whose lookup alone fails.
+let lookupThrowsFor: string[];
 let blobOwner: string | number;
 let blobStatus: string;
 let blobReads: string[];
 // What moderation-service's record says, or a number for a failed read.
 let recordStatus: string | number;
+// Reads left hanging, held until the next test starts. Node's Request follows
+// the signal it was built with only through a weak reference, so a hanging
+// request nothing else holds can be collected before the test aborts it, and
+// the abort never reaches the read: the test then times out, whenever a
+// garbage collection happens to land in that window.
+let hungReads: Request[];
 
 const moderationApi = {
   async fetch(request: Request): Promise<Response> {
@@ -42,6 +53,7 @@ const moderationApi = {
       if (typeof recordStatus === 'number') return new Response('err', { status: recordStatus });
       // A read that never answers, unless its request is aborted.
       if (recordStatus === 'hang') {
+        hungReads.push(request);
         return new Promise((_, reject) => {
           request.signal.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
         });
@@ -63,8 +75,8 @@ const db = {
       async first() {
         sqls.push({ sql, binds });
         if (/FROM age_review_cases/i.test(sql)) {
-          if (lookupThrows) throw new Error('D1 unavailable');
-          return openCase;
+          if (lookupThrows || lookupThrowsFor.includes(binds[0] as string)) throw new Error('D1 unavailable');
+          return [openCase, ...otherCases].find((c) => c?.pubkey === binds[0]) ?? null;
         }
         return null;
       },
@@ -114,11 +126,14 @@ beforeEach(() => {
   calls = [];
   sqls = [];
   openCase = null;
+  otherCases = [];
   lookupThrows = false;
+  lookupThrowsFor = [];
   blobOwner = OWNER;
   blobStatus = 'banned';
   blobReads = [];
   recordStatus = 'permanent_ban';
+  hungReads = [];
   vi.spyOn(console, 'error').mockImplementation(() => {});
   // The allowed calls to /api/moderate-media in the parity table below log a
   // line each from syncZendeskAfterAction.
@@ -378,6 +393,311 @@ describe('/api/moderate-media/lift-check', () => {
         expect(await fromCheck.json()).toEqual(await fromModerate.json());
       }
     });
+  });
+});
+
+// moderation-service keeps its own record of who uploaded a file, and that
+// account can differ from the owner the media server names
+// (divine-moderation-service#242). It sends the account as `uploader`, and the
+// check runs the owner's case check on it too, after the owner, with one
+// difference: a case that has restricted the uploader does not refuse every
+// AGE_RESTRICTED, because its withhold hides only files the uploader owns. A
+// refusal for it carries the owner's codes and fields, so the caller handles
+// both the same way.
+describe('/api/moderate-media/lift-check with the recorded uploader', () => {
+  const UPLOADER = 'c3'.repeat(32);
+  const OWNER_SAFE_ERROR = 'The account that owns this file has an open age review, so its files can only be made public through that case.';
+  const uploaderCase = (state = 'open_reported') => ({ id: 'case-uploader', pubkey: UPLOADER, state });
+  const lookedUp = () => caseLookups().map((s) => s.binds[0]);
+
+  const INVALID_UPLOADERS: Array<[string, unknown]> = [
+    ['uppercase', 'C3'.repeat(32)],
+    ['63 characters', 'c'.repeat(63)],
+    ['65 characters', 'c'.repeat(65)],
+    ['not hex', 'g'.repeat(64)],
+    ['empty', ''],
+    ['null', null],
+    ['a number', 5],
+    ['an array', [UPLOADER]],
+  ];
+
+  it.each(['SAFE', 'AGE_RESTRICTED'].flatMap((action) => INVALID_UPLOADERS.map(([label, uploader]) => [action, label, uploader] as const)))(
+    'refuses a %s whose uploader is %s, before reading anything',
+    async (action, _label, uploader) => {
+      const res = await check({ sha256: SHA, action, uploader });
+      expect(res.status).toBe(400);
+      expect(await res.json()).toMatchObject({ success: false, code: 'invalid_uploader' });
+      expect(blobReads).toEqual([]);
+      expect(sqls).toEqual([]);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  // The guard is the only check on `uploader`, so any caller fails closed on a
+  // malformed one: ageReviewActiveGuard answers "no case" for a non-canonical
+  // pubkey, which would allow the lift.
+  it.each(['SAFE', 'AGE_RESTRICTED'].flatMap((action) => INVALID_UPLOADERS.map(([label, uploader]) => [action, label, uploader] as const)))(
+    'is refused by mediaLiftGuard itself on a %s when the uploader is %s, before reading anything',
+    async (action, _label, uploader) => {
+      otherCases = [uploaderCase()];
+      const res = await mediaLiftGuard(SHA, action as 'SAFE' | 'AGE_RESTRICTED', env(), {}, async () => ({}), uploader);
+      expect(res).toBeInstanceOf(Response);
+      expect((res as Response).status).toBe(400);
+      expect(await (res as Response).json()).toMatchObject({ success: false, code: 'invalid_uploader' });
+      expect(blobReads).toEqual([]);
+      expect(sqls).toEqual([]);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it('ignores `uploader` on an action it does not check, even one it would refuse', async () => {
+    otherCases = [uploaderCase()];
+    for (const action of ['PERMANENT_BAN', 'QUARANTINE', 'DELETE', 'REVIEW']) {
+      for (const uploader of [UPLOADER, null, 'nope']) {
+        const res = await check({ sha256: SHA, action, uploader });
+        expect(res.status).toBe(200);
+        expect(await res.json()).toEqual({ success: true, allowed: true, checked: false });
+      }
+    }
+    expect(blobReads).toEqual([]);
+    expect(sqls).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it('checks only the owner when no uploader is sent', async () => {
+    otherCases = [uploaderCase()];
+    const res = await check({ sha256: SHA, action: 'SAFE' });
+    expect(res.status).toBe(200);
+    expect(lookedUp()).toEqual([OWNER]);
+  });
+
+  it("refuses a SAFE while the uploader has an open age review, naming the uploader's case, and writes nothing", async () => {
+    otherCases = [uploaderCase()];
+    const res = await check({ sha256: SHA, action: 'SAFE', uploader: UPLOADER });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      success: false,
+      code: 'age_review_active',
+      caseId: 'case-uploader',
+      state: 'open_reported',
+      error: "The account recorded as this file's uploader has an open age review, so the file can only be made public through that case.",
+    });
+    expect(lookedUp()).toEqual([OWNER, UPLOADER]);
+    expect(writes()).toHaveLength(0);
+  });
+
+  it.each(['SAFE', 'AGE_RESTRICTED'])("refuses a %s with 503 when the uploader's lookup cannot run", async (action) => {
+    blobStatus = 'active';
+    recordStatus = 'safe';
+    lookupThrowsFor = [UPLOADER];
+    const res = await check({ sha256: SHA, action, uploader: UPLOADER });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ success: false, code: 'age_review_check_failed' });
+    expect(lookedUp()).toEqual([OWNER, UPLOADER]);
+  });
+
+  it.each(['SAFE', 'AGE_RESTRICTED'])('allows a %s when neither the owner nor the uploader has an open case, checking both', async (action) => {
+    blobStatus = 'active';
+    recordStatus = 'safe';
+    const res = await check({ sha256: SHA, action, uploader: UPLOADER });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
+    expect(lookedUp()).toEqual([OWNER, UPLOADER]);
+    expect(stateReads()).toHaveLength(0);
+  });
+
+  it('checks the account once when the uploader is the owner', async () => {
+    const res = await check({ sha256: SHA, action: 'SAFE', uploader: OWNER });
+    expect(res.status).toBe(200);
+    expect(lookedUp()).toEqual([OWNER]);
+  });
+
+  it("answers as the owner, checking once, when the uploader is the owner and has an open case", async () => {
+    openCase = { id: 'case-open', pubkey: OWNER, state: 'open_reported' };
+    const res = await check({ sha256: SHA, action: 'SAFE', uploader: OWNER });
+    expect(res.status).toBe(409);
+    expect(await res.json()).toMatchObject({ code: 'age_review_active', caseId: 'case-open', error: OWNER_SAFE_ERROR });
+    expect(lookedUp()).toEqual([OWNER]);
+  });
+
+  it("allows an AGE_RESTRICTED over a public file while the uploader's case has not restricted the account", async () => {
+    blobStatus = 'active';
+    recordStatus = 'safe';
+    otherCases = [uploaderCase()];
+    const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
+    expect(stateReads()).toHaveLength(1);
+  });
+
+  it.each([
+    ['the media server serves it restricted', 'restricted', 'safe', 0],
+    ['the media server serves it banned', 'banned', 'safe', 0],
+    ['the media server serves it deleted', 'deleted', 'safe', 0],
+    ['the record shows QUARANTINE', 'active', 'quarantine', 1],
+    ['the record shows PERMANENT_BAN', 'active', 'permanent_ban', 1],
+    ['the record shows DELETE', 'active', 'delete', 1],
+  ] as const)("refuses an AGE_RESTRICTED over a hidden file while the uploader has an open case: %s", async (_label, b, r, reads) => {
+    blobStatus = b;
+    recordStatus = r;
+    otherCases = [uploaderCase()];
+    const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+    expect(res.status).toBe(409);
+    const body = await res.json() as { error: string };
+    expect(body).toMatchObject({ success: false, code: 'age_review_active', caseId: 'case-uploader', state: 'open_reported' });
+    expect(body.error).toBe("This file is withheld (hidden, blocked or deleted) and the account recorded as its uploader has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.");
+    expect(stateReads()).toHaveLength(reads);
+  });
+
+  // The case's withhold skips files the account doesn't own, so a restricted
+  // uploader's case has not hidden a file someone else owns. Refusing would
+  // leave it fully public; whether it is hidden decides instead.
+  const RESTRICTED_STATES = ['restricted_pending_user_response', 'restricted_pending_parental_consent', 'restricted_pending_support_email'];
+
+  it.each(RESTRICTED_STATES)(
+    "allows an AGE_RESTRICTED over a public file once the uploader's case is %s, because the withhold skips files the uploader doesn't own",
+    async (state) => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      otherCases = [uploaderCase(state)];
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
+      expect(stateReads()).toHaveLength(1);
+    },
+  );
+
+  it.each(RESTRICTED_STATES.flatMap((state) => [
+    [state, 'the media server serves it banned', 'banned', 'safe', 0],
+    [state, 'the record shows QUARANTINE', 'active', 'quarantine', 1],
+  ] as const))(
+    "refuses an AGE_RESTRICTED over a hidden file once the uploader's case is %s: %s",
+    async (state, _label, b, r, reads) => {
+      blobStatus = b;
+      recordStatus = r;
+      otherCases = [uploaderCase(state)];
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        success: false,
+        code: 'age_review_active',
+        caseId: 'case-uploader',
+        state,
+        error: "This file is withheld (hidden, blocked or deleted) and the account recorded as its uploader has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
+      });
+      expect(stateReads()).toHaveLength(reads);
+    },
+  );
+
+  it("refuses with 503 an AGE_RESTRICTED that needs the record for the uploader's case and cannot read it", async () => {
+    blobStatus = 'active';
+    recordStatus = 500;
+    otherCases = [uploaderCase()];
+    const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ success: false, code: 'state_unreadable' });
+  });
+
+  // As for the owner, this worker's credentials for moderation-service are
+  // resolved only when the uploader's case makes the record worth reading.
+  it('builds no credentials for a SAFE that the uploader does not refuse', async () => {
+    const res = await check({ sha256: SHA, action: 'SAFE', uploader: UPLOADER }, { SERVICE_API_TOKEN: undefined });
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses with 503 an AGE_RESTRICTED that needs the record for the uploader's case while the credentials are not configured", async () => {
+    blobStatus = 'active';
+    recordStatus = 'safe';
+    otherCases = [uploaderCase()];
+    const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER }, { SERVICE_API_TOKEN: undefined });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ success: false, code: 'state_unreadable' });
+    expect(stateReads()).toHaveLength(0);
+  });
+
+  describe('when the owner and the uploader both have open cases', () => {
+    beforeEach(() => {
+      openCase = { id: 'case-owner', pubkey: OWNER, state: 'open_reported' };
+      otherCases = [uploaderCase()];
+    });
+
+    it("answers a SAFE with the owner's refusal", async () => {
+      const res = await check({ sha256: SHA, action: 'SAFE', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'age_review_active', caseId: 'case-owner', error: OWNER_SAFE_ERROR });
+    });
+
+    it("answers an AGE_RESTRICTED over a hidden file with the owner's refusal", async () => {
+      blobStatus = 'restricted';
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'age_review_active', caseId: 'case-owner' });
+    });
+
+    it("answers with the owner's 503 when the owner's lookup cannot run", async () => {
+      lookupThrowsFor = [OWNER];
+      const res = await check({ sha256: SHA, action: 'SAFE', uploader: UPLOADER });
+      expect(res.status).toBe(503);
+      expect(await res.json()).toMatchObject({ code: 'age_review_check_failed' });
+    });
+
+    it("answers an AGE_RESTRICTED with the owner's restricted refusal when both cases have restricted their accounts", async () => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      openCase = { id: 'case-owner', pubkey: OWNER, state: 'restricted_pending_parental_consent' };
+      otherCases = [uploaderCase('restricted_pending_user_response')];
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        success: false,
+        code: 'age_review_active',
+        caseId: 'case-owner',
+        state: 'restricted_pending_parental_consent',
+        error: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+      });
+      expect(lookedUp()).toEqual([OWNER]);
+      expect(stateReads()).toHaveLength(0);
+    });
+
+    it('reads the record once for an AGE_RESTRICTED over a public file, and allows it', async () => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(200);
+      expect(lookedUp()).toEqual([OWNER, UPLOADER]);
+      expect(stateReads()).toHaveLength(1);
+    });
+
+    it("allows a public file when only the uploader's case has restricted the account", async () => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      otherCases = [uploaderCase('restricted_pending_user_response')];
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(200);
+      expect(lookedUp()).toEqual([OWNER, UPLOADER]);
+      expect(stateReads()).toHaveLength(1);
+    });
+
+    it("answers with the owner's restricted refusal when only the owner's case has restricted the account", async () => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      openCase = { id: 'case-owner', pubkey: OWNER, state: 'restricted_pending_user_response' };
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'age_review_active', caseId: 'case-owner', state: 'restricted_pending_user_response' });
+      expect(lookedUp()).toEqual([OWNER]);
+      expect(stateReads()).toHaveLength(0);
+    });
+  });
+
+  // /api/moderate-media names an account through `pubkey`, its account check;
+  // `uploader` is the lift check's alone.
+  it('is not read by /api/moderate-media, whose lift guard checks the owner', async () => {
+    otherCases = [uploaderCase()];
+    const res = await moderate({ sha256: SHA, action: 'SAFE', uploader: UPLOADER });
+    expect(res.status).toBe(200);
+    expect(lookedUp()).toEqual([OWNER]);
+    expect(writes()).toHaveLength(1);
   });
 });
 

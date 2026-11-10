@@ -240,9 +240,12 @@ export async function handleGetAgeReviewCase(
  * sites pass it today: relay-rpc's reversals, bulk-moderate's loosening
  * actions (age-gate-all, un-age-restrict-all), moderate-media's account
  * check (a note's Restore), and moderate-media's lift guard (a SAFE or
- * AGE_RESTRICTED, on the owner the media server names, #335). The rest of
- * bulk deliberately fails open; see LOOSENS_AGE_REVIEW_HOLD in
- * bulk-moderate.ts.
+ * AGE_RESTRICTED, #335). The lift guard checks the owner the media server
+ * names and, when the lift check names one, the account moderation-service
+ * records as the file's uploader (moderation-service#242). It refuses a
+ * non-canonical uploader before calling here, since this guard's "no case"
+ * for one would allow the lift. The rest of bulk deliberately fails open; see
+ * LOOSENS_AGE_REVIEW_HOLD in bulk-moderate.ts.
  */
 export async function ageReviewActiveGuard(
   pubkey: string,

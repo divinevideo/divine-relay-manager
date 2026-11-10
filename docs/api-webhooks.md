@@ -314,12 +314,30 @@ decision and makes no moderation change of its own. Like every route that
 reads age-review cases, the first request a worker instance serves may run the
 idempotent schema setup first, and that setup also backfills fields on older
 age-review rows (case closure times and two protected-minor fields). It runs the age-review lift guard of
-`POST /api/moderate-media` above, the same code, so the two give the same
-answer on that guard. It checks nothing else: `pubkey` and `from` are ignored
-here, so `/api/moderate-media` can still refuse a request this allows, for
-example with `state_mismatch`. It is for a caller that writes media decisions
-itself and must not restate the rules, such as moderation-service's
-dashboard.
+`POST /api/moderate-media` above, the same code. Without `uploader`, the two
+give the same answer on that guard. With `uploader`, the lift check also checks
+that account, so it can refuse where `/api/moderate-media` would not. It checks
+nothing else: `pubkey` and `from` are ignored here, so `/api/moderate-media` can
+still refuse a request this allows, for example with `state_mismatch`. It is for
+a caller that writes media decisions itself and must not restate the rules, such
+as moderation-service's dashboard.
+
+**`uploader` (optional).** The account moderation-service records as the
+file's uploader, as 64 lowercase hex characters. That record can name an
+account other than the owner the media server reports, so the guard runs the
+owner's case check on it too: while it has an open case a `SAFE` is refused,
+and so is an `AGE_RESTRICTED` while the file is hidden. Unlike the owner's
+case, the uploader's case restricting the account does not refuse every
+`AGE_RESTRICTED`: that case's withhold hides only files the account owns, so a
+file someone else owns may still be public, and refusing would keep it public.
+Unlike `/api/moderate-media`'s `pubkey`, the uploader need not own the file.
+The owner is checked first, so when both would refuse, the owner's refusal is
+the answer, and an `uploader` that is the owner is checked once. A refusal for
+the uploader has the owner's status, `code` and fields; only its `error` text
+names the uploader. moderation-service's record is read at most once, however
+many open cases need it. Omit the field when there is no uploader: any other
+value that is not 64 lowercase hex, `null` included, is refused. It is read
+only for a `SAFE` or `AGE_RESTRICTED`.
 
 In addition to the credentials described under Authentication above, it
 accepts moderation-service's relay key, sent in the `X-Admin-Key` header (the
@@ -330,7 +348,8 @@ worker's `MOD_RELAY_ADMIN_KEY` binding), as `POST /api/relay-rpc` does.
 ```json
 {
   "sha256": "abc123...",
-  "action": "SAFE"
+  "action": "SAFE",
+  "uploader": "def456..."
 }
 ```
 
@@ -339,10 +358,11 @@ worker's `MOD_RELAY_ADMIN_KEY` binding), as `POST /api/relay-rpc` does.
 | Status | Body | Meaning |
 |--------|------|---------|
 | 200 | `{ "success": true, "allowed": true, "checked": true, "sha256": "..." }` | The lift may go ahead. `sha256` is the hash, lowercased; write that one. |
-| 200 | `{ "success": true, "allowed": true, "checked": false }` | The action is not one the guard checks (`PERMANENT_BAN`, `QUARANTINE`, `DELETE`, `REVIEW`). Nothing was read. |
+| 200 | `{ "success": true, "allowed": true, "checked": false }` | The action is not one the guard checks (`PERMANENT_BAN`, `QUARANTINE`, `DELETE`, `REVIEW`). Nothing was read, and `uploader` is ignored. |
 | 400 | `code: "invalid_action"` | `action` is missing, not a string, or not one of the six actions above. |
+| 400 | `code: "invalid_uploader"` | On a `SAFE` or `AGE_RESTRICTED`, `uploader` is present but not 64 lowercase hex characters (`null` included). Nothing was read. |
 | 400 | no `code` | `sha256` is missing. |
-| 409, 503, 400 | the lift guard's refusal | Exactly what `/api/moderate-media` would answer, from the table above. |
+| 409, 503, 400 | the lift guard's refusal | The codes from the table above. Without `uploader`, exactly what `/api/moderate-media` would answer. With it, `age_review_active`, `age_review_check_failed` and `state_unreadable` can also come from the uploader's case, which `/api/moderate-media` does not check. |
 | 500 | | The body is not JSON, or is `null`. |
 
 Anything but a 200 with `"allowed": true` is a refusal.
