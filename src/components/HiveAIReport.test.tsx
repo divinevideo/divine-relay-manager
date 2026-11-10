@@ -2,7 +2,7 @@
 // ABOUTME: route the worker never had, so they were removed (#406); the card must only read.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, render, screen } from '@testing-library/react';
-import { QueryClient } from '@tanstack/react-query';
+import { QueryClient, onlineManager } from '@tanstack/react-query';
 
 import { TestApp } from '@/test/TestApp';
 import { HiveAIReport } from './HiveAIReport';
@@ -17,6 +17,7 @@ beforeEach(() => {
   vi.stubGlobal('fetch', fetchMock);
 });
 afterEach(() => {
+  onlineManager.setOnline(true);
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -67,6 +68,21 @@ describe('HiveAIReport', () => {
 
     expect(await screen.findByText(/Status could not be read/)).toBeInTheDocument();
     expect(screen.queryByText('Not analyzed yet')).not.toBeInTheDocument();
+  });
+
+  it('keeps loading while offline instead of saying "Not analyzed yet"', async () => {
+    onlineManager.setOnline(false);
+    respond(200, JSON.stringify({ sha256: SHA, action: 'QUARANTINE', scores: {} }));
+    render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
+
+    // The read is paused, so nothing has been read and nothing is known yet.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(screen.queryByText('Not analyzed yet')).not.toBeInTheDocument();
+    expect(screen.queryByText(/sha256:/)).not.toBeInTheDocument();
+
+    act(() => onlineManager.setOnline(true));
+    expect(await screen.findByText('Quarantined')).toBeInTheDocument();
   });
 
   it('says the status could not be read when a refetch fails after a good read', async () => {

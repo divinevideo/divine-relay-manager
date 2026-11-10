@@ -126,7 +126,7 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
   // The same read the media actions use: bounded by the API timeout, refetched
   // when an action invalidates 'media-status', and a failed read comes back
   // marked unreadable instead of as no decision.
-  const { results, isLoading } = useMediaStatus(sha256 ? [sha256] : []);
+  const { results, isPending } = useMediaStatus(sha256 ? [sha256] : []);
   const result = results[0]?.status as ModerationResult | null | undefined;
   const error = results[0]?.unreadable;
 
@@ -135,7 +135,9 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
     return null;
   }
 
-  if (isLoading) {
+  // isPending, not isLoading: a read paused while offline is pending but not
+  // loading, and has read nothing, so it is not "Not analyzed yet".
+  if (isPending) {
     return (
       <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
         <CardHeader className="py-2 px-3">
