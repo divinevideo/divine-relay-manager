@@ -15,7 +15,7 @@
 // It never writes to moderation-service, and it accepts moderation-service's
 // key, which /api/moderate-media does not.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import worker from '../src/index';
+import worker, { mediaLiftGuard } from '../src/index';
 import { STATUS_READ_TIMEOUT_MS } from '../src/media-server';
 
 const SHA = '5'.repeat(64);
@@ -417,6 +417,23 @@ describe('/api/moderate-media/lift-check with the recorded uploader', () => {
       const res = await check({ sha256: SHA, action, uploader });
       expect(res.status).toBe(400);
       expect(await res.json()).toMatchObject({ success: false, code: 'invalid_uploader' });
+      expect(blobReads).toEqual([]);
+      expect(sqls).toEqual([]);
+      expect(calls).toEqual([]);
+    },
+  );
+
+  // The guard refuses a malformed uploader itself, so a caller that skips the
+  // route's validation still fails closed: ageReviewActiveGuard answers "no
+  // case" for a non-canonical pubkey, which would allow the lift.
+  it.each(['SAFE', 'AGE_RESTRICTED'].flatMap((action) => INVALID_UPLOADERS.map(([label, uploader]) => [action, label, uploader] as const)))(
+    'is refused by mediaLiftGuard itself on a %s when the uploader is %s, before reading anything',
+    async (action, _label, uploader) => {
+      otherCases = [uploaderCase()];
+      const res = await mediaLiftGuard(SHA, action as 'SAFE' | 'AGE_RESTRICTED', env(), {}, async () => ({}), uploader);
+      expect(res).toBeInstanceOf(Response);
+      expect((res as Response).status).toBe(400);
+      expect(await (res as Response).json()).toMatchObject({ success: false, code: 'invalid_uploader' });
       expect(blobReads).toEqual([]);
       expect(sqls).toEqual([]);
       expect(calls).toEqual([]);

@@ -2640,6 +2640,16 @@ const LIFT_REFUSAL_TEXT = {
   },
 } as const;
 
+// The refusal for an `uploader` that is present but not an account's pubkey,
+// from the lift check and from mediaLiftGuard itself.
+function invalidUploaderResponse(corsHeaders: Record<string, string>): Response {
+  return jsonResponse(
+    { success: false, error: "`uploader` must be the account's 64-character lowercase hex pubkey; omit it when there is none", code: 'invalid_uploader' },
+    400,
+    corsHeaders
+  );
+}
+
 // The age-review lift guard (#335). A file whose owner has an open age review
 // is made more visible only through that case, whoever asks: an Unblock,
 // Remove Restriction or Age Restrict on a single post, an automated caller, a
@@ -2689,15 +2699,21 @@ const LIFT_REFUSAL_TEXT = {
 //     handles them as it does the owner's; only their text names the
 //     uploader. Unlike the account check's `pubkey`, it need not own the
 //     file: it is checked because it may not. One that is the owner is
-//     checked once. The caller validates it as 64 lowercase hex.
+//     checked once.
+//   - An `uploader` that is present but not 64 lowercase hex is refused
+//     (400) before anything is read. The lift check refuses one first; the
+//     guard repeats it rather than rest on its caller, because
+//     ageReviewActiveGuard answers "no case" for a non-canonical pubkey, so
+//     one that reached the lookup would be allowed, not refused.
 // Returns the refusal to answer with, or the lowercased hash that was checked.
-async function mediaLiftGuard(
+// Exported for tests.
+export async function mediaLiftGuard(
   rawSha256: unknown,
   action: 'SAFE' | 'AGE_RESTRICTED',
   env: Env,
   corsHeaders: Record<string, string>,
   getHeaders: () => Promise<Record<string, string> | Response>,
-  uploader?: string
+  uploader?: unknown
 ): Promise<Response | { sha256: string }> {
   if (typeof rawSha256 !== 'string' || !isHex64(rawSha256)) {
     return jsonResponse(
@@ -2705,6 +2721,9 @@ async function mediaLiftGuard(
       400,
       corsHeaders
     );
+  }
+  if (uploader !== undefined && (typeof uploader !== 'string' || !isLowerHex64(uploader))) {
+    return invalidUploaderResponse(corsHeaders);
   }
   const sha256 = rawSha256.toLowerCase();
   let file: BlossomBlob;
@@ -2831,19 +2850,14 @@ async function handleMediaLiftCheck(
     if (!isLiftAction(action)) {
       return jsonResponse({ success: false, error: `Unknown action ${JSON.stringify(body.action)}`, code: 'invalid_action' }, 400, corsHeaders);
     }
-    const uploader = body.uploader;
-    if (uploader !== undefined && !isLowerHex64(uploader)) {
-      return jsonResponse(
-        { success: false, error: "`uploader` must be the account's 64-character lowercase hex pubkey; omit it when there is none", code: 'invalid_uploader' },
-        400,
-        corsHeaders
-      );
+    if (body.uploader !== undefined && !isLowerHex64(body.uploader)) {
+      return invalidUploaderResponse(corsHeaders);
     }
     // This route writes nothing to moderation-service, so its credentials are
     // built only if the guard reads the file's record.
     const lift = await mediaLiftGuard(
       body.sha256, action, env, corsHeaders, () => moderationServiceHeaders(env, corsHeaders),
-      uploader as string | undefined,
+      body.uploader,
     );
     if (lift instanceof Response) return lift;
     return jsonResponse({ success: true, allowed: true, checked: true, sha256: lift.sha256 }, 200, corsHeaders);
