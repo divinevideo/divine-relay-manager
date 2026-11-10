@@ -64,13 +64,13 @@ function jsonResponse(body: unknown) {
 let consoleError: MockInstance;
 let originalStorage: Storage;
 let feed: unknown[];
-function useStorage(value: Partial<Storage>) {
+function setStorage(value: Partial<Storage>) {
   Object.defineProperty(window, 'localStorage', { value, writable: true });
 }
 beforeEach(() => {
   originalStorage = window.localStorage;
   const store = new Map<string, string>();
-  useStorage({
+  setStorage({
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => { store.set(key, value); },
     removeItem: (key: string) => { store.delete(key); },
@@ -93,7 +93,7 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   consoleError.mockRestore();
-  useStorage(originalStorage);
+  setStorage(originalStorage);
 });
 
 function renderReports() {
@@ -205,7 +205,7 @@ describe('Filters toggle', () => {
   it('opens by default when storage is unavailable', async () => {
     const getItem = vi.fn(() => { throw new Error('denied'); });
     const setItem = vi.fn(() => { throw new Error('denied'); });
-    useStorage({ getItem, setItem });
+    setStorage({ getItem, setItem });
     const user = userEvent.setup();
     renderReports();
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'true');
