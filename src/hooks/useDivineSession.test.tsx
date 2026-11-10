@@ -1,17 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react';
 
-const { getSession, logout, startLogin, getPublicKey, DivineRpcSigner } = vi.hoisted(() => {
+const { getSession, logout, startLogin, acceptSignOutFromOtherTab, getPublicKey, DivineRpcSigner } = vi.hoisted(() => {
   const getPublicKey = vi.fn();
   return {
     getSession: vi.fn(),
     logout: vi.fn(),
     startLogin: vi.fn(),
+    acceptSignOutFromOtherTab: vi.fn(),
     getPublicKey,
     DivineRpcSigner: vi.fn().mockImplementation(() => ({ getPublicKey })),
   };
 });
-vi.mock('@/lib/divineLogin', () => ({ getSession, logout, startLogin }));
+vi.mock('@/lib/divineLogin', () => ({ getSession, logout, startLogin, acceptSignOutFromOtherTab }));
 vi.mock('@/lib/divineSigner', () => ({ DivineRpcSigner }));
 
 import { DivineSessionProvider } from '@/components/DivineSessionProvider';
@@ -448,5 +449,198 @@ describe('login token expiry', () => {
       });
       expect(getSession).toHaveBeenCalledTimes(1);
     });
+  });
+});
+
+// A sign-out in one tab signs out every tab of the app, without waiting for
+// the others to be focused.
+// A sign-out in one tab signs out every tab of the app, without waiting for
+// the others to be focused. Which sessions a message ends is the library's
+// call (acceptSignOutFromOtherTab), pinned with the real library in
+// DivineSessionProvider.cross-tab.test.tsx; these pin the provider's wiring.
+describe('sign-out across tabs', () => {
+  // An in-memory BroadcastChannel: a message reaches every other open channel
+  // of the same name, never the sender, and asynchronously, as in a browser.
+  class FakeChannel {
+    static open: FakeChannel[] = [];
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    posted: unknown[] = [];
+    closed = false;
+    constructor(public name: string) {
+      FakeChannel.open.push(this);
+    }
+    postMessage(data: unknown) {
+      this.posted.push(data);
+      for (const other of FakeChannel.open) {
+        if (other !== this && other.name === this.name && !other.closed) {
+          queueMicrotask(() => other.onmessage?.(new MessageEvent('message', { data })));
+        }
+      }
+    }
+    close() {
+      this.closed = true;
+      FakeChannel.open = FakeChannel.open.filter((c) => c !== this);
+    }
+  }
+
+  const MESSAGE = { type: 'signed-out', endedRevision: 'rev-1' };
+  const SESSION_A = { bunkerUrl: 'bunker://x', accessToken: 'tok-a' };
+  let handle: { get: () => string | undefined; logout: () => void; refresh: () => Promise<void> };
+  function SessionProbe() {
+    const s = useDivineSession();
+    handle = { get: s.getModeratorToken, logout: s.logout, refresh: s.refresh };
+    return <span data-testid="signed-in">{String(s.isSignedIn)}</span>;
+  }
+  async function renderSignedIn() {
+    getSession.mockResolvedValue(SESSION_A);
+    const view = render(
+      <DivineSessionProvider>
+        <SessionProbe />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(screen.getByTestId('signed-in')).toHaveTextContent('true'));
+    expect(handle.get()).toBe('tok-a');
+    return view;
+  }
+  async function receive(data: unknown) {
+    const otherTab = new FakeChannel('divine-login');
+    await act(async () => {
+      otherTab.postMessage(data);
+    });
+  }
+  const providerChannel = () => FakeChannel.open.find((c) => c.name === 'divine-login');
+
+  beforeEach(() => {
+    FakeChannel.open = [];
+    vi.stubGlobal('BroadcastChannel', FakeChannel);
+    logout.mockReturnValue(MESSAGE);
+  });
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('a message that ends this tab\'s session signs this tab out', async () => {
+    await renderSignedIn();
+    acceptSignOutFromOtherTab.mockReturnValue(true);
+    await receive(MESSAGE);
+    expect(acceptSignOutFromOtherTab).toHaveBeenCalledWith(MESSAGE, SESSION_A);
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('false');
+    expect(handle.get()).toBeUndefined();
+    // Storage is the library's to clear, and the sender already cleared it.
+    expect(logout).not.toHaveBeenCalled();
+  });
+
+  it('a message that does not end this tab\'s session changes nothing', async () => {
+    await renderSignedIn();
+    acceptSignOutFromOtherTab.mockReturnValue(false);
+    await receive(MESSAGE);
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('true');
+    expect(handle.get()).toBe('tok-a');
+  });
+
+  // The message can arrive after a refresh's result is applied but before the
+  // effect that mirrors it into tokenRef runs. The session matched is the one
+  // applied, not the one the mirror still shows.
+  it('matches the credentials a refresh just applied, even before effects run', async () => {
+    await renderSignedIn();
+    const refreshed = { bunkerUrl: 'bunker://x', accessToken: 'tok-refreshed' };
+    getSession.mockResolvedValue(refreshed);
+    acceptSignOutFromOtherTab.mockReturnValue(true);
+    const otherTab = new FakeChannel('divine-login');
+    await act(async () => {
+      window.dispatchEvent(new Event('focus'));
+      for (let i = 0; i < 5; i += 1) await Promise.resolve();
+      otherTab.postMessage(MESSAGE);
+      await Promise.resolve();
+    });
+    expect(acceptSignOutFromOtherTab).toHaveBeenCalledWith(MESSAGE, refreshed);
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('false');
+  });
+
+  it('a signed-out tab passes no session', async () => {
+    getSession.mockResolvedValue(null);
+    render(
+      <DivineSessionProvider>
+        <SessionProbe />
+      </DivineSessionProvider>,
+    );
+    await waitFor(() => expect(getSession).toHaveBeenCalled());
+    await receive(MESSAGE);
+    expect(acceptSignOutFromOtherTab).toHaveBeenCalledWith(MESSAGE, null);
+  });
+
+  // Matt, 2026-11-09: the sign-out goes ahead even if the library throws.
+  it('a throwing sdk logout still signs this tab out, broadcasts, and the tab recovers', async () => {
+    await renderSignedIn();
+    const otherTab = new FakeChannel('divine-login');
+    const received: unknown[] = [];
+    otherTab.onmessage = (event) => received.push(event.data);
+    logout.mockImplementationOnce(() => { throw new DOMException('denied', 'SecurityError'); });
+    let tok: string | undefined = 'unset';
+    await act(async () => {
+      expect(() => handle.logout()).toThrow('denied');
+      tok = handle.get();
+    });
+    expect(tok).toBeUndefined();
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('false');
+    // Without the library's message, the other tabs are told the ended
+    // session is unknown, and end whatever they hold.
+    expect(received).toEqual([{ type: 'signed-out' }]);
+
+    // Not wedged: the next read is applied (the library refuses the ended
+    // session itself, pinned in the cross-tab test), and a new sign-in shows.
+    getSession.mockResolvedValue({ bunkerUrl: 'bunker://y', accessToken: 'tok-b' });
+    await act(async () => {
+      await handle.refresh();
+    });
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('true');
+    expect(handle.get()).toBe('tok-b');
+  });
+
+  it('receiving a sign-out does not re-broadcast', async () => {
+    await renderSignedIn();
+    acceptSignOutFromOtherTab.mockReturnValue(true);
+    await receive(MESSAGE);
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('false');
+    expect(providerChannel()?.posted).toEqual([]);
+  });
+
+  it('logout broadcasts the library\'s message once', async () => {
+    await renderSignedIn();
+    const otherTab = new FakeChannel('divine-login');
+    const received: unknown[] = [];
+    otherTab.onmessage = (event) => received.push(event.data);
+    await act(async () => {
+      handle.logout();
+    });
+    expect(received).toEqual([MESSAGE]);
+    expect(logout).toHaveBeenCalledTimes(1);
+  });
+
+  it('logout still clears the token synchronously', async () => {
+    await renderSignedIn();
+    let tok: string | undefined = 'unset';
+    act(() => {
+      handle.logout();
+      tok = handle.get();
+    });
+    expect(tok).toBeUndefined();
+  });
+
+  it('closes the channel on unmount', async () => {
+    const view = await renderSignedIn();
+    const channel = providerChannel();
+    expect(channel).toBeDefined();
+    view.unmount();
+    expect(channel?.closed).toBe(true);
+  });
+
+  // The focus and visibility re-read still catches such a tab up later.
+  it('without BroadcastChannel, logout still signs this tab out', async () => {
+    vi.stubGlobal('BroadcastChannel', undefined);
+    await renderSignedIn();
+    act(() => handle.logout());
+    expect(screen.getByTestId('signed-in')).toHaveTextContent('false');
+    expect(logout).toHaveBeenCalledTimes(1);
   });
 });

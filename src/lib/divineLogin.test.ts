@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
 // Mock the SDK before importing the module under test. vi.hoisted lets the
 // mock factory reference these without tripping the hoist-before-init error.
@@ -200,25 +200,26 @@ describe('divineLogin', () => {
   });
 
   // Another tab's lock can be held for the length of a refresh. A logout while
-  // this read waits must stop it reading, or refreshing, the signed-out session,
-  // and must still hold once the lock is granted: the holder's refresh may have
-  // saved the old session after the logout cleared it. This read cannot tell
-  // that from a sign-in made meanwhile, so it fails closed and clears storage.
-  it('getSession skips the refresh and clears storage when a logout lands while it waits for the lock', async () => {
+  // this read waits must stop it reading, or refreshing, the signed-out
+  // session, and must still hold once the lock is granted: if the sign-out
+  // could not remove the session this read started from, it is removed here.
+  it('getSession skips the refresh and removes the ended session when a logout lands while it waits for the lock', async () => {
     let grant!: () => void;
     const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
       new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
     Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
     try {
-      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'old' });
+      oauth.getSession.mockReturnValue({ bunkerUrl: 'bunker://x', accessToken: 'still-stored' });
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'still-stored' });
       const pending = getSession();
       logout();
       grant();
       expect(await pending).toBeNull();
       expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
-      expect(oauth.logout).toHaveBeenCalledTimes(2); // the sign-out, then the clear under the lock
+      expect(oauth.logout).toHaveBeenCalledTimes(2); // the sign-out, then the removal under the lock
     } finally {
       delete (navigator as { locks?: unknown }).locks;
+      oauth.getSession.mockReset();
     }
   });
 
@@ -258,5 +259,264 @@ describe('divineLogin', () => {
   it('logout delegates to the SDK', () => {
     logout();
     expect(oauth.logout).toHaveBeenCalled();
+  });
+});
+
+// Another tab shares only storage and the Web Lock with this one, not this
+// module's sessionGeneration. A logout there must still stop a refresh here
+// from writing the session back.
+describe('a logout in another tab', () => {
+  const STORED = 'divine_session'; // the SDK's storage key, used only by this fake
+  const REVISION_KEY = 'divine-login:session-revision';
+  // Unique per test: a logout fences the token it ended for the life of this
+  // module instance, as it does for the life of a tab.
+  let OLD = '';
+  let seq = 0;
+  beforeEach(() => {
+    seq += 1;
+    OLD = `old-${seq}`;
+  });
+
+  // The SDK backed by the shared localStorage, as the real one is: a refresh
+  // saves before it resolves, getSession reads storage, logout clears it.
+  function sdkOnStorage() {
+    oauth.getSession.mockImplementation(() => {
+      const raw = localStorage.getItem(STORED);
+      return raw ? JSON.parse(raw) : null;
+    });
+    oauth.logout.mockImplementation(() => localStorage.removeItem(STORED));
+    let release!: (token: string) => void;
+    oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => {
+      release = (token) => {
+        const session = { bunkerUrl: 'bunker://x', accessToken: token };
+        localStorage.setItem(STORED, JSON.stringify(session));
+        resolve(session);
+      };
+    }));
+    return { refreshResolves: (token: string) => release(token) };
+  }
+
+  // One lock shared by every module instance, granted in request order.
+  function fifoLock() {
+    let tail: Promise<unknown> = Promise.resolve();
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) => {
+      const run = tail.then(() => cb());
+      tail = run.catch(() => {});
+      return run;
+    });
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+  }
+
+  // What another tab's logout leaves in the storage this tab can see.
+  function otherTabLogsOut() {
+    localStorage.setItem(REVISION_KEY, 'other-tab-revision');
+    localStorage.removeItem(STORED);
+  }
+
+  async function flush() {
+    for (let i = 0; i < 5; i += 1) await Promise.resolve();
+  }
+
+  afterEach(() => {
+    delete (navigator as { locks?: unknown }).locks;
+    // clearAllMocks keeps implementations; drop the storage-backed fakes.
+    oauth.getSession.mockReset();
+    oauth.getSessionWithRefresh.mockReset();
+    oauth.logout.mockReset();
+  });
+
+  it('during this tab\'s refresh clears the refreshed session and returns null', async () => {
+    fifoLock();
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: OLD }));
+    const sdk = sdkOnStorage();
+    const pending = getSession();
+    await flush();
+    expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+    otherTabLogsOut();
+    sdk.refreshResolves('refreshed');
+    expect(await pending).toBeNull();
+    expect(oauth.logout).toHaveBeenCalledTimes(1);
+    expect(localStorage.getItem(STORED)).toBeNull();
+  });
+
+  // The ended session is the one this read started from. Another tab's
+  // sign-out whose removal had not reached storage leaves it there; a sign-in
+  // saved while this read waited is another session, and survives.
+  it.each([
+    ['removes the session it started from, still in storage', () => OLD, 1],
+    ['leaves alone a sign-in saved while it waited', () => 'signed-in-meanwhile', 0],
+  ] as const)('while this tab waits for the lock, a logout in another tab: %s', async (_name, atGrant, removals) => {
+    let grant!: () => void;
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: OLD }));
+    sdkOnStorage();
+    oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'refreshed' });
+    const pending = getSession();
+    localStorage.setItem(REVISION_KEY, 'other-tab-revision');
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: atGrant() }));
+    grant();
+    expect(await pending).toBeNull();
+    expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+    expect(oauth.logout).toHaveBeenCalledTimes(removals);
+  });
+
+  it('while this tab waits for the lock skips the refresh', async () => {
+    let grant!: () => void;
+    const request = vi.fn((_name: string, _opts: LockOptions, cb: () => Promise<unknown>) =>
+      new Promise((resolve, reject) => { grant = () => cb().then(resolve, reject); }));
+    Object.defineProperty(navigator, 'locks', { value: { request }, configurable: true });
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: OLD }));
+    sdkOnStorage();
+    // Resolves at once if it is ever called, so a failure here cannot leave a
+    // hung read in this module's single flight for the next test to join.
+    oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 'refreshed' });
+    const pending = getSession();
+    otherTabLogsOut();
+    grant();
+    expect(await pending).toBeNull();
+    expect(oauth.getSessionWithRefresh).not.toHaveBeenCalled();
+  });
+
+  // Proves the bump is written where a separate module instance (another tab)
+  // reads it, not only that a read honours a value a test planted.
+  it('the same, driven by a second module instance\'s logout()', async () => {
+    fifoLock();
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: OLD }));
+    const sdk = sdkOnStorage();
+    vi.resetModules();
+    const tabA = await import('./divineLogin');
+    vi.resetModules();
+    const tabB = await import('./divineLogin');
+    expect(tabA.logout).not.toBe(tabB.logout);
+
+    const pending = tabB.getSession();
+    await flush();
+    expect(oauth.getSessionWithRefresh).toHaveBeenCalledTimes(1);
+    tabA.logout();
+    sdk.refreshResolves('refreshed');
+    expect(await pending).toBeNull();
+    expect(localStorage.getItem(STORED)).toBeNull();
+  });
+
+  it('leaves alone a sign-in another tab saved after the logout', async () => {
+    fifoLock();
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: OLD }));
+    const sdk = sdkOnStorage();
+    const pending = getSession();
+    await flush();
+    otherTabLogsOut();
+    sdk.refreshResolves('refreshed');
+    // The other tab signs in again before this read checks: storage now holds
+    // a session this read did not write.
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: 'newer' }));
+    expect(await pending).toBeNull();
+    expect(oauth.logout).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(STORED)!).accessToken).toBe('newer');
+  });
+
+  it('no revision change means the refreshed session is kept', async () => {
+    fifoLock();
+    localStorage.setItem(REVISION_KEY, 'unchanged');
+    localStorage.setItem(STORED, JSON.stringify({ bunkerUrl: 'bunker://x', accessToken: OLD }));
+    const sdk = sdkOnStorage();
+    const pending = getSession();
+    await flush();
+    sdk.refreshResolves('refreshed');
+    expect(await pending).toEqual({ bunkerUrl: 'bunker://x', accessToken: 'refreshed' });
+    expect(oauth.logout).not.toHaveBeenCalled();
+    expect(JSON.parse(localStorage.getItem(STORED)!).accessToken).toBe('refreshed');
+  });
+
+  // A browser whose storage always throws cannot share a revision. It keeps
+  // the same-tab behaviour: a read is not stale just because both revision
+  // reads failed, and a same-tab logout still discards a refresh in flight.
+  it('storage that throws on every read keeps same-tab behaviour', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const blocked = () => { throw new DOMException('denied', 'SecurityError'); };
+    Object.defineProperty(window, 'localStorage', {
+      value: { getItem: blocked, setItem: blocked, removeItem: blocked, clear: blocked },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      oauth.getSessionWithRefresh.mockResolvedValue({ bunkerUrl: 'bunker://x', accessToken: 't' });
+      expect(await getSession()).toEqual({ bunkerUrl: 'bunker://x', accessToken: 't' });
+
+      let release!: (v: { bunkerUrl: string; accessToken: string }) => void;
+      oauth.getSessionWithRefresh.mockReturnValue(new Promise((resolve) => { release = resolve; }));
+      oauth.getSession.mockReturnValue({ bunkerUrl: 'bunker://x', accessToken: OLD });
+      const pending = getSession();
+      await Promise.resolve();
+      expect(() => logout()).not.toThrow();
+      release({ bunkerUrl: 'bunker://x', accessToken: OLD });
+      expect(await pending).toBeNull();
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  // The fence, not the removal, makes the sign-out hold (see the cross-tab
+  // integration test), so a failed removal is logged and the sign-out goes on.
+  it('logout does not throw when the removal fails, and returns its message', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    localStorage.setItem(REVISION_KEY, 'rev-before');
+    oauth.getSession.mockReturnValue({ bunkerUrl: 'bunker://x', accessToken: OLD });
+    oauth.logout.mockImplementation(() => { throw new DOMException('denied', 'SecurityError'); });
+    try {
+      expect(logout()).toEqual({ type: 'signed-out', endedRevision: 'rev-before' });
+      expect(warn).toHaveBeenCalledWith('[divine-login] could not remove the session; later reads refuse it:', 'SecurityError');
+      // Fenced for a reload too, by fingerprint only.
+      // (It may also hold the session an earlier test accepted in this
+      // module instance: logout fences the tab's last accepted session too.)
+      const fence: string[] = JSON.parse(localStorage.getItem('divine-login:ended-sessions')!);
+      expect(fence.length).toBeGreaterThan(0);
+      for (const fp of fence) expect(fp).toMatch(/^[0-9a-f]{16}$/);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('the persisted fence keeps the latest 20 ended sessions, each once', async () => {
+    // A fresh module instance: no session accepted yet, so each logout fences
+    // only what storage holds.
+    vi.resetModules();
+    const { logout } = await import('./divineLogin');
+    let stored = '';
+    oauth.getSession.mockImplementation(() => ({ bunkerUrl: 'bunker://x', accessToken: stored }));
+    stored = `${OLD}-repeat`;
+    logout();
+    const once: string[] = JSON.parse(localStorage.getItem('divine-login:ended-sessions')!);
+    expect(once).toHaveLength(1);
+    logout();
+    expect(JSON.parse(localStorage.getItem('divine-login:ended-sessions')!)).toEqual(once);
+    for (let i = 0; i < 25; i += 1) {
+      stored = `${OLD}-${i}`;
+      logout();
+    }
+    const fence: string[] = JSON.parse(localStorage.getItem('divine-login:ended-sessions')!);
+    expect(fence).toHaveLength(20);
+    expect(new Set(fence).size).toBe(20);
+    expect(fence).not.toContain(once[0]); // the oldest went first
+  });
+
+  // The warning names the error, never a value from storage.
+  it('a revision write that throws is logged by name and does not stop the sign-out', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const setItem = vi.fn(() => { throw new DOMException('quota', 'QuotaExceededError'); });
+    Object.defineProperty(window, 'localStorage', {
+      value: { getItem: () => null, setItem, removeItem: () => {}, clear: () => {} },
+      writable: true,
+      configurable: true,
+    });
+    try {
+      expect(() => logout()).not.toThrow();
+      expect(setItem).toHaveBeenCalledWith(REVISION_KEY, expect.any(String));
+      expect(warn).toHaveBeenCalledWith('[divine-login] could not record the sign-out for other tabs:', 'QuotaExceededError');
+      expect(oauth.logout).toHaveBeenCalledTimes(1);
+    } finally {
+      warn.mockRestore();
+    }
   });
 });
