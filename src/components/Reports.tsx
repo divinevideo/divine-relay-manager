@@ -60,7 +60,7 @@ import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel,
 import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
-import { groupResolutionStatus, queueResolution, reportResolutionStatus } from "@/lib/reportResolution";
+import { datedHandling, groupResolutionStatus, queueResolution, reportResolutionStatus } from "@/lib/reportResolution";
 import type { ReportStatus } from "../../shared/handling";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
@@ -871,29 +871,39 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [bannedEvents],
   );
 
-  // When the worker first saw each feed report (#324). A report it has no time
-  // for -- a deep-linked one, or one from before arrivals were recorded --
-  // compares by its created_at (shared/handling.ts reportTime). `?? {}` also
-  // covers a feed cached by a build without the field.
+  // When the worker first saw each listed report (#324): the feed's arrivals,
+  // and in the history view each loaded page's, so a history row is dated by
+  // the arrival the worker put it in history by. A report with no time -- a
+  // deep-linked one, or one from before arrivals were recorded -- compares by
+  // its created_at (shared/handling.ts reportTime). `?? {}` also covers data
+  // cached by a build without the field.
   const reportArrivals = queueFeed?.reportArrivals;
-  const arrivals = useMemo(
-    () => new Map(Object.entries(reportArrivals ?? {})),
-    [reportArrivals],
-  );
+  const arrivals = useMemo(() => {
+    const merged = new Map(Object.entries(reportArrivals ?? {}));
+    if (historyView && historyPages) {
+      for (const page of historyPages) {
+        for (const [id, seenAt] of Object.entries(page.reportArrivals ?? {})) merged.set(id, seenAt);
+      }
+    }
+    return merged;
+  }, [reportArrivals, historyView, historyPages]);
 
-  // Which rule decides whether a report is handled. The dated rule (#324)
-  // needs the worker's handling_rows and an `at` on every label target, and
-  // builds its handling map with the worker's own handlingByTarget, so the
-  // screen dates every target as the feed does. A worker without them keeps
-  // the membership rule, and the queue shows what it showed before.
+  // The dated rule's reading of the decision log and labels (#324), with the
+  // worker's own handlingByTarget, so the screen dates every target as the
+  // feed does. Null against a worker without handling_rows or label dates,
+  // which keeps the membership rule. Kept apart from `resolution` so feed and
+  // ban-list polls do not rebuild it over the whole decision log.
+  const handlingRows = decisionsResult?.handlingRows;
+  const dated = useMemo(() => datedHandling(handlingRows, labelTargets), [handlingRows, labelTargets]);
+
+  // Which rule decides whether a report is handled, and what it reads.
   const resolution = useMemo(() => queueResolution({
-    handlingRows: decisionsResult?.handlingRows,
-    labelTargets,
+    dated,
     arrivals,
     bannedPubkeys: bannedPubkeySet,
     bannedEvents: bannedEventSet,
     resolvedTargets,
-  }), [decisionsResult?.handlingRows, labelTargets, arrivals, bannedPubkeySet, bannedEventSet, resolvedTargets]);
+  }), [dated, arrivals, bannedPubkeySet, bannedEventSet, resolvedTargets]);
 
   // Targets auto-hidden and still waiting for a human, keyed to their latest
   // auto-hide state so a row can say when a hide needs a check

@@ -222,6 +222,19 @@ function readArrivalsFor(db: D1Database, reports: readonly RelayReport[]): Promi
   return readReportArrivals(db, ids);
 }
 
+// The `report_arrivals` a response carries: first-seen unix seconds by report
+// id, for the returned events the watcher saw arrive, and only those. The
+// screen compares by these as the worker did; a report absent here compares by
+// its created_at.
+function arrivalsOf(events: readonly RelayReport[], arrivals: ReadonlyMap<string, number>): Record<string, number> {
+  const reportArrivals: Record<string, number> = {};
+  for (const event of events) {
+    const seenAt = arrivals.get(event.id);
+    if (seenAt !== undefined) reportArrivals[event.id] = seenAt;
+  }
+  return reportArrivals;
+}
+
 function failure(status: number, error: unknown) {
   return { status, body: { success: false, error: error instanceof Error ? error.message : String(error) } };
 }
@@ -258,11 +271,7 @@ export async function getReportsNeedingAttention(
       `[needs-attention] handled before: ${handledBefore.length} targets, by last handling ${
         JSON.stringify(handledBeforeByLastAction(handledBefore, keys.handling))}`,
     );
-    const reportArrivals: Record<string, number> = {};
-    for (const event of events) {
-      const seenAt = arrivals.get(event.id);
-      if (seenAt !== undefined) reportArrivals[event.id] = seenAt;
-    }
+    const reportArrivals = arrivalsOf(events, arrivals);
     return {
       status: 200,
       body: {
@@ -416,6 +425,9 @@ export async function getResolvedReportsPage(
         // The label walk stopped early: a label-resolved target beyond its
         // cap is missing from this page's resolved set.
         resolution_truncated: keys.labelsTruncated,
+        // New beside the fields above (#324), shaped as the feed's: the
+        // screen dates these rows by the arrival this page was filtered by.
+        report_arrivals: arrivalsOf(events, arrivals),
       },
     };
   } catch (error) {

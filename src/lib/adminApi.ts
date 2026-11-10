@@ -21,7 +21,7 @@ import {
   type MediaFiles,
 } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
-import type { HandlingRow } from "../../shared/handling";
+import { REOPENED_ACTION, type HandlingRow } from "../../shared/handling";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 import { handleLoginRefusal, isModeratorLoginRequired } from "./moderatorLoginRequired";
 import type {
@@ -689,6 +689,11 @@ export interface ResolvedReportsPage {
   // The worker's walk over resolution labels stopped early, so some
   // label-resolved reports may be missing from this page.
   resolutionTruncated: boolean;
+  // First-seen unix seconds by report id for this page's events, shaped as the
+  // feed's reportArrivals (#324): the worker put these rows in history by
+  // their arrival, and the queue dates them the same way. Empty from a worker
+  // that predates it. Optional for a page cached by a build without it.
+  reportArrivals?: Readonly<Record<string, number>>;
 }
 
 export async function fetchResolvedReportsPage(
@@ -706,6 +711,7 @@ export async function fetchResolvedReportsPage(
     done?: unknown;
     skipped_within_second?: unknown;
     resolution_truncated?: unknown;
+    report_arrivals?: unknown;
     error?: string;
   }>(apiUrl, `/api/reports/resolved${query ? `?${query}` : ''}`, 'GET');
 
@@ -725,6 +731,7 @@ export async function fetchResolvedReportsPage(
     done: data.done,
     skippedWithinSecond: data.skipped_within_second === true,
     resolutionTruncated: data.resolution_truncated === true,
+    reportArrivals: parseReportArrivals(data.report_arrivals),
   };
 }
 
@@ -794,17 +801,34 @@ export interface ResolutionStateResult {
   handlingRows?: HandlingRow[];
 }
 
-// A row missing a field it needs is dropped: dropping handling shows more
-// reports, never fewer.
+// A row that does not name its target and action is dropped. So is a
+// handling row with a malformed date or author: dropping handling shows more
+// reports, never fewer. A reopen row is the exception, because a reopen
+// un-handles: dropping one would hide reports it brought back. A reopen with a
+// malformed date is kept, read as undated (it still supersedes undated rows,
+// and marks its target's relay ban as dated; see datedHandling).
 function parseHandlingRows(value: unknown): HandlingRow[] | undefined {
   if (!Array.isArray(value)) return undefined;
-  return value.filter((row): row is HandlingRow =>
-    !!row && typeof row === 'object'
-    && typeof row.target_type === 'string'
-    && typeof row.target_id === 'string'
-    && typeof row.action === 'string'
-    && (row.at === null || (typeof row.at === 'number' && Number.isFinite(row.at)))
-    && (row.moderator_pubkey === undefined || row.moderator_pubkey === null || typeof row.moderator_pubkey === 'string'));
+  const rows: HandlingRow[] = [];
+  for (const row of value) {
+    if (!row || typeof row !== 'object') continue;
+    if (typeof row.target_type !== 'string' || typeof row.target_id !== 'string' || typeof row.action !== 'string') continue;
+    const datedOk = row.at === null || (typeof row.at === 'number' && Number.isFinite(row.at));
+    const authorOk = row.moderator_pubkey === undefined || row.moderator_pubkey === null
+      || typeof row.moderator_pubkey === 'string';
+    if (row.action === REOPENED_ACTION) {
+      rows.push({
+        target_type: row.target_type,
+        target_id: row.target_id,
+        action: row.action,
+        moderator_pubkey: authorOk ? row.moderator_pubkey : null,
+        at: datedOk ? row.at : null,
+      });
+    } else if (datedOk && authorOk) {
+      rows.push(row as HandlingRow);
+    }
+  }
+  return rows;
 }
 
 export async function fetchResolutionState(

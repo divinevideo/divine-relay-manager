@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { QueryClient, onlineManager } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
-import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
+import { EMPTY_RESOLVED_PAGE, resolvedPage } from '@/test/resolvedHistory';
+import { useLocation } from 'react-router-dom';
 import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
@@ -104,6 +105,12 @@ interface SourceState {
   datedLabels?: unknown[];
   // The feed's report_arrivals: first-seen unix seconds by report id.
   reportArrivals?: Record<string, number>;
+  // More feed reports, after the ones above.
+  extraReports?: unknown[];
+  // The resolved-history page, in place of an empty one.
+  historyPage?: unknown;
+  // Holds /api/resolution-state until this settles.
+  decisionsGate?: Promise<void>;
 }
 
 function stubFetch(state: SourceState) {
@@ -113,10 +120,10 @@ function stubFetch(state: SourceState) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
 
-    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
+    if (url.includes('/api/reports/resolved')) return jsonResponse(state.historyPage ?? EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) {
       if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
-      const events: unknown[] = [REPORT];
+      const events: unknown[] = [REPORT, ...(state.extraReports ?? [])];
       if (state.includeEventReport) events.push(EVENT_REPORT);
       if (state.authoredEventReportP) events.push(authoredEventReport(state.authoredEventReportP));
       if (state.secondAuthoredEventReportP) {
@@ -157,6 +164,7 @@ function stubFetch(state: SourceState) {
     // set, plus the auto-hide state actions that feed pendingReviewTargets.
     if (url.includes('/api/resolution-state')) {
       if (slow.has('decisions')) return never;
+      if (state.decisionsGate) await state.decisionsGate;
       if (state.decisions === 'error') return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
       return jsonResponse({
         success: true,
@@ -208,6 +216,8 @@ afterEach(() => {
   // implementation for every test after the first in this file.
   consoleWarn.mockRestore();
   consoleError.mockRestore();
+  // Deep-link tests leave the URL behind.
+  window.history.pushState({}, '', '/');
 });
 
 function renderReports(queryClient?: QueryClient) {
@@ -536,6 +546,130 @@ describe('the handled-before rule (#324)', () => {
     expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
     // The account's report is resolved; the post's report came after the ban.
     expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // A relay ban hides as undated only when the decision log has no dated row
+  // for it. After a Reopen, its dated row is superseded, and the ban hides
+  // nothing: Reopen never makes a report less visible.
+  it('lists a reopened account, and its posts, though the relay still lists the ban', async () => {
+    stubFetch({
+      ...healthy,
+      bannedPubkeys: 'resolves',
+      authoredEventReportP: REPORTED_PUBKEY,
+      handlingRows: [
+        row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 100),
+        row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50),
+      ],
+      datedLabels: [],
+    });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.getByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  // A reopen with a malformed date is kept, undated, rather than dropped:
+  // dropping it would let the relay ban hide the account as if undated.
+  it('keeps a reopen row whose date is malformed', async () => {
+    stubFetch({
+      ...healthy,
+      bannedPubkeys: 'resolves',
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', 'not a time' as unknown as number)],
+      datedLabels: [],
+    });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  // The All tab dates each report by itself: by its id's arrival, else its
+  // created_at. Grouped, this target is one handled-before row and counts as
+  // no resolved row.
+  it('counts resolved reports one by one in the All tab, by arrival and created_at', async () => {
+    const byArrival = { ...REPORT, id: '3'.repeat(64), created_at: T + 5 };   // stamped after, arrived before
+    const byCreatedAt = { ...REPORT, id: '4'.repeat(64), created_at: T - 100 }; // before the handling
+    const newer = { ...REPORT, id: '5'.repeat(64), created_at: T + 50 };        // after it
+    stubFetch({
+      ...healthy,
+      // REPORT itself arrived after the handling.
+      extraReports: [byArrival, byCreatedAt, newer],
+      reportArrivals: { [REPORT.id]: T + 20, [byArrival.id]: T - 20 },
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 10)],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText('No resolved reports.')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: /^All/ }));
+    expect(await screen.findByText('Showing 2 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // Resolved history carries the arrivals its page was filtered by, so a row
+  // the worker put in history by arrival reads as resolved here too.
+  it('dates a resolved-history row by the arrival its page carries', async () => {
+    const historyRow = { ...REPORT, id: '6'.repeat(64), created_at: T + 100 };
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 10)],
+      datedLabels: [],
+      historyPage: {
+        ...resolvedPage([historyRow], { nextCursor: null, done: true }),
+        report_arrivals: { [historyRow.id]: T - 20 },
+      },
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await user.click(screen.getByRole('tab', { name: /^All/ }));
+    // The feed's REPORT came after the handling; the history row arrived before it.
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  describe('a deep link to a target handled before its newest report', () => {
+    function RoutedReports() {
+      const { pathname } = useLocation();
+      const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+      return <Reports relayUrl={RELAY_URL} selectedReportId={reportId} />;
+    }
+    const hideResolvedSwitch = () => screen.getByRole('switch', { name: /hide resolved/i });
+
+    it('turns Hide resolved off so its row is in the list', async () => {
+      stubFetch({
+        ...healthy,
+        handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 50)],
+        datedLabels: [],
+      });
+      window.history.pushState({}, '', `/reports?pubkey=${REPORTED_PUBKEY}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${REPORT.id}`));
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+      expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+    });
+
+    // The decisions read lands after the link opened the row, so the
+    // re-check as resolution data arrives is what unhides it.
+    it('turns Hide resolved off once the decisions read lands after the link opened', async () => {
+      let release!: () => void;
+      const decisionsGate = new Promise<void>(resolve => { release = resolve; });
+      stubFetch({
+        ...healthy,
+        handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 50)],
+        datedLabels: [],
+        decisionsGate,
+      });
+      window.history.pushState({}, '', `/reports?pubkey=${REPORTED_PUBKEY}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${REPORT.id}`));
+      await act(async () => { release(); });
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+    });
   });
 });
 

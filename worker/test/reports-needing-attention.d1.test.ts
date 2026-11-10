@@ -204,9 +204,16 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     it('puts only the reports the feed drops in resolved history', async () => {
       await seed();
 
-      const history = await (await get('/api/reports/resolved?limit=50')).json() as { events: RelayEvent[] };
+      const history = await (await get('/api/reports/resolved?limit=50')).json() as {
+        events: RelayEvent[]; report_arrivals: Record<string, number>;
+      };
 
       expect(history.events.map(e => e.id).sort()).toEqual([id(1), id(3)].sort());
+      // Shaped as the feed's, for the returned events only: report 3 was
+      // stamped after the handling but arrived before it, and the screen must
+      // date it by the arrival too. Report 4's arrival is not sent: it is not
+      // on this page.
+      expect(history.report_arrivals).toEqual({ [id(3)]: DECIDED_AT_S - 50 });
     });
 
     it('logs once per build how many handled targets came back, by the call that last handled them', async () => {
