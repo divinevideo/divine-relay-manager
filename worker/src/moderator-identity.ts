@@ -165,7 +165,7 @@ const RELAY_READ_METHOD = /^(list[a-z]+|get[a-z]+|supportedmethods)$/;
 export async function needsModeratorLogin(request: Request, path: string): Promise<boolean> {
   if (request.method === 'GET' || request.method === 'HEAD') return false;
   if (READ_ONLY_POSTS.has(path)) return false;
-  if (OPERATIONAL_POSTS.has(path)) return false;
+  if (request.method === 'POST' && OPERATIONAL_POSTS.has(path)) return false;
   if (path === '/api/relay-rpc') {
     try {
       const body = (await request.clone().json()) as { method?: unknown };

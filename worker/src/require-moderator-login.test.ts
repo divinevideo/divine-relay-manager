@@ -194,6 +194,11 @@ describe('needsModeratorLogin: which requests are writes', () => {
     expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(false);
   });
 
+  it.each(['PUT', 'PATCH', 'DELETE'])('%s /api/report-watcher/start still needs a login', async (method) => {
+    const path = '/api/report-watcher/start';
+    expect(await needsModeratorLogin(req(method, path, '{}'), path)).toBe(true);
+  });
+
   it('POST /api/report-watcher/stop still needs a login', async () => {
     const path = '/api/report-watcher/stop';
     expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(true);
