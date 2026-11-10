@@ -61,7 +61,9 @@ it.each([
         }),
     } });
   }
-  const credentials = { accessToken: 'old-login', bunkerUrl: 'bunker://test' };
+  // Unique per case: a logout fences the token it ended for the life of the
+  // module instance (lib/divineLogin), which these cases share.
+  const credentials = { accessToken: `old-login-${event}-${withLocks}`, bunkerUrl: 'bunker://test' };
   let stored: StoredCredentials | null = credentials;
   let release!: () => void;
   oauth.getSessionWithRefresh
