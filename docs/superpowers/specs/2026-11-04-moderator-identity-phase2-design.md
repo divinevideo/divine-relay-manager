@@ -30,7 +30,7 @@ Phase 2 makes the worker work out who acted from the moderator's Divine login, a
 - Restricting anything to Keycast's support-admin list (decision 5).
 - Asking Keycast for a narrower login scope (decision 6, a follow-up issue).
 - A new Keycast endpoint (decision 1, option D, a follow-up).
-- Making the app's sign-out revoke the login in Keycast (decision 9, a follow-up that must land before the viewer).
+- Making the app's sign-out revoke the login in Keycast (post-MVP; viewer v1 uses relay-manager sign-out from #392 instead, per revised decision 9).
 - The suspended-content viewer and its view log (#212).
 - Per-moderator signing (phase 3).
 
