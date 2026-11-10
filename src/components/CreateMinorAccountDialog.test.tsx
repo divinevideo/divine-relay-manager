@@ -9,9 +9,11 @@ import { CreateMinorAccountDialog } from './CreateMinorAccountDialog';
 
 const createMinorAccount = vi.fn();
 
+// Creating an account is a write, so it goes through asModerator(token).
 vi.mock('@/hooks/useAdminApi', () => ({
-  useAdminApi: () => ({ createMinorAccount }),
+  useAdminApi: () => ({ asModerator: () => ({ createMinorAccount }) }),
 }));
+vi.mock('@/hooks/useCurrentUser', () => ({ useCurrentUser: () => ({ getModeratorToken: () => 'tok' }) }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 
 beforeEach(() => {

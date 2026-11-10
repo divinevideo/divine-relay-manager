@@ -4,7 +4,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import type { StoredCredentials } from '@divinevideo/login';
 import type { NostrSigner } from '@nostrify/nostrify';
-import { getSession, logout as sdkLogout, startLogin as sdkStartLogin } from '@/lib/divineLogin';
+import {
+  acceptSignOutFromOtherTab,
+  getSession,
+  logout as sdkLogout,
+  startLogin as sdkStartLogin,
+  type SignOutMessage,
+} from '@/lib/divineLogin';
 import { DivineRpcSigner } from '@/lib/divineSigner';
 import { DivineSessionContext, type DivineSessionValue } from '@/contexts/DivineSessionContext';
 
@@ -26,6 +32,12 @@ const timerDelay = (ms: number) => Math.min(Math.max(ms, 0), MAX_TIMER_MS);
 // How long after expiresAt the one retry runs when the expiry refresh got the
 // same token back (see the expiry timer).
 const EXPIRY_RETRY_MARGIN_MS = 1_000;
+// A sign-out in one tab is announced to the app's other tabs on this channel,
+// so each drops to signed out at once rather than on its next focus.
+const SIGN_OUT_CHANNEL = 'divine-login';
+// Sent when the library could not say which session it ended; receivers then
+// end whatever session they hold (fail closed).
+const SIGN_OUT_UNKNOWN: SignOutMessage = { type: 'signed-out' };
 
 export function DivineSessionProvider({ children }: { children: ReactNode }) {
   const [credentials, setCredentials] = useState<StoredCredentials | null>(null);
@@ -48,6 +60,11 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
   // re-persisted mid-refresh (lib/divineLogin).
   const generationRef = useRef(0);
   const mountedRef = useRef(true);
+  // The credentials last applied, set as they are applied. A sign-out message
+  // is matched against them (lib/divineLogin knows which session era they come
+  // from). tokenRef mirrors the token, but from an effect, so a message
+  // arriving between a refresh's apply and that effect would see the old one.
+  const appliedCredsRef = useRef<StoredCredentials | null>(null);
   useEffect(() => {
     mountedRef.current = true;
     return () => {
@@ -85,6 +102,7 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
       // delete a sign-in another tab has made since.
       return undefined;
     }
+    appliedCredsRef.current = creds;
     setCredentials(creds);
     setCredentialsResolved(true);
     return creds;
@@ -246,9 +264,11 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     };
   }, [signer, accessToken]);
 
-  const logout = useCallback(() => {
-    generationRef.current += 1;
-    sdkLogout();
+  // This tab's half of a sign-out, shared by logout and by another tab's
+  // announcement. No generation bump here: logout bumps it, and a received
+  // sign-out must not, since the library has already invalidated any read
+  // from the ended session, and a read still in flight is of a newer sign-in.
+  const clearLocalSession = useCallback(() => {
     // Drop the token now rather than waiting for the post-commit effect, so a
     // click between logout and the re-render takes no token. An action that
     // already took one keeps its own copy.
@@ -257,6 +277,48 @@ export function DivineSessionProvider({ children }: { children: ReactNode }) {
     setResolvedIdentity(NO_IDENTITY);
     setCredentialsResolved(true); // logout is a definitive "signed out" resolution
   }, []);
+
+  const channelRef = useRef<BroadcastChannel | null>(null);
+  useEffect(() => {
+    // Where BroadcastChannel is missing (constructing it throws) or refused,
+    // the other tabs still catch up on their next focus or visibility re-read.
+    let channel: BroadcastChannel;
+    try {
+      channel = new BroadcastChannel(SIGN_OUT_CHANNEL);
+    } catch {
+      return;
+    }
+    // The library ends this tab's read in flight and applied session if they
+    // belong to the session the sender ended, and leaves a newer sign-in
+    // alone. A channel never receives its own messages, and this handler posts
+    // nothing, so the message does not echo.
+    channel.onmessage = (event: MessageEvent) => {
+      if (acceptSignOutFromOtherTab(event.data, appliedCredsRef.current)) clearLocalSession();
+    };
+    channelRef.current = channel;
+    return () => {
+      channelRef.current = null;
+      channel.close();
+    };
+  }, [clearLocalSession]);
+
+  const logout = useCallback(() => {
+    let message: SignOutMessage = SIGN_OUT_UNKNOWN;
+    try {
+      // Also bumps the session revision in shared storage and fences the
+      // ended session, so neither another tab's refresh in flight nor a failed
+      // removal can bring it back (lib/divineLogin).
+      message = sdkLogout();
+    } finally {
+      // Even if the library throws, this tab and the others sign out (Matt,
+      // 2026-11-09). The throw still propagates. Without the library's message
+      // the other tabs are told the ended session is unknown, and end theirs.
+      // The generation bump discards a resolve already in flight in this tab.
+      generationRef.current += 1;
+      clearLocalSession();
+      channelRef.current?.postMessage(message);
+    }
+  }, [clearLocalSession]);
 
   // Identity is pending when there's a token we have not finished resolving for.
   // Derived during render so it never lags the token by a frame.

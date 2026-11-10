@@ -295,8 +295,9 @@ export function UserActions({
       }
       // Non-critical audit log; never block the action. Attribute to the
       // login taken at job START (not now), so a mid-job logout/switch can't
-      // retarget it. With no start on record, the write goes unattributed
-      // rather than to whoever is signed in now.
+      // retarget it. With no start on record, the write carries no login rather
+      // than whoever is signed in now: unattributed, or refused (and only
+      // warned about below) once REQUIRE_MODERATOR_LOGIN is on.
       const act = bulkActRef.current ?? api.asModerator(undefined);
       void Promise.resolve()
         .then(() => act.logDecision({
