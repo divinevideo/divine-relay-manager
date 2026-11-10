@@ -470,4 +470,10 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     alert_type TEXT PRIMARY KEY,
     last_alerted_at TEXT NOT NULL
   )`).run();
+
+  // When the watcher first saw each report (#324). Keep in sync with migration 0020.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS report_arrivals (
+    report_id TEXT PRIMARY KEY,
+    first_seen_at INTEGER NOT NULL
+  )`).run();
 }

@@ -4,6 +4,7 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
+import { recordReportArrival } from './report-arrivals';
 import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
@@ -899,6 +900,28 @@ export class ReportWatcher implements DurableObject {
     const targetEventId = canonicalHex64(targetEventTag?.[1]);
     if (targetEventTag && !targetEventId) {
       console.log('[ReportWatcher] Report e tag is not a 64-character hex id, skipping auto-hide');
+    }
+
+    // Record when this report arrived: created_at is the reporter's claim and
+    // can be backdated, so "reported after the last human handling" (#324)
+    // compares this clock. Live path only: replayAdultReports does not record,
+    // and the live subscription has no `since` catch-up, so a report filed
+    // during a watcher outage has no row. A missing row falls back to
+    // created_at. Non-critical: logged, never allowed to stop auto-hide or the
+    // age review below. Only a verified event is recorded, since the relay
+    // does not vouch for the id.
+    if (this.env.DB) {
+      try {
+        if (!this.schemaReady) {
+          await ensureSchema(this.env.DB);
+          this.schemaReady = true;
+        }
+        if (verifyEvent(event as unknown as NostrEvent)) {
+          await recordReportArrival(this.env.DB, event.id, Math.floor(Date.now() / 1000));
+        }
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to record report arrival:', error);
+      }
     }
 
     // Process auto-hide if enabled and category qualifies
