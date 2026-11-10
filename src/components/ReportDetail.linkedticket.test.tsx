@@ -33,7 +33,7 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }) }));
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({ hasDecisions: false, isPendingReview: false, isDeleted: false,
-    isAutoHidden: false, isAutoHideRestored: false, decisions: [], latestDecision: null, refetch: vi.fn() }),
+    isAutoHidden: false, isAutoHideRestored: false, decisions: [], refetch: vi.fn() }),
 }));
 vi.mock('@/hooks/useModerationStatus', async () => {
   const { moderationStatusMock } = await import('@/test/moderationStatusMock');

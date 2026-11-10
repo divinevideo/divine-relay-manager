@@ -129,7 +129,6 @@ describe('useDecisionLog handling decisions', () => {
     const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-    expect(result.current.latestDecision?.action).toBe('auto_hide_skipped');
     expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
   });
 
@@ -142,7 +141,6 @@ describe('useDecisionLog handling decisions', () => {
     const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
-    expect(result.current.latestDecision?.action).toBe('auto_hide_failed');
     expect(result.current.latestHandlingDecision?.action).toBe('reviewed');
   });
 

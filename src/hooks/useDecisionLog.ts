@@ -53,11 +53,6 @@ export function useDecisionLog(targetId: string | null | undefined) {
   );
   const hasHandlingDecisions = latestHandlingDecision !== undefined;
 
-  // Get the most recent decision
-  const latestDecision = data?.[0];
-
-  // Check for specific action types
-  const isBanned = data?.some(d => d.action === 'ban_user' || d.action === 'ban');
   // A delete counts until a later restore_event row: EventActions' and
   // EventDetail's Restore Event log one beside the relay call. Decisions come
   // newest first, so the first of these wins. Other restores (report detail's
@@ -69,8 +64,6 @@ export function useDecisionLog(targetId: string | null | undefined) {
     ? undefined
     : latestDeleteOrRestore?.action === 'delete_event' || latestDeleteOrRestore?.action === 'delete';
   const isMediaBlocked = data?.some(d => d.action === 'block_media' || d.action === 'PERMANENT_BAN');
-  const isReviewed = data?.some(d => d.action === 'reviewed' || d.action === 'mark_ok');
-  const isFalsePositive = data?.some(d => d.action === 'false_positive' || d.action === 'false-positive');
 
   // Auto-hide specific checks
   const latestAutoHideAction = getLatestAutoHideState(data?.map(d => d.action) ?? []);
@@ -89,12 +82,8 @@ export function useDecisionLog(targetId: string | null | undefined) {
     hasDecisions,
     hasHandlingDecisions,
     latestHandlingDecision,
-    latestDecision,
-    isBanned,
     isDeleted,
     isMediaBlocked,
-    isReviewed,
-    isFalsePositive,
     isAutoHidden,
     isAutoHideConfirmed,
     isAutoHideRestored,

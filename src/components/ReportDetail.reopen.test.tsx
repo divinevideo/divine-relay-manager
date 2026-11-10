@@ -69,7 +69,6 @@ const decisionLog = vi.hoisted(() => ({
   isAutoHideRestored: false,
   isAutoHideRestoreFailed: false,
   decisions: [],
-  latestDecision: null,
   refetch: vi.fn(),
 }));
 // Set by a test that needs the real hook over api.getDecisions: whether Reopen

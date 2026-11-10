@@ -55,7 +55,7 @@ vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
     hasDecisions: false, hasHandlingDecisions: false, latestHandlingDecision: undefined, isPendingReview: false,
     isAutoHideRestoreFailed: false, isAutoHideUnresolved: false, isDeleted: false, isAutoHidden: false,
-    isAutoHideRestored: false, decisions: [], latestDecision: null, refetch: vi.fn(),
+    isAutoHideRestored: false, decisions: [], refetch: vi.fn(),
   }),
 }));
 vi.mock('@/hooks/useModerationStatus', () => ({

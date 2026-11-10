@@ -56,7 +56,6 @@ vi.mock('@/hooks/useDecisionLog', () => ({
     error: decisionFlags.error,
     isAutoHideRestored: false,
     decisions: [],
-    latestDecision: null,
     refetch: vi.fn(),
   }),
 }));
