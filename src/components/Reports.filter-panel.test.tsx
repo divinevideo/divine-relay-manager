@@ -210,7 +210,7 @@ describe('Filters toggle', () => {
     renderReports();
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'true');
     expect(getItem).toHaveBeenCalledWith(OPEN_KEY);
-    // Toggling still works for the session.
+    // Toggling still works while the queue stays mounted.
     await user.click(await filtersToggle());
     expect(setItem).toHaveBeenCalledWith(OPEN_KEY, '0');
     expect(await filtersToggle()).toHaveAttribute('aria-expanded', 'false');

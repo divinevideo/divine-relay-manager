@@ -123,7 +123,8 @@ function ActiveCategoryChip({ category, onClear, labelId }: { category: string; 
 
 // The Filters section's open state, per browser. Open unless the moderator
 // closed it. Storage can throw (private mode, storage disabled): then it opens
-// by default and toggling still works for the session.
+// by default, and a toggle lasts only while the queue stays mounted. Leaving
+// the Reports tab or switching environment opens it again.
 const FILTERS_OPEN_KEY = 'reports:filters-open';
 function readFiltersOpen(): boolean {
   try {
