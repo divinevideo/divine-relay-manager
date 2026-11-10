@@ -399,9 +399,11 @@ describe('/api/moderate-media/lift-check', () => {
 // moderation-service keeps its own record of who uploaded a file, and that
 // account can differ from the owner the media server names
 // (divine-moderation-service#242). It sends the account as `uploader`, and the
-// check runs the owner's case check on it too, with the same rules, after the
-// owner. A refusal for it carries the owner's codes and fields, so the caller
-// handles both the same way.
+// check runs the owner's case check on it too, after the owner, with one
+// difference: a case that has restricted the uploader does not refuse every
+// AGE_RESTRICTED, because its withhold hides only files the uploader owns. A
+// refusal for it carries the owner's codes and fields, so the caller handles
+// both the same way.
 describe('/api/moderate-media/lift-check with the recorded uploader', () => {
   const UPLOADER = 'c3'.repeat(32);
   const OWNER_SAFE_ERROR = 'The account that owns this file has an open age review, so its files can only be made public through that case.';
@@ -547,11 +549,32 @@ describe('/api/moderate-media/lift-check with the recorded uploader', () => {
     expect(stateReads()).toHaveLength(reads);
   });
 
-  it.each(['restricted_pending_user_response', 'restricted_pending_parental_consent', 'restricted_pending_support_email'])(
-    "refuses an AGE_RESTRICTED over a public file once the uploader's case is %s, without reading the record",
+  // The case's withhold skips files the account doesn't own, so a restricted
+  // uploader's case has not hidden a file someone else owns. Refusing would
+  // leave it fully public; whether it is hidden decides instead.
+  const RESTRICTED_STATES = ['restricted_pending_user_response', 'restricted_pending_parental_consent', 'restricted_pending_support_email'];
+
+  it.each(RESTRICTED_STATES)(
+    "allows an AGE_RESTRICTED over a public file once the uploader's case is %s, because the withhold skips files the uploader doesn't own",
     async (state) => {
       blobStatus = 'active';
       recordStatus = 'safe';
+      otherCases = [uploaderCase(state)];
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ success: true, allowed: true, checked: true, sha256: SHA });
+      expect(stateReads()).toHaveLength(1);
+    },
+  );
+
+  it.each(RESTRICTED_STATES.flatMap((state) => [
+    [state, 'the media server serves it banned', 'banned', 'safe', 0],
+    [state, 'the record shows QUARANTINE', 'active', 'quarantine', 1],
+  ] as const))(
+    "refuses an AGE_RESTRICTED over a hidden file once the uploader's case is %s: %s",
+    async (state, _label, b, r, reads) => {
+      blobStatus = b;
+      recordStatus = r;
       otherCases = [uploaderCase(state)];
       const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
       expect(res.status).toBe(409);
@@ -560,9 +583,9 @@ describe('/api/moderate-media/lift-check with the recorded uploader', () => {
         code: 'age_review_active',
         caseId: 'case-uploader',
         state,
-        error: "The account recorded as this file's uploader is restricted by an open age review, so the file can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
+        error: "This file is withheld (hidden, blocked or deleted) and the account recorded as its uploader has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
       });
-      expect(stateReads()).toHaveLength(0);
+      expect(stateReads()).toHaveLength(reads);
     },
   );
 
@@ -645,14 +668,25 @@ describe('/api/moderate-media/lift-check with the recorded uploader', () => {
       expect(stateReads()).toHaveLength(1);
     });
 
-    it("refuses with the uploader's answer when only the uploader's case has restricted the account", async () => {
+    it("allows a public file when only the uploader's case has restricted the account", async () => {
       blobStatus = 'active';
       recordStatus = 'safe';
       otherCases = [uploaderCase('restricted_pending_user_response')];
       const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
-      expect(res.status).toBe(409);
-      expect(await res.json()).toMatchObject({ code: 'age_review_active', caseId: 'case-uploader', state: 'restricted_pending_user_response' });
+      expect(res.status).toBe(200);
+      expect(lookedUp()).toEqual([OWNER, UPLOADER]);
       expect(stateReads()).toHaveLength(1);
+    });
+
+    it("answers with the owner's restricted refusal when only the owner's case has restricted the account", async () => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      openCase = { id: 'case-owner', pubkey: OWNER, state: 'restricted_pending_user_response' };
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toMatchObject({ code: 'age_review_active', caseId: 'case-owner', state: 'restricted_pending_user_response' });
+      expect(lookedUp()).toEqual([OWNER]);
+      expect(stateReads()).toHaveLength(0);
     });
   });
 

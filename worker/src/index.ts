@@ -2627,6 +2627,7 @@ const NON_LIFT_MEDIA_ACTIONS = new Set(['PERMANENT_BAN', 'QUARANTINE', 'DELETE',
 
 // What mediaLiftGuard's refusals tell a moderator, by whose case refused: the
 // file's owner, or the account moderation-service records as its uploader.
+// Only the owner's case refuses as `restricted` (see mediaLiftGuard).
 const LIFT_REFUSAL_TEXT = {
   owner: {
     safe: 'The account that owns this file has an open age review, so its files can only be made public through that case.',
@@ -2636,7 +2637,6 @@ const LIFT_REFUSAL_TEXT = {
   uploader: {
     safe: "The account recorded as this file's uploader has an open age review, so the file can only be made public through that case.",
     hidden: "This file is withheld (hidden, blocked or deleted) and the account recorded as its uploader has an open age review, so it can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
-    restricted: "The account recorded as this file's uploader is restricted by an open age review, so the file can't be put behind the 18+ gate, which would show it to adults. The case decides when it becomes public.",
   },
 } as const;
 
@@ -2680,8 +2680,10 @@ function invalidUploaderResponse(corsHeaders: Record<string, string>): Response 
 //     only while an account checked here has an open case: the record is
 //     read only then, and once however many cases need it, while the media
 //     server's status comes from the owner read every SAFE and
-//     AGE_RESTRICTED makes. Once the case has restricted the
+//     AGE_RESTRICTED makes. Once the owner's case has restricted the
 //     account (and so run the withhold), every AGE_RESTRICTED is refused.
+//     An uploader's case does not: the withhold hides only files the
+//     account owns, so whether the file is hidden still decides.
 //   - Block, Quarantine, Delete and REVIEW are not checked (callers test
 //     isLiftAction first).
 //   - The hash must be 64 hex: it becomes a path on the media server's
@@ -2696,7 +2698,9 @@ function invalidUploaderResponse(corsHeaders: Record<string, string>): Response 
 //     the credentials for reading it cannot be built: `getHeaders` is called
 //     only for that read, so a missing credential refuses nothing else.
 //   - An `uploader` other than the owner gets the same checks, after the
-//     owner's, so when both would refuse the owner's refusal is the answer.
+//     owner's, except that its case restricting the account does not refuse
+//     every AGE_RESTRICTED (above). When both would refuse, the owner's
+//     refusal is the answer.
 //     Its refusals carry the same codes, statuses and fields, so a caller
 //     handles them as it does the owner's; only their text names the
 //     uploader. Unlike the account check's `pubkey`, it need not own the
@@ -2766,28 +2770,34 @@ export async function mediaLiftGuard(
     // A 409 is an open case. Anything else the guard answers (a 503) means
     // the lookup could not run, and refuses whatever the action.
     if (held.status !== 409 || action === 'SAFE') return held;
-    // Once the case restricts the account, its withhold has hidden the
-    // files, and for up to 5 minutes the media server can still read them
-    // public; a REVIEW (unchecked here) rewrites the record without hiding
-    // anything. Neither source can then be trusted to say "hidden", so
-    // every AGE_RESTRICTED is refused. The later states can be reached
+    // Once the owner's case restricts the account, its withhold has hidden
+    // the files, and for up to 5 minutes the media server can still read
+    // them public; a REVIEW (unchecked here) rewrites the record without
+    // hiding anything. Neither source can then be trusted to say "hidden",
+    // so every AGE_RESTRICTED is refused. The later states can be reached
     // without a restriction, so whether the file is hidden decides there.
+    // An uploader's case never takes this path: the withhold skips files
+    // the account doesn't own (bulk-moderate.ts, `not-owned`), and an
+    // uploader checked here is never the owner, so nothing hid the file and
+    // refusing would leave it fully public. Whether it is hidden decides.
     // ageReviewActiveGuard's one 409 always carries the case's state
     // (age-review.ts); a 409 without it would fall through to the checks
     // below, so keep that shape if the guard ever grows another 409.
-    const heldCase = await held.clone().json() as { caseId?: string; state?: string };
-    if (isAccountRestrictedAgeReviewState(heldCase.state as AgeReviewState)) {
-      return jsonResponse(
-        {
-          success: false,
-          error: text.restricted,
-          code: 'age_review_active',
-          caseId: heldCase.caseId,
-          state: heldCase.state,
-        },
-        409,
-        corsHeaders
-      );
+    if (role === 'owner') {
+      const heldCase = await held.clone().json() as { caseId?: string; state?: string };
+      if (isAccountRestrictedAgeReviewState(heldCase.state as AgeReviewState)) {
+        return jsonResponse(
+          {
+            success: false,
+            error: LIFT_REFUSAL_TEXT.owner.restricted,
+            code: 'age_review_active',
+            caseId: heldCase.caseId,
+            state: heldCase.state,
+          },
+          409,
+          corsHeaders
+        );
+      }
     }
     if (file.level === 'hidden' || file.level === 'blocked' || file.level === 'deleted') return held;
     if (recorded === undefined) {

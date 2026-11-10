@@ -325,16 +325,19 @@ as moderation-service's dashboard.
 **`uploader` (optional).** The account moderation-service records as the
 file's uploader, as 64 lowercase hex characters. That record can name an
 account other than the owner the media server reports, so the guard runs the
-owner's case check on it too, with the same rules: while it has an open case a
-`SAFE` is refused, and so is an `AGE_RESTRICTED` once the case has restricted
-the account or while the file is hidden. Unlike `/api/moderate-media`'s
-`pubkey`, it need not own the file. The owner is checked first, so when both
-would refuse, the owner's refusal is the answer, and an `uploader` that is the
-owner is checked once. A refusal for the uploader has the owner's status,
-`code` and fields; only its `error` text names the uploader. moderation-service's
-record is read at most once, however many open cases need it. Omit the field
-when there is no uploader: any other value that is not 64 lowercase hex,
-`null` included, is refused. It is read only for a `SAFE` or `AGE_RESTRICTED`.
+owner's case check on it too: while it has an open case a `SAFE` is refused,
+and so is an `AGE_RESTRICTED` while the file is hidden. Unlike the owner's
+case, the uploader's case restricting the account does not refuse every
+`AGE_RESTRICTED`: that case's withhold hides only files the account owns, so a
+file someone else owns may still be public, and refusing would keep it public.
+Unlike `/api/moderate-media`'s `pubkey`, the uploader need not own the file.
+The owner is checked first, so when both would refuse, the owner's refusal is
+the answer, and an `uploader` that is the owner is checked once. A refusal for
+the uploader has the owner's status, `code` and fields; only its `error` text
+names the uploader. moderation-service's record is read at most once, however
+many open cases need it. Omit the field when there is no uploader: any other
+value that is not 64 lowercase hex, `null` included, is refused. It is read
+only for a `SAFE` or `AGE_RESTRICTED`.
 
 In addition to the credentials described under Authentication above, it
 accepts moderation-service's relay key, sent in the `X-Admin-Key` header (the
