@@ -153,7 +153,7 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
     );
   }
 
-  // No record, so no action to show
+  // No record, so no action to show, or the record could not be read
   if (!result?.action || error) {
     return (
       <Card className={`border-blue-200 dark:border-blue-800 ${className}`}>
@@ -164,7 +164,9 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
           </CardTitle>
         </CardHeader>
         <CardContent className="py-2 px-3">
-          <p className="text-xs text-muted-foreground">Not analyzed yet</p>
+          <p className="text-xs text-muted-foreground">
+            {error ? 'Status could not be read. Reload to try again.' : 'Not analyzed yet'}
+          </p>
           <CopyableId value={sha256} type="hash" label="sha256:" size="xs" className="mt-2" />
         </CardContent>
       </Card>

@@ -59,6 +59,29 @@ describe('HiveAIReport', () => {
     expectOnlyReads();
   });
 
+  it('says the status could not be read when the read fails, not "Not analyzed yet"', async () => {
+    // The worker's answer when moderation-service rejects the request (it turns
+    // an upstream 404 into a 502 so it is not read as "no decision").
+    respond(502, JSON.stringify({ success: false, error: 'Moderation service error: 404' }));
+    render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
+
+    expect(await screen.findByText(/Status could not be read/)).toBeInTheDocument();
+    expect(screen.queryByText('Not analyzed yet')).not.toBeInTheDocument();
+  });
+
+  it('says the status could not be read when a refetch fails after a good read', async () => {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    respond(200, JSON.stringify({ sha256: SHA, action: 'QUARANTINE', scores: {} }));
+    render(<TestApp queryClient={queryClient}><HiveAIReport eventTags={TAGS} /></TestApp>);
+    expect(await screen.findByText('Quarantined')).toBeInTheDocument();
+
+    respond(500, JSON.stringify({ success: false, error: 'Unknown error' }));
+    await act(() => queryClient.invalidateQueries({ queryKey: ['media-status'] }));
+
+    expect(await screen.findByText(/Status could not be read/)).toBeInTheDocument();
+    expect(screen.queryByText('Not analyzed yet')).not.toBeInTheDocument();
+  });
+
   it('shows an existing result with no re-check button', async () => {
     respond(200, JSON.stringify({
       action: 'SAFE', scores: { nudity: 0.8 }, processedAt: '2026-11-01T10:00:00Z',
