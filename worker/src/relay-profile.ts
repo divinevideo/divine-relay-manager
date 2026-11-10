@@ -7,9 +7,8 @@ import { parseKind0Profile, type ReportedProfile } from './report-note';
 //
 // Follows the #186 contract: `success` answers "did the relay confirm the end
 // of the set (EOSE)?" -- a timeout, an early close, or a NIP-01 CLOSED are all
-// `success: false`, so an absence-sensitive caller (/api/reports, reopen's
-// label cleanup) can never mistake an unconfirmed read for a confirmed empty
-// one. Every outcome still carries the events that did arrive. `complete` is
+// `success: false`, so an absence-sensitive caller (/api/reports) can never
+// mistake an unconfirmed read for a confirmed empty one. Every outcome still carries the events that did arrive. `complete` is
 // retained (optional, only set on EOSE) so callers that adopted the interim
 // flag-based contract keep type-checking; it is an alias of the confirmed path.
 export async function queryRelay(

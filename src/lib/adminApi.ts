@@ -611,8 +611,10 @@ export async function fetchReportsByTarget(
 // `reportArrivals` (#324) is when the worker first saw each returned report,
 // the time the handled-before rule compares; a report without one compares by
 // its created_at. Read but not `handled_before`: the queue dates every target
-// itself, so it agrees with the worker for the reports deep links and
-// resolved history add too.
+// itself, by the same rule, so a resolved-history page, which carries its own
+// arrivals, is dated as the worker dated it. A report a deep link's targeted
+// lookup adds from outside the feed has no arrival here, and is compared by
+// its created_at.
 //
 // `truncated` means the worker's walk over the relay's reports stopped at its
 // page bound, so older reports may be missing. The response's `counts` are

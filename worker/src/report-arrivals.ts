@@ -1,7 +1,8 @@
 // ABOUTME: First-seen time per report id (#324).
 // ABOUTME: The reporter's client sets created_at, so "which report is newer" is decided by arrival.
 
-// D1 caps bound parameters per statement; stay well under it.
+// D1 allows at most 100 bound parameters per statement, and each chunk binds
+// one per id, so a chunk is exactly at that cap. Do not raise it.
 const READ_CHUNK = 100;
 
 /** First arrival wins: a replayed or concurrently delivered report keeps its original time. */
