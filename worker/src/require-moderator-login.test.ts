@@ -103,10 +103,18 @@ describe('REQUIRE_MODERATOR_LOGIN on', () => {
     const res = await call(
       { url: 'https://api.test/api/relay-rpc', body: { method: 'banpubkey', params: ['c'.repeat(64)] }, headers: { 'X-Admin-Key': 'mod-relay-key' } },
       env,
-    ).catch(() => ({ status: 0, code: 'handler-ran' }));
-    // Past the gate the relay handler runs against a stub env; all that matters
-    // here is that the login gate did not refuse it.
+    );
+    // Past both gates the relay handler runs against a stub env and can't
+    // confirm the ban. That answer proves the key authenticated and the login
+    // gate let it through.
+    expect(res.code).toBe('ban_unconfirmed');
+  });
+
+  it('lets a signed-out relay read through to the handler', async () => {
+    const res = await call({ url: 'https://api.test/api/relay-rpc', body: { method: 'listbannedpubkeys', params: [] }, headers: await browser() })
+      .catch(() => ({ status: 0, code: 'handler-threw' }));
     expect(res.code).not.toBe('moderator_login_required');
+    expect(res.status).not.toBe(401);
   });
 
   it('refuses before a real write route runs, not only on unmatched paths', async () => {

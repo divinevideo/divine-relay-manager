@@ -9,7 +9,7 @@ import { buildAdminApi, useAdminApi, type ModeratorApi, type PlainAdminApi } fro
 // wrapper that forgets to pass `{ loginToken }` on leaves that action
 // unattributed while tsc and the component tests (which mock this hook) stay
 // green. This table runs the REAL wrappers over the REAL adminApi down to fetch.
-// A new attribution function belongs in it.
+// A new write belongs in it.
 
 const API_URL = 'https://api.example';
 const TOKEN = 'login-token-under-test';
@@ -101,7 +101,8 @@ describe('useAdminApi attribution header', () => {
 
   // An action has to take the login at the click to record a moderator, so the
   // plain api leaves every attribution call out, at runtime as well as in its
-  // type. callRelayRpc stays for reads (RelaySettings' relay-config methods).
+  // type. callRelayRpc stays for relay reads (list*, get*); relay writes,
+  // RelaySettings' config changes included, go through asModerator.
   it.each(ATTRIBUTION_CALLS.filter(([name]) => name !== 'callRelayRpc'))(
     'the plain api has no %s', (name) => {
       const { result } = renderHook(() => useAdminApi());

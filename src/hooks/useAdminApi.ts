@@ -37,8 +37,8 @@ export function useAdminApi(): PlainAdminApi {
     // Sends no login header. Kept for reads; see the hook doc.
     callRelayRpc: buildAttributionApi(apiUrl).callRelayRpc,
     /**
-     * The same API with the moderator's login token bound to every call that
-     * records who acted. Take the token once at the click
+     * The same API with the moderator's login token bound to every write. Take
+     * the token once at the click
      * (`api.asModerator(getModeratorToken())`) and use the result for every
      * request in that action, so a sign-out or account switch mid-action
      * cannot change who it is recorded as.

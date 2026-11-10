@@ -23,8 +23,9 @@ import {
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 
-// The moderator's Divine login token, for a request that records who acted. The
-// worker verifies it and records that moderator; it never reads one from a body.
+// The moderator's Divine login token, sent on every write. The worker verifies it
+// and records that moderator (it never reads one from a body), and refuses a
+// write without it once REQUIRE_MODERATOR_LOGIN is on.
 export interface LoginOpts {
   loginToken?: string;
 }
