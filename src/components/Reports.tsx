@@ -53,6 +53,7 @@ import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailur
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
 import { isConsolidatedReportResolved } from "@/lib/reportResolution";
@@ -987,14 +988,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     ? Math.max(...activeTruncationBounds)
     : null;
 
-  // Get all unique categories from reports for filter chips
+  // Filter chips, one per category name. filterCategory holds the chip's name,
+  // so picking it matches every spelling clients send for that category.
   const availableCategories = useMemo(() => {
     if (!listReports) return [];
-    const categories = new Set<string>();
-    for (const report of listReports) {
-      categories.add(getReportCategory(report));
-    }
-    return Array.from(categories).sort();
+    return categoryChips(listReports.map(report => getReportCategory(report)));
   }, [listReports]);
 
   // The needs-attention feed plus deep-linked reports (`reports`), grouped,
@@ -1075,7 +1073,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Filter by category
     if (filterCategory) {
-      items = items.filter(c => c.categories.includes(filterCategory));
+      items = items.filter(c => c.categories.some(cat => categoryMatchesChip(cat, filterCategory)));
     }
 
     // Filter by target type
@@ -1188,7 +1186,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     // Filter by category
     if (filterCategory) {
-      items = items.filter(report => getReportCategory(report) === filterCategory);
+      items = items.filter(report => categoryMatchesChip(getReportCategory(report), filterCategory));
     }
 
     // Filter by target type
@@ -2047,21 +2045,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       className="text-xs cursor-pointer pr-1"
                       onClick={() => setFilterCategory(null)}
                     >
-                      {getCategoryLabel(filterCategory)}
+                      {filterCategory}
                       <X className="h-3 w-3 ml-1" />
                     </Badge>
                   )}
-                  {!filterCategory && availableCategories.map(cat => (
+                  {!filterCategory && availableCategories.map(chip => (
                     <Badge
-                      key={cat}
-                      variant={HIGH_PRIORITY_CATEGORIES.includes(cat) ? 'destructive' : 'outline'}
+                      key={chip.label}
+                      variant={chip.highPriority ? 'destructive' : 'outline'}
                       className="text-xs cursor-pointer hover:bg-muted"
-                      onClick={() => setFilterCategory(cat)}
+                      onClick={() => setFilterCategory(chip.label)}
                     >
-                      {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
+                      {chip.highPriority && (
                         <AlertTriangle className="h-3 w-3 mr-1" />
                       )}
-                      {getCategoryLabel(cat)}
+                      {chip.label}
                     </Badge>
                   ))}
                 </div>
