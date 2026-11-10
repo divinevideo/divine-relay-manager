@@ -40,6 +40,7 @@ import {
   EyeOff,
   Copy,
   Check,
+  ChevronDown,
 } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
@@ -52,6 +53,7 @@ import { useAdminApi } from "@/hooks/useAdminApi";
 import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailure";
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
@@ -98,6 +100,25 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'oldest', label: 'Oldest First' },
   { value: 'category', label: 'By Category' },
 ];
+
+// The Filters section's open state, per browser. Open unless the moderator
+// closed it. Storage can throw (private mode, storage disabled): then it opens
+// by default and toggling still works for the session.
+const FILTERS_OPEN_KEY = 'reports:filters-open';
+function readFiltersOpen(): boolean {
+  try {
+    return localStorage.getItem(FILTERS_OPEN_KEY) !== '0';
+  } catch {
+    return true;
+  }
+}
+function writeFiltersOpen(open: boolean): void {
+  try {
+    localStorage.setItem(FILTERS_OPEN_KEY, open ? '1' : '0');
+  } catch {
+    // Remembering is a convenience; the toggle already changed on screen.
+  }
+}
 
 const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_goods'];
 
@@ -353,6 +374,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [showPendingReview, setShowPendingReview] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
+  const [filtersOpen, setFiltersOpen] = useState(readFiltersOpen);
+  const onFiltersOpenChange = (open: boolean) => {
+    setFiltersOpen(open);
+    writeFiltersOpen(open);
+  };
   const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
   // The resolution sources a moderator has explicitly chosen to proceed without.
   // A Set rather than a boolean: the blocked pane names the sources it is
@@ -1972,108 +1998,150 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             </TabsList>
           </Tabs>
 
-          {/* Sort and Filter Controls */}
-          <div className="space-y-3 mt-3 pt-3 border-t">
-            {/* Sort dropdown */}
-            <div className="flex items-center gap-2">
-              <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
-              <Select
-                value={sortBy}
-                onValueChange={(v) => setSortBy(v as SortOption)}
-              >
-                <SelectTrigger
-                  className="h-8 text-xs flex-1"
-                  aria-describedby={showSortScopeNote ? 'sort-scope-note' : undefined}
-                >
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {SORT_OPTIONS.map(option => (
-                    <SelectItem key={option.value} value={option.value} className="text-xs">
-                      {option.label}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-            {/* Sorted history covers only the pages loaded so far. */}
-            {showSortScopeNote && (
-              <p id="sort-scope-note" className="text-[10px] italic leading-tight opacity-70">
-                Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
-              </p>
-            )}
-
-            {/* Target type filter */}
-            <div className="flex items-center gap-2">
-              <Filter className="h-3 w-3 text-muted-foreground shrink-0" />
-              <div className="flex gap-1 flex-1">
-                <Button
-                  variant={filterTargetType === 'all' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 text-xs px-2 flex-1"
-                  onClick={() => setFilterTargetType('all')}
-                >
-                  All
+          {/* Sort, type and category fold behind Filters, open by default and
+              remembered per browser. Closed, the summary still names the sort
+              and every active filter, so a narrowed list is never unexplained.
+              The two queue switches below never fold: they change which queue
+              is on screen, and hiding that state is how "the toggles don't
+              work" reports started. */}
+          <Collapsible open={filtersOpen} onOpenChange={onFiltersOpenChange} className="mt-3 pt-3 border-t">
+            <div className="flex items-center gap-2 min-w-0">
+              <CollapsibleTrigger asChild>
+                <Button variant="ghost" size="sm" className="h-7 px-1 -ml-1 text-xs font-medium shrink-0">
+                  <ChevronDown className={`h-3 w-3 mr-1 transition-transform motion-reduce:transition-none ${filtersOpen ? '' : '-rotate-90'}`} />
+                  Filters
                 </Button>
-                <Button
-                  variant={filterTargetType === 'pubkey' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 text-xs px-2 flex-1"
-                  onClick={() => setFilterTargetType('pubkey')}
-                >
-                  <User className="h-3 w-3 mr-1" />
-                  Users
-                </Button>
-                <Button
-                  variant={filterTargetType === 'event' ? 'secondary' : 'ghost'}
-                  size="sm"
-                  className="h-7 text-xs px-2 flex-1"
-                  onClick={() => setFilterTargetType('event')}
-                >
-                  <FileText className="h-3 w-3 mr-1" />
-                  Events
-                </Button>
-              </div>
-            </div>
-
-            {/* Category filter chips */}
-            {availableCategories.length > 0 && (
-              <div className="space-y-1.5">
-                <Label className="text-xs text-muted-foreground">Category</Label>
-                <div className="flex flex-wrap gap-1">
+              </CollapsibleTrigger>
+              {!filtersOpen && (
+                <div data-testid="filters-summary" className="flex items-center gap-1 flex-wrap min-w-0 text-xs text-muted-foreground">
+                  <span>
+                    {SORT_OPTIONS.find(o => o.value === sortBy)?.label}
+                    {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
+                  </span>
                   {filterCategory && (
-                    <Badge
-                      variant="default"
-                      className="text-xs cursor-pointer pr-1"
-                      onClick={() => setFilterCategory(null)}
-                    >
+                    <Badge variant="default" className="text-xs pr-1">
                       {getCategoryLabel(filterCategory)}
-                      <X className="h-3 w-3 ml-1" />
+                      <button
+                        type="button"
+                        aria-label="Clear category filter"
+                        className="ml-1 rounded-sm focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+                        onClick={() => setFilterCategory(null)}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
                     </Badge>
                   )}
-                  {!filterCategory && availableCategories.map(cat => (
-                    <Badge
-                      key={cat}
-                      variant={HIGH_PRIORITY_CATEGORIES.includes(cat) ? 'destructive' : 'outline'}
-                      className="text-xs cursor-pointer hover:bg-muted"
-                      onClick={() => setFilterCategory(cat)}
-                    >
-                      {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
-                        <AlertTriangle className="h-3 w-3 mr-1" />
-                      )}
-                      {getCategoryLabel(cat)}
-                    </Badge>
-                  ))}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
+            <CollapsibleContent className="space-y-3 mt-2">
+              {/* Sort and type share a row, wrapping to two on narrow screens. */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Sort dropdown */}
+                <div className="flex items-center gap-2 flex-1 min-w-[10rem]">
+                  <ArrowUpDown className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <Select
+                    value={sortBy}
+                    onValueChange={(v) => setSortBy(v as SortOption)}
+                  >
+                    <SelectTrigger
+                      className="h-8 text-xs flex-1"
+                      aria-describedby={showSortScopeNote ? 'sort-scope-note' : undefined}
+                    >
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      {SORT_OPTIONS.map(option => (
+                        <SelectItem key={option.value} value={option.value} className="text-xs">
+                          {option.label}
+                        </SelectItem>
+                      ))}
+                    </SelectContent>
+                  </Select>
+                </div>
+                {/* Target type filter */}
+                <div className="flex items-center gap-2 flex-1 min-w-[13rem]">
+                  <Filter className="h-3 w-3 text-muted-foreground shrink-0" />
+                  <div className="flex gap-1 flex-1">
+                    <Button
+                      variant={filterTargetType === 'all' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-7 text-xs px-2 flex-1"
+                      onClick={() => setFilterTargetType('all')}
+                    >
+                      All
+                    </Button>
+                    <Button
+                      variant={filterTargetType === 'pubkey' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-7 text-xs px-2 flex-1"
+                      onClick={() => setFilterTargetType('pubkey')}
+                    >
+                      <User className="h-3 w-3 mr-1" />
+                      Users
+                    </Button>
+                    <Button
+                      variant={filterTargetType === 'event' ? 'secondary' : 'ghost'}
+                      size="sm"
+                      className="h-7 text-xs px-2 flex-1"
+                      onClick={() => setFilterTargetType('event')}
+                    >
+                      <FileText className="h-3 w-3 mr-1" />
+                      Events
+                    </Button>
+                  </div>
+                </div>
 
+              </div>
+              {/* Sorted history covers only the pages loaded so far. */}
+              {showSortScopeNote && (
+                <p id="sort-scope-note" className="text-[10px] italic leading-tight opacity-70">
+                  Sorted among the {resolvedRowsShown} resolved loaded so far. Load more can add rows anywhere in this order.
+                </p>
+              )}
+
+              {/* Category filter chips */}
+              {availableCategories.length > 0 && (
+                <div className="space-y-1.5">
+                  <Label className="text-xs text-muted-foreground">Category</Label>
+                  <div className="flex flex-wrap gap-1">
+                    {filterCategory && (
+                      <Badge
+                        variant="default"
+                        className="text-xs cursor-pointer pr-1"
+                        onClick={() => setFilterCategory(null)}
+                      >
+                        {getCategoryLabel(filterCategory)}
+                        <X className="h-3 w-3 ml-1" />
+                      </Badge>
+                    )}
+                    {!filterCategory && availableCategories.map(cat => (
+                      <Badge
+                        key={cat}
+                        variant={HIGH_PRIORITY_CATEGORIES.includes(cat) ? 'destructive' : 'outline'}
+                        className="text-xs cursor-pointer hover:bg-muted"
+                        onClick={() => setFilterCategory(cat)}
+                      >
+                        {HIGH_PRIORITY_CATEGORIES.includes(cat) && (
+                          <AlertTriangle className="h-3 w-3 mr-1" />
+                        )}
+                        {getCategoryLabel(cat)}
+                      </Badge>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CollapsibleContent>
+          </Collapsible>
+
+          {/* Queue switches share one row and wrap on narrow screens. */}
+          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 mt-3 pt-3 border-t">
             {/* Pending review filter */}
             {/* Stays rendered while on, even at zero: finishing the last item
                 would otherwise remove the only way back, since Hide resolved
                 is disabled while this is on. */}
             {(pendingReviewCount > 0 || showPendingReview) && (
-              <div className="flex items-center justify-between pt-2 border-t">
+              <div className="flex items-center gap-2">
                 <Label htmlFor="pending-review" className="text-xs text-muted-foreground flex items-center gap-1.5">
                   <EyeOff className="h-3 w-3 text-orange-500" />
                   Pending review (sensitive)
@@ -2099,7 +2167,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             )}
 
             {/* Hide resolved toggle */}
-            <div className="flex items-center justify-between pt-2 border-t">
+            <div className="flex items-center gap-2">
               <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
                 <CheckCircle className="h-3 w-3 text-green-500" />
                 Hide resolved
