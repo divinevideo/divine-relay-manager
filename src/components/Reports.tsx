@@ -43,6 +43,8 @@ import {
   Copy,
   Check,
   ChevronDown,
+  ChevronRight,
+  History,
 } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
@@ -60,8 +62,17 @@ import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel,
 import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
-import { datedHandling, groupResolutionStatus, queueResolution, reportResolutionStatus } from "@/lib/reportResolution";
-import type { ReportStatus } from "../../shared/handling";
+import {
+  consolidatedHandling,
+  datedHandling,
+  groupResolutionStatus,
+  queueResolution,
+  reportHandling,
+  reportResolutionStatus,
+  type HandlingVerdict,
+  type QueueResolution,
+} from "@/lib/reportResolution";
+import type { HandlingEntry, ReportStatus } from "../../shared/handling";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
 import { historyFooterState } from "@/lib/historyFooter";
@@ -235,17 +246,71 @@ function SwitchStateBadge({ state }: { state?: SwitchState }) {
   );
 }
 
+// Marks a row whose item a person handled before a newer report came (#324).
+// Text, not colour alone, so it reads the same to every moderator.
+function HandledBeforeBadge({ show }: { show?: boolean }) {
+  if (!show) return null;
+  return (
+    <Badge variant="outline" className="text-xs">
+      Handled before
+    </Badge>
+  );
+}
+
+function handledBeforeCountText(count: number): string {
+  return count === 1 ? '1 new on an item already handled' : `${count} new on items already handled`;
+}
+
+// With Hide resolved on, the items handled before a newer report (#324) leave
+// the main list and wait here, below it: counted, collapsed until opened, so a
+// moderator always sees that they exist without them crowding never-handled
+// work. The header is the count, as a real button that says whether it is open.
+function HandledBeforeSection({
+  count,
+  open,
+  onToggle,
+  children,
+}: {
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <div className="pt-2 border-t">
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={open ? 'handled-before-items' : undefined}
+        onClick={onToggle}
+        className="w-full flex items-center gap-1.5 py-1 text-xs text-muted-foreground hover:text-foreground transition-colors"
+      >
+        {open ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <History className="h-3 w-3" />
+        {handledBeforeCountText(count)}
+      </button>
+      {open && (
+        <div id="handled-before-items" className="space-y-2 pt-2">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConsolidatedReportItem({
   consolidated,
   isSelected,
   onClick,
   switchState,
+  handledBefore = false,
   countTruncated = false,
 }: {
   consolidated: ConsolidatedReport;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
+  handledBefore?: boolean;
   // The reports of this target may be more than the count: the read that
   // loaded them stopped early. Shown as "N+", as in the open pane.
   countTruncated?: boolean;
@@ -296,6 +361,7 @@ function ConsolidatedReportItem({
               {consolidated.target.type === 'event' ? 'Event' : 'User'}
             </Badge>
             <SwitchStateBadge state={switchState} />
+            <HandledBeforeBadge show={handledBefore} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -328,11 +394,13 @@ function IndividualReportItem({
   isSelected,
   onClick,
   switchState,
+  handledBefore = false,
 }: {
   report: NostrEvent;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
+  handledBefore?: boolean;
 }) {
   const category = getReportCategory(report);
   const target = getReportTarget(report);
@@ -375,6 +443,7 @@ function IndividualReportItem({
               </Badge>
             )}
             <SwitchStateBadge state={switchState} />
+            <HandledBeforeBadge show={handledBefore} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -404,6 +473,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const detailBoundaryRef = useRef<ErrorBoundary | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
+  // The handled-before section below the main list (#324), collapsed by default.
+  const [handledBeforeOpen, setHandledBeforeOpen] = useState(false);
   const [showPendingReview, setShowPendingReview] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
@@ -766,7 +837,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   //
   // handledTargets is the same set without the decisions only the worker wrote
   // (`automated`, today an age-review case it opened on a reported account).
-  // The sensitive switch reads it: no person has looked at those targets.
+  // The sensitive switch reads it under the membership rule (switchResolution
+  // below): no person has looked at those targets.
   const { resolvedTargets, handledTargets } = useMemo(() => {
     const resolved = new Set<string>();
 
@@ -1178,19 +1250,36 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // any target in the feed or the deep-linked reports with a CSAM signal that
   // no person has handled yet. Not loaded history; see switchCandidates. It
   // does not read hideResolved; see buildSwitchMembership.
+  //
+  // It reads the queue's own rule, so a CSAM-signal target that is 'new' or
+  // 'handled_before' is a member (#324). Only against a worker without
+  // handling dates does it differ: the membership rule then reads
+  // handledTargets, which leaves out targets only the worker decided on.
+  const switchResolution = useMemo<QueueResolution>(
+    () => resolution.rule === 'dated'
+      ? resolution
+      : { rule: 'membership', resolvedTargets: handledTargets, bannedPubkeys: bannedPubkeySet },
+    [resolution, handledTargets, bannedPubkeySet],
+  );
   const switchMembership = useMemo(() => buildSwitchMembership({
     consolidated: switchCandidates,
     pendingReview: pendingReviewTargets,
     humanHandled: humanHandledTargets,
-    handledTargets,
-    bannedPubkeys: bannedPubkeySet,
-  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
+    resolution: switchResolution,
+  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, switchResolution]);
 
-  const consolidated = useMemo(() => {
+  // Where each target goes, in this order (#324): behind the switch if it is a
+  // member, whatever its standing; otherwise, with Hide resolved on, 'new' to
+  // the main list, 'handled_before' to the section below it, and 'handled'
+  // nowhere. With Hide resolved off, every target stays in the main list, the
+  // handled-before ones tagged. The section is filtered and sorted with the
+  // main list, so it lists its targets in the chosen sort.
+  const { consolidated, handledBeforeConsolidated } = useMemo(() => {
     // A copy, so the in-place sort below can never reorder allConsolidated.
     // Today both view branches filter into a new array first, so this is
     // belt and braces against a later change that drops a filter.
     let items = [...allConsolidated];
+    const splitHandledBefore = !showPendingReview && hideResolved;
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
@@ -1199,9 +1288,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
       items = items.filter(c => !switchMembership.has(reportTargetKey(c.target)));
       // Also filter out handled targets if toggle is on: those whose every
-      // report is handled, and those handled before a newer report (#324).
+      // report is handled. Those handled before a newer report go to the
+      // section, below.
       if (hideResolved) {
-        items = items.filter(c => groupStatusOf(c) === 'new');
+        items = items.filter(c => groupStatusOf(c) !== 'handled');
       }
     }
 
@@ -1265,7 +1355,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     });
 
-    return items;
+    if (!splitHandledBefore) return { consolidated: items, handledBeforeConsolidated: [] };
+    return {
+      consolidated: items.filter(c => groupStatusOf(c) === 'new'),
+      handledBeforeConsolidated: items.filter(c => groupStatusOf(c) === 'handled_before'),
+    };
   }, [allConsolidated, hideResolved, showPendingReview, groupStatusOf, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const authorByTarget = useMemo(() => new Map(
@@ -1279,16 +1373,67 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // so it is memoized (and sits above the early returns, as a hook must): it
   // would otherwise rescan the whole feed on every render, including the
   // freshness text's tick every few seconds.
-  const selectedPaneReports = useMemo(() => {
+  const selectedPaneGroup = useMemo(() => {
     if (!selectedReport) return undefined;
     const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
-    return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id))?.reports;
+    return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id));
   }, [selectedReport, listReports, allConsolidated, deepLinkedConsolidated]);
+  const selectedPaneReports = selectedPaneGroup?.reports;
 
-  // Filter individual reports when hideResolved is on
-  const filteredReports = useMemo(() => {
-    if (!listReports) return [];
+  // The open report's handled-before history (#324): the history of the
+  // handling its row is tagged by, read with the same rule and context as the
+  // row (the grouped tab by the target's group, the All tab by the report
+  // itself), so the pane and the queue cannot disagree. Undefined for any
+  // other report, and always against a worker without handling dates.
+  const selectedHandledBefore = useMemo<HandlingEntry['history'] | undefined>(() => {
+    if (resolution.rule !== 'dated' || !selectedReport) return undefined;
+    let verdict: HandlingVerdict | undefined;
+    if (viewMode === 'consolidated') {
+      if (selectedPaneGroup) verdict = consolidatedHandling(selectedPaneGroup, resolution.ctx);
+    } else {
+      const target = getReportTarget(selectedReport);
+      if (target) {
+        verdict = reportHandling(
+          {
+            target,
+            authorPubkey: authorByTarget.get(reportTargetKey(target)),
+            id: selectedReport.id,
+            created_at: selectedReport.created_at,
+          },
+          resolution.ctx,
+        );
+      }
+    }
+    return verdict?.status === 'handled_before' ? verdict.entry?.history : undefined;
+  }, [resolution, selectedReport, viewMode, selectedPaneGroup, authorByTarget]);
+
+  // Each listed report's own standing, by `resolution`, for the All tab: its
+  // place (main list or section), its tag, and the resolved count read it.
+  // Each report by its own time (#324): its arrival by id, else its created_at.
+  const reportStatusById = useMemo(() => {
+    const statuses = new Map<string, ReportStatus>();
+    for (const report of listReports ?? []) {
+      const target = getReportTarget(report);
+      if (!target) continue;
+      statuses.set(report.id, reportResolutionStatus(
+        {
+          target,
+          authorPubkey: authorByTarget.get(reportTargetKey(target)),
+          id: report.id,
+          created_at: report.created_at,
+        },
+        resolution,
+      ));
+    }
+    return statuses;
+  }, [listReports, authorByTarget, resolution]);
+
+  // Filter individual reports when hideResolved is on. Placed as targets are
+  // (see `consolidated`), each report by its own standing.
+  const { filteredReports, handledBeforeReports } = useMemo(() => {
+    if (!listReports) return { filteredReports: [], handledBeforeReports: [] };
     let items = [...listReports];
+    const splitHandledBefore = !showPendingReview && hideResolved;
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
@@ -1305,21 +1450,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         return !switchMembership.has(reportTargetKey(target));
       });
       // Also filter handled reports if toggle is on, each by its own time
-      // (#324): handled, or newer than a handling, leaves the main list.
+      // (#324). Those newer than a handling go to the section, below.
+      // Reports without targets have no standing and stay.
       if (hideResolved) {
-        items = items.filter(report => {
-          const target = getReportTarget(report);
-          if (!target) return true; // Keep reports without targets
-          return reportResolutionStatus(
-            {
-              target,
-              authorPubkey: authorByTarget.get(reportTargetKey(target)),
-              id: report.id,
-              created_at: report.created_at,
-            },
-            resolution,
-          ) === 'new';
-        });
+        items = items.filter(report => reportStatusById.get(report.id) !== 'handled');
       }
     }
 
@@ -1365,8 +1499,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     });
 
-    return items;
-  }, [listReports, hideResolved, showPendingReview, resolution, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
+    if (!splitHandledBefore) return { filteredReports: items, handledBeforeReports: [] };
+    return {
+      filteredReports: items.filter(report => reportStatusById.get(report.id) !== 'handled_before'),
+      handledBeforeReports: items.filter(report => reportStatusById.get(report.id) === 'handled_before'),
+    };
+  }, [listReports, hideResolved, showPendingReview, reportStatusById, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
@@ -1409,19 +1547,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     ? consolidated.filter(c => isListedTargetResolved(c.target, groupStatusOf(c))).length
     : filteredReports.filter(report => {
         const target = getReportTarget(report);
-        if (!target) return false;
-        const status = reportResolutionStatus(
-          {
-            target,
-            authorPubkey: authorByTarget.get(reportTargetKey(target)),
-            id: report.id,
-            created_at: report.created_at,
-          },
-          resolution,
-        );
+        const status = reportStatusById.get(report.id);
+        if (!target || !status) return false;
         return isListedTargetResolved(target, status);
       }).length,
-  [viewMode, consolidated, filteredReports, authorByTarget, isListedTargetResolved, groupStatusOf, resolution]);
+  [viewMode, consolidated, filteredReports, isListedTargetResolved, groupStatusOf, reportStatusById]);
 
   // The failure a failed Load more left (see refreshFailed), remembered against
   // the cached query's own error: src/lib/loadMoreFailure.ts says why it is not
@@ -2030,9 +2160,50 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         targetLeftList={selectedTargetLeftList}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
+        handledBeforeHistory={selectedHandledBefore}
       />
     </ErrorBoundary>
   );
+
+  const noReportsFound = (
+    <div className="text-center py-8 text-muted-foreground">
+      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+      <p className="text-sm">No reports found</p>
+    </div>
+  );
+
+  // One row each, wherever it is listed: the main list, the handled-before
+  // section, or behind the switch. The tag follows the row's own standing.
+  const renderConsolidatedRow = (item: ConsolidatedReport) => {
+    const key = reportTargetKey(item.target);
+    return (
+      <ConsolidatedReportItem
+        key={key}
+        consolidated={item}
+        isSelected={selectedReport?.id === item.latestReport.id}
+        onClick={() => handleSelectReport(item.latestReport)}
+        switchState={switchMembership.get(key)}
+        handledBefore={groupStatusOf(item) === 'handled_before'}
+        countTruncated={key === selectedSwitchKey
+          ? selectedTargetCountTruncated
+          : targetCountTruncated(key)}
+      />
+    );
+  };
+  const renderIndividualRow = (report: NostrEvent) => {
+    const target = getReportTarget(report);
+    const key = target ? reportTargetKey(target) : undefined;
+    return (
+      <IndividualReportItem
+        key={report.id}
+        report={report}
+        isSelected={selectedReport?.id === report.id}
+        onClick={() => handleSelectReport(report)}
+        switchState={key ? switchMembership.get(key) : undefined}
+        handledBefore={reportStatusById.get(report.id) === 'handled_before'}
+      />
+    );
+  };
 
   return (
     <>
@@ -2351,53 +2522,41 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]>div]:!block" viewportRef={listViewportRef}>
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
-                !consolidated || consolidated.length === 0 ? (
-                  listEmptyIsFinal ? (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p className="text-sm">No reports found</p>
-                    </div>
-                  ) : null
-                ) : (
-                  consolidated.map((item) => {
-                    const key = reportTargetKey(item.target);
-                    return (
-                      <ConsolidatedReportItem
-                        key={key}
-                        consolidated={item}
-                        isSelected={selectedReport?.id === item.latestReport.id}
-                        onClick={() => handleSelectReport(item.latestReport)}
-                        switchState={switchMembership.get(key)}
-                        countTruncated={key === selectedSwitchKey
-                          ? selectedTargetCountTruncated
-                          : targetCountTruncated(key)}
-                      />
-                    );
-                  })
-                )
+                <>
+                  {consolidated.length === 0 ? (
+                    // With items set apart below, the section header says
+                    // what there is; "No reports found" above it would not.
+                    listEmptyIsFinal && handledBeforeConsolidated.length === 0 ? noReportsFound : null
+                  ) : (
+                    consolidated.map(renderConsolidatedRow)
+                  )}
+                  {handledBeforeConsolidated.length > 0 && (
+                    <HandledBeforeSection
+                      count={handledBeforeConsolidated.length}
+                      open={handledBeforeOpen}
+                      onToggle={() => setHandledBeforeOpen(open => !open)}
+                    >
+                      {handledBeforeConsolidated.map(renderConsolidatedRow)}
+                    </HandledBeforeSection>
+                  )}
+                </>
               ) : (
-                filteredReports.length === 0 ? (
-                  listEmptyIsFinal ? (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p className="text-sm">No reports found</p>
-                    </div>
-                  ) : null
-                ) : (
-                  filteredReports.map((report) => {
-                    const target = getReportTarget(report);
-                    const key = target ? reportTargetKey(target) : undefined;
-                    return (
-                      <IndividualReportItem
-                        key={report.id}
-                        report={report}
-                        isSelected={selectedReport?.id === report.id}
-                        onClick={() => handleSelectReport(report)}
-                        switchState={key ? switchMembership.get(key) : undefined}
-                      />
-                    );
-                  })
-                )
+                <>
+                  {filteredReports.length === 0 ? (
+                    listEmptyIsFinal && handledBeforeReports.length === 0 ? noReportsFound : null
+                  ) : (
+                    filteredReports.map(renderIndividualRow)
+                  )}
+                  {handledBeforeReports.length > 0 && (
+                    <HandledBeforeSection
+                      count={handledBeforeReports.length}
+                      open={handledBeforeOpen}
+                      onToggle={() => setHandledBeforeOpen(open => !open)}
+                    >
+                      {handledBeforeReports.map(renderIndividualRow)}
+                    </HandledBeforeSection>
+                  )}
+                </>
               )}
               {historyView && (
                 <ResolvedHistoryFooter

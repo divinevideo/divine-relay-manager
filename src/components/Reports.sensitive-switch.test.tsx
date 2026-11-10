@@ -53,7 +53,7 @@ const NOTE_HIDDEN = nip19.noteEncode(HIDDEN_EVENT);
 
 type State = { target_type: string; target_id: string; action: string };
 type Resolved = { target_type: string; target_id: string; automated?: boolean };
-type LabelTarget = { type: string; value: string };
+type LabelTarget = { type: string; value: string; at?: number };
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -70,6 +70,7 @@ function stubFetch({
   statesGate,
   statesFail = false,
   reportsGate,
+  handlingRows,
 }: {
   events: unknown[];
   states?: State[];
@@ -90,6 +91,9 @@ function stubFetch({
   // A deep link's targeted lookup (/api/reports?event= or ?pubkey=), keyed by
   // the target's hex. A target with no entry gets an empty result.
   targeted?: Record<string, unknown[]>;
+  // A worker with the handled-before rule (#324) sends these as handling_rows.
+  // Absent: a worker from before it.
+  handlingRows?: unknown[];
 }) {
   const calls = { labels: 0, resolutionState: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -117,7 +121,7 @@ function stubFetch({
       if (typeof statesFail === 'function' ? statesFail() : statesFail) {
         return jsonResponse({ success: false, error: 'unavailable' });
       }
-      return jsonResponse({ success: true, resolved, states });
+      return jsonResponse({ success: true, resolved, states, ...(handlingRows ? { handling_rows: handlingRows } : {}) });
     }
     if (url.includes('/api/relay-rpc')) {
       const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
@@ -374,6 +378,57 @@ describe('Reports sensitive pending-review switch', () => {
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
 
       await expectHandled(user, NPUB_SPAM_PROFILE);
+    });
+  });
+
+  // #324: the switch reads the same handled rule as the queue. A CSAM report
+  // that came after a person handled its target is unanswered, so it goes
+  // behind the switch, never into the main list or the handled-before section.
+  describe('by the handled-before rule (#324)', () => {
+    const T = CSAM_REPORT.created_at;
+    const MODERATOR = '6'.repeat(64);
+    const DECIDED: Resolved = { target_type: 'pubkey', target_id: CSAM_PROFILE };
+    const handlingRow = (action: string, at: number) =>
+      ({ target_type: 'pubkey', target_id: CSAM_PROFILE, action, moderator_pubkey: MODERATOR, at });
+
+    async function expectBehindSwitchOnly(user: ReturnType<typeof userEvent.setup>) {
+      await screen.findByText(NOTE_SPAM);
+      await waitFor(() => expect(switchLabelText()).toBe('Pending review (sensitive)1'));
+      expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /already handled/ })).not.toBeInTheDocument();
+
+      await turnSwitchOn(user);
+      expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
+    }
+
+    it('keeps a CSAM report that came after its target was handled behind the switch', async () => {
+      // A worker with the rule still sends the decision in `resolved`.
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [DECIDED], handlingRows: [handlingRow('reviewed', T - 50)] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    // The label still names the target, but the reopen after it cancelled it.
+    it('keeps a CSAM target behind the switch when a reopen cancelled its label', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        handlingRows: [handlingRow('reopened', T - 50)],
+        labels: () => Promise.resolve([{ type: 'pubkey', value: CSAM_PROFILE, at: T - 100 }]),
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    it('takes a CSAM target out once a person handled it after its reports', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [DECIDED], handlingRows: [handlingRow('reviewed', T + 50)] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectHandled(user, NPUB_CSAM);
     });
   });
 

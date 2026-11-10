@@ -66,6 +66,7 @@ import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
+import type { HandlingEntry } from "../../shared/handling";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getKindLabel(kind: number): string {
@@ -103,9 +104,17 @@ interface ReportDetailProps {
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
   // own auto-hide banner and badge already describe the auto-hidden states.
   switchState?: SwitchState;
+  // Set only when the queue counts this report as handled before (#324): a
+  // person handled its item, then this report came. The history of that
+  // handling, newest first, as the queue read it (shared/handling.ts), so the
+  // pane and the queue row cannot disagree. The history card then lists it.
+  handledBeforeHistory?: HandlingEntry['history'];
 }
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState }: ReportDetailProps) {
+const ACCOUNT_HANDLED_BEFORE_PROMPT =
+  "This account was handled before. Does this report, with the account's current state, change the call?";
+
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBeforeHistory }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
@@ -957,8 +966,44 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             </Card>
           )}
 
+          {/* Handled before (#324): a person handled this item, then this
+              report came. Every entry of that handling's history, dated,
+              reopens and reversals included, and for an account a prompt to
+              look again at its current state. */}
+          {handledBeforeHistory && (
+            <Card className="border-amber-200 bg-amber-50/50 dark:bg-amber-950/20">
+              <CardHeader className="py-3">
+                <CardTitle className="text-sm flex items-center gap-2 text-amber-700 dark:text-amber-400">
+                  <History className="h-4 w-4" />
+                  Handled before
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3 space-y-2">
+                {context.target?.type === 'pubkey' && (
+                  <p className="text-sm">{ACCOUNT_HANDLED_BEFORE_PROMPT}</p>
+                )}
+                <div className="space-y-2">
+                  {handledBeforeHistory.map((entry, i) => (
+                    <div
+                      key={i}
+                      data-testid="handled-before-entry"
+                      className="flex items-start justify-between text-xs p-2 bg-background rounded"
+                    >
+                      <Badge variant="outline" className="text-xs">
+                        {entry.action.replace(/_/g, ' ')}
+                      </Badge>
+                      <span className="text-muted-foreground shrink-0">
+                        {entry.at === null ? 'date unknown' : new Date(entry.at * 1000).toLocaleDateString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
           {/* Decision History - show if target already has decisions */}
-          {decisionLog.hasDecisions && (
+          {!handledBeforeHistory && decisionLog.hasDecisions && (
             <Card className={decisionLog.hasHandlingDecisions ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
               <CardHeader className="py-3">
                 <CardTitle className={`text-sm flex items-center gap-2 ${decisionLog.hasHandlingDecisions ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>

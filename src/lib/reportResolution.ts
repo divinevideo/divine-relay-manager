@@ -23,9 +23,9 @@ export interface ResolvableReport {
   authorPubkey?: string;
 }
 
-// The membership rule, as the queue applied it before #324. It still serves
-// two callers: the sensitive switch (sensitiveSwitch.ts), and the queue against
-// a worker that sends no handling dates (queueResolution below).
+// The membership rule, as the queue applied it before #324. It now serves
+// only a worker that sends no handling dates (queueResolution below), for the
+// queue and, through the same QueueResolution, the sensitive switch.
 //
 // A consolidated report is resolved when its exact target key is already in
 // `resolvedTargets`, OR — for an EVENT-scoped report — when its author pubkey is
@@ -93,6 +93,18 @@ function isUndatedBan(banned: boolean, key: string, ctx: HandlingContext): boole
   return banned && !ctx.logged.has(key);
 }
 
+// A report's standing, and for 'handled_before' the handling it came after,
+// whose history the report pane lists. Read in the same pass as the status,
+// so the pane and the queue row cannot disagree about it.
+export interface HandlingVerdict {
+  status: ReportStatus;
+  entry?: HandlingEntry;
+}
+
+function verdict(status: ReportStatus, entry: HandlingEntry | undefined): HandlingVerdict {
+  return status === 'handled_before' && entry ? { status, entry } : { status };
+}
+
 // One report against its target, by the dated rule (#324): handled only when a
 // person handled the target after the report arrived.
 //
@@ -103,7 +115,11 @@ function isUndatedBan(banned: boolean, key: string, ctx: HandlingContext): boole
 // author's: banning the account purges its posts, so a report filed before the
 // ban was answered by it, whatever the post's own history says. An author ban
 // the log dates but a reopen has since cancelled answers nothing.
-export function reportHandlingStatus(report: DatedReport, ctx: HandlingContext): ReportStatus {
+//
+// The entry a 'handled_before' verdict carries is the target's own when the
+// report came after it, else the banned author's: the pane shows the history
+// of the item the moderator opened whenever it has one that counts.
+export function reportHandling(report: DatedReport, ctx: HandlingContext): HandlingVerdict {
   const time = reportTime(report, ctx.arrivals);
   const key = reportTargetKey(report.target);
   const entry = ctx.handling.get(key);
@@ -113,34 +129,49 @@ export function reportHandlingStatus(report: DatedReport, ctx: HandlingContext):
   const own: ReportStatus = entry
     ? reportStatus(time, entry)
     : isUndatedBan(banned, key, ctx) ? 'handled' : 'new';
-  if (own === 'handled') return own;
+  if (own === 'handled') return { status: own };
 
   // The author comes from a reporter-authored `p` tag, so only its side is
   // lowercased; see isConsolidatedReportResolved.
   const author = report.target.type === 'event' ? report.authorPubkey?.toLowerCase() : undefined;
-  if (!author || !ctx.bannedPubkeys.has(author)) return own;
+  if (!author || !ctx.bannedPubkeys.has(author)) return verdict(own, entry);
   const authorKey = `pubkey:${author}`;
   const authorEntry = ctx.handling.get(authorKey);
-  if (authorEntry) return reportStatus(time, authorEntry);
-  return isUndatedBan(true, authorKey, ctx) ? 'handled' : own;
+  if (authorEntry) {
+    const status = reportStatus(time, authorEntry);
+    return verdict(status, own === 'handled_before' ? entry : authorEntry);
+  }
+  return isUndatedBan(true, authorKey, ctx) ? { status: 'handled' } : verdict(own, entry);
+}
+
+export function reportHandlingStatus(report: DatedReport, ctx: HandlingContext): ReportStatus {
+  return reportHandling(report, ctx).status;
 }
 
 // A target's group of reports: handled before if any report is (a report no
-// one has answered yet), handled if all are, otherwise new.
+// one has answered yet), handled if all are, otherwise new. A handled-before
+// group carries the entry of its first report no one has answered.
+export function consolidatedHandling(
+  c: ResolvableReport & { reports: readonly { id: string; created_at: number }[] },
+  ctx: HandlingContext,
+): HandlingVerdict {
+  let allHandled = c.reports.length > 0;
+  for (const report of c.reports) {
+    const v = reportHandling(
+      { target: c.target, authorPubkey: c.authorPubkey, id: report.id, created_at: report.created_at },
+      ctx,
+    );
+    if (v.status === 'handled_before') return v;
+    if (v.status !== 'handled') allHandled = false;
+  }
+  return { status: allHandled ? 'handled' : 'new' };
+}
+
 export function consolidatedStatus(
   c: ResolvableReport & { reports: readonly { id: string; created_at: number }[] },
   ctx: HandlingContext,
 ): ReportStatus {
-  let allHandled = c.reports.length > 0;
-  for (const report of c.reports) {
-    const status = reportHandlingStatus(
-      { target: c.target, authorPubkey: c.authorPubkey, id: report.id, created_at: report.created_at },
-      ctx,
-    );
-    if (status === 'handled_before') return status;
-    if (status !== 'handled') allHandled = false;
-  }
-  return allHandled ? 'handled' : 'new';
+  return consolidatedHandling(c, ctx).status;
 }
 
 // The dated rule's reading of the decision log and the labels, apart from the

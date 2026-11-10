@@ -3,7 +3,7 @@
 
 import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohide';
 import { hasCsamSignal } from './constants';
-import { isConsolidatedReportResolved } from './reportResolution';
+import { groupResolutionStatus, type QueueResolution } from './reportResolution';
 
 // 'hidden-needs-check' is an auto-hidden target whose latest state is
 // auto_hide_unresolved or auto_hide_restore_failed. The worker writes both only
@@ -38,25 +38,32 @@ export function humanHandledAutoHideTargets(states: readonly AutoHideStateRowLik
 interface SwitchCandidate {
   target: { type: 'event' | 'pubkey'; value: string };
   authorPubkey?: string;
-  reports: readonly { tags: string[][]; content?: string }[];
+  reports: readonly { id: string; created_at: number; tags: string[][]; content?: string }[];
 }
 
 // Membership is computed from resolution state BEFORE the view's own Hide
 // resolved setting applies: turning the switch on turns Hide resolved off, so
 // a handled target has to be out of here already or it would sit behind the
-// switch for good. While a resolution source is still loading, handledTargets
-// is partial and a CSAM target stays in. That is the safe direction: it is
-// kept out of the default view, not shown there.
+// switch for good. While a resolution source is still loading, what the
+// resolution reads is partial and a CSAM target stays in. That is the safe
+// direction: it is kept out of the default view, not shown there.
+//
+// A CSAM-signal target leaves only when every report on it is 'handled'. One
+// that is 'handled_before' (a person handled it, then a report came) is as
+// unanswered as a new one, so it stays here rather than reaching the main
+// list or the queue's handled-before section (#324).
 export function buildSwitchMembership(args: {
   consolidated: readonly SwitchCandidate[];
   // Auto-hidden targets pending review, keyed to their latest auto-hide state.
   pendingReview: ReadonlyMap<string, string>;
   humanHandled: ReadonlySet<string>;
-  // The queue's resolved set without the decisions only the worker wrote
-  // (resolution-state's `automated`). Those still count for Hide resolved, but
-  // no person has looked at the target, so they do not take it out of here.
-  handledTargets: Set<string>;
-  bannedPubkeys: Set<string>;
+  // The queue's rule. Under the dated rule it is the queue's own: automated
+  // decisions are not handling there (#332). Under the membership rule (a
+  // worker without handling dates) its set must leave out the decisions only
+  // the worker wrote (resolution-state's `automated`): those still count for
+  // Hide resolved, but no person has looked at the target, so they do not take
+  // it out of here.
+  resolution: QueueResolution;
 }): Map<string, SwitchState> {
   const membership = new Map<string, SwitchState>();
   // Every auto-hidden target, whether or not its reports are loaded.
@@ -75,7 +82,7 @@ export function buildSwitchMembership(args: {
     if (membership.has(key)) continue;
     if (!hasCsamSignal(c.reports)) continue;
     if (args.humanHandled.has(key)) continue;
-    if (isConsolidatedReportResolved(c, args.handledTargets, args.bannedPubkeys)) continue;
+    if (groupResolutionStatus(c, args.resolution) === 'handled') continue;
     membership.set(key, 'not-hidden');
   }
   return membership;

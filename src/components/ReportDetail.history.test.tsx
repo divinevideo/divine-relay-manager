@@ -1,7 +1,8 @@
 // ABOUTME: Pins how the report pane states an account history it could not read whole:
-// ABOUTME: a cut-short report list is a floor ("N+"), and a failed read withholds the AI summary.
+// ABOUTME: a cut-short report list is a floor ("N+"), a failed read withholds the AI summary,
+// ABOUTME: and a report on an item handled before lists that item's dated handling (#324).
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +16,7 @@ const MOD_PUBKEY = 'e'.repeat(64);
 // Mutable per test: which half of the account history failed to read, and
 // what the summary hook would otherwise hand back.
 const history = vi.hoisted(() => ({
+  target: { type: 'event', value: 'c'.repeat(64) } as { type: 'event' | 'pubkey'; value: string },
   userStats: undefined as { reportsIncomplete: boolean; labelsIncomplete: boolean } | undefined,
   summary: { data: null as { summary: string; riskLevel: 'low' } | null, isLoading: false, error: null as Error | null },
 }));
@@ -72,7 +74,7 @@ const TARGET_EVENT_OBJ: NostrEvent = {
 };
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
-    target: { type: 'event', value: TARGET_EVENT },
+    target: history.target,
     thread: { event: TARGET_EVENT_OBJ, ancestors: [], replies: [] },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
@@ -107,7 +109,11 @@ const REPORT: NostrEvent = {
   sig: 'b'.repeat(128),
 };
 
-function renderDetail(props: { allReportsForTarget?: NostrEvent[]; allReportsForTargetTruncated?: boolean } = {}) {
+function renderDetail(props: {
+  allReportsForTarget?: NostrEvent[];
+  allReportsForTargetTruncated?: boolean;
+  handledBeforeHistory?: { action: string; at: number | null }[];
+} = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -122,6 +128,7 @@ function renderDetail(props: { allReportsForTarget?: NostrEvent[]; allReportsFor
 
 beforeEach(() => {
   vi.clearAllMocks();
+  history.target = { type: 'event', value: TARGET_EVENT };
   history.userStats = { reportsIncomplete: false, labelsIncomplete: false };
   history.summary = { data: null, isLoading: false, error: null };
 });
@@ -186,5 +193,50 @@ describe('ReportDetail AI summary with an unreadable account history', () => {
 
     expect(screen.getByText('AI summary unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Generating summary...')).not.toBeInTheDocument();
+  });
+});
+
+// #324: a report that came after its target was handled shows that handling,
+// dated, so the moderator sees what was decided before and when.
+describe('ReportDetail history for a report on an item handled before', () => {
+  const day = (at: number) => new Date(at * 1000).toLocaleDateString();
+  const HISTORY = [
+    { action: 'reopened', at: 1751500000 },
+    { action: 'unban_user', at: 1751400000 },
+    { action: 'resolution_label', at: 1751300000 },
+    { action: 'ban_user', at: null },
+  ];
+  const PROMPT = "This account was handled before. Does this report, with the account's current state, change the call?";
+
+  it('titles the card Handled before and lists every entry with its date', () => {
+    renderDetail({ handledBeforeHistory: HISTORY });
+
+    const card = screen.getByText('Handled before').closest('.rounded-lg') as HTMLElement;
+    expect(card).not.toBeNull();
+    const rows = within(card).getAllByTestId('handled-before-entry');
+    expect(rows.map(r => r.textContent)).toEqual([
+      `reopened${day(1751500000)}`,
+      `unban user${day(1751400000)}`,
+      `resolution label${day(1751300000)}`,
+      'ban userdate unknown',
+    ]);
+    // A post is not an account: no account prompt.
+    expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+  });
+
+  it('asks for a fresh look at an account', () => {
+    history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
+    renderDetail({ handledBeforeHistory: HISTORY });
+
+    expect(screen.getByText('Handled before')).toBeInTheDocument();
+    expect(screen.getByText(PROMPT)).toBeInTheDocument();
+  });
+
+  it('shows no such card for any other report', () => {
+    history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
+    renderDetail();
+
+    expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
+    expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
   });
 });

@@ -1,10 +1,12 @@
 import { describe, it, expect } from 'vitest';
 import {
+  consolidatedHandling,
   consolidatedStatus,
   datedHandling,
   groupResolutionStatus,
   isConsolidatedReportResolved,
   queueResolution,
+  reportHandling,
   reportHandlingStatus,
   reportResolutionStatus,
   type HandlingContext,
@@ -214,6 +216,61 @@ describe('consolidatedStatus', () => {
 
   it('is new when the target has no handling', () => {
     expect(consolidatedStatus(group([20, 50]), ctxWith())).toBe('new');
+  });
+});
+
+// The pane lists the history of the handling a report came after (#324), so
+// it must be the entry the status was read against, not one looked up again.
+describe('reportHandling', () => {
+  const own: HandlingEntry = { handledAt: 100, history: [{ action: 'reviewed', at: 100 }] };
+  const authors: HandlingEntry = { handledAt: 120, history: [{ action: 'ban_user', at: 120 }] };
+
+  it("carries the target's own entry for a report that came after it", () => {
+    const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, own]]) });
+    expect(reportHandling(profileReport(150), ctx)).toEqual({ status: 'handled_before', entry: own });
+  });
+
+  it('carries no entry for a handled or a new report', () => {
+    const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, own]]) });
+    expect(reportHandling(profileReport(50), ctx)).toEqual({ status: 'handled' });
+    expect(reportHandling(profileReport(150), ctxWith())).toEqual({ status: 'new' });
+  });
+
+  it("carries the banned author's entry for a post with none of its own", () => {
+    const ctx = ctxWith({ bannedPubkeys: new Set([AUTHOR]), handling: new Map([[`pubkey:${AUTHOR}`, authors]]) });
+    expect(reportHandling(eventReport(150, AUTHOR), ctx)).toEqual({ status: 'handled_before', entry: authors });
+  });
+
+  it("keeps the post's own entry when the author's ban predates the report too", () => {
+    const ctx = ctxWith({
+      bannedPubkeys: new Set([AUTHOR]),
+      handling: new Map([[`event:${EVENT}`, own], [`pubkey:${AUTHOR}`, authors]]),
+    });
+    expect(reportHandling(eventReport(150, AUTHOR), ctx)).toEqual({ status: 'handled_before', entry: own });
+  });
+
+  it('agrees with reportHandlingStatus', () => {
+    const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, own]]) });
+    for (const t of [50, 100, 150]) {
+      expect(reportHandling(profileReport(t), ctx).status).toBe(reportHandlingStatus(profileReport(t), ctx));
+    }
+  });
+});
+
+describe('consolidatedHandling', () => {
+  const own: HandlingEntry = { handledAt: 100, history: [{ action: 'reviewed', at: 100 }] };
+  const group = (times: number[]) => ({
+    target: { type: 'pubkey' as const, value: PROFILE },
+    reports: times.map((created_at, i) => ({ id: String(i).repeat(64), created_at })),
+  });
+  const ctx = ctxWith({ handling: new Map([[`pubkey:${PROFILE}`, own]]) });
+
+  it('carries the entry of the report no one has answered', () => {
+    expect(consolidatedHandling(group([50, 150]), ctx)).toEqual({ status: 'handled_before', entry: own });
+  });
+
+  it('carries no entry when every report is handled', () => {
+    expect(consolidatedHandling(group([20, 50]), ctx)).toEqual({ status: 'handled' });
   });
 });
 

@@ -7,31 +7,57 @@ import {
   humanHandledAutoHideTargets,
   SWITCH_STATE_LABELS,
 } from './sensitiveSwitch';
+import { datedHandling, queueResolution, type QueueResolution } from './reportResolution';
 
 const EVENT = 'a'.repeat(64);
 const AUTHOR = 'b'.repeat(64);
 const PROFILE = 'c'.repeat(64);
 
-const CSAM_REPORT = { tags: [['p', PROFILE, 'illegal'], ['l', 'NS-csam', 'social.nos.ontology']], content: '' };
-const BARE_ILLEGAL = { tags: [['p', PROFILE, 'illegal']], content: 'bad stuff' };
+type Report = { id: string; created_at: number; tags: string[][]; content?: string };
 
-const profileTarget = (reports: { tags: string[][]; content?: string }[]) => ({
+const CSAM_REPORT: Report = {
+  id: '1'.repeat(64),
+  created_at: 150,
+  tags: [['p', PROFILE, 'illegal'], ['l', 'NS-csam', 'social.nos.ontology']],
+  content: '',
+};
+const BARE_ILLEGAL: Report = { id: '2'.repeat(64), created_at: 150, tags: [['p', PROFILE, 'illegal']], content: 'bad stuff' };
+
+const profileTarget = (reports: Report[]) => ({
   target: { type: 'pubkey' as const, value: PROFILE },
   reports,
 });
 const eventTarget = {
   target: { type: 'event' as const, value: EVENT },
   authorPubkey: AUTHOR,
-  reports: [{ tags: [['e', EVENT, 'illegal'], ['p', AUTHOR, 'illegal']], content: 'Reason: csam' }],
+  reports: [{ id: '3'.repeat(64), created_at: 150, tags: [['e', EVENT, 'illegal'], ['p', AUTHOR, 'illegal']], content: 'Reason: csam' }],
 };
+
+// A worker from before #324: target membership, as the switch always read it.
+function membership(handledTargets: string[] = [], bannedPubkeys: string[] = []): QueueResolution {
+  return { rule: 'membership', resolvedTargets: new Set(handledTargets), bannedPubkeys: new Set(bannedPubkeys) };
+}
+
+// A worker with the handled-before rule: dated decision rows and labels.
+function dated(
+  rows: { target_type: string; target_id: string; action: string; at: number | null; moderator_pubkey?: string }[],
+  labels: { type: 'event' | 'pubkey'; value: string; at: number }[] = [],
+): QueueResolution {
+  return queueResolution({
+    dated: datedHandling(rows.map(r => ({ moderator_pubkey: 'd'.repeat(64), ...r })), labels),
+    arrivals: new Map(),
+    bannedPubkeys: new Set(),
+    bannedEvents: new Set(),
+    resolvedTargets: new Set(),
+  });
+}
 
 function build(overrides: Partial<Parameters<typeof buildSwitchMembership>[0]> = {}) {
   return buildSwitchMembership({
     consolidated: [],
     pendingReview: new Map(),
     humanHandled: new Set(),
-    handledTargets: new Set(),
-    bannedPubkeys: new Set(),
+    resolution: membership(),
     ...overrides,
   });
 }
@@ -50,7 +76,7 @@ describe('buildSwitchMembership', () => {
   it('leaves a resolved CSAM target out', () => {
     const m = build({
       consolidated: [profileTarget([CSAM_REPORT])],
-      handledTargets: new Set([`pubkey:${PROFILE}`]),
+      resolution: membership([`pubkey:${PROFILE}`]),
     });
     expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
   });
@@ -66,8 +92,47 @@ describe('buildSwitchMembership', () => {
   it('leaves a CSAM event out once its author is banned', () => {
     // Control: the same target is in when the author is not banned.
     expect(build({ consolidated: [eventTarget] }).get(`event:${EVENT}`)).toBe('not-hidden');
-    const m = build({ consolidated: [eventTarget], bannedPubkeys: new Set([AUTHOR]) });
+    const m = build({ consolidated: [eventTarget], resolution: membership([], [AUTHOR]) });
     expect(m.has(`event:${EVENT}`)).toBe(false);
+  });
+
+  describe('by the handled-before rule (#324)', () => {
+    it('keeps a CSAM report that came after its target was handled behind the switch', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'reviewed', at: 100 }]),
+      });
+      expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
+    it('leaves a CSAM report out once a person handled its target after it', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'reviewed', at: 200 }]),
+      });
+      expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
+    });
+
+    // The label still names the target, but the reopen after it cancelled it:
+    // the report is unanswered and stays out of the default view.
+    it('keeps a CSAM target behind the switch when a reopen cancelled its label', () => {
+      const m = build({
+        consolidated: [profileTarget([{ ...CSAM_REPORT, created_at: 50 }])],
+        resolution: dated(
+          [{ target_type: 'pubkey', target_id: PROFILE, action: 'reopened', at: 120 }],
+          [{ type: 'pubkey', value: PROFILE, at: 100 }],
+        ),
+      });
+      expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
+    it('keeps a CSAM target behind the switch when only the worker decided on it', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'age_review_case_created', at: 100, moderator_pubkey: 'auto' }]),
+      });
+      expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
   });
 
   it('lists an auto-hidden target that also has a CSAM report once, as auto-hidden', () => {

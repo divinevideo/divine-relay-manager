@@ -1,7 +1,8 @@
 // ABOUTME: The Hide resolved toggle must obey the moderator, not resolution data.
-// ABOUTME: Reproduces the reported "toggle does nothing until you reload" stutter.
+// ABOUTME: Reproduces the reported "toggle does nothing until you reload" stutter, and pins
+// ABOUTME: where items handled before a newer report go (#324): a counted section, or in place.
 
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
@@ -13,7 +14,9 @@ const RELAY_URL = 'wss://relay.example';
 const TARGET = 'c'.repeat(64);
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: () => <div data-testid="detail" />,
+  ReportDetail: ({ handledBeforeHistory }: { handledBeforeHistory?: unknown }) => (
+    <div data-testid="detail" data-handled-before={JSON.stringify(handledBeforeHistory ?? null)} />
+  ),
 }));
 
 const REPORT = {
@@ -429,5 +432,192 @@ describe('Pending review gives back what it borrows', () => {
     await user.click(screen.getByRole('switch', { name: /pending review/i }));
     await act(async () => { await new Promise((r) => setTimeout(r, 0)); });
     expect(screen.queryByText('Harassment')).not.toBeInTheDocument();
+  });
+});
+
+// #324: a report that came after its target was handled is not answered by
+// that handling. With Hide resolved on it leaves the main list for a counted,
+// collapsed section below it; with Hide resolved off it stays in place. Either
+// way its row says "Handled before".
+describe('items handled before a newer report', () => {
+  const T = 1751000000;
+  const MODERATOR = '1'.repeat(64);
+  const HANDLED_BEFORE_A = 'a1'.repeat(32);
+  const HANDLED_BEFORE_B = 'b2'.repeat(32);
+  const NEVER_HANDLED = 'c3'.repeat(32);
+  const HANDLED = 'd4'.repeat(32);
+  const profileReport = (id: string, pubkey: string, created_at: number) => ({
+    id,
+    pubkey: 'e'.repeat(64),
+    created_at,
+    kind: 1984,
+    tags: [['p', pubkey, 'spam']],
+    content: 'reported',
+    sig: 'e'.repeat(128),
+  });
+  const handled = (target_id: string, at: number) =>
+    ({ target_type: 'pubkey', target_id, action: 'reviewed', moderator_pubkey: MODERATOR, at });
+
+  // A has two reports, one from before its handling, so the default sort (most
+  // reports first) puts it ahead of B though B is first in the feed.
+  const A_OLD = profileReport('01'.repeat(32), HANDLED_BEFORE_A, T - 100);
+  const A_NEW = profileReport('02'.repeat(32), HANDLED_BEFORE_A, T + 10);
+  const B_NEW = profileReport('03'.repeat(32), HANDLED_BEFORE_B, T + 20);
+  const C_NEW = profileReport('04'.repeat(32), NEVER_HANDLED, T);
+  const D_OLD = profileReport('05'.repeat(32), HANDLED, T);
+  const A_HISTORY = [{ action: 'reviewed', at: T - 50 }];
+
+  function stubDated({
+    events,
+    handlingRows,
+    reportArrivals,
+  }: {
+    events: unknown[];
+    // undefined: a worker from before #324, which sends no handling rows.
+    handlingRows?: unknown[];
+    reportArrivals?: Record<string, number>;
+  }) {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
+      if (url.includes('/api/reports')) {
+        return jsonResponse({ success: true, events, ...(reportArrivals ? { report_arrivals: reportArrivals } : {}) });
+      }
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) {
+        return jsonResponse({
+          success: true,
+          resolved: [],
+          states: [],
+          ...(handlingRows ? { handling_rows: handlingRows } : {}),
+        });
+      }
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+  }
+
+  const row = (key: string) => document.querySelector(`[data-row-key="${key}"]`) as HTMLElement | null;
+  const section = () => screen.queryByRole('button', { name: /already handled/ });
+
+  function renderQueue() {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    render(<TestApp queryClient={queryClient}><Reports relayUrl={RELAY_URL} /></TestApp>);
+  }
+
+  const FOUR_TARGETS = {
+    events: [B_NEW, A_OLD, A_NEW, C_NEW, D_OLD],
+    handlingRows: [handled(HANDLED_BEFORE_A, T - 50), handled(HANDLED_BEFORE_B, T - 50), handled(HANDLED, T + 100)],
+  };
+
+  it('counts them below the main list, collapsed, and lists them with the tag when opened', async () => {
+    stubDated(FOUR_TARGETS);
+    const user = userEvent.setup();
+    renderQueue();
+
+    const header = await screen.findByRole('button', { name: '2 new on items already handled' });
+    expect(header).toHaveAttribute('aria-expanded', 'false');
+    expect(row(`pubkey:${NEVER_HANDLED}`)).not.toBeNull();
+    expect(within(row(`pubkey:${NEVER_HANDLED}`)!).queryByText('Handled before')).not.toBeInTheDocument();
+    expect(screen.getByText('1 pending')).toBeInTheDocument();
+    expect(row(`pubkey:${HANDLED_BEFORE_A}`)).toBeNull();
+    expect(row(`pubkey:${HANDLED_BEFORE_B}`)).toBeNull();
+
+    await user.click(header);
+    expect(header).toHaveAttribute('aria-expanded', 'true');
+    const a = row(`pubkey:${HANDLED_BEFORE_A}`)!;
+    const b = row(`pubkey:${HANDLED_BEFORE_B}`)!;
+    expect(within(a).getByText('Handled before')).toBeInTheDocument();
+    expect(within(b).getByText('Handled before')).toBeInTheDocument();
+    // In the chosen sort, and below the main list.
+    expect(a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(row(`pubkey:${NEVER_HANDLED}`)!.compareDocumentPosition(a) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // A target whose every report predates its handling is in neither place.
+    expect(row(`pubkey:${HANDLED}`)).toBeNull();
+  });
+
+  it('says "an item" for one', async () => {
+    stubDated({ ...FOUR_TARGETS, events: [A_OLD, A_NEW, C_NEW, D_OLD] });
+    renderQueue();
+
+    expect(await screen.findByRole('button', { name: '1 new on an item already handled' })).toBeInTheDocument();
+  });
+
+  it('leaves them in place, tagged, with Hide resolved off', async () => {
+    stubDated(FOUR_TARGETS);
+    const user = userEvent.setup();
+    renderQueue();
+
+    await screen.findByRole('button', { name: /already handled/ });
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+
+    await waitFor(() => expect(row(`pubkey:${HANDLED}`)).not.toBeNull());
+    expect(section()).not.toBeInTheDocument();
+    expect(within(row(`pubkey:${HANDLED_BEFORE_A}`)!).getByText('Handled before')).toBeInTheDocument();
+    expect(within(row(`pubkey:${HANDLED_BEFORE_B}`)!).getByText('Handled before')).toBeInTheDocument();
+    expect(within(row(`pubkey:${NEVER_HANDLED}`)!).queryByText('Handled before')).not.toBeInTheDocument();
+    expect(within(row(`pubkey:${HANDLED}`)!).queryByText('Handled before')).not.toBeInTheDocument();
+  });
+
+  it('has no section against a worker that sends no handling dates', async () => {
+    stubDated({ events: FOUR_TARGETS.events });
+    renderQueue();
+
+    await waitFor(() => expect(row(`pubkey:${HANDLED_BEFORE_A}`)).not.toBeNull());
+    expect(section()).not.toBeInTheDocument();
+    expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
+  });
+
+  // The All tab dates each report by itself: its arrival by id, else its
+  // created_at. Only the one report that came after the handling is set apart.
+  it('sets apart, in the All tab, only the reports that came after the handling', async () => {
+    const byArrival = profileReport('11'.repeat(32), HANDLED_BEFORE_A, T + 5);   // stamped after, arrived before
+    const byCreatedAt = profileReport('12'.repeat(32), HANDLED_BEFORE_A, T - 100); // before the handling
+    const newer = profileReport('13'.repeat(32), HANDLED_BEFORE_A, T + 10);        // after it
+    stubDated({
+      events: [byArrival, byCreatedAt, newer, C_NEW],
+      reportArrivals: { [byArrival.id]: T - 100 },
+      handlingRows: [handled(HANDLED_BEFORE_A, T - 50)],
+    });
+    const user = userEvent.setup();
+    renderQueue();
+
+    await screen.findByRole('button', { name: /already handled/ });
+    await user.click(screen.getByRole('tab', { name: /^All/ }));
+    const header = await screen.findByRole('button', { name: '1 new on an item already handled' });
+    expect(row(C_NEW.id)).not.toBeNull();
+    expect(row(newer.id)).toBeNull();
+
+    await user.click(header);
+    expect(within(row(newer.id)!).getByText('Handled before')).toBeInTheDocument();
+    expect(row(byArrival.id)).toBeNull();
+    expect(row(byCreatedAt.id)).toBeNull();
+
+    // The pane reads each report as its row does: this one came after the
+    // handling, the older one on the same account did not.
+    await user.click(row(newer.id)!);
+    await waitFor(() =>
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', JSON.stringify(A_HISTORY)));
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await waitFor(() => expect(row(byCreatedAt.id)).not.toBeNull());
+    expect(within(row(byCreatedAt.id)!).queryByText('Handled before')).not.toBeInTheDocument();
+    await user.click(row(byCreatedAt.id)!);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', 'null'));
+  });
+
+  it("hands the pane the history of the handling the item's report came after", async () => {
+    stubDated(FOUR_TARGETS);
+    const user = userEvent.setup();
+    renderQueue();
+
+    await user.click(await screen.findByRole('button', { name: /already handled/ }));
+    await user.click(row(`pubkey:${HANDLED_BEFORE_A}`)!);
+    await waitFor(() =>
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', JSON.stringify(A_HISTORY)));
+
+    await user.click(row(`pubkey:${NEVER_HANDLED}`)!);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', 'null'));
   });
 });
