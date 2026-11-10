@@ -104,6 +104,15 @@ const SORT_OPTIONS: { value: SortOption; label: string }[] = [
   { value: 'category', label: 'By Category' },
 ];
 
+// The target-type filter. The buttons and the closed Filters summary both
+// read these labels, so renaming one renames both.
+type TargetTypeFilter = 'all' | 'event' | 'pubkey';
+const TARGET_TYPE_LABELS: Record<TargetTypeFilter, string> = {
+  all: 'All',
+  pubkey: 'Users',
+  event: 'Events',
+};
+
 // The chosen category as a chip that clears it, the same in the open panel
 // and the closed summary. A real button, so the keyboard reaches it, and the
 // whole chip is the target rather than the small X. labelId marks the
@@ -410,7 +419,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     setFilterCategory(null);
     filtersToggleRef.current?.focus();
   };
-  const [filterTargetType, setFilterTargetType] = useState<'all' | 'event' | 'pubkey'>('all');
+  const [filterTargetType, setFilterTargetType] = useState<TargetTypeFilter>('all');
   // The resolution sources a moderator has explicitly chosen to proceed without.
   // A Set rather than a boolean: the blocked pane names the sources it is
   // blocking on, and its consent paragraph changes depending on whether
@@ -469,7 +478,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const prePendingReviewRef = useRef<{
     hideResolved: boolean;
     filterCategory: string | null;
-    filterTargetType: 'all' | 'event' | 'pubkey';
+    filterTargetType: TargetTypeFilter;
   } | null>(null);
   // Hide resolved as the moderator had it before a deep link's courtesy last
   // turned it off to show a resolved linked report. Null until a courtesy
@@ -2066,7 +2075,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                 <div data-testid="filters-summary" className="flex items-center gap-1 flex-wrap min-w-0 text-xs text-muted-foreground">
                   <span id="filters-summary">
                     {SORT_OPTIONS.find(o => o.value === sortBy)?.label}
-                    {filterTargetType !== 'all' && `, ${filterTargetType === 'pubkey' ? 'Users' : 'Events'}`}
+                    {filterTargetType !== 'all' && `, ${TARGET_TYPE_LABELS[filterTargetType]}`}
                   </span>
                   {filterCategory && (
                     <ActiveCategoryChip name={filterCategory} onClear={clearCategory} labelId="filters-summary-category" />
@@ -2115,7 +2124,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       className="h-7 text-xs px-2 flex-1"
                       onClick={() => setFilterTargetType('all')}
                     >
-                      All
+                      {TARGET_TYPE_LABELS.all}
                     </Button>
                     <Button
                       variant={filterTargetType === 'pubkey' ? 'secondary' : 'ghost'}
@@ -2124,7 +2133,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       onClick={() => setFilterTargetType('pubkey')}
                     >
                       <User className="h-3 w-3 mr-1" />
-                      Users
+                      {TARGET_TYPE_LABELS.pubkey}
                     </Button>
                     <Button
                       variant={filterTargetType === 'event' ? 'secondary' : 'ghost'}
@@ -2133,7 +2142,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                       onClick={() => setFilterTargetType('event')}
                     >
                       <FileText className="h-3 w-3 mr-1" />
-                      Events
+                      {TARGET_TYPE_LABELS.event}
                     </Button>
                   </div>
                 </div>
@@ -2170,7 +2179,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </Collapsible>
 
           {/* Queue switches share one row and wrap on narrow screens. */}
-          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 pt-3 border-t">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-3 border-t">
             {/* Pending review filter */}
             {/* Stays rendered while on, even at zero: finishing the last item
                 would otherwise remove the only way back, since Hide resolved
@@ -2201,8 +2210,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </div>
             )}
 
-            {/* Hide resolved toggle */}
-            <div className="flex items-center gap-2">
+            {/* Hide resolved toggle. Pinned to the right end, so it does not
+                jump sideways when a poll shows or hides Pending review. */}
+            <div className="flex items-center gap-2 ml-auto">
               <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
                 <CheckCircle className="h-3 w-3 text-green-500" />
                 Hide resolved
