@@ -14,11 +14,17 @@ const RELAY_URL = 'wss://relay.example';
 const TARGET = 'c'.repeat(64);
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ handledBefore }: { handledBefore?: { history: unknown; via: string } }) => (
+  ReportDetail: ({ report, handledBefore, queueHandled }: {
+    report: { id: string } | null;
+    handledBefore?: { history: unknown; via: string };
+    queueHandled?: boolean;
+  }) => (
     <div
       data-testid="detail"
+      data-report-id={report?.id ?? ''}
       data-handled-before={JSON.stringify(handledBefore?.history ?? null)}
       data-handled-before-via={handledBefore?.via ?? ''}
+      data-queue-handled={String(queueHandled ?? false)}
     />
   ),
 }));
@@ -476,6 +482,9 @@ describe('items handled before a newer report', () => {
     handlingRows,
     reportArrivals,
     bannedPubkeys = [],
+    labelTargets = [],
+    feedFails = false,
+    lookupEvents = [],
   }: {
     events: unknown[];
     // undefined: a worker from before #324, which sends no handling rows.
@@ -483,15 +492,30 @@ describe('items handled before a newer report', () => {
     reportArrivals?: Record<string, number>;
     // What the relay's listbannedpubkeys answers.
     bannedPubkeys?: string[];
+    // Dated resolution label targets.
+    labelTargets?: { type: 'event' | 'pubkey'; value: string; at: number }[];
+    // The needs-attention feed answers 502, as in a relay outage.
+    feedFails?: boolean;
+    // What a deep link's targeted lookup (?event= / ?pubkey=) finds.
+    lookupEvents?: unknown[];
   }) {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
+      if (url.includes('/api/reports?event=') || url.includes('/api/reports?pubkey=')) {
+        return jsonResponse({ success: true, events: lookupEvents });
+      }
       if (url.includes('/api/reports')) {
+        if (feedFails) {
+          return new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
+            status: 502,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
         return jsonResponse({ success: true, events, ...(reportArrivals ? { report_arrivals: reportArrivals } : {}) });
       }
       if (url.includes('/api/resolution-label-targets')) {
-        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+        return jsonResponse({ success: true, targets: labelTargets, truncated: false, oldest_covered: null });
       }
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
@@ -512,9 +536,9 @@ describe('items handled before a newer report', () => {
   const row = (key: string) => document.querySelector(`[data-row-key="${key}"]`) as HTMLElement | null;
   const section = () => screen.queryByRole('button', { name: /already handled/ });
 
-  function renderQueue() {
+  function renderQueue(selectedReportId?: string) {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
-    render(<TestApp queryClient={queryClient}><Reports relayUrl={RELAY_URL} /></TestApp>);
+    render(<TestApp queryClient={queryClient}><Reports relayUrl={RELAY_URL} selectedReportId={selectedReportId} /></TestApp>);
   }
 
   const FOUR_TARGETS = {
@@ -631,6 +655,61 @@ describe('items handled before a newer report', () => {
     await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', 'null'));
   });
 
+  // The pane reads the report it opened, in both tabs, so a report that came
+  // before the handling never shows the Handled before card, whichever tab the
+  // moderator reached it in (spec anti-goal 3).
+  it('hands the pane no history for a deep-linked report from before the handling, in the grouped tab', async () => {
+    stubDated(FOUR_TARGETS);
+    renderQueue(A_OLD.id);
+
+    // The dated rule has landed: the section counts A.
+    await screen.findByRole('button', { name: '2 new on items already handled' });
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', A_OLD.id));
+    expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', 'null');
+  });
+
+  // A reporter's clock can stamp an old report in the future. A group row
+  // opens the report that arrived last, the one its tag is about, not the one
+  // with the largest created_at.
+  it("opens a group's newest report by arrival, not by created_at", async () => {
+    const futureStamped = profileReport('14'.repeat(32), HANDLED_BEFORE_A, T + 1000); // arrived before the handling
+    const newer = profileReport('15'.repeat(32), HANDLED_BEFORE_A, T + 10);           // after it
+    stubDated({
+      events: [futureStamped, newer, C_NEW],
+      reportArrivals: { [futureStamped.id]: T - 100 },
+      handlingRows: [handled(HANDLED_BEFORE_A, T - 50)],
+    });
+    const user = userEvent.setup();
+    renderQueue();
+
+    await user.click(await screen.findByRole('button', { name: '1 new on an item already handled' }));
+    await user.click(row(`pubkey:${HANDLED_BEFORE_A}`)!);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', newer.id));
+    expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before', JSON.stringify(A_HISTORY));
+  });
+
+  // A target handled only by a resolution label has no handling row, so the
+  // pane's decision log knows nothing of it. The queue tells the pane, so it
+  // can offer Reopen, which cancels the label.
+  it('tells the pane its target is handled when only a resolution label handled it', async () => {
+    stubDated({
+      events: [A_OLD, A_NEW, C_NEW],
+      handlingRows: [],
+      labelTargets: [{ type: 'pubkey', value: HANDLED_BEFORE_A, at: T - 50 }],
+    });
+    const user = userEvent.setup();
+    renderQueue();
+
+    await user.click(await screen.findByRole('button', { name: '1 new on an item already handled' }));
+    await user.click(row(`pubkey:${HANDLED_BEFORE_A}`)!);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-queue-handled', 'true'));
+    expect(screen.getByTestId('detail')).toHaveAttribute(
+      'data-handled-before', JSON.stringify([{ action: 'resolution_label', at: T - 50 }]));
+
+    await user.click(row(`pubkey:${NEVER_HANDLED}`)!);
+    await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-queue-handled', 'false'));
+  });
+
   // Spec decision 6: with Hide resolved on, the count always shows, even at
   // none, so a moderator can tell "none" from "not shown".
   it('shows the count at none, with nothing to open', async () => {
@@ -717,6 +796,25 @@ describe('items handled before a newer report', () => {
       // The banned ones last.
       const keys = [...document.querySelectorAll('#handled-before-items [data-row-key]')].map(el => el.getAttribute('data-row-key'));
       expect(keys[0]).toBe(A_NEW.id);
+    });
+
+    // With the feed failed cold, the deep link's own lookup is all the screen
+    // has. The post's author still comes from it, so the pane keeps the
+    // banned author's history.
+    it("keeps the banned author's history for a deep-linked post while the feed fails cold", async () => {
+      stubDated({ ...fixture, feedFails: true, lookupEvents: [POST_REPORT] });
+      window.history.pushState({}, '', `/reports?event=${POST}`);
+      try {
+        renderQueue();
+
+        await screen.findByText(/Failed to load reports/);
+        await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', POST_REPORT.id));
+        await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-handled-before-via', 'author'));
+        expect(screen.getByTestId('detail')).toHaveAttribute(
+          'data-handled-before', JSON.stringify([{ action: 'ban_user', at: T - 40 }]));
+      } finally {
+        window.history.pushState({}, '', '/');
+      }
     });
 
     it("hands the pane the author's history for a post handled before through its author", async () => {

@@ -110,12 +110,17 @@ interface ReportDetailProps {
   // the post's author, as the queue read them, so the pane and the queue row
   // cannot disagree. The Handled before card lists it.
   handledBefore?: HandledBeforeView;
+  // The queue's dated rule has a person's handling on this report's own target
+  // since its last reopen: a decision, or a resolution label (#324). A target
+  // handled only by a label has no handling row in the decision log, yet the
+  // queue counts it and a Reopen cancels it, so Reopen shows on this as well.
+  queueHandled?: boolean;
 }
 
 const ACCOUNT_HANDLED_BEFORE_PROMPT =
   "This account was handled before. Does this report, with the account's current state, change the call?";
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBefore }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBefore, queueHandled = false }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
@@ -788,8 +793,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             </div>
           )}
 
-          {/* Decision log banner - show when there's a recorded moderation action (but not pending review) */}
-          {isResolved && !isPendingReview && lastHandlingDecision && (
+          {/* Decision log banner - show when there's a recorded moderation action (but not pending review).
+              Never on a report handled before (#324): its green check would
+              say resolved above the Handled before card, about the report no
+              one has answered. */}
+          {isResolved && !isPendingReview && lastHandlingDecision && !handledBefore && (
             <div className="bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg px-3 py-2 flex items-center gap-2">
               <CheckCircle className="h-4 w-4 text-green-600 shrink-0" />
               <p className="text-sm text-green-700 dark:text-green-400">
@@ -1440,8 +1448,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
-              {/* Reopen: only when something handled the target since its last reopen */}
-              {(decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions) && !isUserBanned && !isEventDeleted && (
+              {/* Reopen: only when something handled the target since its last
+                  reopen, by the decision log or, for a label, by the queue */}
+              {(decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || queueHandled) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button

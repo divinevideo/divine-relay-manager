@@ -63,11 +63,11 @@ import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
 import {
-  consolidatedHandling,
   datedHandling,
   groupResolutionVerdict,
   handledBeforeBanText,
   handledBeforeView,
+  newestReport,
   queueResolution,
   reportHandling,
   reportResolutionStatus,
@@ -1396,9 +1396,29 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     };
   }, [allConsolidated, hideResolved, showPendingReview, groupStatusOf, groupVerdictOf, switchMembership, filterCategory, filterTargetType, sortBy]);
 
+  // The groups the pane draws a target's context from: every grouped report,
+  // or with the queue failed cold, when there is no list, the deep link's own
+  // lookup.
+  const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
+
+  // Each target's reported author, as its group agrees on it. From the pane's
+  // groups, so with the queue failed cold a deep-linked post still finds its
+  // author, and through it a ban on the author.
   const authorByTarget = useMemo(() => new Map(
-    allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
-  ), [allConsolidated]);
+    paneConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
+  ), [paneConsolidated]);
+
+  // The report a group's row, or a deep link to its target, opens: the group's
+  // newest by arrival, the one a handled-before tag is about (newestReport),
+  // not the one with the largest created_at. Memoized: every render walks the
+  // listed rows, including the freshness text's tick every few seconds.
+  const opensByTarget = useMemo(() => new Map(
+    allConsolidated.map(c => [reportTargetKey(c.target), newestReport(c, arrivals)]),
+  ), [allConsolidated, arrivals]);
+  const opensOf = useCallback(
+    (c: ConsolidatedReport) => opensByTarget.get(reportTargetKey(c.target)) ?? newestReport(c, arrivals),
+    [opensByTarget, arrivals],
+  );
 
   // The reports of the open report's target. From every grouped report, not the
   // filtered list: a filter that drops the open row must not empty the pane's
@@ -1409,37 +1429,41 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // freshness text's tick every few seconds.
   const selectedPaneGroup = useMemo(() => {
     if (!selectedReport) return undefined;
-    const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
     return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id));
-  }, [selectedReport, listReports, allConsolidated, deepLinkedConsolidated]);
+  }, [selectedReport, paneConsolidated]);
   const selectedPaneReports = selectedPaneGroup?.reports;
 
-  // The open report's handled-before history (#324): the history of the
-  // handling its row is tagged by, read with the same rule and context as the
-  // row (the grouped tab by the target's group, the All tab by the report
-  // itself), so the pane and the queue cannot disagree. Undefined for any
-  // other report, and always against a worker without handling dates.
+  // The open report's handled-before history (#324), read by the same rule and
+  // context as the queue: the report's own verdict, in either tab. A group row
+  // opens the group's newest report (newestReport), which is handled before
+  // whenever the group is, so the pane and the row agree; a report reached
+  // otherwise, such as an older one by a deep link, shows what it is itself.
+  // Undefined for any other report, and always against a worker without
+  // handling dates.
   const selectedHandledBefore = useMemo<HandledBeforeView | undefined>(() => {
     if (resolution.rule !== 'dated' || !selectedReport) return undefined;
-    let verdict: HandlingVerdict | undefined;
-    if (viewMode === 'consolidated') {
-      if (selectedPaneGroup) verdict = consolidatedHandling(selectedPaneGroup, resolution.ctx);
-    } else {
-      const target = getReportTarget(selectedReport);
-      if (target) {
-        verdict = reportHandling(
-          {
-            target,
-            authorPubkey: authorByTarget.get(reportTargetKey(target)),
-            id: selectedReport.id,
-            created_at: selectedReport.created_at,
-          },
-          resolution.ctx,
-        );
-      }
-    }
-    return handledBeforeView(verdict);
-  }, [resolution, selectedReport, viewMode, selectedPaneGroup, authorByTarget]);
+    const target = getReportTarget(selectedReport);
+    if (!target) return undefined;
+    return handledBeforeView(reportHandling(
+      {
+        target,
+        authorPubkey: authorByTarget.get(reportTargetKey(target)),
+        id: selectedReport.id,
+        created_at: selectedReport.created_at,
+      },
+      resolution.ctx,
+    ));
+  }, [resolution, selectedReport, authorByTarget]);
+
+  // Whether the dated rule has a person's handling on the open report's own
+  // target since its last reopen, labels included. The pane offers Reopen on
+  // it, as it does on its decision log, so a target only a label handled can
+  // be reopened. False against a worker without handling dates.
+  const selectedQueueHandled = useMemo(() => {
+    if (resolution.rule !== 'dated' || !selectedReport) return false;
+    const target = getReportTarget(selectedReport);
+    return target ? resolution.ctx.handling.has(reportTargetKey(target)) : false;
+  }, [resolution, selectedReport]);
 
   // Each listed report's own standing, by `resolution`, for the All tab: its
   // place (main list or section), its tag, and the resolved count read it.
@@ -1850,13 +1874,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         hideResolvedBeforeCourtesyRef.current = hideResolved;
         setHideResolved(false);
       }
+      // The report its row opens (opensOf).
+      const opens = opensOf(inBulk);
       deepLinkSelectedRef.current = true;
-      setSelectedReport(inBulk.latestReport);
+      setSelectedReport(opens);
       setDeepLinkStatus('found');
       // Navigating to the path (no query string) already clears the deep-link params;
       // a separate setSearchParams({}) here would run against the stale pre-navigate path
       // and clobber this back to /reports.
-      navigate(`/reports/${inBulk.latestReport.id}`, { replace: true });
+      navigate(`/reports/${opens.id}`, { replace: true });
       attemptedTargetRef.current = null;
       return;
     }
@@ -1948,7 +1974,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, groupStatusOf, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, opensOf, searchParams, hideResolved, groupStatusOf, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -2196,6 +2222,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
         handledBefore={selectedHandledBefore}
+        queueHandled={selectedQueueHandled}
       />
     </ErrorBoundary>
   );
@@ -2216,14 +2243,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // One row each, wherever it is listed: the main list, the handled-before
   // section, or behind the switch. The tag follows the row's own standing.
+  // A row opens its newest report by arrival (opensOf).
   const renderConsolidatedRow = (item: ConsolidatedReport) => {
     const key = reportTargetKey(item.target);
+    const opens = opensOf(item);
     return (
       <ConsolidatedReportItem
         key={key}
         consolidated={item}
-        isSelected={selectedReport?.id === item.latestReport.id}
-        onClick={() => handleSelectReport(item.latestReport)}
+        isSelected={selectedReport?.id === opens.id}
+        onClick={() => handleSelectReport(opens)}
         switchState={switchMembership.get(key)}
         handling={groupVerdictOf(item)}
         countTruncated={key === selectedSwitchKey

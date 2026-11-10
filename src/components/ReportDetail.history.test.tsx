@@ -126,6 +126,7 @@ function renderDetail(props: {
     via: 'own' | 'author';
     ban?: { kind: 'account' | 'author'; since: number | null };
   };
+  queueHandled?: boolean;
 } = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -308,5 +309,46 @@ describe('ReportDetail history for a report on an item handled before', () => {
     renderDetail();
 
     expect(screen.getByText(/^Already Handled/)).toBeInTheDocument();
+  });
+
+  // The green "Last action" banner at the top of the pane reads as "this is
+  // resolved". Above the Handled before card it would say the opposite of it:
+  // this report is the one no one has answered (spec anti-goal 3).
+  it('shows no green Last action banner on a report handled before', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail({ handledBefore: OWN });
+
+    expect(cardOf()).toBeInTheDocument();
+    expect(screen.queryByText(/^Last action:/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the green Last action banner on any other handled report', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.getByText(/^Last action: reviewed on /)).toBeInTheDocument();
+  });
+
+  // A target handled only by a resolution label has no handling row in the
+  // decision log, but the queue counts the label, and a Reopen cancels it.
+  // The queue says so (queueHandled), so the pane offers Reopen too.
+  it('offers Reopen on a report handled before only through a resolution label', () => {
+    renderDetail({
+      handledBefore: { history: [{ action: 'resolution_label', at: 1751300000 }], via: 'own' },
+      queueHandled: true,
+    });
+
+    expect(cardOf()).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+  });
+
+  it('offers no Reopen when neither the decision log nor the queue has handling', () => {
+    renderDetail();
+
+    expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
   });
 });

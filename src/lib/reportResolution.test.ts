@@ -7,6 +7,7 @@ import {
   handledBeforeBanText,
   isBanDecision,
   isConsolidatedReportResolved,
+  newestReport,
   queueResolution,
   reportHandling,
   reportHandlingStatus,
@@ -319,6 +320,24 @@ describe('consolidatedHandling', () => {
 
   it('carries no entry when every report is handled', () => {
     expect(consolidatedHandling(group([20, 50]), ctx)).toEqual({ status: 'handled' });
+  });
+});
+
+describe('newestReport', () => {
+  const report = (id: string, created_at: number) => ({ id: id.repeat(64), created_at });
+
+  it('picks the report that arrived last, not the one with the largest created_at', () => {
+    const futureStamped = report('1', 1000);
+    const newer = report('2', 200);
+    const arrivals = new Map([[futureStamped.id, 100]]);
+    expect(newestReport({ reports: [futureStamped, newer], latestReport: futureStamped }, arrivals)).toBe(newer);
+  });
+
+  it('compares reports with no arrival by created_at, and keeps latestReport on a tie', () => {
+    const a = report('1', 300);
+    const b = report('2', 300);
+    const older = report('3', 100);
+    expect(newestReport({ reports: [older, a, b], latestReport: b }, new Map())).toBe(b);
   });
 });
 

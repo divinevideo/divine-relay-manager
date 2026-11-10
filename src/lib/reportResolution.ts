@@ -242,6 +242,28 @@ export function consolidatedStatus(
   return consolidatedHandling(c, ctx).status;
 }
 
+// The group's report that reached us last, by reportTime: its arrival, else
+// its created_at. A reporter's clock can stamp an old report in the future, so
+// the largest created_at (`latestReport`) is not always the newest. A group is
+// handled before when any of its reports is, and the one that arrived last is
+// then one of them, so opening it shows the pane what the row's tag is about.
+// Ties keep `latestReport`.
+export function newestReport<R extends { id: string; created_at: number }>(
+  c: { reports: readonly R[]; latestReport: R },
+  arrivals: ReadonlyMap<string, number>,
+): R {
+  let newest = c.latestReport;
+  let newestTime = reportTime(newest, arrivals);
+  for (const report of c.reports) {
+    const time = reportTime(report, arrivals);
+    if (time > newestTime) {
+      newest = report;
+      newestTime = time;
+    }
+  }
+  return newest;
+}
+
 // The dated rule's reading of the decision log and the labels, apart from the
 // arrivals and ban lists so the screen rebuilds it only when those two reads
 // change, not on every feed or ban-list poll.
