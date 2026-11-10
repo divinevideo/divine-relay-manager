@@ -2920,7 +2920,7 @@ describe('GET /api/resolution-label-targets pages the relay (#273)', () => {
     const filters = stubPagingRelay(corpus);
 
     const body = await (await getTargets()).json() as {
-      targets: Array<{ type: string; value: string }>;
+      targets: Array<{ type: string; value: string; at: number }>;
       truncated: boolean;
     };
 
@@ -2932,7 +2932,8 @@ describe('GET /api/resolution-label-targets pages the relay (#273)', () => {
     expect(body.targets).toHaveLength(LABEL_PAGE_SIZE + 5);
     expect(body.truncated).toBe(false);
     const oldest = String(LABEL_PAGE_SIZE + 4).padStart(64, '0');
-    expect(body.targets).toContainEqual({ type: 'event', value: oldest });
+    // `at` (#324) is the label's created_at, beside the fields an older frontend reads.
+    expect(body.targets).toContainEqual({ type: 'event', value: oldest, at: 1_760_000_000 - (LABEL_PAGE_SIZE + 4) });
   });
 });
 

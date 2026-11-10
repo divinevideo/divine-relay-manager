@@ -5,21 +5,61 @@ import { describe, it, expect } from 'vitest';
 import { reduceLabelsToTargets, pageResolutionLabels } from './resolution-labels';
 import type { ResolutionLabelEvent } from './resolution-labels';
 
-function label(tags: string[][]) {
-  return { id: Math.random().toString(36).slice(2), created_at: 1, tags };
+function label(tags: string[][], createdAt = 1) {
+  return { id: Math.random().toString(36).slice(2), created_at: createdAt, tags };
 }
 
 describe('reduceLabelsToTargets', () => {
   it('reads an event target from an e tag', () => {
     const targets = reduceLabelsToTargets([label([['e', 'a'.repeat(64)]])]);
 
-    expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64) }]);
+    expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64), at: 1 }]);
   });
 
   it('reads a pubkey target from a p tag', () => {
     const targets = reduceLabelsToTargets([label([['p', 'b'.repeat(64)]])]);
 
-    expect(targets).toEqual([{ type: 'pubkey', value: 'b'.repeat(64) }]);
+    expect(targets).toEqual([{ type: 'pubkey', value: 'b'.repeat(64), at: 1 }]);
+  });
+
+  // The label's date is the handling time the handled-before rule compares a
+  // report with (#324). A target labelled more than once was last handled by
+  // the newest label, whatever order the relay sent them in.
+  it("dates a target by its newest label's created_at", () => {
+    const targets = reduceLabelsToTargets([
+      label([['e', 'a'.repeat(64)]], 100),
+      label([['e', 'a'.repeat(64)]], 300),
+      label([['e', 'a'.repeat(64)]], 200),
+    ]);
+
+    expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64), at: 300 }]);
+  });
+
+  it('dates a label with no usable created_at at 0, so it covers no report', () => {
+    // Relay payloads are untrusted. A label the rule cannot date still names a
+    // target a person handled, but it must not hide any report: at 0 every
+    // report reads as newer and stays in front of a person.
+    const targets = reduceLabelsToTargets([
+      { id: 'x', created_at: 'soon' as unknown as number, tags: [['e', 'a'.repeat(64)]] },
+      { id: 'y', created_at: Number.NaN, tags: [['p', 'b'.repeat(64)]] },
+    ]);
+
+    expect(targets).toEqual([
+      { type: 'event', value: 'a'.repeat(64), at: 0 },
+      { type: 'pubkey', value: 'b'.repeat(64), at: 0 },
+    ]);
+  });
+
+  it('dates the event and the author of one label alike', () => {
+    const targets = reduceLabelsToTargets([
+      label([['e', 'a'.repeat(64)], ['p', 'b'.repeat(64)]], 300),
+      label([['p', 'b'.repeat(64)]], 400),
+    ]);
+
+    expect(targets).toEqual([
+      { type: 'event', value: 'a'.repeat(64), at: 300 },
+      { type: 'pubkey', value: 'b'.repeat(64), at: 400 },
+    ]);
   });
 
   it('reads both targets when a label carries an e tag and a p tag', () => {
@@ -31,8 +71,8 @@ describe('reduceLabelsToTargets', () => {
     ]);
 
     expect(targets).toEqual([
-      { type: 'event', value: 'a'.repeat(64) },
-      { type: 'pubkey', value: 'b'.repeat(64) },
+      { type: 'event', value: 'a'.repeat(64), at: 1 },
+      { type: 'pubkey', value: 'b'.repeat(64), at: 1 },
     ]);
   });
 
@@ -45,7 +85,7 @@ describe('reduceLabelsToTargets', () => {
       label([['e', 'a'.repeat(64)]]),
     ]);
 
-    expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64) }]);
+    expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64), at: 1 }]);
   });
 
   it('ignores a label with no e or p tag', () => {

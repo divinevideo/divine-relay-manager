@@ -3,6 +3,7 @@
 
 import { AUTO_HIDE_ACTIONS, AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAutomatedDecision } from '../../shared/automated-decision';
+import { REOPENED_ACTION, type HandlingRow } from '../../shared/handling';
 
 export interface ResolvedTargetRow {
   target_type: string;
@@ -46,6 +47,11 @@ const ROW_CHUNK_SIZE = 1000;
 // moderator: POST /api/decisions records only a verified login's pubkey or NULL,
 // and bulk moderation always writes a hex pubkey. The worker puts its marker on a
 // person's decision only in an auto-hide row, which this read skips.
+//
+// A `reopened` row (#324) starts the target over: only rows after it count, so a
+// target whose rows end in a reopen is left out. Reopen used to delete the
+// target's rows, and a Pages build that reads only this list sees the same as it
+// did then. Rows are walked in id order, which is the order they were written.
 export async function getResolvedTargets(
   db: D1Database,
   opts?: { chunkSize?: number }
@@ -79,6 +85,10 @@ export async function getResolvedTargets(
     }>;
     for (const row of rows) {
       const key = `${row.target_type}:${row.target_id}`;
+      if (row.action === REOPENED_ACTION) {
+        targets.delete(key);
+        continue;
+      }
       const human = !isAutomatedDecision(row);
       const target = targets.get(key);
       if (!target) {
@@ -95,6 +105,58 @@ export async function getResolvedTargets(
   return Array.from(targets.values(), ({ target_type, target_id, human }) =>
     human ? { target_type, target_id } : { target_type, target_id, automated: true }
   );
+}
+
+// The dated decision rows the handled-before rule reads (#324): every event and
+// pubkey row except auto-hide actions, with automated and `reopened` rows
+// included, because handlingByTarget (shared/handling.ts) is the one place that
+// decides which of them count. The worker feed and the screen both pass these
+// rows to it, so the two cannot disagree on a target.
+//
+// `at` is unix seconds, or null for a row with no created_at. Uncapped and
+// keyset-paged on id, as getResolvedTargets is. The result grows with decision
+// rows rather than targets, but carries no reason or report text.
+export async function getHandlingRows(
+  db: D1Database,
+  opts?: { chunkSize?: number }
+): Promise<HandlingRow[]> {
+  const chunkSize = opts?.chunkSize ?? ROW_CHUNK_SIZE;
+  const placeholders = AUTO_HIDE_ACTIONS.map(() => '?').join(', ');
+
+  const handling: HandlingRow[] = [];
+  let afterId = 0;
+
+  for (;;) {
+    const result = await db
+      .prepare(
+        `SELECT id, target_type, target_id, action, moderator_pubkey,
+                CAST(strftime('%s', created_at) AS INTEGER) AS at
+           FROM moderation_decisions
+          WHERE action NOT IN (${placeholders})
+            AND target_type IN ('event', 'pubkey')
+            AND id > ?
+          ORDER BY id
+          LIMIT ?`
+      )
+      .bind(...AUTO_HIDE_ACTIONS, afterId, chunkSize)
+      .all();
+
+    const rows = (result.results || []) as unknown as Array<HandlingRow & { id: number }>;
+    for (const row of rows) {
+      handling.push({
+        target_type: row.target_type,
+        target_id: row.target_id,
+        action: row.action,
+        moderator_pubkey: row.moderator_pubkey ?? null,
+        at: row.at ?? null,
+      });
+    }
+
+    if (rows.length < chunkSize) break;
+    afterId = rows[rows.length - 1].id;
+  }
+
+  return handling;
 }
 
 // Feeds the pending-review queue. Only the STATE actions are read, because

@@ -63,7 +63,7 @@ import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAccountRestrictedAgeReviewState, type AgeReviewState } from '../../shared/age-review';
 import { canonicalHex64 } from '../../shared/hex-id';
-import { getResolvedTargets, getAutoHideStates } from './resolution-state';
+import { getResolvedTargets, getAutoHideStates, getHandlingRows } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
@@ -2274,12 +2274,18 @@ async function handleGetResolutionState(
 
     await ensureSchemaOnce(env.DB);
 
-    const [resolved, states] = await Promise.all([
+    // handling_rows (#324) is new beside resolved and states, which keep their
+    // shape for a Pages build that predates it. The screen runs the same
+    // handlingByTarget over these rows and /api/resolution-label-targets as the
+    // worker feed does; raw rows, not per-target results, because the labels
+    // arrive separately and only the rows let a later Reopen cancel a label.
+    const [resolved, states, handlingRows] = await Promise.all([
       getResolvedTargets(env.DB),
       getAutoHideStates(env.DB),
+      getHandlingRows(env.DB),
     ]);
 
-    return proxyJsonResponse({ success: true, resolved, states }, 200, corsHeaders);
+    return proxyJsonResponse({ success: true, resolved, states, handling_rows: handlingRows }, 200, corsHeaders);
   } catch (error) {
     console.error('Get resolution state error:', error);
     return jsonResponse(
@@ -2294,6 +2300,8 @@ async function handleGetResolutionState(
 // of 500 and discloses the bound; this walks every page and returns only the
 // target keys the queue subtracts, so the bound stops being a date in the UI.
 // /api/resolution-labels stays as it is for a frontend deployed before this one.
+// Each target also carries `at`, its newest label's created_at (#324), beside
+// the type and value an older frontend reads.
 async function handleGetResolutionLabelTargets(
   env: Env,
   corsHeaders: Record<string, string>
