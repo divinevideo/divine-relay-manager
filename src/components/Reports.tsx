@@ -2040,7 +2040,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               The two queue switches below never fold: they change which queue
               is on screen, and hiding that state is how "the toggles don't
               work" reports started. */}
-          <Collapsible open={filtersOpen} onOpenChange={onFiltersOpenChange} className="mt-3 pt-3 border-t">
+          <Collapsible open={filtersOpen} onOpenChange={onFiltersOpenChange} className="pt-3 border-t">
             <div className="flex items-center gap-2 min-w-0">
               <CollapsibleTrigger asChild>
                 {/* Closed, the toggle is described by the summary's sort and
@@ -2171,7 +2171,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </Collapsible>
 
           {/* Queue switches share one row and wrap on narrow screens. */}
-          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 mt-3 pt-3 border-t">
+          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 pt-3 border-t">
             {/* Pending review filter */}
             {/* Stays rendered while on, even at zero: finishing the last item
                 would otherwise remove the only way back, since Hide resolved
