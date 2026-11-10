@@ -1880,7 +1880,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           <div className="lg:col-span-2">{queueLoadFailure}</div>
         ) : (
         <ErrorBoundary fallback={reset => <ReportsListErrorFallback onRetry={reset} />}>
-        <Card className="lg:col-span-2 h-full overflow-hidden flex flex-col">
+        {/* The card scrolls when the filter header plus the list's minimum
+            height don't fit. The header is ~330 px and grows with categories;
+            the list used to take only what was left, so on a short window it
+            shrank to nothing with no way to reach it. */}
+        <Card className="lg:col-span-2 h-full overflow-y-auto flex flex-col">
         <CardHeader className="pb-3 shrink-0">
           <div className="flex items-center justify-between">
             <div>
@@ -2131,7 +2135,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
             </div>
           </div>
         </CardHeader>
-        <CardContent className="p-0 flex-1 min-h-0">
+        {/* Never below ~2 rows. The list stays the scroller (Load more's
+            scroll anchoring reads listViewportRef), so the card only scrolls
+            far enough to reveal this minimum. */}
+        <CardContent className="p-0 flex-1 min-h-[16rem]">
           {/* Radix wraps the viewport's content in a display:table div, which is
               never narrower than its widest row (a nowrap 63-character ID).
               Block it, or below about 1280 px the list's footer sentences are
