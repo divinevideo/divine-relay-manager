@@ -35,6 +35,7 @@ const api = vi.hoisted(() => ({
   logDecision: vi.fn(),
   confirmAutoHide: vi.fn(),
   deleteDecisions: vi.fn(),
+  getDecisions: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
 
@@ -71,7 +72,17 @@ const decisionLog = vi.hoisted(() => ({
   latestDecision: null,
   refetch: vi.fn(),
 }));
-vi.mock('@/hooks/useDecisionLog', () => ({ useDecisionLog: () => decisionLog }));
+// Set by a test that needs the real hook over api.getDecisions: whether Reopen
+// shows after a reopen is the hook's reading of the rows, so a canned result
+// would only restate the answer.
+const realDecisionLog = vi.hoisted(() => ({ on: false }));
+vi.mock('@/hooks/useDecisionLog', async (orig) => {
+  const actual = await orig<typeof import('@/hooks/useDecisionLog')>();
+  return {
+    useDecisionLog: (targetId: string | null | undefined) =>
+      realDecisionLog.on ? actual.useDecisionLog(targetId) : decisionLog,
+  };
+});
 const modStatus = vi.hoisted(() => ({ recheck: vi.fn(), recheckAfterAction: vi.fn() }));
 vi.mock('@/hooks/useModerationStatus', async () => {
   const { moderationStatusMock } = await import('@/test/moderationStatusMock');
@@ -149,6 +160,7 @@ beforeEach(() => {
   ctx.reportedPubkey = REPORTED_PUBKEY;
   decisionLog.isPendingReview = false;
   decisionLog.isAutoHideRestoreFailed = false;
+  realDecisionLog.on = false;
   api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: false });
   api.logDecision.mockResolvedValue(undefined);
 });
@@ -366,7 +378,9 @@ describe('ReportDetail reopen reporting', () => {
 
   // The label survived, so resolvedTargets still hides the target and the
   // report does NOT come back. Claiming it did is the exact failure this flag
-  // exists to prevent.
+  // exists to prevent. Only a worker from before #324 sets it (that worker
+  // deleted decisions and banned labels); the cases below keep a rolled-back
+  // worker reading right.
   it('warns that the report may stay hidden when label cleanup failed', async () => {
     api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: true });
     renderDetail();
@@ -534,5 +548,81 @@ describe('ReportDetail reopen reporting', () => {
     const tip = await screen.findByRole('tooltip');
     expect(tip.textContent).not.toMatch(/back in the pending queue/i);
     expect(tip.textContent).toMatch(/stays hidden until that is lifted/i);
+  });
+});
+
+// Reopen keeps the target's history (#324): the worker records a dated
+// `reopened` row and only handling after it counts.
+describe('ReportDetail reopen keeps history', () => {
+  // A post's Reopen reopens the post and its author's account, one call each,
+  // as it did when Reopen deleted both targets' decisions.
+  it("reopens a post and its author's account, one call each", async () => {
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(api.deleteDecisions).toHaveBeenCalledTimes(2);
+    expect(api.deleteDecisions).toHaveBeenNthCalledWith(1, TARGET_EVENT, 'event');
+    expect(api.deleteDecisions).toHaveBeenNthCalledWith(2, REPORTED_PUBKEY, 'pubkey');
+  });
+
+  it('says the history is kept rather than cleared', async () => {
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const arg = toast.mock.calls[0][0];
+    const text = `${arg.title} ${arg.description}`;
+    expect(text).not.toMatch(/cleared/i);
+    expect(text).toMatch(/history is kept/i);
+  });
+
+  it('says the history is kept in the tooltip too', async () => {
+    renderDetail();
+    fireEvent.focus(screen.getByRole('button', { name: /reopen/i }));
+
+    const tip = await screen.findByRole('tooltip');
+    expect(tip.textContent).not.toMatch(/clears/i);
+    expect(tip.textContent).toMatch(/history is kept/i);
+  });
+
+  // The rows stay after a reopen, so the button has to go by what came after
+  // the reopen, or it would offer to reopen a report that already is.
+  it('hides Reopen once both targets are reopened with nothing handled since', async () => {
+    realDecisionLog.on = true;
+    api.getDecisions.mockImplementation(async (targetId: string) => targetId === TARGET_EVENT
+      ? [
+          { id: 3, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
+          { id: 1, action: 'delete_event', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
+        ]
+      : [
+          { id: 4, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
+          { id: 2, action: 'ban_user', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
+        ]);
+    renderDetail();
+
+    await waitFor(() => expect(api.getDecisions).toHaveBeenCalledWith(REPORTED_PUBKEY));
+    // The history card renders once the reads land, so the button's absence is
+    // read after the decisions arrived, not before.
+    await screen.findByText(/\(2 actions\)/);
+    expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
+    // Nor does the card call the target handled.
+    expect(screen.queryByText(/Already Handled/)).not.toBeInTheDocument();
+  });
+
+  it('offers Reopen again once the target is handled after the reopen', async () => {
+    realDecisionLog.on = true;
+    api.getDecisions.mockImplementation(async (targetId: string) => targetId === TARGET_EVENT
+      ? [
+          { id: 5, action: 'reviewed', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:05:00' },
+          { id: 3, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
+          { id: 1, action: 'delete_event', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
+        ]
+      : [
+          { id: 4, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
+        ]);
+    renderDetail();
+
+    expect(await screen.findByRole('button', { name: /reopen/i })).toBeInTheDocument();
   });
 });

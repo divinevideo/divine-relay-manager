@@ -3251,601 +3251,161 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).toMatch(/no reason given/i);
   });
 
-  // A reopen deletes the D1 decisions unconditionally, but clearing the relay's
-  // resolution labels is best-effort. When that read fails the label survives and
-  // keeps the report hidden, so the response has to say so or the UI reports a
-  // clean reopen that did not happen.
-  it('flags labelCleanupFailed when the resolution-label query fails during a reopen', async () => {
-    const db = {
-      prepare: () => {
-        const stmt: Record<string, unknown> = {
-          bind: () => stmt,
-          run: async () => ({ success: true, meta: { changes: 3 } }),
-          first: async () => null,
-          all: async () => ({ results: [] }),
-        };
-        return stmt;
-      },
-    };
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-
-    const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': 'test-admin-key' },
-      }),
-      { ...(reportsEnv as object), DB: db } as never,
-      ctx,
-    );
-    await new Promise((r) => setTimeout(r, 0));
-    // Both label filters close before EOSE, so neither cleanup can run.
-    for (const sock of FakeRelaySocket.instances) sock.emit('close', {});
-    await new Promise((r) => setTimeout(r, 0));
-    for (const sock of FakeRelaySocket.instances) sock.emit('close', {});
-
-    const res = await resPromise;
-    expect(res.status).toBe(200);
-    const body = await res.json() as { success: boolean; deleted: number; labelCleanupFailed: boolean };
-    expect(body.success).toBe(true);
-    expect(body.deleted).toBe(3); // the decisions really were deleted
-    expect(body.labelCleanupFailed).toBe(true); // but the reopen is not clean
-  });
-
-  function reopenDb() {
-    return {
-      prepare: () => {
-        const stmt: Record<string, unknown> = {
-          bind: () => stmt,
-          run: async () => ({ success: true, meta: { changes: 2 } }),
-          first: async () => null,
-          all: async () => ({ results: [] }),
-        };
-        return stmt;
-      },
-    };
-  }
-
-  // Each label filter opens its own socket, and the second only exists after the
-  // first query resolves. Polling for it keeps the feed from racing ahead.
-  async function feedLabelToEachFilter() {
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      sock.message(['EVENT', sock.subId(), LABEL_A]);
-      sock.message(['EOSE', sock.subId()]);
-    }
-  }
-
-  const reopenRequest = () => new Request(`https://api.example/api/decisions/${'a'.repeat(64)}`, {
-    method: 'DELETE',
-    headers: { 'X-Admin-Key': 'test-admin-key' },
-  });
-
-  // The positive control for the flag. Every other case below asserts it goes
-  // TRUE; without this one, flagging any reopen that touched a label at all
-  // still passes -- and that mutation puts a destructive "may stay hidden"
-  // toast on the ordinary successful reopen, which is the failure mode this
-  // flag exists to avoid in the other direction.
-  it('reports a clean reopen when the labels it found were removed', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    await feedLabelToEachFilter();
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    // A label was genuinely removed -- this is not the vacuous empty-read case.
-    expect(body.labelsDeleted).toBeGreaterThan(0);
-    expect(body.labelCleanupFailed).toBe(false);
-  });
-
-  // The label read can succeed while the delete fails. A relay admin key
-  // mismatch 403s every management command but leaves reads working, and that
-  // refusal does NOT throw: the RPC comes back success:false. The label
-  // survives and keeps the report hidden, so this reopen is no cleaner than a
-  // failed read and must not report one.
-  it('flags labelCleanupFailed when the label is found but banevent is refused', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    // Signing succeeds; the relay refuses the management command.
-    vi.stubGlobal('fetch', vi.fn(async () => new Response('forbidden', { status: 403 })));
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    await feedLabelToEachFilter();
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(0); // nothing was actually removed
-    expect(body.labelCleanupFailed).toBe(true);
-  });
-
-  // Events arrive off the wire unvalidated, so a label with no id reaches the
-  // cleanup loop. It cannot be banned, so it survives exactly like a refused
-  // delete and must not report a clean reopen either.
-  it('flags labelCleanupFailed when a resolution label has no id to ban', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    const { id: _dropped, ...LABEL_WITHOUT_ID } = LABEL_A;
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      sock.message(['EVENT', sock.subId(), LABEL_WITHOUT_ID]);
-      sock.message(['EOSE', sock.subId()]);
+  // Reopen (#324) keeps the target's history. It records one dated `reopened`
+  // row, and handlingByTarget (shared/handling.ts) counts only handling after
+  // it, so every report filed before the reopen reads as new again. It used to
+  // delete every decision row for the target and ban its resolution labels on
+  // the relay, which erased the history the handled-before marker shows.
+  describe('DELETE /api/decisions/:id records a reopen (#324)', () => {
+    function recordingDb(opts?: { failInsert?: boolean }) {
+      const statements: Array<{ sql: string; binds: unknown[] }> = [];
+      const db = {
+        prepare: (sql: string) => {
+          const entry = { sql, binds: [] as unknown[] };
+          statements.push(entry);
+          const stmt: Record<string, unknown> = {
+            bind: (...binds: unknown[]) => { entry.binds = binds; return stmt; },
+            run: async () => {
+              if (opts?.failInsert && /^\s*INSERT/i.test(sql)) throw new Error('D1 unavailable');
+              return { success: true, meta: { changes: 1 } };
+            },
+            first: async () => null,
+            all: async () => ({ results: [] }),
+          };
+          return stmt;
+        },
+      };
+      // Writes to the decision log only: the schema bootstrap also names the
+      // table, in CREATE and ALTER statements that change no rows.
+      const decisionWrites = () => statements.filter((s) =>
+        /^\s*(INSERT|DELETE|UPDATE|REPLACE)\b/i.test(s.sql) && /moderation_decisions/.test(s.sql));
+      return { db, decisionWrites };
     }
 
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(0);
-    expect(body.labelCleanupFailed).toBe(true);
-  });
+    const reopen = (id: string, query = '') => new Request(`https://api.example/api/decisions/${id}${query}`, {
+      method: 'DELETE',
+      headers: { 'X-Admin-Key': 'test-admin-key' },
+    });
 
-  // The other way the delete can fail: the relay is unreachable, so the call
-  // rejects instead of answering. banevent goes through the event-visibility
-  // coordinator, which turns that rejection into success:false, so this
-  // reaches the flag through the same branch as a refusal. It is pinned
-  // separately because the transport fails, not the relay's answer.
-  //
-  // The rejection is stubbed. Left unstubbed, the coordinator makes a real
-  // request to relay.example, and a slow DNS miss on a CI runner delays the
-  // second label socket past feedLabelToEachFilter's wait.
-  it('flags labelCleanupFailed when the banevent cannot reach the relay', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () => {
-      throw new TypeError('fetch failed');
-    }));
+    it('records one reopened row and leaves the earlier rows alone', async () => {
+      const { db, decisionWrites } = recordingDb();
 
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    await feedLabelToEachFilter();
+      const res = await worker.fetch(
+        reopen('a'.repeat(64), '?targetType=event'),
+        { ...(reportsEnv as object), DB: db } as never,
+        ctx,
+      );
 
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(0);
-    expect(body.labelCleanupFailed).toBe(true);
-  });
+      expect(res.status).toBe(200);
+      // Every field an older Pages build reads is still there. deleted counts the
+      // rows written now; nothing is removed, so no label was either.
+      expect(await res.json()).toEqual({
+        success: true, deleted: 1, labelsDeleted: 0, labelCleanupFailed: false,
+      });
+      const writes = decisionWrites();
+      expect(writes).toHaveLength(1);
+      expect(writes[0].sql).toMatch(/^\s*INSERT INTO moderation_decisions/);
+      // No moderator: the route has no verified login to name. created_at is left
+      // to the column default, which dates the row; the D1 test pins that.
+      expect(writes[0].sql.replace(/\s+/g, ' '))
+        .toMatch(/\(target_type, target_id, action, reason, moderator_pubkey\) VALUES \(\?, \?, \?, \?, NULL\)/);
+      expect(writes[0].binds).toEqual(['event', 'a'.repeat(64), 'reopened', 'Reopened']);
+    });
 
-  // An incomplete read is not an empty one. Before this PR a timeout resolved
-  // success:true with whatever had arrived, so the cleanup banned those labels;
-  // treating the read as a failure must not also throw them away, because the
-  // D1 delete below runs either way. A label received and left alive keeps the
-  // report hidden, so discarding it makes reopen strictly worse than not
-  // changing queryRelay at all.
-  it('bans the resolution labels it received even when the read did not complete', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
+    it('sends nothing to the relay', async () => {
+      const relayFetch = vi.fn(async () => new Response(JSON.stringify({ result: true }), { status: 200 }));
+      vi.stubGlobal('fetch', relayFetch);
+      const { db } = recordingDb();
 
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
+      const res = await worker.fetch(
+        reopen('a'.repeat(64), '?targetType=event'),
+        { ...(reportsEnv as object), DB: db, NOSTR_NSEC: TEST_NSEC } as never,
+        ctx,
+      );
 
-    // First filter delivers a label, then the socket drops before EOSE.
-    // Second filter closes empty. Neither read completed.
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
-      sock.emit('close', {});
-    }
+      expect(res.status).toBe(200);
+      // No label read, and no banevent (or any other management call).
+      expect(FakeRelaySocket.instances).toHaveLength(0);
+      expect(relayFetch).not.toHaveBeenCalled();
+    });
 
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(1); // the label that arrived was still removed
-    expect(body.labelCleanupFailed).toBe(true); // and the read is still reported incomplete
-  });
+    it('records the reopen on a pubkey target as a pubkey row', async () => {
+      const { db, decisionWrites } = recordingDb();
 
-  // publishLabel writes exactly one target tag -- 'e' for an event, 'p' for a
-  // pubkey, never both -- so of the two filters the worker runs, one can never
-  // match. That was harmless when a stalled read was an empty success; now that
-  // it is a failure, a stall on the dead filter reports a failed cleanup and
-  // tells the moderator to retry something that cannot help. Naming the target
-  // type removes the query that was never going to match.
-  it('queries only the filter that can match when the target type is known', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
+      await worker.fetch(
+        reopen('b'.repeat(64), '?targetType=pubkey'),
+        { ...(reportsEnv as object), DB: db } as never,
+        ctx,
+      );
 
-    const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=event`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': 'test-admin-key' },
-      }),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let t = 0; t < 100 && !FakeRelaySocket.instances[0]; t++) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    const sock = FakeRelaySocket.instances[0];
-    expect(sock).toBeDefined();
-    sock.message(['EOSE', sock.subId()]);
+      expect(decisionWrites().map((w) => w.binds)).toEqual([['pubkey', 'b'.repeat(64), 'reopened', 'Reopened']]);
+    });
 
-    const res = await resPromise;
-    const body = await res.json() as { labelCleanupFailed: boolean };
-    expect(body.labelCleanupFailed).toBe(false);
-    // One socket, and it asked about the e-tag.
-    expect(FakeRelaySocket.instances).toHaveLength(1);
-    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
-  });
+    // The request is canonicalized, so an older tab asking with a report's
+    // uppercase tag reopens the lowercase target the worker now writes and the
+    // queue keys (#313, #315).
+    it('records the reopen under the canonical spelling, whichever spelling is asked for', async () => {
+      const { db, decisionWrites } = recordingDb();
 
-  // The request is canonicalized, so an older tab asking with a report's
-  // uppercase tag clears the lowercase rows the worker now writes. The match
-  // itself stays exact, as the queue keys every stored record as stored; a
-  // machine auto-hide row in a report's uppercase spelling never applied to
-  // the lowercase target.
-  it('deletes decision rows in the canonical spelling only, whichever spelling is asked for', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-    const statements: Array<{ sql: string; binds: unknown[] }> = [];
-    const db = {
-      prepare: (sql: string) => {
-        const entry = { sql, binds: [] as unknown[] };
-        statements.push(entry);
-        const stmt: Record<string, unknown> = {
-          bind: (...binds: unknown[]) => { entry.binds = binds; return stmt; },
-          run: async () => ({ success: true, meta: { changes: 2 } }),
-          first: async () => null,
-          all: async () => ({ results: [] }),
-        };
-        return stmt;
-      },
-    };
+      await worker.fetch(
+        reopen('A'.repeat(64), '?targetType=event'),
+        { ...(reportsEnv as object), DB: db } as never,
+        ctx,
+      );
 
-    const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'A'.repeat(64)}?targetType=event`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': 'test-admin-key' },
-      }),
-      { ...(reportsEnv as object), DB: db, NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let t = 0; t < 100 && !FakeRelaySocket.instances[0]; t++) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    const sock = FakeRelaySocket.instances[0];
-    sock.message(['EOSE', sock.subId()]);
-    await resPromise;
+      expect(decisionWrites().map((w) => w.binds[1])).toEqual(['a'.repeat(64)]);
+    });
 
-    expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64) ]);
-    const del = statements.find((s) => /DELETE FROM moderation_decisions/.test(s.sql));
-    expect(del?.binds).toEqual(['a'.repeat(64)]);
-    // And by an exact match: lower() or COLLATE NOCASE would widen it with
-    // the same single bind.
-    expect(del?.sql.replace(/\s+/g, ' ')).toMatch(/WHERE target_id = \? $/);
-  });
+    // A frontend from before targetType (2026-08) reopened the id under both
+    // types: the old delete matched target_id alone. A row under the type the id
+    // is not changes nothing, since that target has no handling to end.
+    it('reopens both target types when no type is given', async () => {
+      const { db, decisionWrites } = recordingDb();
 
-  it('queries the pubkey filter alone for a pubkey target', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
+      const res = await worker.fetch(
+        reopen('a'.repeat(64)),
+        { ...(reportsEnv as object), DB: db } as never,
+        ctx,
+      );
 
-    const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=pubkey`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': 'test-admin-key' },
-      }),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let t = 0; t < 100 && !FakeRelaySocket.instances[0]; t++) {
-      await new Promise((r) => setTimeout(r, 0));
-    }
-    const sock = FakeRelaySocket.instances[0];
-    expect(sock).toBeDefined();
-    sock.message(['EOSE', sock.subId()]);
+      expect((await res.json() as { deleted: number }).deleted).toBe(2);
+      expect(decisionWrites().map((w) => w.binds)).toEqual([
+        ['event', 'a'.repeat(64), 'reopened', 'Reopened'],
+        ['pubkey', 'a'.repeat(64), 'reopened', 'Reopened'],
+      ]);
+    });
 
-    await resPromise;
-    expect(FakeRelaySocket.instances).toHaveLength(1);
-    expect(JSON.parse(sock.sent[0])[2]['#p']).toEqual([ 'a'.repeat(64) ]);
-  });
+    // An unrecognised value is not trusted as a type: written as given, it would
+    // make a row no reader matches and the reopen would quietly do nothing.
+    it('treats an unrecognised target type as no type, and logs it', async () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const { db, decisionWrites } = recordingDb();
 
-  // The whitelist at the route is load-bearing, not defensive tidiness. An
-  // unrecognised value must fall back to both filters, because the alternative
-  // -- trusting the raw string -- indexes the tag map with a miss and builds a
-  // filter keyed "undefined". That is an UNTARGETED query: the relay ignores
-  // the unknown key and returns resolution labels for arbitrary targets, which
-  // the cleanup loop then bans. One reopen would wipe resolution labels
-  // queue-wide and still report success.
-  it('falls back to both filters when the target type is not a recognised value', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
+      await worker.fetch(
+        reopen('a'.repeat(64), '?targetType=EVENT'),
+        { ...(reportsEnv as object), DB: db } as never,
+        ctx,
+      );
 
-    const resPromise = worker.fetch(
-      new Request(`https://api.example/api/decisions/${'a'.repeat(64)}?targetType=EVENT`, {
-        method: 'DELETE',
-        headers: { 'X-Admin-Key': 'test-admin-key' },
-      }),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      sock.message(['EOSE', sock.subId()]);
-    }
+      expect(decisionWrites().map((w) => w.binds[0])).toEqual(['event', 'pubkey']);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('unrecognised targetType'), 'EVENT');
+    });
 
-    await resPromise;
-    expect(FakeRelaySocket.instances).toHaveLength(2);
-    const filters = FakeRelaySocket.instances.map((s) => JSON.parse(s.sent[0])[2]);
-    // Every filter is anchored to the target. None may be an open query.
-    expect(filters[0]['#e']).toEqual([ 'a'.repeat(64) ]);
-    expect(filters[1]['#p']).toEqual([ 'a'.repeat(64) ]);
-    for (const f of filters) expect(Object.keys(f)).not.toContain('undefined');
-    // Degrading safely is right, but silently would make a client-side typo
-    // invisible in production.
-    expect(warn).toHaveBeenCalledWith(expect.stringContaining('unrecognised targetType'), 'EVENT');
-  });
+    // Recording the reopen is the whole action, so a failed write is a failed
+    // reopen: the UI must not tell the moderator it worked.
+    it('fails the reopen when the row cannot be written', async () => {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const { db } = recordingDb({ failInsert: true });
 
-  // Worker and Pages deploy separately, so a new worker serves an old frontend
-  // that sends no targetType. It must keep checking both tags rather than
-  // guessing one and silently skipping the labels that matter.
-  it('still queries both filters when the target type is not given', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
+      const res = await worker.fetch(
+        reopen('a'.repeat(64), '?targetType=event'),
+        { ...(reportsEnv as object), DB: db } as never,
+        ctx,
+      );
 
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      sock.message(['EOSE', sock.subId()]);
-    }
-
-    await resPromise;
-    expect(FakeRelaySocket.instances).toHaveLength(2);
-  });
-
-  // Each failure path carries its events independently, so each is pinned
-  // independently. The timeout is the one this branch is named for.
-  it('bans a label received before the read timed out', async () => {
-    vi.useFakeTimers();
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await vi.advanceTimersByTimeAsync(0);
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
-      await vi.advanceTimersByTimeAsync(5000);
-    }
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(1);
-    expect(body.labelCleanupFailed).toBe(true);
-  });
-
-  it('bans a label received before the relay CLOSED the subscription', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
-      sock.message(['CLOSED', sock.subId(), 'error: could not complete query']);
-    }
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(1);
-    expect(body.labelCleanupFailed).toBe(true);
-  });
-
-  it('bans a label received before the socket errored', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) sock.message(['EVENT', sock.subId(), LABEL_A]);
-      sock.emit('error', {});
-    }
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(1);
-    expect(body.labelCleanupFailed).toBe(true);
-  });
-
-  // The same window exists on the success path, and it is the common one: the
-  // worker sends REQ and never CLOSE, so between EOSE and the socket actually
-  // closing the relay can stream a newly published matching label. Counting it
-  // would ban a label the read never reported.
-  it('does not ban a label that arrived after EOSE', async () => {
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-    const LATE_LABEL = { ...LABEL_A, id: 'd'.repeat(64) };
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) {
-        sock.message(['EVENT', sock.subId(), LABEL_A]);
-        sock.message(['EOSE', sock.subId()]);
-        sock.message(['EVENT', sock.subId(), LATE_LABEL]); // too late to count
-      } else {
-        sock.message(['EOSE', sock.subId()]);
-      }
-    }
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number };
-    expect(body.labelsDeleted).toBe(1);
-  });
-
-  // A frame can still arrive after a failure path has handed its events to the
-  // caller: the socket is closing, not closed. Two independent things stop that
-  // late label joining a set the caller is already iterating and banning, and on
-  // this path either alone suffices -- the message listener's resolved-guard
-  // blocks the push, and all four socket failure exits (timeout, CLOSED, error,
-  // close) resolve with `events.slice()`, a snapshot the late frame cannot
-  // reach. The outer catch carries no events at all; it fires before the array
-  // is in scope.
-  //
-  // So this test dies only to the conjunction: drop the guard and it passes,
-  // drop the slice and it passes, drop both and it fails. The after-EOSE case
-  // ABOVE is the guard's sole-custody pin, because the success exit hands back
-  // the live `events` array and the snapshot is not there to cover it. Neither
-  // mechanism is redundant: removing the copies would leave the guard as the
-  // only thing standing between a late frame and the caller's set.
-  it('does not ban a label that arrived after the read had already failed', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-    const LATE_LABEL = { ...LABEL_A, id: 'd'.repeat(64) };
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      for (let t = 0; t < 100 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) {
-        sock.message(['EVENT', sock.subId(), LABEL_A]);
-        sock.emit('close', {});           // read fails, caller gets its events
-        sock.message(['EVENT', sock.subId(), LATE_LABEL]); // too late to count
-      } else {
-        sock.emit('close', {});
-      }
-    }
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number };
-    expect(body.labelsDeleted).toBe(1);
-  });
-
-  // A completed read that fills the page is indistinguishable from a truncated
-  // one, so it must report an incomplete cleanup even though EOSE arrived. The
-  // 50 is written out rather than imported: the page size doubles as the
-  // worst-case number of sequential signed round-trips in one reopen, so it is
-  // bounded by the client's 30s timeout and the Workers subrequest budget --
-  // that bound is part of what the test pins.
-  it('reports incomplete cleanup when the label read fills the page', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.stubGlobal('fetch', vi.fn(async () =>
-      new Response(JSON.stringify({ result: true }), { status: 200 })
-    ));
-    const fullPage = Array.from({ length: 50 }, (_, i) => ({
-      ...LABEL_A,
-      id: i.toString(16).padStart(64, '0'),
-    }));
-
-    const resPromise = worker.fetch(
-      reopenRequest(),
-      { ...(reportsEnv as object), DB: reopenDb(), NOSTR_NSEC: TEST_NSEC } as never,
-      ctx,
-    );
-    for (let i = 0; i < 2; i++) {
-      // A full page means LABEL_CLEANUP_LIMIT sequential banevent round-trips
-      // before the second filter opens its socket, so this wait needs a far
-      // bigger budget than the single-label cases above.
-      for (let t = 0; t < 5000 && !FakeRelaySocket.instances[i]; t++) {
-        await new Promise((r) => setTimeout(r, 0));
-      }
-      const sock = FakeRelaySocket.instances[i];
-      expect(sock).toBeDefined();
-      if (i === 0) for (const label of fullPage) sock.message(['EVENT', sock.subId(), label]);
-      sock.message(['EOSE', sock.subId()]);
-    }
-
-    // The cap is what makes truncation implausible rather than merely
-    // detectable, so the requested page size is pinned too: detection only
-    // fires on our own limit, never on a lower one the relay imposes.
-    expect(JSON.parse(FakeRelaySocket.instances[0].sent[0])[2].limit).toBe(50);
-
-    const res = await resPromise;
-    const body = await res.json() as { labelsDeleted: number; labelCleanupFailed: boolean };
-    expect(body.labelsDeleted).toBe(50); // every label on the page was removed
-    expect(body.labelCleanupFailed).toBe(true); // but there may be more beyond it
+      expect(res.status).toBe(500);
+      expect(await res.json()).toMatchObject({ success: false });
+    });
   });
 
   it('returns 502 when the relay closes before EOSE on resolution labels', async () => {

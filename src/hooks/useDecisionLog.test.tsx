@@ -243,3 +243,79 @@ describe('useDecisionLog read state', () => {
     }
   });
 });
+
+// Reopen (#324) writes a dated `reopened` row instead of deleting the target's
+// history. Only rows after the newest reopen say the report is handled, so the
+// pane, the Reopen button and the queue agree. Rows come newest first.
+describe('useDecisionLog reopen', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('does not count handling from before the newest reopen', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
+      { action: 'ban_user', moderator_pubkey: 'e'.repeat(64), created_at: '2026-11-09 00:01:40' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('pubkey-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasDecisions).toBe(true);
+    expect(result.current.hasHandlingDecisions).toBe(false);
+    expect(result.current.latestHandlingDecision).toBeUndefined();
+    expect(result.current.isReopened).toBe(true);
+  });
+
+  it('counts handling recorded after the reopen', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'ban_user', moderator_pubkey: 'e'.repeat(64), created_at: '2026-11-09 00:05:00' },
+      { action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('pubkey-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasHandlingDecisions).toBe(true);
+    expect(result.current.latestHandlingDecision?.action).toBe('ban_user');
+    expect(result.current.isReopened).toBe(false);
+  });
+
+  // The newest reopen is the cutoff, not the oldest: handling between two
+  // reopens was itself reopened.
+  it('reads from the newest reopen when there are several', async () => {
+    getDecisions.mockResolvedValue([
+      { action: 'reopened', moderator_pubkey: null },
+      { action: 'reviewed', moderator_pubkey: 'e'.repeat(64) },
+      { action: 'reopened', moderator_pubkey: null },
+      { action: 'ban_user', moderator_pubkey: 'e'.repeat(64) },
+    ]);
+
+    const { result } = renderHook(() => useDecisionLog('pubkey-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasHandlingDecisions).toBe(false);
+    expect(result.current.isReopened).toBe(true);
+  });
+
+  // A reopen is not a decision about the target, so it never names one.
+  it('never names the reopen as the handling decision', async () => {
+    getDecisions.mockResolvedValue([{ action: 'reopened', moderator_pubkey: null }]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.latestHandlingDecision).toBeUndefined();
+    expect(result.current.isReopened).toBe(true);
+  });
+
+  it('is not reopened when no reopen was recorded', async () => {
+    getDecisions.mockResolvedValue([{ action: 'reviewed', moderator_pubkey: 'e'.repeat(64) }]);
+
+    const { result } = renderHook(() => useDecisionLog('event-id'), { wrapper });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.hasHandlingDecisions).toBe(true);
+    expect(result.current.isReopened).toBe(false);
+  });
+});

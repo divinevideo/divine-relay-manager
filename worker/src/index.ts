@@ -63,6 +63,7 @@ import { markHumanAction, markHumanReviewed } from './human-decision';
 import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAccountRestrictedAgeReviewState, type AgeReviewState } from '../../shared/age-review';
 import { canonicalHex64 } from '../../shared/hex-id';
+import { REOPENED_ACTION } from '../../shared/handling';
 import { getResolvedTargets, getAutoHideStates, getHandlingRows } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
@@ -414,8 +415,8 @@ interface ApiResponse {
   reconciled?: boolean;
   deleted?: number;
   labelsDeleted?: number;
-  // Reopen could not clear every relay-side resolution label, so the report
-  // may stay hidden even though its decisions were deleted.
+  // Reopen's pre-#324 label cleanup fields. Reopen no longer touches labels,
+  // so it answers 0 and false; kept for a Pages build that reads them.
   labelCleanupFailed?: boolean;
   // Realness proxy pass-through
   details?: string;
@@ -794,15 +795,18 @@ export default {
       if (path.startsWith('/api/decisions/') && request.method === 'DELETE') {
         const rawId = path.replace('/api/decisions/', '');
         const targetId = canonicalHex64(rawId) ?? rawId;
-        // Optional: an older frontend omits it, and then both tags are checked.
-        // A present-but-unrecognised value takes the same safe path, but that
-        // means a client-side typo is invisible in production, so it is logged.
+        // Reopen (#324): records a `reopened` row; the method and path are kept
+        // for a Pages build that predates it. targetType is optional: an older
+        // frontend omits it, and then both types are reopened. A
+        // present-but-unrecognised value takes the same path rather than being
+        // written as a type no reader matches, but that makes a client-side
+        // typo invisible in production, so it is logged.
         const rawType = url.searchParams.get('targetType');
         const targetType = rawType === 'event' || rawType === 'pubkey' ? rawType : undefined;
         if (rawType !== null && targetType === undefined) {
-          console.warn('[reopen] unrecognised targetType, querying both label tags:', rawType);
+          console.warn('[reopen] unrecognised targetType, reopening both types:', rawType);
         }
-        return handleDeleteDecisions(targetId, env, corsHeaders, targetType);
+        return handleReopenTarget(targetId, env, corsHeaders, targetType);
       }
 
       if (path.startsWith('/api/check-result/') && request.method === 'GET') {
@@ -2376,31 +2380,28 @@ async function handleGetDecisions(
   }
 }
 
-// Kind 1985 is a regular event, not replaceable, so review/reopen cycles
-// accumulate resolution labels on one target. A real target carries one or two,
-// so this is far above the expected count -- but it is NOT set by that. Every
-// label costs one sequential signed NIP-86 round-trip at roughly 200-400ms, and
-// each filter also spends up to the 5s queryRelay cap on its read, so a full
-// page is ~15-25s of work per filter.
+// Reopen (#324). Records a dated `reopened` row for the target instead of
+// deleting its history: handlingByTarget (shared/handling.ts) counts only
+// handling after the newest reopen, so every report filed before it reads as
+// new again, while the history the handled-before marker shows survives.
 //
-// The binding constraint is the client's 30s abort (API_TIMEOUT_MS in
-// adminApi.ts): blowing it aborts a reopen the worker had already completed and
-// reports it as a failure. A cap of 200 blows it outright. 50 fits the path
-// every current caller takes, which is one filter -- ReportDetail always sends
-// targetType. It does NOT fit the two-filter fallback at the top of the range;
-// that path is reachable only by a frontend older than this deploy, and only
-// against a target carrying tens of labels.
+// It no longer bans the target's resolution labels either. A label older than
+// the reopen stops counting by the same rule, and banning it would erase it
+// from that history. Nothing in D1 is deleted or changed; neither is
+// moderation_targets.ever_human_reviewed, which keeps auto-hide off a target a
+// person has looked at.
 //
-// Subrequests are not the constraint: this is Workers Paid, so the budget is
-// 10,000/request (Cloudflare's Workers limits page) and even the two-filter
-// worst case spends ~102 (two sockets plus two full pages of bans).
+// The path, query and response fields are unchanged for a Pages build that
+// predates this. `deleted` now counts the reopen rows written. labelsDeleted
+// and labelCleanupFailed stay as 0 and false, which is what they mean when no
+// label is touched; true would raise an older build's "labels may remain,
+// retry" toast on every reopen.
 //
-// A full page is reported as an incomplete cleanup rather than assumed
-// complete, so a target somehow past the cap still gets cleared over successive
-// reopens instead of silently half-cleared.
-const LABEL_CLEANUP_LIMIT = 50;
-
-async function handleDeleteDecisions(
+// Without a type (a frontend from before targetType, added in 2026-08) the id
+// is reopened under both types, as the old delete matched target_id alone. A
+// row under the type the id is not ends nothing, since that target has no
+// handling of its own.
+async function handleReopenTarget(
   targetId: string,
   env: Env,
   corsHeaders: Record<string, string>,
@@ -2413,106 +2414,26 @@ async function handleDeleteDecisions(
 
     await ensureSchemaOnce(env.DB);
 
-    let labelsDeleted = 0;
-    let labelCleanupFailed = false;
-
-    // Query for and delete any resolution labels (kind 1985) on the relay.
-    // publishLabel tags a label with 'e' for an event target or 'p' for a
-    // pubkey target, never both, so naming the type skips a query that could
-    // not have matched. Without a type (an older frontend) both are checked:
-    // guessing wrong would silently skip the labels that do exist.
-    const tagForType = { event: '#e', pubkey: '#p' } as const;
-    const labelTags = targetType ? [tagForType[targetType]] : ['#e', '#p'];
-    const labelFilters = labelTags.map((tag) => ({
-      kinds: [1985],
-      [tag]: [targetId],
-      '#L': ['moderation/resolution'],
-      limit: LABEL_CLEANUP_LIMIT,
-    }));
-
-    for (const filter of labelFilters) {
-      const queryResult = await queryRelay(filter, env.RELAY_URL);
-      if (!queryResult.success) {
-        // Best-effort cleanup, but the caller has to hear about it. The D1
-        // delete below is unconditional, so a surviving resolution label
-        // leaves the report hidden by resolvedTargets even though its
-        // decisions are gone. Reporting a clean reopen would tell the
-        // moderator the report is back in the queue when it is not.
-        labelCleanupFailed = true;
-        console.warn('[reopen] resolution-label query failed, labels may remain:', queryResult.error);
-      } else if ((queryResult.events?.length ?? 0) >= LABEL_CLEANUP_LIMIT) {
-        // A full page is indistinguishable from a truncated one, so any labels
-        // past the cap are invisible here and would survive silently. Same
-        // outcome as a failed read, so it reports the same way.
-        //
-        // This detects our own cap, not the relay's: a relay enforcing a lower
-        // maximum returns a short page and truncation stays invisible. Raising
-        // the cap well above any plausible label count is what makes that
-        // remote, rather than this check.
-        labelCleanupFailed = true;
-        console.warn('[reopen] resolution-label read hit the page limit, labels may remain');
-      }
-      // Deliberately not gated on success: an incomplete read still hands back
-      // the labels it did receive, and removing those is strictly progress.
-      // labelCleanupFailed above already records that the set may be partial.
-      if (queryResult.events && queryResult.events.length > 0) {
-        for (const labelEvent of queryResult.events) {
-          const eventId = (labelEvent as { id?: string }).id;
-          if (eventId) {
-            // Ban the label event to remove it from the relay
-            const rpcRequest = new Request(`https://placeholder/api/relay-rpc`, {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                method: 'banevent',
-                params: [eventId, 'Removed by reopen action'],
-              }),
-            });
-
-            try {
-              const rpcResponse = await handleRelayRpc(rpcRequest, env, corsHeaders);
-              const rpcResult = await rpcResponse.json() as { success: boolean };
-              if (rpcResult.success) {
-                labelsDeleted++;
-              } else {
-                // The label was found but could not be removed (a relay admin
-                // key mismatch 403s every management command while reads keep
-                // working). It survives and keeps the report hidden, so this
-                // reopen is no cleaner than a failed read.
-                labelCleanupFailed = true;
-                console.warn('[reopen] banevent failed for resolution label:', eventId);
-              }
-            } catch (err) {
-              labelCleanupFailed = true;
-              console.error('[reopen] banevent threw for resolution label:', eventId, err);
-            }
-          } else {
-            // Events come off the wire unvalidated, so an id-less label is
-            // possible. It cannot be banned, so it survives and keeps the
-            // report hidden: the same outcome as any other failed cleanup.
-            labelCleanupFailed = true;
-            console.warn('[reopen] resolution label has no id, cannot remove it');
-          }
-        }
-      }
+    const types = targetType ? [targetType] : (['event', 'pubkey'] as const);
+    for (const type of types) {
+      // No moderator: the route has never been given a verified login to name,
+      // and NULL is what a person's decision with no login records. created_at
+      // is left to the column default, so D1 dates the row; an undated reopen
+      // would cut off nothing.
+      await env.DB.prepare(`
+        INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey)
+        VALUES (?, ?, ?, ?, NULL)
+      `).bind(type, targetId, REOPENED_ACTION, 'Reopened').run();
     }
-
-    // Delete all decisions for this target from D1 (reopens the report).
-    // Exact match, as in handleGetDecisions and the label cleanup above.
-    // moderation_targets.ever_human_reviewed is NOT cleared — prevents re-auto-hide.
-    const result = await env.DB.prepare(`
-      DELETE FROM moderation_decisions
-      WHERE target_id = ?
-    `).bind(targetId).run();
 
     return jsonResponse({
       success: true,
-      deleted: result.meta.changes || 0,
-      labelsDeleted,
-      labelCleanupFailed,
+      deleted: types.length,
+      labelsDeleted: 0,
+      labelCleanupFailed: false,
     }, 200, corsHeaders);
   } catch (error) {
-    console.error('[reopen] delete decisions failed:', error);
+    console.error('[reopen] recording the reopen failed:', error);
     return jsonResponse(
       { success: false, error: error instanceof Error ? error.message : 'Unknown error' },
       500,

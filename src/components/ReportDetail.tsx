@@ -308,16 +308,18 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // re-renders ReportDetail rather than remounting it), and mutate() rebuilds
   // the mutation from the observer's LATEST options -- so a mutationFn closing
   // over `context` would send the retry at whichever report is selected when
-  // it is clicked, deleting that report's decisions instead.
+  // it is clicked, reopening that report instead.
   type ReopenTarget = { type: 'event' | 'pubkey'; value: string; reportedPubkey?: string | null };
 
   const reopenMutation = useMutation({
     mutationFn: async (target: ReopenTarget | null) => {
       if (!target) throw new Error('No target');
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      // Delete all decisions for this target
+      // Reopen the target. The worker records a dated `reopened` row and keeps
+      // the history (#324); the call keeps its old name and route.
       const primary = await act.deleteDecisions(target.value, target.type);
-      // Also delete decisions for the pubkey if this is an event report
+      // A post's reopen also reopens its author's account, as it did when it
+      // deleted both targets' decisions.
       let secondary = { labelCleanupFailed: false };
       if (target.type === 'event' && target.reportedPubkey) {
         secondary = await act.deleteDecisions(target.reportedPubkey, 'pubkey');
@@ -341,6 +343,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // ban-resolved report stays hidden even on a fully clean run.
       toast(labelCleanupFailed
         ? {
+            // Only a worker from before #324 reports this: it deleted the
+            // decisions and banned the resolution labels, and this says the
+            // label half fell short. The current worker clears nothing and
+            // always answers false. Kept so a rolled-back worker still reads
+            // right.
+            //
             // Deliberately does not name the relay: one of the causes is our
             // own page cap, where the relay did exactly what it was asked.
             title: "Reopened, but resolution labels could not all be cleared",
@@ -370,7 +378,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           }
         : {
             title: "Report reopened",
-            description: "Decisions and resolution labels cleared. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
+            description: "Its history is kept, and reports filed before now count as new again. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
             // Longer than the 5s Radix default can be read in.
             duration: 10000,
           });
@@ -1369,7 +1377,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
-              {/* Reopen: only when there are decisions to undo */}
+              {/* Reopen: only when something handled the target since its last reopen */}
               {(decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
@@ -1386,7 +1394,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Clears its moderation decisions and resolution labels. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
+                    <p>Reopen this report for review. Its history is kept, and reports filed before now count as new again. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
                   </TooltipContent>
                 </Tooltip>
               )}

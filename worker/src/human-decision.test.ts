@@ -221,19 +221,13 @@ describe('human decision persistence', () => {
     });
   });
 
-  describe('DELETE /api/decisions/:targetId (handleDeleteDecisions)', () => {
-    it('should delete decisions but NOT touch moderation_targets', async () => {
+  describe('DELETE /api/decisions/:targetId (handleReopenTarget)', () => {
+    // Reopen (#324) records a `reopened` row and deletes nothing.
+    it('should record a reopen, delete no decisions, and NOT touch moderation_targets', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);
 
-      // Mock fetch to return empty results for relay label queries
-      mockFetch.mockResolvedValue({
-        ok: true,
-        json: async () => ([]),
-        text: async () => '[]',
-      });
-
-      const request = new Request('http://localhost/api/decisions/event_abc123', {
+      const request = new Request('http://localhost/api/decisions/event_abc123?targetType=event', {
         method: 'DELETE',
         headers: { 'X-Admin-Key': TEST_ADMIN_KEY },
       });
@@ -242,10 +236,10 @@ describe('human decision persistence', () => {
       const body = await response.json() as { success: boolean };
       expect(body.success).toBe(true);
 
-      // Should have DELETE from moderation_decisions
-      const deletes = sqlLog.filter(s => s.sql.includes('DELETE FROM moderation_decisions'));
-      expect(deletes.length).toBe(1);
-      expect(deletes[0].bindings).toContain('event_abc123');
+      const reopens = sqlLog.filter(s => s.sql.includes('INSERT INTO moderation_decisions'));
+      expect(reopens.length).toBe(1);
+      expect(reopens[0].bindings).toEqual(['event', 'event_abc123', 'reopened', 'Reopened']);
+      expect(sqlLog.filter(s => s.sql.includes('DELETE FROM moderation_decisions'))).toHaveLength(0);
 
       // Should NOT have any DELETE/UPDATE on moderation_targets
       const targetDeletes = sqlLog.filter(s =>
