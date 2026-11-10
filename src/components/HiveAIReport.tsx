@@ -16,6 +16,7 @@ import {
 import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye, Clock } from "lucide-react";
 import { CopyableId } from "@/components/CopyableId";
 import { useApiUrl } from "@/hooks/useAdminApi";
+import { useMediaStatus } from "@/hooks/useMediaStatus";
 
 interface HiveAIReportProps {
   sha256?: string;
@@ -129,27 +130,15 @@ function formatDate(dateStr: string | undefined): string {
 // already have a result, so a re-check button could never do anything (#406).
 // The AI detection card is the on-demand check.
 export function HiveAIReport({ sha256: providedSha256, eventTags, className }: HiveAIReportProps) {
-  const apiUrl = useApiUrl();
-
   // Determine sha256 from props or tags
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
 
-  const { data: result, isLoading, error } = useQuery({
-    queryKey: ['hive-moderation', sha256],
-    queryFn: async (): Promise<ModerationResult | null> => {
-      if (!sha256) return null;
-
-      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, { headers: getApiHeaders('') });
-      if (!response.ok) {
-        if (response.status === 404) return null;
-        throw new Error(`Failed to fetch moderation result: ${response.status}`);
-      }
-
-      return response.json();
-    },
-    enabled: !!sha256,
-    staleTime: 5 * 60 * 1000, // Cache for 5 minutes
-  });
+  // The same read the media actions use: bounded by the API timeout, refetched
+  // when an action invalidates 'media-status', and a failed read comes back
+  // marked unreadable instead of as no decision.
+  const { results, isLoading } = useMediaStatus(sha256 ? [sha256] : []);
+  const result = results[0]?.status as ModerationResult | null | undefined;
+  const error = results[0]?.unreadable;
 
   // No sha256 found - nothing to show
   if (!sha256) {
