@@ -1,21 +1,13 @@
 // ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
 // ABOUTME: Shows confidence scores, classification categories and timestamps (read-only)
 
-import { getApiHeaders, type MediaStatusAction } from "@/lib/adminApi";
-import { useQuery } from "@tanstack/react-query";
+import { type MediaStatusAction } from "@/lib/adminApi";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Skeleton } from "@/components/ui/skeleton";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { Bot, ShieldCheck, ShieldAlert, ShieldX, Eye, Clock } from "lucide-react";
 import { CopyableId } from "@/components/CopyableId";
-import { useApiUrl } from "@/hooks/useAdminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 
 interface HiveAIReportProps {
@@ -41,7 +33,6 @@ interface ModerationResult {
     medical?: number;
     gambling?: number;
   };
-  category?: string;
   reason?: string;
   processedAt?: string;
   created_at?: string;
@@ -265,56 +256,3 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
   );
 }
 
-// Compact badge version for list views
-interface HiveStatusBadgeProps {
-  sha256?: string;
-  eventTags?: string[][];
-  className?: string;
-}
-
-export function HiveStatusBadge({ sha256: providedSha256, eventTags, className }: HiveStatusBadgeProps) {
-  const apiUrl = useApiUrl();
-  const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
-
-  const { data: result } = useQuery({
-    queryKey: ['hive-moderation', sha256],
-    queryFn: async (): Promise<ModerationResult | null> => {
-      if (!sha256) return null;
-      const response = await fetch(`${apiUrl}/api/check-result/${sha256}`, { headers: getApiHeaders('') });
-      if (!response.ok) return null;
-      return response.json();
-    },
-    enabled: !!sha256,
-    staleTime: 5 * 60 * 1000,
-  });
-
-  if (!sha256 || !result) return null;
-
-  const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
-  const ActionIcon = actionConfig.icon;
-  const checkedAt = result.processedAt || result.created_at;
-
-  return (
-    <TooltipProvider>
-      <Tooltip>
-        <TooltipTrigger asChild>
-          <Badge variant="outline" className={`${className} ${actionConfig.color} cursor-help`}>
-            <ActionIcon className="h-3 w-3 mr-1" />
-            {actionConfig.label}
-          </Badge>
-        </TooltipTrigger>
-        <TooltipContent>
-          <div className="text-xs space-y-1">
-            <p><strong>Hive AI:</strong> {actionConfig.label}</p>
-            {checkedAt && (
-              <p><strong>Checked:</strong> {formatDate(checkedAt)}</p>
-            )}
-            {result.category && (
-              <p><strong>Category:</strong> {result.category}</p>
-            )}
-          </div>
-        </TooltipContent>
-      </Tooltip>
-    </TooltipProvider>
-  );
-}
