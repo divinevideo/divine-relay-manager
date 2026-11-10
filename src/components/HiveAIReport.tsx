@@ -35,8 +35,9 @@ interface ModerationResult {
     gambling?: number;
   };
   reason?: string;
-  processedAt?: string;
-  created_at?: string;
+  // When the record was written, not always a scan: a report writes it and a later
+  // report can move it forward, while a moderator action leaves it as it was.
+  moderated_at?: string;
   categoryVerifications?: Record<string, 'confirmed' | 'rejected' | null>;
 }
 
@@ -175,7 +176,7 @@ export function HiveAIReport({ sha256: providedSha256, eventTags, className }: H
 
   const actionConfig = ACTION_CONFIG[result.action] || ACTION_CONFIG.REVIEW;
   const ActionIcon = actionConfig.icon;
-  const checkedAt = result.processedAt || result.created_at;
+  const checkedAt = result.moderated_at;
 
   // Filter scores above threshold (0.3)
   const significantScores = Object.entries(result.scores || {})

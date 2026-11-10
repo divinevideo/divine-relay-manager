@@ -84,12 +84,16 @@ describe('HiveAIReport', () => {
 
   it('shows an existing result with no re-check button', async () => {
     respond(200, JSON.stringify({
-      action: 'SAFE', scores: { nudity: 0.8 }, processedAt: '2026-11-01T10:00:00Z',
+      // The fields handlePublicCheckResult returns for a stored record.
+      sha256: SHA, status: 'safe', moderated: true, action: 'SAFE', provider: 'hive',
+      scores: { nudity: 0.8 }, categories: [], moderated_at: '2026-11-01T10:00:00.000Z',
+      reviewed_by: null, reviewed_at: null,
     }));
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
 
     expect(await screen.findByText('Nudity')).toBeInTheDocument();
     expect(screen.getByText(/Checked:/)).toBeInTheDocument();
+    expect(screen.queryByText('Check time unknown')).not.toBeInTheDocument();
     // The only button left is the hash's copy control (the re-check icon had no
     // accessible name, so count rather than look it up by name).
     expect(screen.getAllByRole('button')).toHaveLength(1);
