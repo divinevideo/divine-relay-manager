@@ -100,6 +100,13 @@ describe('HiveAIReport', () => {
     expectOnlyReads();
   });
 
+  it('shows an unparseable check time as stored instead of "Invalid Date"', async () => {
+    respond(200, JSON.stringify({ sha256: SHA, action: 'SAFE', scores: {}, moderated_at: 'not-a-date' }));
+    render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
+
+    expect(await screen.findByText('Checked: not-a-date')).toBeInTheDocument();
+  });
+
   it('bounds the read with the API timeout', async () => {
     vi.useFakeTimers();
     // A read that never answers: it ends only when its signal aborts.

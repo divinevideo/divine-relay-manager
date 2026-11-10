@@ -105,17 +105,15 @@ const ACTION_CONFIG: Record<string, { label: string; icon: typeof ShieldCheck; c
 
 function formatDate(dateStr: string | undefined): string {
   if (!dateStr) return 'Unknown';
-  try {
-    const date = new Date(dateStr);
-    return date.toLocaleString(undefined, {
-      month: 'short',
-      day: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-    });
-  } catch {
-    return dateStr;
-  }
+  const date = new Date(dateStr);
+  // An unparseable string gives an Invalid Date rather than throwing.
+  if (Number.isNaN(date.getTime())) return dateStr;
+  return date.toLocaleString(undefined, {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+  });
 }
 
 // Read-only. Re-analysis isn't offered here: moderation-service runs reactive
