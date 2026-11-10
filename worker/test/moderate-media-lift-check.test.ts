@@ -618,6 +618,24 @@ describe('/api/moderate-media/lift-check with the recorded uploader', () => {
       expect(await res.json()).toMatchObject({ code: 'age_review_check_failed' });
     });
 
+    it("answers an AGE_RESTRICTED with the owner's restricted refusal when both cases have restricted their accounts", async () => {
+      blobStatus = 'active';
+      recordStatus = 'safe';
+      openCase = { id: 'case-owner', pubkey: OWNER, state: 'restricted_pending_parental_consent' };
+      otherCases = [uploaderCase('restricted_pending_user_response')];
+      const res = await check({ sha256: SHA, action: 'AGE_RESTRICTED', uploader: UPLOADER });
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({
+        success: false,
+        code: 'age_review_active',
+        caseId: 'case-owner',
+        state: 'restricted_pending_parental_consent',
+        error: "This file's owner is restricted by an open age review, so its files can't be put behind the 18+ gate, which would show them to adults. The case decides when they become public.",
+      });
+      expect(lookedUp()).toEqual([OWNER]);
+      expect(stateReads()).toHaveLength(0);
+    });
+
     it('reads the record once for an AGE_RESTRICTED over a public file, and allows it', async () => {
       blobStatus = 'active';
       recordStatus = 'safe';
