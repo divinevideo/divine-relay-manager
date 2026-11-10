@@ -385,7 +385,7 @@ describe('another tab signs out', () => {
   });
 });
 
-describe('round 2', () => {
+describe('storage faults and queued reads around a sign-out', () => {
   // B's refresh lands after A's sign-out, and its own cleanup cannot remove
   // it. The cleanup's fence has to outlive this tab.
   it('a refreshed session the cleanup could not remove stays refused after a reload', async () => {
@@ -511,7 +511,7 @@ describe('round 2', () => {
   });
 });
 
-describe('round 3', () => {
+describe('storage faults that hide the session or the fence', () => {
   // A storage hiccup during sign-out: the session can be neither read nor
   // removed. The tab still knows which session it held, and fences that.
   it('a sign-out during a storage failure that hides the session still holds once storage recovers', async () => {

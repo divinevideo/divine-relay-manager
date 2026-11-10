@@ -453,8 +453,6 @@ describe('login token expiry', () => {
 });
 
 // A sign-out in one tab signs out every tab of the app, without waiting for
-// the others to be focused.
-// A sign-out in one tab signs out every tab of the app, without waiting for
 // the others to be focused. Which sessions a message ends is the library's
 // call (acceptSignOutFromOtherTab), pinned with the real library in
 // DivineSessionProvider.cross-tab.test.tsx; these pin the provider's wiring.
