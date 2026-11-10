@@ -19,8 +19,11 @@ describe('categoryChips', () => {
   });
 
   it('marks a name high priority when any of its spellings is', () => {
-    // 'csam' and 'NS-csam' are both high priority; 'sexual_minors' too. One chip, red.
-    expect(categoryChips(['NS-csam', 'sexual_minors'])).toEqual([{ label: 'CSAM', highPriority: true }]);
+    // Every mapped CSAM spelling is high priority, so mix in one that is not:
+    // an unmapped 'CSAM' keeps its raw value, which is the same name. Both
+    // orders, so neither the first nor the last spelling alone decides it.
+    expect(categoryChips(['csam', 'CSAM'])).toEqual([{ label: 'CSAM', highPriority: true }]);
+    expect(categoryChips(['CSAM', 'csam'])).toEqual([{ label: 'CSAM', highPriority: true }]);
   });
 
   it('names NS-impersonation instead of showing the raw value', () => {
