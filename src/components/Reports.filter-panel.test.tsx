@@ -3,7 +3,7 @@
 
 import { render, screen, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
@@ -61,7 +61,6 @@ function jsonResponse(body: unknown) {
 
 // The shared test setup stubs localStorage with no-ops, so back it with a real
 // store here (same pattern as AttributionNotice.test.tsx). Restored after each.
-let consoleError: MockInstance;
 let originalStorage: Storage;
 let feed: unknown[];
 function setStorage(value: Partial<Storage>) {
@@ -76,7 +75,6 @@ beforeEach(() => {
     removeItem: (key: string) => { store.delete(key); },
     clear: () => store.clear(),
   });
-  consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
   feed = [SPAM, HARASSMENT];
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
     const url = String(input instanceof Request ? input.url : input);
@@ -92,7 +90,6 @@ beforeEach(() => {
 });
 afterEach(() => {
   vi.unstubAllGlobals();
-  consoleError.mockRestore();
   setStorage(originalStorage);
 });
 
