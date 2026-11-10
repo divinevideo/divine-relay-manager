@@ -361,7 +361,7 @@ describe('POST /api/suspended-content/account', () => {
     };
   });
 
-  it('first page returns events, profile and media and records one account row with page_until NULL', async () => {
+  it('first page returns events and profile without an account media listing, recording one account row', async () => {
     const { db, inserts } = makeDb();
     const res = await worker.fetch(viewAccount(), makeEnv(db), ctx);
     expect(res.status).toBe(200);
@@ -373,12 +373,11 @@ describe('POST /api/suspended-content/account', () => {
       events: [event(), SECOND],
       nextUntil: 1_699_999_000,
       nextUntilId: SECOND.id,
-      media: [{ sha256: '1'.repeat(64), level: 'hidden' }],
     });
     const pageCall = relayCalls.find(c => !(c.params[1] as { kinds?: number[] })?.kinds);
     expect(pageCall?.params).toEqual([AUTHOR, { limit: 50 }]);
     expect(relayCalls.some(c => JSON.stringify(c.params[1]) === JSON.stringify({ kinds: [0], limit: 1 }))).toBe(true);
-    expect(mediaCalls).toBe(1);
+    expect(mediaCalls).toBe(0);
     expect(inserts).toEqual([[MODERATOR, AUTHOR, 'account', null, null, 'user', 3]]);
   });
 
@@ -390,14 +389,15 @@ describe('POST /api/suspended-content/account', () => {
     expect(inserts[0][0]).toBe('7'.repeat(64));
   });
 
-  it('a later page records page_until and omits profile and media', async () => {
+  it('a later page records page_until and omits profile and account media', async () => {
     const { db, inserts } = makeDb();
     const res = await worker.fetch(viewAccount({
       pubkey: AUTHOR, surface: 'report', until: 1_699_999_000, untilId: SECOND.id, kinds: [1, 34236], limit: 20,
     }), makeEnv(db), ctx);
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ profile: null, media: null, events: [event(), SECOND] });
+    expect(body).toMatchObject({ profile: null, events: [event(), SECOND] });
+    expect(body).not.toHaveProperty('media');
     expect(body).not.toHaveProperty('profileError');
     expect(body).not.toHaveProperty('mediaError');
     expect(relayCalls).toEqual([{
@@ -408,14 +408,16 @@ describe('POST /api/suspended-content/account', () => {
     expect(inserts).toEqual([[MODERATOR, AUTHOR, 'account', null, 1_699_999_000, 'report', 2]]);
   });
 
-  it('a media list failure still serves the events, with mediaError', async () => {
-    vi.spyOn(console, 'warn').mockImplementation(() => {});
+  it('does not depend on the media server for the first page', async () => {
     mediaAnswer = () => new Response('down', { status: 500 });
     const { db, inserts } = makeDb();
     const res = await worker.fetch(viewAccount(), makeEnv(db), ctx);
     expect(res.status).toBe(200);
     const body = await res.json() as Record<string, unknown>;
-    expect(body).toMatchObject({ media: null, mediaError: 'media_unavailable', events: [event(), SECOND], profile: PROFILE });
+    expect(body).toMatchObject({ events: [event(), SECOND], profile: PROFILE });
+    expect(body).not.toHaveProperty('media');
+    expect(body).not.toHaveProperty('mediaError');
+    expect(mediaCalls).toBe(0);
     expect(inserts).toHaveLength(1);
   });
 

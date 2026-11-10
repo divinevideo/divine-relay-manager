@@ -17,7 +17,6 @@
 
 import { callNip86Rpc, getManagementUrl, type Nip86Env, type Nip86RpcResult } from './nip86';
 import { SUSPENDED_READ_REFUSED } from '../../shared/suspended-read';
-import { listAccountVideos, type MediaServerEnv } from './media-server';
 import { requireVerifiedModerator } from './moderator-identity';
 import {
   SUSPENDED_CONTENT_CODE,
@@ -416,7 +415,7 @@ export async function recordSuspendedContentView(db: D1Database, row: SuspendedC
 // written is the one verified for this request, passed in by value; nothing
 // re-reads the login after an await.
 
-export type SuspendedContentEnv = Nip86Env & MediaServerEnv & { DB?: D1Database };
+export type SuspendedContentEnv = Nip86Env & { DB?: D1Database };
 
 const NO_STORE = { 'Cache-Control': 'no-store' };
 
@@ -550,15 +549,14 @@ export async function handleViewSuspendedAccount(
   const firstPage = req.until === undefined;
   const pageRequest = { ...req, limit: req.limit ?? SUSPENDED_PAGE_DEFAULT };
 
-  // The first page also carries the profile and the media list, read in
-  // parallel with it. Neither of their failures decides the answer.
-  const [page, profileRead, mediaRead] = await Promise.all([
+  // The first page also carries the profile, from the same filtered relay
+  // source. Account-wide media listing belongs to the separate media work.
+  const [page, profileRead] = await Promise.all([
     readSuspendedAccountPage(pageRequest, env),
     firstPage ? readSuspendedAccountPage({ pubkey: req.pubkey, kinds: [0], limit: 1 }, env) : null,
-    firstPage ? readAccountMedia(req.pubkey, env) : null,
   ]);
   // The page read is what confirms the suspension. Without it, nothing else
-  // read here (the profile, the media list) is returned.
+  // read here (the profile) is returned.
   if (!page.ok) return viewerFailure(route, page.status, page.code, corsHeaders);
 
   let profile: NostrEventJson | null = null;
@@ -587,26 +585,8 @@ export async function handleViewSuspendedAccount(
     events: page.value.events,
     nextUntil: page.value.nextUntil,
     nextUntilId: page.value.nextUntilId,
-    media: mediaRead && 'media' in mediaRead ? mediaRead.media : null,
-    ...(mediaRead && 'error' in mediaRead ? { mediaError: mediaRead.error } : {}),
   };
   return viewerJson(body, 200, corsHeaders);
-}
-
-// The account's video files, as hash and level. Videos only, a known limit of
-// listAccountVideos. Its failure is reported by a fixed code; the reason is
-// logged, not returned.
-async function readAccountMedia(
-  pubkey: string,
-  env: MediaServerEnv,
-): Promise<{ media: Array<{ sha256: string; level: string | null }> } | { error: string }> {
-  try {
-    const videos = await listAccountVideos(pubkey, env);
-    return { media: videos.map(v => ({ sha256: v.sha256, level: v.level })) };
-  } catch (err) {
-    console.warn('[suspended-content] account view: media list failed:', err instanceof Error ? err.message : typeof err);
-    return { error: 'media_unavailable' };
-  }
 }
 
 // ============================================================================

@@ -43,9 +43,6 @@ export interface SuspendedAccountResponse {
   events: NostrEventJson[];
   nextUntil: number | null;
   nextUntilId: string | null;
-  /** The account's video files from the media server. First page only; null on later pages or when the list failed. */
-  media: Array<{ sha256: string; level: string | null }> | null;
-  mediaError?: string;
 }
 
 function hex64(value: unknown): string | null {
