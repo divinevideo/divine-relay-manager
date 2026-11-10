@@ -279,6 +279,8 @@ export interface DatedHandling {
 // Null when a date the rule compares is missing: handling_rows from
 // /api/resolution-state, or an `at` on any label target. A worker that
 // predates #324 sends neither, and the queue then keeps the membership rule.
+// TODO(#409): remove the membership fallback (null return here, the 'membership'
+// rule in queueResolution) once no worker without handling_rows/label `at` can pair with this build.
 export function datedHandling(
   handlingRows: readonly HandlingRow[] | undefined,
   labelTargets: readonly { type: 'event' | 'pubkey'; value: string; at?: number }[] | undefined,

@@ -2429,6 +2429,7 @@ async function handleReopenTarget(
     return jsonResponse({
       success: true,
       deleted: types.length,
+      // TODO(#409): drop labelsDeleted and labelCleanupFailed; kept only for older frontends.
       labelsDeleted: 0,
       labelCleanupFailed: false,
     }, 200, corsHeaders);

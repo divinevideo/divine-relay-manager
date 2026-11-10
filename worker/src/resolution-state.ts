@@ -52,6 +52,8 @@ const ROW_CHUNK_SIZE = 1000;
 // target whose rows end in a reopen is left out. Reopen used to delete the
 // target's rows, and a Pages build that reads only this list sees the same as it
 // did then. Rows are walked in id order, which is the order they were written.
+// TODO(#409): remove the reopen handling here once no older Pages build that
+// reads the `resolved` field can be live.
 export async function getResolvedTargets(
   db: D1Database,
   opts?: { chunkSize?: number }

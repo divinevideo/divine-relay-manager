@@ -360,6 +360,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // returns to the queue depends on resolvedTargets, which is also built
       // from relay bans and deletions that reopen never undoes -- so a
       // ban-resolved report stays hidden even on a fully clean run.
+      // TODO(#409): remove the labelCleanupFailed toast branch (and labelsDeleted
+      // handling); only a pre-#324 worker sets it.
       toast(labelCleanupFailed
         ? {
             // Only a worker from before #324 reports this: it deleted the
