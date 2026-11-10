@@ -2640,16 +2640,6 @@ const LIFT_REFUSAL_TEXT = {
   },
 } as const;
 
-// The refusal for an `uploader` that is present but not an account's pubkey,
-// from the lift check and from mediaLiftGuard itself.
-function invalidUploaderResponse(corsHeaders: Record<string, string>): Response {
-  return jsonResponse(
-    { success: false, error: "`uploader` must be the account's 64-character lowercase hex pubkey; omit it when there is none", code: 'invalid_uploader' },
-    400,
-    corsHeaders
-  );
-}
-
 // The age-review lift guard (#335). A file whose owner has an open age review
 // is made more visible only through that case, whoever asks: an Unblock,
 // Remove Restriction or Age Restrict on a single post, an automated caller, a
@@ -2707,10 +2697,10 @@ function invalidUploaderResponse(corsHeaders: Record<string, string>): Response 
 //     file: it is checked because it may not. One that is the owner is
 //     checked once.
 //   - An `uploader` that is present but not 64 lowercase hex is refused
-//     (400) before anything is read. The lift check refuses one first; the
-//     guard repeats it rather than rest on its caller, because
-//     ageReviewActiveGuard answers "no case" for a non-canonical pubkey, so
-//     one that reached the lookup would be allowed, not refused.
+//     (400) before anything is read. The guard is the only check on it, so
+//     no caller can skip it: ageReviewActiveGuard answers "no case" for a
+//     non-canonical pubkey, so one that reached the lookup would be
+//     allowed, not refused.
 // Returns the refusal to answer with, or the lowercased hash that was checked.
 // Exported for tests.
 export async function mediaLiftGuard(
@@ -2729,7 +2719,11 @@ export async function mediaLiftGuard(
     );
   }
   if (uploader !== undefined && (typeof uploader !== 'string' || !isLowerHex64(uploader))) {
-    return invalidUploaderResponse(corsHeaders);
+    return jsonResponse(
+      { success: false, error: "`uploader` must be the account's 64-character lowercase hex pubkey; omit it when there is none", code: 'invalid_uploader' },
+      400,
+      corsHeaders
+    );
   }
   const sha256 = rawSha256.toLowerCase();
   let file: BlossomBlob;
@@ -2835,11 +2829,12 @@ export async function mediaLiftGuard(
 // server's owner, so the guard checks that account's open case as well. It is
 // read only for a SAFE or AGE_RESTRICTED. Absent, the guard checks the owner
 // alone, as /api/moderate-media does. Anything but 64 lowercase hex, null
-// included, is refused, as a malformed `from` is: a caller that sends one is
-// asking for the check, and reading it as absent would answer 200 without
-// running it. Writes no media decision; the caller writes. The guard's
-// ensureAgeReviewSchema may run the per-isolate schema bootstrap and its
-// backfills of older rows, as it does for /api/moderate-media.
+// included, is refused by the guard before it reads anything, as a malformed
+// `from` is: a caller that sends one is asking for the check, and reading it
+// as absent would answer 200 without running it. Writes no media decision;
+// the caller writes. The guard's ensureAgeReviewSchema may run the
+// per-isolate schema bootstrap and its backfills of older rows, as it does
+// for /api/moderate-media.
 // Check-then-act, as on /api/moderate-media: the caller's write is a
 // separate request, so a case opened between the two is not seen.
 async function handleMediaLiftCheck(
@@ -2861,9 +2856,6 @@ async function handleMediaLiftCheck(
     }
     if (!isLiftAction(action)) {
       return jsonResponse({ success: false, error: `Unknown action ${JSON.stringify(body.action)}`, code: 'invalid_action' }, 400, corsHeaders);
-    }
-    if (body.uploader !== undefined && !isLowerHex64(body.uploader)) {
-      return invalidUploaderResponse(corsHeaders);
     }
     // This route writes nothing to moderation-service, so its credentials are
     // built only if the guard reads the file's record.

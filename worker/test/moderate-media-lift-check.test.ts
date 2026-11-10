@@ -433,9 +433,9 @@ describe('/api/moderate-media/lift-check with the recorded uploader', () => {
     },
   );
 
-  // The guard refuses a malformed uploader itself, so a caller that skips the
-  // route's validation still fails closed: ageReviewActiveGuard answers "no
-  // case" for a non-canonical pubkey, which would allow the lift.
+  // The guard is the only check on `uploader`, so any caller fails closed on a
+  // malformed one: ageReviewActiveGuard answers "no case" for a non-canonical
+  // pubkey, which would allow the lift.
   it.each(['SAFE', 'AGE_RESTRICTED'].flatMap((action) => INVALID_UPLOADERS.map(([label, uploader]) => [action, label, uploader] as const)))(
     'is refused by mediaLiftGuard itself on a %s when the uploader is %s, before reading anything',
     async (action, _label, uploader) => {
