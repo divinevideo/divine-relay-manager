@@ -2171,7 +2171,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           </Collapsible>
 
           {/* Queue switches share one row and wrap on narrow screens. */}
-          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2 pt-3 border-t">
+          <div className="flex flex-wrap items-center gap-x-6 gap-y-2 pt-3 border-t">
             {/* Pending review filter */}
             {/* Stays rendered while on, even at zero: finishing the last item
                 would otherwise remove the only way back, since Hide resolved
@@ -2202,8 +2202,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
               </div>
             )}
 
-            {/* Hide resolved toggle */}
-            <div className="flex items-center gap-2">
+            {/* Hide resolved toggle. Pinned to the right end, so it does not
+                jump sideways when a poll shows or hides Pending review. */}
+            <div className="flex items-center gap-2 ml-auto">
               <Label htmlFor="hide-resolved" className="text-xs text-muted-foreground flex items-center gap-1.5">
                 <CheckCircle className="h-3 w-3 text-green-500" />
                 Hide resolved
