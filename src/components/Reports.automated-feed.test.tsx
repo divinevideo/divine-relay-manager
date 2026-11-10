@@ -1,5 +1,5 @@
 // ABOUTME: Targets only the worker's own decisions resolved, as the needs-attention feed now carries them:
-// ABOUTME: a CSAM one goes behind the switch, any other is hidden by Hide resolved and listed from the feed.
+// ABOUTME: a CSAM one goes behind the switch; any other is listed (hidden by Hide resolved only against an older worker).
 
 import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -67,6 +67,7 @@ function stubWorker({
   automatedTargets = [],
   resolved = [],
   targeted = {},
+  handlingRows,
 }: {
   feed: unknown[];
   automatedTargets?: string[];
@@ -74,6 +75,9 @@ function stubWorker({
   resolved?: Resolved[];
   // A deep link's targeted lookup, keyed by the target's hex.
   targeted?: Record<string, unknown[]>;
+  // /api/resolution-state's handling_rows, from a worker with the
+  // handled-before rule (#324). Absent: a worker from before it.
+  handlingRows?: unknown[];
 }) {
   const calls = { history: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -92,7 +96,9 @@ function stubWorker({
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
-    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved, states: [] });
+    if (url.includes('/api/resolution-state')) {
+      return jsonResponse({ success: true, resolved, states: [], ...(handlingRows ? { handling_rows: handlingRows } : {}) });
+    }
     if (url.includes('/api/relay-rpc')) {
       const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
       if (method === 'listbannedpubkeys' || method === 'listbannedevents') return jsonResponse({ success: true, result: [] });
@@ -156,6 +162,41 @@ describe('a target only automation resolved, from the needs-attention feed', () 
     // Resolved history answered with nothing, so the row is the feed's.
     await waitFor(() => expect(calls.history).toBeGreaterThan(0));
     expect(await screen.findByText(NPUB_SPAM_PROFILE)).toBeInTheDocument();
+  });
+});
+
+// Under the handled-before rule (#324) only what a person did counts, so a
+// target only automation touched is not resolved (#332).
+describe('a target only automation resolved, against a worker with the handled-before rule', () => {
+  const automatedRow = (pubkey: string) =>
+    ({ target_type: 'pubkey', target_id: pubkey, action: 'age_review_case_created', moderator_pubkey: 'auto', at: 1751000100 });
+
+  it('stays in the main list with Hide resolved on', async () => {
+    stubWorker({
+      feed: [SPAM_PROFILE_REPORT, SPAM_REPORT],
+      automatedTargets: [`pubkey:${SPAM_PROFILE}`],
+      resolved: [{ target_type: 'pubkey', target_id: SPAM_PROFILE, automated: true }],
+      handlingRows: [automatedRow(SPAM_PROFILE)],
+    });
+    render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+    await screen.findByText(NOTE_SPAM);
+    expect(screen.getByRole('switch', { name: /hide resolved/i })).toBeChecked();
+    expect(screen.getByText(NPUB_SPAM_PROFILE)).toBeInTheDocument();
+  });
+
+  it('still goes behind the switch when it carries a CSAM signal', async () => {
+    stubWorker({
+      feed: [CSAM_REPORT, SPAM_REPORT],
+      automatedTargets: [`pubkey:${CSAM_PROFILE}`],
+      resolved: [{ target_type: 'pubkey', target_id: CSAM_PROFILE, automated: true }],
+      handlingRows: [automatedRow(CSAM_PROFILE)],
+    });
+    render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+    await screen.findByText(NOTE_SPAM);
+    expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+    expect(switchLabelText()).toBe('Pending review (sensitive)1');
   });
 });
 

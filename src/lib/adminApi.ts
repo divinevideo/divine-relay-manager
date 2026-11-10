@@ -21,6 +21,7 @@ import {
   type MediaFiles,
 } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
+import type { HandlingRow } from "../../shared/handling";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 import { handleLoginRefusal, isModeratorLoginRequired } from "./moderatorLoginRequired";
 import type {
@@ -602,8 +603,16 @@ export async function fetchReportsByTarget(
 // each ban list keeps its own failure handling (#221). So are targets only the
 // worker's own decisions resolved: no person has handled them, so the
 // sensitive switch must be able to take them. `automatedTargets` holds their
-// keys, which the queue's Hide resolved still counts as resolved (#332). A
-// worker from before this field sends none and leaves those targets out.
+// keys. Under the handled-before rule (#324) Hide resolved does not count
+// them, as no person handled them (#332); against a worker without that rule
+// it still does. A worker from before this field sends none and leaves those
+// targets out.
+//
+// `reportArrivals` (#324) is when the worker first saw each returned report,
+// the time the handled-before rule compares; a report without one compares by
+// its created_at. Read but not `handled_before`: the queue dates every target
+// itself, so it agrees with the worker for the reports deep links and
+// resolved history add too.
 //
 // `truncated` means the worker's walk over the relay's reports stopped at its
 // page bound, so older reports may be missing. The response's `counts` are
@@ -620,6 +629,20 @@ export interface ReportsNeedingAttention {
   // plain array, not a Set: TanStack Query keeps the previous data only for
   // plain values, so a Set here rebuilt the whole queue on every unchanged poll.
   automatedTargets: readonly string[];
+  // Unix seconds by report id, from `report_arrivals`. Empty from a worker
+  // that predates it. A plain object for the same reason as automatedTargets.
+  reportArrivals: Readonly<Record<string, number>>;
+}
+
+// Only finite numbers: anything else is no arrival, and the report compares
+// by its created_at.
+function parseReportArrivals(value: unknown): Record<string, number> {
+  const arrivals: Record<string, number> = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return arrivals;
+  for (const [id, seenAt] of Object.entries(value)) {
+    if (typeof seenAt === 'number' && Number.isFinite(seenAt)) arrivals[id] = seenAt;
+  }
+  return arrivals;
 }
 
 export async function fetchReportsNeedingAttention(apiUrl: string): Promise<ReportsNeedingAttention> {
@@ -629,6 +652,7 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     truncated?: boolean;
     oldest_covered?: number | null;
     automated_targets?: unknown;
+    report_arrivals?: unknown;
     error?: string;
   }>(apiUrl, '/api/reports?needs_attention=1', 'GET');
 
@@ -644,6 +668,7 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     automatedTargets: Array.isArray(data.automated_targets)
       ? data.automated_targets.filter((key): key is string => typeof key === 'string')
       : [],
+    reportArrivals: parseReportArrivals(data.report_arrivals),
   };
 }
 
@@ -757,9 +782,29 @@ export async function fetchResolutionLabels(
 
 export interface ResolutionStateResult {
   // automated: the worker itself wrote every decision that resolves this
-  // target. Hide resolved still counts it; the sensitive switch does not.
+  // target. Hide resolved counts it only against a worker without
+  // handlingRows (#332); the sensitive switch does not.
   resolved: Array<{ target_type: string; target_id: string; automated?: boolean }>;
   states: Array<{ target_type: string; target_id: string; action: string }>;
+  // Every event and pubkey decision row, auto-hide actions left out, each
+  // dated in unix seconds (null for a row written before decisions were
+  // dated): the handled-before rule's input (#324), which the queue reduces
+  // with the worker's own handlingByTarget. Undefined from a worker that
+  // predates it, which keeps the queue on the membership rule.
+  handlingRows?: HandlingRow[];
+}
+
+// A row missing a field it needs is dropped: dropping handling shows more
+// reports, never fewer.
+function parseHandlingRows(value: unknown): HandlingRow[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  return value.filter((row): row is HandlingRow =>
+    !!row && typeof row === 'object'
+    && typeof row.target_type === 'string'
+    && typeof row.target_id === 'string'
+    && typeof row.action === 'string'
+    && (row.at === null || (typeof row.at === 'number' && Number.isFinite(row.at)))
+    && (row.moderator_pubkey === undefined || row.moderator_pubkey === null || typeof row.moderator_pubkey === 'string'));
 }
 
 export async function fetchResolutionState(
@@ -770,6 +815,7 @@ export async function fetchResolutionState(
     success: boolean;
     resolved?: ResolutionStateResult['resolved'];
     states?: ResolutionStateResult['states'];
+    handling_rows?: unknown;
     error?: string;
   }>(apiUrl, '/api/resolution-state', 'GET', undefined, opts);
 
@@ -778,11 +824,17 @@ export async function fetchResolutionState(
     throw new ApiError(data.error || 'Failed to get resolution state');
   }
 
-  return { resolved: data.resolved || [], states: data.states || [] };
+  return {
+    resolved: data.resolved || [],
+    states: data.states || [],
+    handlingRows: parseHandlingRows(data.handling_rows),
+  };
 }
 
 export interface ResolutionLabelTargetsResult {
-  targets: Array<{ type: 'event' | 'pubkey'; value: string }>;
+  // `at` (#324): unix seconds of the newest label on the target. Absent from a
+  // worker that predates it, which keeps the queue on the membership rule.
+  targets: Array<{ type: 'event' | 'pubkey'; value: string; at?: number }>;
   truncated: boolean;
   oldestCovered: number | null;
 }

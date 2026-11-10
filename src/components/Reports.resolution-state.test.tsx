@@ -96,6 +96,14 @@ interface SourceState {
   // they disagree, which must not cross-resolve (the burying case).
   secondAuthoredEventReportP?: string;
   secondAuthoredEventReportWithoutP?: boolean;
+  // A worker with the handled-before rule (#324): /api/resolution-state sends
+  // these as handling_rows, and /api/resolution-label-targets sends
+  // `datedLabels` in place of the targets `labels` would. Both absent: a
+  // worker from before it, which sends neither.
+  handlingRows?: unknown[];
+  datedLabels?: unknown[];
+  // The feed's report_arrivals: first-seen unix seconds by report id.
+  reportArrivals?: Record<string, number>;
 }
 
 function stubFetch(state: SourceState) {
@@ -120,7 +128,11 @@ function stubFetch(state: SourceState) {
           tags: [['e', AUTHORED_EVENT_ID, 'spam']],
         });
       }
-      return jsonResponse({ success: true, events });
+      return jsonResponse({
+        success: true,
+        events,
+        ...(state.reportArrivals ? { report_arrivals: state.reportArrivals } : {}),
+      });
     }
 
     // The worker now reduces every page of resolution labels to target keys,
@@ -128,6 +140,9 @@ function stubFetch(state: SourceState) {
     if (url.includes('/api/resolution-label-targets')) {
       if (slow.has('labels')) return never;
       if (state.labels === 'error') return jsonResponse({ success: false, error: 'relay timeout' }, 502);
+      if (state.datedLabels) {
+        return jsonResponse({ success: true, targets: state.datedLabels, truncated: false, oldest_covered: null });
+      }
       return jsonResponse({
         success: true,
         targets: state.labels === 'resolves' || state.labels === 'resolves-uppercase'
@@ -149,6 +164,7 @@ function stubFetch(state: SourceState) {
           ? [{ target_type: 'pubkey', target_id: state.decisions === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase() }]
           : [],
         states: [],
+        ...(state.handlingRows ? { handling_rows: state.handlingRows } : {}),
       });
     }
 
@@ -389,6 +405,137 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
 
     await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
     expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+  });
+});
+
+// A report counts as handled only when a person handled its target after the
+// report arrived (#324). The screen dates every target from the worker's
+// handling_rows and the dated label targets, as the worker's feed does.
+describe('the handled-before rule (#324)', () => {
+  const T = REPORT.created_at;
+  const MODERATOR = '1'.repeat(64);
+  const row = (target_type: string, target_id: string, action: string, at: number | null, moderator_pubkey = MODERATOR) =>
+    ({ target_type, target_id, action, moderator_pubkey, at });
+  const healthy = { bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' } as const;
+
+  it('takes a target handled before its newest report out of the main list, keeps an older one hidden, and lists both with Hide resolved off', async () => {
+    stubFetch({
+      ...healthy,
+      // A worker with the rule still sends `resolved`, as before.
+      decisions: 'resolves',
+      includeEventReport: true,
+      // An unhandled post by an unhandled account: the control row.
+      authoredEventReportP: 'f'.repeat(64),
+      handlingRows: [
+        // The account was handled 50s before its report arrived.
+        row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 50),
+        // The post was handled 50s after its report arrived.
+        row('event', REPORTED_EVENT_ID, 'delete_event', EVENT_REPORT.created_at + 50),
+      ],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NOTE)).not.toBeInTheDocument();
+
+    // Hide resolved off: the newer report stays where the feed put it.
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.getByText(REPORTED_NOTE)).toBeInTheDocument();
+    // Only the post counts as resolved: the account has a report no one has
+    // answered yet.
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // Reopen ends the handling before it. A resolution label is never banned
+  // any more, so only its date against the reopen can tell it no longer counts.
+  it('lists a target whose label a later reopen cancelled', async () => {
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50)],
+      datedLabels: [{ type: 'pubkey', value: REPORTED_PUBKEY, at: T - 100 }],
+    });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  it("keeps today's list against a worker that sends neither handling rows nor label dates", async () => {
+    // The same label, from a worker that predates the rule: it hides the target.
+    stubFetch({ ...healthy, labels: 'resolves' });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
+  it("keeps today's list when label targets come without dates, even beside handling rows", async () => {
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50)],
+      datedLabels: [{ type: 'pubkey', value: REPORTED_PUBKEY }],
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
+  // The worker compares by when it saw a report arrive; the screen must too,
+  // or it calls a backdated report handled that the worker kept as new.
+  it('compares a report by its arrival time from the feed', async () => {
+    const base = {
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T + 10)],
+      datedLabels: [],
+    };
+    stubFetch({ ...base, reportArrivals: { [REPORT.id]: T + 20 } });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(await screen.findByText('No resolved reports.')).toBeInTheDocument();
+  });
+
+  it('compares a report with no arrival by its created_at', async () => {
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T + 10)],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // Spec decision 3: a post by a banned account is compared with the
+  // account's dated ban, not hidden for good by it.
+  it("compares a banned author's post report with the author's dated ban", async () => {
+    stubFetch({
+      ...healthy,
+      bannedPubkeys: 'resolves',
+      authoredEventReportP: REPORTED_PUBKEY,
+      // Banned 10s after the account's own report, 50s before the post's.
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T + 10)],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+    // The account's report is resolved; the post's report came after the ban.
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
   });
 });
 

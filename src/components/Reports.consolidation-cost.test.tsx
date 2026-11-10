@@ -8,7 +8,7 @@ import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { consolidateReports } from '@/lib/consolidateReports';
-import { isConsolidatedReportResolved } from '@/lib/reportResolution';
+import { groupResolutionStatus, reportResolutionStatus } from '@/lib/reportResolution';
 import { Reports } from './Reports';
 
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
@@ -19,7 +19,12 @@ vi.mock('@/lib/consolidateReports', async importOriginal => {
 });
 vi.mock('@/lib/reportResolution', async importOriginal => {
   const actual = await importOriginal<typeof import('@/lib/reportResolution')>();
-  return { ...actual, isConsolidatedReportResolved: vi.fn(actual.isConsolidatedReportResolved) };
+  // The screen's two ways in: a target's group, and a single report.
+  return {
+    ...actual,
+    groupResolutionStatus: vi.fn(actual.groupResolutionStatus),
+    reportResolutionStatus: vi.fn(actual.reportResolutionStatus),
+  };
 });
 
 function report(id: string, createdAt: number, targetTag: string[]) {
@@ -96,12 +101,14 @@ describe('grouping the needs-attention feed', () => {
     renderQueue();
     expect(await screen.findByText(nip19.noteEncode(FIRST_EVENT))).toBeInTheDocument();
     expect(screen.getByText('just now')).toBeInTheDocument();
-    expect(vi.mocked(isConsolidatedReportResolved)).toHaveBeenCalled();
+    expect(vi.mocked(groupResolutionStatus)).toHaveBeenCalled();
 
-    vi.mocked(isConsolidatedReportResolved).mockClear();
+    vi.mocked(groupResolutionStatus).mockClear();
+    vi.mocked(reportResolutionStatus).mockClear();
     await act(async () => { vi.advanceTimersByTime(5000); });
 
     expect(screen.getByText('5s ago')).toBeInTheDocument();
-    expect(vi.mocked(isConsolidatedReportResolved)).not.toHaveBeenCalled();
+    expect(vi.mocked(groupResolutionStatus)).not.toHaveBeenCalled();
+    expect(vi.mocked(reportResolutionStatus)).not.toHaveBeenCalled();
   });
 });
