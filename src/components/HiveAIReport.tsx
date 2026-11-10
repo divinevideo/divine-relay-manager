@@ -101,6 +101,7 @@ const ACTION_CONFIG: Record<string, { label: string; icon: typeof ShieldCheck; c
   FLAGGED: { label: 'Flagged', icon: ShieldAlert, color: 'text-orange-500' },
   QUARANTINE: { label: 'Quarantined', icon: ShieldX, color: 'text-red-500' },
   PERMANENT_BAN: { label: 'Banned', icon: ShieldX, color: 'text-red-600' },
+  DELETE: { label: 'Deleted', icon: ShieldX, color: 'text-red-600' },
 };
 
 function formatDate(dateStr: string | undefined): string {

@@ -100,6 +100,15 @@ describe('HiveAIReport', () => {
     expectOnlyReads();
   });
 
+  it('labels a deleted file Deleted, not Needs Review', async () => {
+    // What /api/v1/moderate records when a moderator deletes the file.
+    respond(200, JSON.stringify({ sha256: SHA, action: 'DELETE', provider: 'relay-manager', scores: {} }));
+    render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
+
+    expect(await screen.findByText('Deleted')).toBeInTheDocument();
+    expect(screen.queryByText('Needs Review')).not.toBeInTheDocument();
+  });
+
   it('shows an unparseable check time as stored instead of "Invalid Date"', async () => {
     respond(200, JSON.stringify({ sha256: SHA, action: 'SAFE', scores: {}, moderated_at: 'not-a-date' }));
     render(<TestApp><HiveAIReport eventTags={TAGS} /></TestApp>);
