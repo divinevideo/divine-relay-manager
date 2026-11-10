@@ -62,7 +62,7 @@ import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { handlePrivateReport, type PrivateReportEnv } from './private-reports';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
-import { MODERATOR_LOGIN_HEADER, noteClaimedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
+import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, noteClaimedModerator, requireVerifiedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -463,17 +463,19 @@ const ACCESS_UNAVAILABLE = {
 //      header alone proves nothing: service bindings reach this Worker without
 //      passing through Access, and so would workers.dev or preview URLs.
 // The keys are checked first so server-to-server calls never fetch Access certs.
-// Returns null if authorized, or the status and error to answer with if not.
+// Returns which credential let the request in ('admin-key' for a matching key,
+// 'access' for a verified Access token), or the status and error to answer with.
+// The login gate keys off `via`: only 'access' requests are the admin UI.
 async function verifyAdminAccess(
   request: Request,
   env: Env,
   options: { allowModRelayAdminKey?: boolean } = {}
-): Promise<{ status: 401 | 503; error: string; code?: string } | null> {
+): Promise<{ status: 401 | 503; error: string; code?: string } | { via: 'admin-key' | 'access' }> {
   // Server-to-server callers use a shared API key, compared in constant time.
   const adminKey = request.headers.get('X-Admin-Key');
   if (adminKey) {
     if (env.ADMIN_API_KEY && secretsMatch(adminKey, env.ADMIN_API_KEY)) {
-      return null;
+      return { via: 'admin-key' };
     }
     if (options.allowModRelayAdminKey) {
       // Dedicated moderation-service key (Secrets Store), accepted in addition to
@@ -481,7 +483,7 @@ async function verifyAdminAccess(
       try {
         const modRelayKey = await resolveSecret(env.MOD_RELAY_ADMIN_KEY);
         if (modRelayKey && secretsMatch(adminKey, modRelayKey)) {
-          return null;
+          return { via: 'admin-key' };
         }
       } catch (error) {
         // This credential failed; a separately valid Access token can still authorize.
@@ -513,7 +515,7 @@ async function verifyAdminAccess(
   });
   // The claims aren't kept: the admin UI reaches this API with a shared
   // Access service token, so they name that token, not a moderator.
-  if (claims) return null;
+  if (claims) return { via: 'access' };
   return unavailable ? ACCESS_UNAVAILABLE : UNAUTHORIZED_ADMIN;
 }
 
@@ -606,24 +608,36 @@ export default {
       // only creates review items (a Coop item or an age-review case) and
       // enforces nothing. The key still opens no route that writes media
       // decisions.
-      const adminAuthError = await verifyAdminAccess(request, env, {
+      const adminAuth = await verifyAdminAccess(request, env, {
         allowModRelayAdminKey: request.method === 'POST'
           && (path === '/api/relay-rpc' || path === '/api/moderate-media/lift-check'
             || path === '/api/internal/private-reports'),
       });
-      if (adminAuthError) {
-        const { status, error, code } = adminAuthError;
+      if (!('via' in adminAuth)) {
+        const { status, error, code } = adminAuth;
         return jsonResponse({ success: false, error, ...(code ? { code } : {}) }, status, corsHeaders);
       }
 
       // The moderator's verified pubkey, from their Divine login. Checked once
       // per request and only past the access gate, so an unauthenticated caller
       // cannot make the worker call Keycast. undefined means no header or a
-      // failed check; a failed check never blocks an action, it only leaves the
-      // action unattributed.
+      // failed check. With REQUIRE_MODERATOR_LOGIN off, a failed check never
+      // blocks an action, it only leaves it unattributed; with it on, the gate
+      // below refuses the action.
       const moderator: string | undefined = request.headers.has(MODERATOR_LOGIN_HEADER)
         ? await verifyModeratorLogin(env, request.headers.get(MODERATOR_LOGIN_HEADER))
         : undefined;
+
+      // With REQUIRE_MODERATOR_LOGIN on, a write from the admin UI (it reaches
+      // this API through Cloudflare Access) needs a verified login. This fails
+      // closed: no token, a refused token, and a Keycast outage all get the same
+      // 401, so no moderation action goes unattributed. Server callers on an
+      // admin key are not moderators and are left alone. The setting is the
+      // off switch for an extended Keycast outage.
+      if (adminAuth.via === 'access' && moderatorLoginRequired(env) && await needsModeratorLogin(request, path)) {
+        const gate = requireVerifiedModerator(moderator, corsHeaders);
+        if (gate instanceof Response) return gate;
+      }
 
       // Standalone media viewer, linked from a Coop review card. Behind the same
       // CF Access + verifyAdminAccess gate as everything above, so only an

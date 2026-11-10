@@ -1,7 +1,8 @@
 // ABOUTME: Displays Hive AI moderation results from the divine-moderation-service
 // ABOUTME: Shows confidence scores, classification categories, timestamps, and re-check ability
 
-import { getApiHeaders, type MediaStatusAction } from "@/lib/adminApi";
+import { getApiHeaders, loginHeader, type MediaStatusAction } from "@/lib/adminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Badge } from "@/components/ui/badge";
@@ -162,6 +163,7 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
   const [isSubmitting, setIsSubmitting] = useState(false);
   const queryClient = useQueryClient();
   const apiUrl = useApiUrl();
+  const { getModeratorToken } = useCurrentUser();
 
   // Determine sha256 from props or tags
   const sha256 = providedSha256 || (eventTags ? extractSha256FromTags(eventTags) : null);
@@ -214,7 +216,8 @@ export function HiveAIReport({ sha256: providedSha256, videoUrl: providedVideoUr
       // Call the worker to trigger a moderation check
       const response = await fetch(`${apiUrl}/api/moderate-check`, {
         method: 'POST',
-        headers: getApiHeaders(),
+        // A write: carries the login, taken at the click.
+        headers: { ...getApiHeaders(), ...loginHeader(getModeratorToken()) },
         body: JSON.stringify({ url: videoUrl, sha256 }),
       });
 

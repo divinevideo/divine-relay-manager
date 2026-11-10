@@ -1,5 +1,5 @@
-// ABOUTME: Pins that every attribution call made through asModerator(token) sends
-// ABOUTME: the X-Divine-Login-Token header, and the plain useAdminApi() has none of them (#178).
+// ABOUTME: Pins that every write made through asModerator(token) sends the
+// ABOUTME: X-Divine-Login-Token header, and the plain useAdminApi() has none of them (#178).
 import { renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { buildAdminApi, useAdminApi, type ModeratorApi, type PlainAdminApi } from './useAdminApi';
@@ -9,7 +9,7 @@ import { buildAdminApi, useAdminApi, type ModeratorApi, type PlainAdminApi } fro
 // wrapper that forgets to pass `{ loginToken }` on leaves that action
 // unattributed while tsc and the component tests (which mock this hook) stay
 // green. This table runs the REAL wrappers over the REAL adminApi down to fetch.
-// A new attribution function belongs in it.
+// A new write belongs in it.
 
 const API_URL = 'https://api.example';
 const TOKEN = 'login-token-under-test';
@@ -47,6 +47,15 @@ const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]
   ['callRelayRpc', (a) => a.callRelayRpc('unbanpubkey', [PK])],
   ['banEvent', (a) => a.banEvent('e1', 'r')],
   ['allowEvent', (a) => a.allowEvent('e1')],
+  // Writes that record no moderator still need the login once
+  // REQUIRE_MODERATOR_LOGIN is on, or the worker refuses them.
+  ['moderateMedia', (a) => a.moderateMedia('f'.repeat(64), 'SAFE', 'r')],
+  ['deleteMedia', (a) => a.deleteMedia('f'.repeat(64), 'r')],
+  ['unblockMedia', (a) => a.unblockMedia('f'.repeat(64), 'r')],
+  ['deleteDecisions', (a) => a.deleteDecisions('e1', 'event')],
+  ['updateAgeReviewConfig', (a) => a.updateAgeReviewConfig({ auto_delete_on_deny: true })],
+  ['createMinorAccount', (a) => a.createMinorAccount('kid', 'Kid', 12, 'op-1')],
+  ['submitAIDetection', (a) => a.submitAIDetection('https://v.example/x.mp4', 'f'.repeat(64), 'e1')],
 ];
 
 const mockFetch = vi.fn();
@@ -92,7 +101,8 @@ describe('useAdminApi attribution header', () => {
 
   // An action has to take the login at the click to record a moderator, so the
   // plain api leaves every attribution call out, at runtime as well as in its
-  // type. callRelayRpc stays for reads (RelaySettings' relay-config methods).
+  // type. callRelayRpc stays for relay reads (list*, get*); relay writes,
+  // RelaySettings' config changes included, go through asModerator.
   it.each(ATTRIBUTION_CALLS.filter(([name]) => name !== 'callRelayRpc'))(
     'the plain api has no %s', (name) => {
       const { result } = renderHook(() => useAdminApi());
@@ -176,6 +186,20 @@ export function plainApiHasNoAttributionCalls(api: PlainAdminApi): void {
   void api.bulkModerate;
   // @ts-expect-error attribution calls go through asModerator(token)
   void api.closeTicket;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.moderateMedia;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.deleteMedia;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.unblockMedia;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.deleteDecisions;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.updateAgeReviewConfig;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.createMinorAccount;
+  // @ts-expect-error writes go through asModerator(token)
+  void api.submitAIDetection;
   // Reads stay, and so does callRelayRpc.
   void api.listBannedPubkeys;
   void api.callRelayRpc;

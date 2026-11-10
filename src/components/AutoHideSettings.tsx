@@ -9,7 +9,8 @@ import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useToast } from "@/hooks/useToast";
-import { getApiHeaders } from "@/lib/adminApi";
+import { getApiHeaders, loginHeader } from "@/lib/adminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Shield, X, Plus, Save, AlertTriangle, Clock } from "lucide-react";
 import {
   isImmediateAutoHideTier,
@@ -132,6 +133,7 @@ function TierConfig({
 
 export function AutoHideSettings() {
   const { config: appConfig } = useAppContext();
+  const { getModeratorToken } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -160,7 +162,8 @@ export function AutoHideSettings() {
     mutationFn: async (config: AutoHideConfig) => {
       const res = await fetch(`${appConfig.apiUrl}/api/report-watcher/config`, {
         method: "PUT",
-        headers: getApiHeaders(),
+        // A write: carries the login, taken at the click.
+        headers: { ...getApiHeaders(), ...loginHeader(getModeratorToken()) },
         body: JSON.stringify(config),
       });
       const body = await res.json() as { success: boolean; config?: AutoHideConfig; error?: string };
@@ -282,6 +285,7 @@ export function AutoHideSettings() {
 
 export function AgeReviewSettings() {
   const api = useAdminApi();
+  const { getModeratorToken } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
@@ -291,7 +295,8 @@ export function AgeReviewSettings() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: (config: { auto_delete_on_deny: boolean }) => api.updateAgeReviewConfig(config),
+    mutationFn: (config: { auto_delete_on_deny: boolean }) =>
+      api.asModerator(getModeratorToken()).updateAgeReviewConfig(config),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['age-review-config'] });
       toast({ title: 'Age review configuration updated' });

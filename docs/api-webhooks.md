@@ -23,12 +23,17 @@ CF-Access-Client-Secret: <your-client-secret>
 
 Routes that record who acted take the moderator from the `X-Divine-Login-Token`
 header, which carries the moderator's Divine login token. The worker checks it
-with Keycast and records the verified pubkey. A missing header or a failed check
-never refuses the request; the action records the route's "no human named" value
-instead, as listed under
+with Keycast and records the verified pubkey. With `REQUIRE_MODERATOR_LOGIN` off
+(the default), a missing header or a failed check never refuses the request; the
+action records the route's "no human named" value instead, as listed under
 [Goals](superpowers/specs/2026-11-04-moderator-identity-phase2-design.md#goals) in
-the phase 2 design. A moderator named in the request body (`moderatorPubkey`,
-`moderator_pubkey`, `actor`) is never recorded.
+the phase 2 design. With it on, a write that reaches the API through Cloudflare
+Access (anything but GET or HEAD, apart from the read-only calls listed in
+`DEPLOYMENT.md`) needs a verified login or gets a 401 with code
+`moderator_login_required`. That includes an external service on a service token
+above; a caller on a matching `X-Admin-Key` is not affected. A moderator named in
+the request body (`moderatorPubkey`, `moderator_pubkey`, `actor`) is never
+recorded.
 
 ### Webhook Signature Verification
 

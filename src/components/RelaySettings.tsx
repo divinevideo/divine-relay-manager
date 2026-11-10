@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -23,7 +24,12 @@ interface RelaySettingsProps {
 export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
-  const { callRelayRpc } = useAdminApi();
+  const api = useAdminApi();
+  const { callRelayRpc } = api; // reads only
+  const { getModeratorToken } = useCurrentUser();
+  // Relay config changes are writes: they carry the login, taken at the click.
+  const relayWrite = (method: string, params: (string | number | undefined)[]) =>
+    api.asModerator(getModeratorToken()).callRelayRpc(method, params);
   
   // Form states
   const [relayName, setRelayName] = useState("");
@@ -53,7 +59,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for changing relay name
   const changeNameMutation = useMutation({
-    mutationFn: (name: string) => callRelayRpc('changerelayname', [name]),
+    mutationFn: (name: string) => relayWrite('changerelayname', [name]),
     onSuccess: () => {
       toast({ title: "Relay name updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['relay-info', relayUrl] });
@@ -69,7 +75,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for changing relay description
   const changeDescriptionMutation = useMutation({
-    mutationFn: (description: string) => callRelayRpc('changerelaydescription', [description]),
+    mutationFn: (description: string) => relayWrite('changerelaydescription', [description]),
     onSuccess: () => {
       toast({ title: "Relay description updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['relay-info', relayUrl] });
@@ -85,7 +91,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for changing relay icon
   const changeIconMutation = useMutation({
-    mutationFn: (icon: string) => callRelayRpc('changerelayicon', [icon]),
+    mutationFn: (icon: string) => relayWrite('changerelayicon', [icon]),
     onSuccess: () => {
       toast({ title: "Relay icon updated successfully" });
       queryClient.invalidateQueries({ queryKey: ['relay-info', relayUrl] });
@@ -103,7 +109,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   const manageKindMutation = useMutation({
     mutationFn: ({ kind, action }: { kind: number; action: 'allow' | 'disallow' }) => {
       const method = action === 'allow' ? 'allowkind' : 'disallowkind';
-      return callRelayRpc(method, [kind]);
+      return relayWrite(method, [kind]);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['allowed-kinds', relayUrl] });
@@ -123,7 +129,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
   // Mutation for blocking IPs
   const blockIpMutation = useMutation({
     mutationFn: ({ ip, reason }: { ip: string; reason?: string }) =>
-      callRelayRpc('blockip', [ip, reason]),
+      relayWrite('blockip', [ip, reason]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['blocked-ips', relayUrl] });
       toast({ title: "IP blocked successfully" });
@@ -142,7 +148,7 @@ export function RelaySettings({ relayUrl }: RelaySettingsProps) {
 
   // Mutation for unblocking IPs
   const unblockIpMutation = useMutation({
-    mutationFn: (ip: string) => callRelayRpc('unblockip', [ip]),
+    mutationFn: (ip: string) => relayWrite('unblockip', [ip]),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ['blocked-ips', relayUrl] });
       toast({ title: "IP unblocked successfully" });
