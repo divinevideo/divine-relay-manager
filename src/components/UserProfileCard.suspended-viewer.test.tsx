@@ -23,7 +23,6 @@ vi.mock('@/components/MediaPreview', () => ({
   InlineMediaPreview: () => null,
   MediaPreview: (props: { showByDefault?: boolean | null }) => <div data-testid="viewer-media" data-show={String(props.showByDefault)} />,
 }));
-vi.mock('@/components/NoteContent', () => ({ NoteContent: ({ event }: { event: { content: string } }) => <p>{event.content}</p> }));
 
 const fetchMock = vi.fn();
 beforeEach(() => {

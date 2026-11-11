@@ -9,7 +9,6 @@ import { Button } from '@/components/ui/button';
 import { CopyableId } from '@/components/CopyableId';
 import { ForeignAuthorWarning } from '@/components/ForeignAuthorWarning';
 import { MediaPreview } from '@/components/MediaPreview';
-import { NoteContent } from '@/components/NoteContent';
 import { useStartSignIn } from '@/hooks/useStartSignIn';
 import { useSuspendedAccount, useSuspendedPost, type ViewerSession } from '@/hooks/useSuspendedContent';
 import { ApiError } from '@/lib/adminApi';
@@ -165,7 +164,9 @@ function readProfile(profile: NostrEventJson | null): ProfileFields | null {
 /**
  * One hidden post. Not ThreadContext's PostCard: that reads the author through
  * the relay, which hides a suspended account's profile. The author is the hex
- * pubkey, or the name from the viewer's own profile read.
+ * pubkey, or the name from the viewer's own profile read. The text is plain, as
+ * in the other cards: NoteContent links hashtags and mentions to routes this
+ * app does not have, and following one would close the view.
  */
 function HiddenPostCard({ event, showMediaByDefault, authorName }: {
   event: NostrEventJson;
@@ -183,7 +184,7 @@ function HiddenPostCard({ event, showMediaByDefault, authorName }: {
         {authorName && <span className="font-medium">{authorName}</span>}
         <CopyableId value={event.pubkey} type="hex" />
       </div>
-      <NoteContent event={nostrEvent} className="text-sm break-words" />
+      {event.content && <p className="text-sm whitespace-pre-wrap break-words">{event.content}</p>}
       <MediaPreview event={nostrEvent} showByDefault={showMediaByDefault} />
     </div>
   );

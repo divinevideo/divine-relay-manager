@@ -3,6 +3,8 @@
 import { useLayoutEffect, type ReactElement } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { nip19 } from 'nostr-tools';
+import { MemoryRouter } from 'react-router-dom';
 import type { NostrEventJson, SuspendedAccountResponse } from '../../../shared/suspended-content';
 import { SuspendedAccountViewer, SuspendedPostViewer } from './SuspendedContentPanel';
 
@@ -43,11 +45,6 @@ vi.mock('@/components/MediaPreview', () => ({
   MediaPreview: (props: { showByDefault?: boolean | null }) => (
     <div data-testid="media" data-show={String(props.showByDefault)} />
   ),
-}));
-// NoteContent links mentions through the router and the relay; plain text is
-// enough to see what is in the DOM.
-vi.mock('@/components/NoteContent', () => ({
-  NoteContent: ({ event }: { event: { content: string } }) => <p>{event.content}</p>,
 }));
 // Radix's AvatarImage starts a request just by mounting, so what matters is
 // whether it is mounted at all (see UserProfileCard.hide-media.test.tsx).
@@ -145,6 +142,20 @@ describe('SuspendedPostViewer', () => {
     expect(screen.getByText(LABEL)).toBeInTheDocument();
     expect(screen.getByText(RECORDED)).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  // The app has no /t/<tag> or /<nip19> route, so a link there navigates the
+  // tab to NotFound, unmounting the open view; reopening is another audited read.
+  // Inside a router, so a linkifying renderer would render real links here.
+  it('shows the post as plain text, with no links for hashtags, references or URLs', async () => {
+    const text = `look #tag nostr:${nip19.noteEncode(EVENT_ID)} https://example.invalid/page`;
+    answerWith({ success: true, event: event(EVENT_ID, text) });
+    render(<MemoryRouter>{post()}</MemoryRouter>);
+    fireEvent.click(screen.getByRole('button', { name: 'View hidden post' }));
+
+    const shown = await screen.findByText(/^look/);
+    expect(screen.queryByRole('link')).not.toBeInTheDocument();
+    expect(shown).toHaveTextContent(text);
   });
 
   it.each([[false], [null], [true]] as const)('hands the media viewer the screen rule (%s)', async (rule) => {
