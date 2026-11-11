@@ -112,8 +112,11 @@ function CaseDetail({ eventId }: { eventId: string }) {
   });
   // A suspended author's snapshot, opened by a click. It is held here, not in
   // the query cache, so polls never replace it and it goes with the component.
-  // A sign-out drops it: the next view must be another audited open.
-  const [openedSnapshot, setOpenedSnapshot] = useState<QuarantineSnapshot | null>(null);
+  // A sign-out drops it: the next view must be another audited open. It is
+  // bound to the moderator who started the open, and renders only while that
+  // moderator is the one signed in, so a session change hides it on its first
+  // render, before the clearing effect below has run.
+  const [openedSnapshot, setOpenedSnapshot] = useState<{ snapshot: QuarantineSnapshot | null; openedBy: string | undefined } | null>(null);
   // Bumped whenever the session signs out or changes moderator. An open that
   // started under an earlier session drops its answer, so a response that lands
   // after a sign-out (or after someone else signs in) is never shown. The same
@@ -122,12 +125,15 @@ function CaseDetail({ eventId }: { eventId: string }) {
   const sessionGeneration = useRef(0);
   const openSnapshot = useMutation({
     mutationFn: async () => {
+      // Taken when the open starts: the request below is audited against this
+      // login, so this is who the answer belongs to, whenever it lands.
       const generation = sessionGeneration.current;
+      const openedBy = session.pubkey;
       const result = await api.asModerator(session.getModeratorToken()).getSexualQuarantineSnapshot(eventId);
-      return { result, generation };
+      return { result, generation, openedBy };
     },
-    onSuccess: ({ result, generation }) => {
-      if (active.current && generation === sessionGeneration.current) setOpenedSnapshot(result.snapshot ?? null);
+    onSuccess: ({ result, generation, openedBy }) => {
+      if (active.current && generation === sessionGeneration.current) setOpenedSnapshot({ snapshot: result.snapshot ?? null, openedBy });
     },
   });
   const { reset: resetOpenSnapshot } = openSnapshot;
@@ -139,7 +145,9 @@ function CaseDetail({ eventId }: { eventId: string }) {
   const c = item.data;
   const withheldWhy = c && !c.snapshot ? c.snapshotWithheld : undefined;
   const withheld = withheldWhy !== undefined;
-  const snapshot = c?.snapshot ?? (withheld && session.isSignedIn ? openedSnapshot : null);
+  const opened = withheld && session.isSignedIn && openedSnapshot && openedSnapshot.openedBy === session.pubkey
+    ? openedSnapshot.snapshot : null;
+  const snapshot = c?.snapshot ?? opened;
   return <>
     <div className="flex gap-4 items-center"><Link to="/sexual-quarantine" className="underline">All cases</Link>
       <Button variant="outline" onClick={() => void client.invalidateQueries({ queryKey: key })} disabled={item.isFetching}>Refresh case</Button></div>

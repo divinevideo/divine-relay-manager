@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { useLayoutEffect, type ReactNode } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -26,11 +27,12 @@ let postStatus: number;
 let lastDecision: unknown;
 let lastDecisionHeaders: Record<string, string> | undefined;
 
-function renderQueue(path = `/sexual-quarantine/${EVENT}`) {
+function renderQueue(path = `/sexual-quarantine/${EVENT}`, after?: () => ReactNode) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const view = () => <QueryClientProvider client={client}><MemoryRouter initialEntries={[path]}>
     <Routes><Route path="/sexual-quarantine" element={<SexualQuarantine />} />
       <Route path="/sexual-quarantine/:eventId" element={<SexualQuarantine />} /></Routes>
+    {after?.()}
   </MemoryRouter></QueryClientProvider>;
   return { ...render(view()), view };
 }
@@ -208,12 +210,25 @@ describe("a suspended author's withheld snapshot", () => {
   });
 
   it('the snapshot disappears when another moderator takes over the session', async () => {
-    const { rerender, view } = renderQueue();
+    // A sibling rendered after the screen reads the DOM in a layout effect,
+    // which runs at each commit before any passive effect (such as the screen's
+    // own clear-on-session-change). It sees what B's first render committed.
+    const commits: Array<{ pubkey: string | undefined; shown: boolean }> = [];
+    function CommitProbe() {
+      useLayoutEffect(() => {
+        commits.push({ pubkey: context.pubkey, shown: document.body.textContent?.includes(`Review media ${SNAP_HASH}`) ?? false });
+      });
+      return null;
+    }
+    const { rerender, view } = renderQueue(undefined, () => <CommitProbe />);
     fireEvent.click(await screen.findByRole('button', { name: /view the reported post/i }));
     expect(await screen.findByText(`Review media ${SNAP_HASH}`)).toBeInTheDocument();
     context.token = 'other-moderator-token';
     context.pubkey = '7'.repeat(64);
+    const before = commits.length;
     rerender(view());
+    const firstUnderB = commits.slice(before).find(commit => commit.pubkey === '7'.repeat(64));
+    expect(firstUnderB).toEqual({ pubkey: '7'.repeat(64), shown: false });
     await waitFor(() => expect(screen.queryByText(`Review media ${SNAP_HASH}`)).not.toBeInTheDocument());
     // The new moderator opens it with their own audited request, or not at all.
     expect(screen.getByRole('button', { name: /view the reported post/i })).toBeInTheDocument();
@@ -302,6 +317,22 @@ describe("a suspended author's withheld snapshot", () => {
       await new Promise(resolve => setTimeout(resolve, 0));
       expect(screen.queryByText(`Review media ${SNAP_HASH}`)).not.toBeInTheDocument();
       expect(screen.getByRole('button', { name: /view the reported post/i })).toBeInTheDocument();
+    });
+
+    it('is dropped when it lands after the same moderator signed out and back in', async () => {
+      // The opener matches and the clearing effect has already run, so only
+      // the session generation can tell this answer belongs to the old session.
+      const { rerender, view } = await openAndHold();
+      context.token = undefined;
+      context.pubkey = undefined;
+      rerender(view());
+      context.token = MOD_TOKEN;
+      context.pubkey = 'c'.repeat(64);
+      rerender(view());
+      release();
+      await waitFor(() => expect(vi.mocked(fetch).mock.results.length).toBeGreaterThan(0));
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.queryByText(`Review media ${SNAP_HASH}`)).not.toBeInTheDocument();
     });
 
     it('is dropped when another moderator signed in meanwhile', async () => {
