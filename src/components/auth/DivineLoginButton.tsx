@@ -1,6 +1,7 @@
 // ABOUTME: Sign-in surface for the shell header. Signed out -> "Sign in";
-// signed in -> the moderator's name/pubkey + "Sign out". Attribution only;
-// CF Access remains the access gate.
+// signed in -> the moderator's name/pubkey + "Sign out". CF Access remains the
+// access gate; the login attributes writes, and with REQUIRE_MODERATOR_LOGIN on
+// a write from the admin UI needs it.
 import { AlertTriangle, LogIn, LogOut } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';

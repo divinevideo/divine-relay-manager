@@ -5,7 +5,9 @@
 // admits, but it also removes the loudest cue that you have no divine-login
 // session. Without a replacement, a moderator sees a fully working tool, never
 // signs in, and every decision they write lands moderator_pubkey = null --
-// silently defeating the audit trail #181 exists to build.
+// silently defeating the audit trail #181 exists to build. With
+// REQUIRE_MODERATOR_LOGIN on, such a decision is refused instead, so the
+// notice's wording has to hold in both cases.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 
@@ -309,7 +311,8 @@ describe('AttributionNotice dismissal (#397)', () => {
   });
 });
 
-// The worker records nobody for an expired login token, so the notice has to
+// The worker records nobody for an expired login token (or, with
+// REQUIRE_MODERATOR_LOGIN on, refuses the write), so the notice has to
 // come back when the token expires and is not replaced (#178 phase 2). Before
 // this, the pubkey stayed cached and the moderator kept looking attributed.
 describe('AttributionNotice after the login token expires', () => {

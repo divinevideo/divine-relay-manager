@@ -3,8 +3,9 @@
 //
 // CF Access is the access gate, so this never blocks anything -- it is the cue
 // that replaces the login walls this tool used to put in front of the relay
-// management surfaces. Without it a moderator has no reason to sign in and
-// every decision they write lands moderator_pubkey = null (#178, #181).
+// management surfaces. Without it a moderator has no reason to sign in before
+// acting, and every decision they write lands moderator_pubkey = null
+// (#178, #181) or, with REQUIRE_MODERATOR_LOGIN on, is refused.
 //
 // Dismissable: the banner is informational, not a gate, and on a short viewport
 // it steals vertical space from the report panes. A moderator who cannot (or
