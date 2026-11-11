@@ -22,6 +22,7 @@ import {
 } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import type { SexualCase } from "../../shared/sexual-quarantine";
+import { handleLoginRefusal, isModeratorLoginRequired } from "./moderatorLoginRequired";
 
 // The moderator's Divine login token, sent on every write. The worker verifies it
 // and records that moderator (it never reads one from a body), and refuses a
@@ -256,7 +257,7 @@ async function apiRequest<T>(
       // body was empty or not JSON; keep the status-line fallback
     }
     throw new ApiError(
-      parsed?.error || `HTTP ${response.status}: ${response.statusText}`,
+      handleLoginRefusal(parsed?.code, { prompt: mutates }) ?? (parsed?.error || `HTTP ${response.status}: ${response.statusText}`),
       response.status,
       response.statusText,
       parsed?.code,
@@ -361,7 +362,7 @@ export async function callRelayRpc<T = unknown>(
       // empty or non-JSON body; keep the status-line fallback
     }
     throw new ApiError(
-      parsed?.error || `HTTP ${response.status}: ${response.statusText}`,
+      handleLoginRefusal(parsed?.code, { prompt: mutates }) ?? (parsed?.error || `HTTP ${response.status}: ${response.statusText}`),
       response.status,
       response.statusText,
       parsed?.code,
@@ -1408,6 +1409,15 @@ export async function submitAIDetection(
     }, 'AI detection submit', { mutates: true });
 
     if (!response.ok) {
+      let code: string | undefined;
+      try {
+        const parsed = (await response.json()) as { code?: unknown } | null;
+        if (typeof parsed?.code === 'string') code = parsed.code;
+      } catch {
+        // empty or non-JSON body
+      }
+      const loginRefused = handleLoginRefusal(code, { prompt: true });
+      if (loginRefused) throw new ApiError(loginRefused, response.status, response.statusText, code);
       throw new Error(`HTTP ${response.status}: ${response.statusText}`);
     }
 
@@ -1417,6 +1427,10 @@ export async function submitAIDetection(
       status: result.status || 'pending',
     };
   } catch (error) {
+    // Other failures come back as null, which the screen words generically. A
+    // missing login is thrown on, so the screen's catch shows the plain
+    // message beside the sign-in prompt.
+    if (error instanceof ApiError && isModeratorLoginRequired(error.code)) throw error;
     console.error('Failed to submit AI detection:', error);
     return null;
   }

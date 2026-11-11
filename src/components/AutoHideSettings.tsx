@@ -10,6 +10,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useToast } from "@/hooks/useToast";
 import { getApiHeaders, loginHeader } from "@/lib/adminApi";
+import { handleLoginRefusal } from "@/lib/moderatorLoginRequired";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Shield, X, Plus, Save, AlertTriangle, Clock } from "lucide-react";
 import {
@@ -166,9 +167,10 @@ export function AutoHideSettings() {
         headers: { ...getApiHeaders(), ...loginHeader(getModeratorToken()) },
         body: JSON.stringify(config),
       });
-      const body = await res.json() as { success: boolean; config?: AutoHideConfig; error?: string };
+      const body = await res.json() as { success: boolean; config?: AutoHideConfig; error?: string; code?: string };
       if (!res.ok || !body.success) {
-        throw new Error(body.error || `Save failed: ${res.status}`);
+        // Read here, not through adminApi, so the login check is made here too.
+        throw new Error(handleLoginRefusal(body.code, { prompt: true }) ?? (body.error || `Save failed: ${res.status}`));
       }
       return body.config!;
     },
