@@ -5,7 +5,8 @@ import { Miniflare } from 'miniflare';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
-import { handleStartGreenlight } from '../src/age-review';
+import { handleStartGreenlight, type AgeReviewEnv } from '../src/age-review';
+import { partialEnv } from '../src/test-helpers/partial-env';
 import { createSubjectWithBinding } from '../src/protected-minors';
 import { fetchAccountIdentity } from '../src/relay-profile';
 import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
@@ -600,7 +601,7 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     const body = report({ reportType: 'underage_user' });
     const pending = post(body);
     await lookupEntered;
-    await handleStartGreenlight(REPORTED, { DB }, {});
+    await handleStartGreenlight(REPORTED, partialEnv<AgeReviewEnv>({ DB }), {});
     releaseLookup();
 
     expect(await (await pending).json()).toEqual({ success: true, outcome: 'age_review_exists', duplicate: false });
@@ -633,7 +634,7 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
     const body = report({ reportType: 'underage_user' });
     const pending = post(body, testEnv({ DB: noActiveCase }));
     await lookupEntered;
-    await handleStartGreenlight(REPORTED, { DB }, {});
+    await handleStartGreenlight(REPORTED, partialEnv<AgeReviewEnv>({ DB }), {});
     releaseLookup();
 
     const failed = await pending;
@@ -684,7 +685,7 @@ describe('POST /api/internal/private-reports: under-16 reports', () => {
 
   describe('on a family\'s Greenlight case', () => {
     async function familyCase() {
-      await handleStartGreenlight(REPORTED, { DB }, {});
+      await handleStartGreenlight(REPORTED, partialEnv<AgeReviewEnv>({ DB }), {});
       return () => DB.prepare(`SELECT reporter_pubkey, report_id FROM age_review_cases
         WHERE pubkey = ? AND created_via = 'greenlight_application'`).bind(REPORTED).first();
     }

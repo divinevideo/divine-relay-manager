@@ -8,6 +8,9 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.e2e.test.ts'],
+    // tsconfig.test.json loads vitest/globals; match it at runtime so a test
+    // that relies on the globals type-checks and also runs.
+    globals: true,
     environment: 'node',
     testTimeout: 30000,
     hookTimeout: 30000,

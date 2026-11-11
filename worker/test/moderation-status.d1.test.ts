@@ -1,10 +1,12 @@
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleGetModerationStatus } from '../src/age-review';
+import { handleGetModerationStatus, type AgeReviewEnv } from '../src/age-review';
+import { partialEnv } from '../src/test-helpers/partial-env';
 
 let mf: Miniflare;
 let DB: D1Database;
+let env: AgeReviewEnv;
 const cors: Record<string, string> = {};
 
 beforeAll(async () => {
@@ -16,6 +18,7 @@ beforeAll(async () => {
     d1Databases: ['DB'],
   });
   DB = (await mf.getD1Database('DB')) as unknown as D1Database;
+  env = partialEnv<AgeReviewEnv>({ DB });
 });
 
 afterAll(async () => { await mf?.dispose(); });
@@ -51,7 +54,7 @@ describe('moderation status response deadline on real D1', () => {
     const pubkey = 'a'.repeat(64);
     await insertCase('sqlite-deadline', pubkey, { deadline: '2099-08-26 09:30:00' });
 
-    const res = await handleGetModerationStatus(pubkey, { DB }, cors);
+    const res = await handleGetModerationStatus(pubkey, env, cors);
     const body = await res.json() as { minorReviewCase: { responseDeadline: unknown } };
 
     expect(body.minorReviewCase.responseDeadline).toEqual({
@@ -72,7 +75,7 @@ describe('moderation status response deadline on real D1', () => {
       remaining: 5.25,
     });
 
-    const res = await handleGetModerationStatus(pubkey, { DB }, cors);
+    const res = await handleGetModerationStatus(pubkey, env, cors);
     const body = await res.json() as { minorReviewCase: { responseDeadline: unknown } };
 
     expect(body.minorReviewCase.responseDeadline).toEqual({
@@ -90,7 +93,7 @@ describe('moderation status response deadline on real D1', () => {
     await insertCase('first-account', firstPubkey, { deadline: '2099-09-01T12:00:00.000Z' });
     await insertCase('second-account', secondPubkey, { deadline: '2099-10-01T12:00:00.000Z' });
 
-    const res = await handleGetModerationStatus(firstPubkey, { DB }, cors);
+    const res = await handleGetModerationStatus(firstPubkey, env, cors);
     const body = await res.json() as {
       minorReviewCase: { id: string; responseDeadline: { deadlineAt: string | null } };
     };
