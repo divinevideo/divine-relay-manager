@@ -12,6 +12,10 @@ vi.mock('@/hooks/useDivineSession', () => ({ useDivineSession: () => ({
   getModeratorToken: () => context.token, identityUnavailable: context.identityUnavailable, isSignedIn: context.token !== undefined, pubkey: context.pubkey,
 }) }));
 const MOD_TOKEN = 'moderator-login-token';
+// The decision-area warning for a session whose identity is unavailable. One
+// constant for the check that it shows and the check that it doesn't, so a
+// rewording cannot leave the absence check looking for old text.
+const IDENTITY_WARNING = 'Moderator identity unavailable. Your decision may not be recorded under your name.';
 
 const EVENT = 'a'.repeat(64);
 const HASH = 'b'.repeat(64);
@@ -156,8 +160,17 @@ describe('Sexual quarantine review', () => {
     context.identityUnavailable = true;
     context.pubkey = undefined;
     renderQueue();
-    expect(await screen.findByText('Moderator identity unavailable. Your decision may not be recorded under your name.')).toBeInTheDocument();
+    expect(await screen.findByText(IDENTITY_WARNING)).toBeInTheDocument();
     expect(screen.queryByText(/attributed as unattributed/i)).toBeNull();
+  });
+
+  it('does not warn an identified moderator that their decision may not carry their name', async () => {
+    // beforeEach leaves a signed-in session with a resolved pubkey. Wait for the
+    // case to render, so the absence is checked on the decision area itself.
+    renderQueue();
+    expect(await screen.findByText('Revision 3')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+    expect(screen.queryByText(IDENTITY_WARNING)).toBeNull();
   });
 
   it('explains remaining restrictions after a restore', async () => {
