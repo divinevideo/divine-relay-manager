@@ -44,7 +44,7 @@ interface ErrorCopy { text: string; retry: boolean; signIn?: boolean }
  * without the route answers a bare 404, which must not read as "hidden for
  * another reason".
  */
-function viewerErrorCopy(error: unknown): ErrorCopy {
+function viewerErrorCopy(error: unknown, olderPage: boolean): ErrorCopy {
   const code = error instanceof ApiError ? error.code : undefined;
   switch (code) {
     case MODERATOR_LOGIN_REQUIRED:
@@ -54,7 +54,14 @@ function viewerErrorCopy(error: unknown): ErrorCopy {
     case SUSPENDED_CONTENT_CODE.hiddenForAnotherReason:
       return { text: "Hidden for another reason (such as deleted or banned), so it can't be shown here either.", retry: false };
     case SUSPENDED_CONTENT_CODE.auditUnavailable:
-      return { text: "Couldn't record this view, so nothing is shown. Try again.", retry: true };
+      // For an older page the pages already loaded stay on screen; only the
+      // one that could not be recorded is withheld.
+      return {
+        text: olderPage
+          ? "Couldn't record this view, so that page isn't shown. Try again."
+          : "Couldn't record this view, so nothing is shown. Try again.",
+        retry: true,
+      };
     case SUSPENDED_CONTENT_CODE.relayError:
       return { text: "Couldn't read from the relay. Try again.", retry: true };
   }
@@ -86,8 +93,8 @@ function SignInPrompt({ text = SIGN_IN_TO_VIEW, onRetry }: { text?: string; onRe
   );
 }
 
-function ViewerError({ error, onRetry }: { error: unknown; onRetry: () => void }) {
-  const copy = viewerErrorCopy(error);
+function ViewerError({ error, onRetry, olderPage = false }: { error: unknown; onRetry: () => void; olderPage?: boolean }) {
+  const copy = viewerErrorCopy(error, olderPage);
   if (copy.signIn) return <SignInPrompt text={copy.text} onRetry={onRetry} />;
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm text-amber-700 dark:text-amber-400">
@@ -257,7 +264,7 @@ export function SuspendedAccountViewer({ pubkey, surface, showMediaByDefault }: 
               <HiddenPostCard key={e.id} event={e} showMediaByDefault={showMediaByDefault} authorName={authorName} />
             ))}
           </div>
-          {view.olderStatus === 'error' && <ViewerError error={view.olderError} onRetry={view.loadOlder} />}
+          {view.olderStatus === 'error' && <ViewerError error={view.olderError} onRetry={view.loadOlder} olderPage />}
           {view.hasOlder && view.olderStatus !== 'error' && (
             <Button size="sm" variant="outline" onClick={view.loadOlder} disabled={view.olderStatus === 'loading'}>
               {view.olderStatus === 'loading' ? 'Loading older…' : 'Load older'}

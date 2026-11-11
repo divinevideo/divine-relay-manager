@@ -11,8 +11,14 @@ import { BannedUserCard } from './BannedUserCard';
 
 const PUBKEY = 'a'.repeat(64);
 
+// What the card's normal relay read returns. Empty by default: the relay hides
+// a suspended account's posts.
+const relayEvents = vi.hoisted(() => ({ list: [] as unknown[] }));
 vi.mock('@nostrify/react', () => ({
-  useNostr: () => ({ nostr: { req: async function* () { yield ['EOSE', 'sub']; } } }),
+  useNostr: () => ({ nostr: { req: async function* () {
+    for (const e of relayEvents.list) yield ['EVENT', 'sub', e];
+    yield ['EOSE', 'sub'];
+  } } }),
 }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useEventTitles', () => ({ useEventTitles: () => ({ titles: new Map(), isLoading: false }) }));
@@ -44,6 +50,7 @@ function openDetails() {
 
 beforeEach(() => {
   viewerProps.last = null;
+  relayEvents.list = [];
 });
 
 describe('BannedUserCard suspended-content viewer', () => {
@@ -60,6 +67,17 @@ describe('BannedUserCard suspended-content viewer', () => {
     openDetails();
 
     expect(viewerProps.last?.pubkey).toBe(PUBKEY);
+  });
+
+  // A read from before the suspension (or a relay that has not caught up) can
+  // still hand the card posts. The suspension is confirmed, so the viewer stays.
+  it('still offers the viewer when the normal read returned posts', async () => {
+    relayEvents.list = [{ id: '1'.repeat(64), pubkey: PUBKEY, kind: 1, content: 'cached post', tags: [], created_at: 1_750_000_000, sig: 'f'.repeat(128) }];
+    renderCard({ suspended: true });
+    openDetails();
+
+    expect(await screen.findByText('cached post')).toBeInTheDocument();
+    expect(screen.getByTestId('account-viewer')).toBeInTheDocument();
   });
 
   it('does not mount the viewer while the details are closed', () => {

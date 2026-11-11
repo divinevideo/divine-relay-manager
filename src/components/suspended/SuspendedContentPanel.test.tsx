@@ -1,5 +1,6 @@
 // ABOUTME: Pins the suspended-content viewer panels: a click opens them, they are labelled,
 // ABOUTME: they follow the screen's media rule, they empty on sign-out, and errors map by code.
+import { useLayoutEffect, type ReactElement } from 'react';
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { NostrEventJson, SuspendedAccountResponse } from '../../../shared/suspended-content';
@@ -107,6 +108,26 @@ async function openPost(showMediaByDefault: boolean | null = true) {
   return view;
 }
 
+// Records, at every commit of the tree, which moderator the session named and
+// whether `text` was in the DOM. A layout effect runs after the commit and
+// before paint, so it sees exactly what that render committed: content that
+// a later effect clears is still caught (the technique SexualQuarantine.test
+// uses for the opened snapshot).
+// `viewer` builds a fresh element per render: the session is a mocked hook,
+// not a context, so a reused element would skip the viewer's re-render.
+function withCommitProbe(viewer: () => ReactElement, text: string) {
+  const commits: Array<{ pubkey: string | undefined; shown: boolean }> = [];
+  function CommitProbe() {
+    useLayoutEffect(() => {
+      commits.push({ pubkey: ctx.pubkey, shown: document.body.textContent?.includes(text) ?? false });
+    });
+    return null;
+  }
+  return { commits, tree: () => <>{viewer()}<CommitProbe /></> };
+}
+
+const MOD_B = 'b'.repeat(64);
+
 describe('SuspendedPostViewer', () => {
   it('starts closed, says viewing is recorded, and requests nothing', async () => {
     render(post());
@@ -194,6 +215,19 @@ describe('SuspendedPostViewer', () => {
 
     await screen.findByText('the hidden post');
     expect(screen.queryByText(/not by this case's subject/)).not.toBeInTheDocument();
+  });
+
+  it("never commits the previous moderator's post under the next moderator, not even once", async () => {
+    const probe = withCommitProbe(() => post(), 'the hidden post');
+    const view = render(probe.tree());
+    fireEvent.click(screen.getByRole('button', { name: 'View hidden post' }));
+    await screen.findByText('the hidden post');
+
+    ctx.pubkey = MOD_B;
+    const before = probe.commits.length;
+    view.rerender(probe.tree());
+
+    expect(probe.commits.slice(before).find(c => c.pubkey === MOD_B)).toEqual({ pubkey: MOD_B, shown: false });
   });
 
   it('signing out removes the fetched post from the DOM', async () => {
@@ -338,6 +372,31 @@ describe('SuspendedAccountViewer', () => {
     expect(await screen.findByText("Couldn't read from the relay. Try again.")).toBeInTheDocument();
     expect(screen.getByText('first hidden post')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  // The earlier pages stay on screen, so "nothing is shown" would be wrong.
+  it('an older page the audit could not record says that page is not shown, and keeps the rest', async () => {
+    await openAccount();
+    answerWith({ success: false, error: 'x', code: 'audit_unavailable' }, 503);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older' }));
+
+    expect(await screen.findByText("Couldn't record this view, so that page isn't shown. Try again.")).toBeInTheDocument();
+    expect(screen.queryByText(/so nothing is shown/)).not.toBeInTheDocument();
+    expect(screen.getByText('first hidden post')).toBeInTheDocument();
+  });
+
+  it("never commits the previous moderator's posts under the next moderator, not even once", async () => {
+    const probe = withCommitProbe(() => account(), 'first hidden post');
+    const view = render(probe.tree());
+    fireEvent.click(screen.getByRole('button', { name: 'View hidden posts' }));
+    await screen.findByText('first hidden post');
+
+    ctx.pubkey = MOD_B;
+    const before = probe.commits.length;
+    view.rerender(probe.tree());
+
+    expect(probe.commits.slice(before).find(c => c.pubkey === MOD_B)).toEqual({ pubkey: MOD_B, shown: false });
   });
 
   it('signing out removes every fetched post and the profile from the DOM', async () => {

@@ -310,16 +310,9 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   })}
                 </div>
               ) : suspended ? (
-                <div className="space-y-2">
-                  <p className="text-sm text-muted-foreground">
-                    The relay hides a suspended account's content, so none is shown here.
-                  </p>
-                  {/* The audited viewer. Media starts hidden: this list has no
-                      report to say whether the account's media is sensitive. */}
-                  {HEX64.test(pubkey) && (
-                    <SuspendedAccountViewer key={pubkey} pubkey={pubkey} surface="user" showMediaByDefault={false} />
-                  )}
-                </div>
+                <p className="text-sm text-muted-foreground">
+                  The relay hides a suspended account's content, so none is shown here.
+                </p>
               ) : readFailed ? (
                 <p className="text-sm text-muted-foreground">
                   Couldn't load this account's content (relay error).
@@ -336,6 +329,15 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                 <p className="text-sm text-muted-foreground">
                   No recent content found on this relay
                 </p>
+              )}
+              {/* The audited viewer, whenever the suspension is confirmed: posts
+                  this read still returned (cached, or a relay not caught up)
+                  are not the hidden ones. Media starts hidden: this list has no
+                  report to say whether the account's media is sensitive. */}
+              {suspended && HEX64.test(pubkey) && (
+                <div className="mt-2">
+                  <SuspendedAccountViewer key={pubkey} pubkey={pubkey} surface="user" showMediaByDefault={false} />
+                </div>
               )}
             </div>
 
