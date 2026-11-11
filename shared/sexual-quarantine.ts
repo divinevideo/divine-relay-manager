@@ -16,6 +16,13 @@ export interface SexualCase {
   retryAt: number;
   snapshot?: QuarantineSnapshot;
   snapshotRef?: string;
+  /**
+   * Set by the worker, never stored: the snapshot and the other media
+   * identifiers were left out because the author is suspended, or because the
+   * worker couldn't tell ('unknown'). A moderator opens it with an audited
+   * `?snapshot=1` read.
+   */
+  snapshotWithheld?: 'suspended' | 'unknown';
   actor?: string;
   decisionAt?: number;
   decisionRecordedAt?: number;

@@ -80,6 +80,10 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
   return {
     decideSexualQuarantine: (eventId: string, body: Parameters<typeof adminApi.decideSexualQuarantine>[2]) =>
       adminApi.decideSexualQuarantine(apiUrl, eventId, body, login),
+    // A suspended author's quarantine snapshot: the worker records the view
+    // against this login, so it lives here, not with the plain reads.
+    getSexualQuarantineSnapshot: (eventId: string) =>
+      adminApi.getSexualQuarantineCase(apiUrl, eventId, { snapshot: true, ...login }),
 
     // Event publishing
     publishEvent: (event: adminApi.UnsignedEvent) => adminApi.publishEvent(apiUrl, event, login),

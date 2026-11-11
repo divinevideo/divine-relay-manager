@@ -172,6 +172,59 @@ describe('verifyModeratorLogin', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  describe('fresh check', () => {
+    it('calls Keycast even with a cached success', async () => {
+      const fetchMock = vi.fn().mockImplementation(async () => okResponse(PUBKEY));
+      vi.stubGlobal('fetch', fetchMock);
+      expect(await verifyModeratorLogin(env, 'tok')).toBe(PUBKEY);
+      expect(await verifyModeratorLogin(env, 'tok', { fresh: true })).toBe(PUBKEY);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+
+    it('evicts the cached success when it fails', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okResponse(PUBKEY))
+        .mockResolvedValueOnce(new Response('revoked', { status: 401 }))
+        .mockResolvedValueOnce(new Response('revoked', { status: 401 }));
+      vi.stubGlobal('fetch', fetchMock);
+      expect(await verifyModeratorLogin(env, 'tok')).toBe(PUBKEY);
+      expect(await verifyModeratorLogin(env, 'tok', { fresh: true })).toBeUndefined();
+      // A plain call no longer trusts the old success: it asks Keycast again.
+      expect(await verifyModeratorLogin(env, 'tok')).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('evicts the cached success when Keycast cannot be reached', async () => {
+      vi.spyOn(console, 'warn').mockImplementation(() => {});
+      const fetchMock = vi
+        .fn()
+        .mockResolvedValueOnce(okResponse(PUBKEY))
+        .mockRejectedValueOnce(Object.assign(new Error('timed out'), { name: 'TimeoutError' }))
+        .mockResolvedValueOnce(new Response('revoked', { status: 401 }));
+      vi.stubGlobal('fetch', fetchMock);
+      expect(await verifyModeratorLogin(env, 'tok')).toBe(PUBKEY);
+      expect(await verifyModeratorLogin(env, 'tok', { fresh: true })).toBeUndefined();
+      expect(await verifyModeratorLogin(env, 'tok')).toBeUndefined();
+      expect(fetchMock).toHaveBeenCalledTimes(3);
+    });
+
+    it('refreshes the cache on success', async () => {
+      vi.useFakeTimers();
+      const fetchMock = vi.fn().mockImplementation(async () => okResponse(PUBKEY));
+      vi.stubGlobal('fetch', fetchMock);
+      await verifyModeratorLogin(env, 'tok');
+      vi.advanceTimersByTime(50_000);
+      await verifyModeratorLogin(env, 'tok', { fresh: true });
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      // 100 s after the first check but 50 s after the fresh one: still cached.
+      vi.advanceTimersByTime(50_000);
+      await verifyModeratorLogin(env, 'tok');
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+    });
+  });
+
   it('never logs the token', async () => {
     const token = 'super-secret-token-value';
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});

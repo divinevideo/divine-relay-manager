@@ -18,7 +18,17 @@ import { getReportsForTarget, getReportsNeedingAttention, getResolvedReportsPage
 import { generatePreAuthToken, verifyPreAuthToken, base64UrlEncode } from './zendesk-preauth';
 import { deriveFunnelcakeApiUrl, proxyFunnelcakeRequest } from './funnelcake-proxy';
 import { renderMediaPage } from './media-page';
-import { checkBannedEventAuthor, isBannedEventRead, isSuspendedReadMethod, SUSPENDED_READ_REFUSED } from './suspended-content';
+import {
+  checkBannedEventAuthor,
+  guardQuarantineSnapshot,
+  handleListSuspendedContentViews,
+  handleViewSuspendedAccount,
+  handleViewSuspendedEvent,
+  isBannedEventRead,
+  isSuspendedReadMethod,
+  needsFreshModeratorLogin,
+  SUSPENDED_READ_REFUSED,
+} from './suspended-content';
 import type { KeycastEnv } from './keycast-client';
 import { suspendUser, unsuspendUser, banUser } from './keycast-client';
 import {
@@ -624,8 +634,13 @@ export default {
       // failed check. With REQUIRE_MODERATOR_LOGIN off, a failed check never
       // blocks an action, it only leaves it unattributed; with it on, the gate
       // below refuses the action.
+      // The suspended-content reads check the login fresh, past the cache, so a
+      // login Keycast has stopped honouring cannot open hidden content; see
+      // needsFreshModeratorLogin. Still one check per request.
       const moderator: string | undefined = request.headers.has(MODERATOR_LOGIN_HEADER)
-        ? await verifyModeratorLogin(env, request.headers.get(MODERATOR_LOGIN_HEADER))
+        ? await verifyModeratorLogin(env, request.headers.get(MODERATOR_LOGIN_HEADER), {
+          fresh: needsFreshModeratorLogin(request.method, url),
+        })
         : undefined;
 
       // With REQUIRE_MODERATOR_LOGIN on, a write from the admin UI (it reaches
@@ -695,6 +710,19 @@ export default {
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
         return handleRelayRpc(request, env, corsHeaders, ctx, moderator);
+      }
+
+      // The audited suspended-content viewer. The two reads need a moderator
+      // login verified fresh (needsFreshModeratorLogin) and write an audit row
+      // before answering; the audit read needs only the access gate.
+      if (path === '/api/suspended-content/event' && request.method === 'POST') {
+        return handleViewSuspendedEvent(request, env, corsHeaders, moderator);
+      }
+      if (path === '/api/suspended-content/account' && request.method === 'POST') {
+        return handleViewSuspendedAccount(request, env, corsHeaders, moderator);
+      }
+      if (path === '/api/suspended-content/views' && request.method === 'GET') {
+        return handleListSuspendedContentViews(url, env, corsHeaders);
       }
 
       if (path === '/api/summarize-user' && request.method === 'POST') {
@@ -3897,7 +3925,13 @@ async function handleReportWatcherRoutes(
     });
 
     const response = await stub.fetch(doRequest);
-    const data = await response.json();
+    let data: unknown = await response.json();
+    // A suspended author's snapshot is served only through an audited open.
+    if (doUrl.pathname === '/sexual-quarantine' || doUrl.pathname.startsWith('/sexual-quarantine/')) {
+      const guarded = await guardQuarantineSnapshot(data, response.status, request, env, corsHeaders, moderator);
+      if (guarded instanceof Response) return guarded;
+      data = guarded.data;
+    }
 
     return new Response(JSON.stringify(data), {
       status: response.status,

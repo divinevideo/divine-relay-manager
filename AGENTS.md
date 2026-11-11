@@ -330,6 +330,7 @@ Schema is created on-demand via `ensureDecisionsTable()` and `ensureZendeskTable
 | `moderation_targets` | Per-target state tracking (`ever_human_reviewed` prevents auto-hide override) |
 | `zendesk_tickets` | Maps Zendesk ticket IDs to Nostr event IDs and pubkeys |
 | `private_report_intake` | One row per private DM report moderation-service handed over; the idempotency record for `POST /api/internal/private-reports` |
+| `suspended_content_views` | Append-only audit of moderator views of suspended content (verified moderator, target account, event or account page, surface). Triggers refuse UPDATE, DELETE and an insert over an existing id. Created on demand by `ensureSuspendedContentViewsTable()` in `worker/src/suspended-content.ts`; never written to `moderation_decisions` |
 
 ## Local Development
 

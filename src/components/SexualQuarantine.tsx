@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
-import type { SexualCase } from '../../shared/sexual-quarantine';
+import type { QuarantineSnapshot, SexualCase } from '../../shared/sexual-quarantine';
 
 const STATES: Record<SexualCase['state'], string> = {
   review: 'Awaiting review', pending: 'Pending verification', hidden: 'Hidden',
@@ -110,7 +110,46 @@ function CaseDetail({ eventId }: { eventId: string }) {
       await client.invalidateQueries({ queryKey: ['sexual-quarantine', apiUrl] });
     },
   });
+  // A suspended author's snapshot, opened by a click. It is held here, not in
+  // the query cache, so polls never replace it and it goes with the component.
+  // A sign-out drops it: the next view must be another audited open. It is
+  // bound to the moderator who started the open, and renders only while that
+  // moderator is the one signed in, so a session change hides it on its first
+  // render, before the clearing effect below has run.
+  const [openedSnapshot, setOpenedSnapshot] = useState<{ snapshot: QuarantineSnapshot | null; openedBy: string | undefined } | null>(null);
+  // Bumped whenever the session signs out or changes moderator. An open that
+  // started under an earlier session drops its answer, so a response that lands
+  // after a sign-out (or after someone else signs in) is never shown. The same
+  // change clears an opened snapshot: it was audited against the moderator who
+  // opened it, so the next one must open it with their own request.
+  const sessionGeneration = useRef(0);
+  const openSnapshot = useMutation({
+    mutationFn: async () => {
+      // Taken when the open starts: the request below is audited against this
+      // login, so this is who the answer belongs to, whenever it lands.
+      const generation = sessionGeneration.current;
+      const openedBy = session.pubkey;
+      const result = await api.asModerator(session.getModeratorToken()).getSexualQuarantineSnapshot(eventId);
+      return { result, generation, openedBy };
+    },
+    onSuccess: ({ result, generation, openedBy }) => {
+      if (active.current && generation === sessionGeneration.current) setOpenedSnapshot({ snapshot: result.snapshot ?? null, openedBy });
+    },
+  });
+  const { reset: resetOpenSnapshot } = openSnapshot;
+  useEffect(() => {
+    sessionGeneration.current += 1;
+    setOpenedSnapshot(null);
+    resetOpenSnapshot();
+  }, [session.isSignedIn, session.pubkey, resetOpenSnapshot]);
   const c = item.data;
+  const withheldWhy = c && !c.snapshot ? c.snapshotWithheld : undefined;
+  const withheld = withheldWhy !== undefined;
+  // A resolved owner is required: two unresolved sessions both have an
+  // undefined pubkey, and A's snapshot must not pass as B's.
+  const opened = withheld && session.isSignedIn && openedSnapshot?.openedBy && openedSnapshot.openedBy === session.pubkey
+    ? openedSnapshot.snapshot : null;
+  const snapshot = c?.snapshot ?? opened;
   return <>
     <div className="flex gap-4 items-center"><Link to="/sexual-quarantine" className="underline">All cases</Link>
       <Button variant="outline" onClick={() => void client.invalidateQueries({ queryKey: key })} disabled={item.isFetching}>Refresh case</Button></div>
@@ -144,9 +183,11 @@ function CaseDetail({ eventId }: { eventId: string }) {
       </section>
       <section aria-label="Media review" className="space-y-2">
         <h3 className="font-semibold">Media</h3>
-        {!c.snapshot && <p>Media snapshot is not available yet.</p>}
-        {c.snapshot?.assets.length === 0 && <p>No reviewable media is mapped in this snapshot.</p>}
-        {c.snapshot?.assets.map(hash => <a key={hash} href={`${apiUrl}/media/${hash}`} target="_blank" rel="noopener noreferrer" className="block underline text-sm break-all">Review media {hash}</a>)}
+        {withheldWhy && !snapshot && <WithheldSnapshot why={withheldWhy} signedIn={session.isSignedIn} identified={!!session.pubkey} open={openSnapshot} />}
+        {withheldWhy === 'suspended' && snapshot && <p className="text-sm text-muted-foreground">Hidden from everyone else by the suspension.</p>}
+        {!snapshot && !withheld && <p>Media snapshot is not available yet.</p>}
+        {snapshot?.assets.length === 0 && <p>No reviewable media is mapped in this snapshot.</p>}
+        {snapshot?.assets.map(hash => <a key={hash} href={`${apiUrl}/media/${hash}`} target="_blank" rel="noopener noreferrer" className="block underline text-sm break-all">Review media {hash}</a>)}
       </section>
       <div className="space-y-2">
         {session.identityUnavailable && <p role="alert">Moderator identity unavailable. Decisions will be attributed as unattributed.</p>}
@@ -172,4 +213,36 @@ function CaseDetail({ eventId }: { eventId: string }) {
       </Card>)}
     </section>
   </>;
+}
+
+// The worker leaves a suspended author's snapshot out of the polled case. The
+// moderator opens it here, once, and the worker records that view against
+// their login. Errors map by code, never by status alone.
+function WithheldSnapshot({ why, signedIn, identified, open }: {
+  why: 'suspended' | 'unknown';
+  signedIn: boolean;
+  /** The session's moderator pubkey has resolved. The opened snapshot is bound to it, so no open starts without it. */
+  identified: boolean;
+  open: { mutate: () => void; isPending: boolean; error: unknown };
+}) {
+  if (!signedIn) return <p>Sign in with Divine to view the reported post.</p>;
+  if (!identified) return <p>Your Divine identity hasn't loaded yet, so the reported post can't be opened.</p>;
+  const code = open.error instanceof ApiError ? open.error.code : undefined;
+  if (code === 'moderator_login_required') return <p>Sign in with Divine to view the reported post.</p>;
+  if (open.error) {
+    const copy = code === 'audit_unavailable' ? "Couldn't record this view, so nothing is shown."
+      : code === 'suspension_status_unavailable' ? "Couldn't confirm the author's suspension status, so nothing is shown."
+        : "Couldn't open the reported post.";
+    return <div className="space-y-2"><p role="alert">{copy}</p>
+      <Button variant="outline" onClick={() => open.mutate()} disabled={open.isPending}>Try again</Button></div>;
+  }
+  if (why === 'unknown') {
+    return <div className="space-y-2">
+      <p>Couldn't check whether this account is suspended, so its media is withheld.</p>
+      <Button variant="outline" onClick={() => open.mutate()} disabled={open.isPending}>Open the reported post to check</Button>
+    </div>;
+  }
+  return <Button variant="outline" onClick={() => open.mutate()} disabled={open.isPending}>
+    View the reported post (hidden from everyone else by the suspension)
+  </Button>;
 }

@@ -56,10 +56,17 @@ function warnFailed(reason: string | number): void {
  * Returns the verified lowercase 64-hex pubkey, or undefined on any failure
  * (no token, no setting, 401, 5xx, timeout, bad body). The whole body sits in
  * the try because a Secrets Store binding can throw on read.
+ *
+ * `fresh` skips the cache read and always asks Keycast. The suspended-content
+ * viewer uses it: Keycast stops honouring a revoked or expired login within
+ * seconds, and the cache would keep trusting it for up to its TTL. A fresh
+ * success refreshes the entry, and any failure evicts it, so attribution on
+ * other routes stops trusting that login at once too.
  */
 export async function verifyModeratorLogin(
   env: ModeratorLoginEnv,
   token: string | null | undefined,
+  opts: { fresh?: boolean } = {},
 ): Promise<string | undefined> {
   try {
     if (!token) return undefined;
@@ -71,8 +78,14 @@ export async function verifyModeratorLogin(
 
     const key = await hashToken(token);
     const hit = cache.get(key);
-    if (hit && hit.expiresAt > Date.now()) return hit.pubkey;
-    if (hit) cache.delete(key);
+    if (!opts.fresh && hit && hit.expiresAt > Date.now()) return hit.pubkey;
+    // From here every exit that is not a success leaves no entry for this token.
+    // Known race: a non-fresh check already past its cache read when a fresh
+    // check evicts the entry can still succeed at Keycast first and cache the
+    // login again, for one TTL. The fresh paths never read the cache, so the
+    // viewer still refuses a revoked login; only attribution on other routes
+    // may keep trusting it for up to 60 s more.
+    cache.delete(key);
 
     const res = await fetch(`${baseUrl.replace(/\/+$/, '')}/api/nostr`, {
       method: 'POST',

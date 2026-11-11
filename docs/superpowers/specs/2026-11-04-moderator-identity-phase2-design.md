@@ -30,7 +30,7 @@ Phase 2 makes the worker work out who acted from the moderator's Divine login, a
 - Restricting anything to Keycast's support-admin list (decision 5).
 - Asking Keycast for a narrower login scope (decision 6, a follow-up issue).
 - A new Keycast endpoint (decision 1, option D, a follow-up).
-- Making the app's sign-out revoke the login in Keycast (decision 9, a follow-up that must land before the viewer).
+- Making the app's sign-out revoke the login in Keycast (post-MVP; viewer v1 uses relay-manager sign-out from #392 instead, per revised decision 9).
 - The suspended-content viewer and its view log (#212).
 - Per-moderator signing (phase 3).
 
@@ -97,6 +97,19 @@ Rewriting the body or passing the identity in a worker-set internal header is le
 ### 9. Sign-out revokes the login in a follow-up (Matt, 2026-11-04)
 
 Recording who acted stays correct, because a token only ever names its owner. A follow-up issue makes the app's sign-out also revoke the login in Keycast. That follow-up must land before the suspended-content viewer (#212) relies on strict mode.
+
+**Revised (Matt, 2026-11-09).** The suspended-content viewer's first version does not wait for Keycast revocation. Instead:
+
+- Sign-out is relay-manager only (#392). Every tab signs out, the ended session is refused even after a reload, and a refresh in another tab can't bring it back. #392 lands before the viewer goes live.
+- The viewer checks the moderator's login fresh against Keycast on every view, with no cache, and every view writes an audit row naming that moderator.
+
+Accepted risks for v1:
+
+- A token copied before sign-out stays valid at Keycast until it expires (24 h by default). Cloudflare Access still gates the API, and the audit row names the moderator whose token was used.
+- The login.divine.video browser session survives sign-out, so on a shared machine the next sign-in may not ask for a password.
+- Escape hatch: disconnecting relay admin from Keycast's account page makes the viewer refuse that login within about 5 seconds.
+
+Keycast self-revocation (an RFC 7009-style revoke endpoint) stays a post-MVP hardening follow-up.
 
 ### 10. Keycast status calls name the moderator (Matt, 2026-11-04)
 
