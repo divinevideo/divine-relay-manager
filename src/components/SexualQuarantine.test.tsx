@@ -6,12 +6,16 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { SexualCase } from '../../shared/sexual-quarantine';
 import { SexualQuarantine } from './SexualQuarantine';
 
-const context = vi.hoisted(() => ({ apiUrl: 'https://api.example.test', relayUrl: 'wss://relay.example.test', token: undefined as string | undefined, pubkey: undefined as string | undefined }));
+const context = vi.hoisted(() => ({ apiUrl: 'https://api.example.test', relayUrl: 'wss://relay.example.test', token: undefined as string | undefined, pubkey: undefined as string | undefined, identityUnavailable: false }));
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: context }) }));
 vi.mock('@/hooks/useDivineSession', () => ({ useDivineSession: () => ({
-  getModeratorToken: () => context.token, identityUnavailable: false, isSignedIn: context.token !== undefined, pubkey: context.pubkey,
+  getModeratorToken: () => context.token, identityUnavailable: context.identityUnavailable, isSignedIn: context.token !== undefined, pubkey: context.pubkey,
 }) }));
 const MOD_TOKEN = 'moderator-login-token';
+// The decision-area warning for a session whose identity is unavailable. One
+// constant for the check that it shows and the check that it doesn't, so a
+// rewording cannot leave the absence check looking for old text.
+const IDENTITY_WARNING = 'Moderator identity unavailable. Your decision may not be recorded under your name.';
 
 const EVENT = 'a'.repeat(64);
 const HASH = 'b'.repeat(64);
@@ -41,6 +45,7 @@ beforeEach(() => {
   context.apiUrl = 'https://api.example.test';
   context.token = MOD_TOKEN;
   context.pubkey = 'c'.repeat(64);
+  context.identityUnavailable = false;
   current = makeCase(); postStatus = 202; lastDecision = undefined; lastDecisionHeaders = undefined;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
@@ -146,6 +151,26 @@ describe('Sexual quarantine review', () => {
     renderQueue();
     expect(await screen.findByText('Human decision saved; recording in Reports is pending.')).toBeInTheDocument();
     expect(screen.getByText('Overdue')).toBeInTheDocument();
+  });
+
+  it('warns that a decision may not carry the moderator\'s name when the identity is unavailable', async () => {
+    // Not "unattributed": with REQUIRE_MODERATOR_LOGIN on, an unverified decision
+    // is refused rather than recorded without a name, and a verified token still
+    // attributes it, so the frontend can only say it may not carry the name.
+    context.identityUnavailable = true;
+    context.pubkey = undefined;
+    renderQueue();
+    expect(await screen.findByText(IDENTITY_WARNING)).toBeInTheDocument();
+    expect(screen.queryByText(/attributed as unattributed/i)).toBeNull();
+  });
+
+  it('does not warn an identified moderator that their decision may not carry their name', async () => {
+    // beforeEach leaves a signed-in session with a resolved pubkey. Wait for the
+    // case to render, so the absence is checked on the decision area itself.
+    renderQueue();
+    expect(await screen.findByText('Revision 3')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Restore' })).toBeInTheDocument();
+    expect(screen.queryByText(IDENTITY_WARNING)).toBeNull();
   });
 
   it('explains remaining restrictions after a restore', async () => {

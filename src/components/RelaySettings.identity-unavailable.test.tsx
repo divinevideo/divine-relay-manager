@@ -1,13 +1,12 @@
 // ABOUTME: A session whose moderator identity never resolved must still reach
-// ABOUTME: relay management, which the worker authorizes without that identity.
+// ABOUTME: relay management, whose reads the worker serves without that identity.
 //
-// The header banner this PR adds tells the moderator "Moderation itself still
-// works". That has to be true. Relay management authenticates through
-// useAdminApi -> adminApi.callRelayRpc, which sends only CF Access service-token
-// / X-Admin-Key headers and never uses the moderator pubkey or signer, so gating
-// it on `useCurrentUser().user` (which requires the pubkey) locked out exactly
-// the session identityUnavailable describes -- telling a signed-in moderator to
-// "log in" while the header above said they were signed in.
+// The header shows this session as signed in (it offers Sign out, not Sign
+// in), so relay management must not tell the moderator to "log in". Relay
+// reads go through useAdminApi -> adminApi.callRelayRpc, which sends only CF
+// Access service-token / X-Admin-Key headers and never uses the moderator
+// pubkey or signer, so gating them on `useCurrentUser().user` (which requires
+// the pubkey) locked out exactly the session identityUnavailable describes.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen, waitFor } from '@testing-library/react';
 

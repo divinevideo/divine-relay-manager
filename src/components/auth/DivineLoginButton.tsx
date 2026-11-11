@@ -1,6 +1,7 @@
 // ABOUTME: Sign-in surface for the shell header. Signed out -> "Sign in";
-// signed in -> the moderator's name/pubkey + "Sign out". Attribution only;
-// CF Access remains the access gate.
+// signed in -> the moderator's name/pubkey + "Sign out". CF Access remains the
+// access gate; the login attributes writes, and with REQUIRE_MODERATOR_LOGIN on
+// a write from the admin UI needs it.
 import { AlertTriangle, LogIn, LogOut } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
@@ -66,19 +67,24 @@ export function DivineLoginButton() {
             inserted already-populated is not reliably announced anyway. */}
         <span
           className="flex items-center gap-1.5 text-sm text-destructive whitespace-nowrap"
-          title="Your moderator identity could not be loaded, so moderation actions may be recorded without attribution. Moderation itself still works. If signing out and back in does not help, this account may have no Keycast-managed key."
+          title="Your moderator identity could not be loaded, so your moderation actions may not be recorded under your name. If signing out and back in does not help, this account may have no Keycast-managed key."
         >
           <AlertTriangle className="h-4 w-4 shrink-0" aria-hidden />
-          {/* "may be", matching the title: attribution rests on the worker
+          {/* "may not", matching the title: attribution rests on the worker
               verifying the login token, not on this pubkey read. After a
               transient failure the banner is latched for the life of the token
               while actions can still be attributed, and a label that states it
               as fact would be wrong for exactly that window. */}
           {/* Widened with the wording: measured against the built CSS in a
-              headless browser, this label is 300px natural, so the previous
-              16rem (256px) truncated it mid-phrase and cut off the consequence
-              -- which is the reason the consequence was moved out of the hover
-              title and onto the label in the first place. 24rem clears it.
+              headless browser on macOS, this label is 343px natural in the
+              system font the built stack resolves to there, and 331px in
+              Helvetica (the earlier "may be unattributed" wording, four
+              characters shorter, was 313px and 300px), so the previous 16rem
+              (256px) truncated it mid-phrase and cut off the consequence --
+              which is the reason the consequence was moved out of the hover
+              title and onto the label in the first place. 24rem (384px) clears
+              it on macOS, but only just in a wide font: Verdana measures 383px.
+              Fonts on other systems were not measured.
               truncate caps the width against that max only; it is NOT a
               narrow-viewport guard. Shrink pressure never reaches this label
               because the header's outer flex row (RelayManager's gap-3
@@ -90,7 +96,7 @@ export function DivineLoginButton() {
               on a desktop-only tool. That overflow predates this banner and
               affects the signed-in name the same way. jsdom performs no layout,
               so no test can pin any of this. */}
-          <span className="max-w-[24rem] truncate">Identity unavailable, actions may be unattributed</span>
+          <span className="max-w-[24rem] truncate">Identity unavailable, actions may not carry your name</span>
         </span>
         <Button variant="ghost" size="sm" onClick={logout} title="Sign out">
           <LogOut className="h-4 w-4" />

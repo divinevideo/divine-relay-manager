@@ -123,12 +123,17 @@ describe('signed in but identity never resolves', () => {
     expect(screen.queryByRole('button', { name: /^sign in$/i })).toBeNull();
   });
 
-  it('says the moderator is unattributed rather than failing silently', async () => {
+  it('says actions may not carry the moderator\'s name rather than failing silently', async () => {
     renderButton();
     // The hedge is asserted, not just the noun: the label must not state as
-    // fact something the tooltip correctly calls a possibility.
-    expect(await screen.findByText(/actions may be unattributed/i))
-      .toBeInTheDocument();
+    // fact something the tooltip correctly calls a possibility. "Unattributed"
+    // is avoided because, with REQUIRE_MODERATOR_LOGIN on, an unverified write
+    // is refused rather than recorded without a name.
+    const label = await screen.findByText(/identity unavailable, actions may not carry your name/i);
+    expect(label).toBeInTheDocument();
+    const title = label.closest('[title]')?.getAttribute('title') ?? '';
+    expect(title).toMatch(/may not be recorded under your name/i);
+    expect(title).not.toMatch(/still works/i);
   });
 
   it('signing out clears the stuck session', async () => {
@@ -341,7 +346,7 @@ describe('states that must not regress', () => {
     expect(await screen.findByRole('button', { name: /sign out/i })).toBeInTheDocument();
     expect(screen.getByTitle(PUBKEY)).toBeInTheDocument();
     // A working session is not the broken state.
-    expect(screen.queryByText(/actions may be unattributed/i)).toBeNull();
+    expect(screen.queryByText(/actions may not carry your name/i)).toBeNull();
   });
 
   it('a signed-out moderator still gets a plain sign-in', async () => {
@@ -351,7 +356,7 @@ describe('states that must not regress', () => {
 
     expect(await screen.findByRole('button', { name: /^sign in$/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /sign out/i })).toBeNull();
-    expect(screen.queryByText(/actions may be unattributed/i)).toBeNull();
+    expect(screen.queryByText(/actions may not carry your name/i)).toBeNull();
   });
 
   it('is not "unavailable" while the pubkey is still in flight', async () => {

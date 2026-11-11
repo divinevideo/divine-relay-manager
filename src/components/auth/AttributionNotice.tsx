@@ -1,10 +1,11 @@
-// ABOUTME: Tells a moderator with no resolved identity that their moderation
-// ABOUTME: actions are being recorded without attribution, and offers sign-in.
+// ABOUTME: Tells a moderator with no resolved identity that they aren't signed in
+// ABOUTME: with Divine, or that their identity isn't available, and offers sign-in.
 //
 // CF Access is the access gate, so this never blocks anything -- it is the cue
 // that replaces the login walls this tool used to put in front of the relay
-// management surfaces. Without it a moderator has no reason to sign in and
-// every decision they write lands moderator_pubkey = null (#178, #181).
+// management surfaces. Without it a moderator has no reason to sign in before
+// acting, and every decision they write lands moderator_pubkey = null
+// (#178, #181) or, with REQUIRE_MODERATOR_LOGIN on, is refused.
 //
 // Dismissable: the banner is informational, not a gate, and on a short viewport
 // it steals vertical space from the report panes. A moderator who cannot (or
@@ -53,7 +54,7 @@ function forgetDismissed(): void {
 
 export function AttributionNotice() {
   const { user } = useCurrentUser();
-  const { isResolving } = useDivineSession();
+  const { isResolving, identityUnavailable } = useDivineSession();
   const handleSignIn = useStartSignIn();
   const [dismissed, setDismissed] = useState(readDismissed);
 
@@ -98,7 +99,14 @@ export function AttributionNotice() {
       <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
         <span className="flex items-center gap-2">
           <UserX className="h-4 w-4 shrink-0" aria-hidden />
-          Moderation actions are being recorded without attribution.
+          {/* Worded to stay true whether or not REQUIRE_MODERATOR_LOGIN is on: with
+              it on, an unverified write is refused rather than recorded, and the
+              frontend can't read the flag. A session that is still present but has no
+              identity (the lookup failed, or the token expired and has not been
+              replaced) is not signed out, so it gets its own line. */}
+          {identityUnavailable
+            ? "Your Divine identity isn't available right now, so your moderation actions may not be recorded under your name. Try signing in again."
+            : "You're not signed in with Divine. Sign in so your moderation actions are recorded under your name."}
         </span>
         <div className="flex items-center gap-2">
           <Button size="sm" variant="outline" onClick={handleSignIn}>
