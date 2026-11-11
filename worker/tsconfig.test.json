@@ -11,6 +11,12 @@
 // For the same reason the check accepts a Workers-only member that Node's
 // objects lack (Request.cf, Response.webSocket), so it does not prove those
 // globals are used correctly for the Node runtime.
+//
+// The timer functions are the exception: setTimeout and setInterval resolve to
+// Node's overloads here and return NodeJS.Timeout, not number. That also holds
+// for every src/ file a test imports, so `const t: number = setTimeout(...)`
+// in src/ passes tsconfig.json and fails this check. Type a timer handle as
+// `ReturnType<typeof setTimeout>`, as src/ already does.
 {
   "extends": "./tsconfig.json",
   "compilerOptions": {
