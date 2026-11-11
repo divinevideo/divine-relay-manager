@@ -1,5 +1,5 @@
 // ABOUTME: A moderator acting without a resolved identity must be told their
-// ABOUTME: actions are recorded unattributed, and offered the way to fix it.
+// ABOUTME: actions may not carry their name, and offered the way to fix it.
 //
 // Removing the login walls (this PR) restores access for everyone CF Access
 // admits, but it also removes the loudest cue that you have no divine-login

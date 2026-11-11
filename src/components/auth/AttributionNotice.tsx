@@ -1,5 +1,5 @@
 // ABOUTME: Tells a moderator with no resolved identity that they aren't signed in
-// ABOUTME: with Divine, and offers sign-in so their actions carry their name.
+// ABOUTME: with Divine, or that their identity isn't available, and offers sign-in.
 //
 // CF Access is the access gate, so this never blocks anything -- it is the cue
 // that replaces the login walls this tool used to put in front of the relay
