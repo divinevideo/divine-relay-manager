@@ -366,25 +366,24 @@ export function ThreadContext({
             {isEventDeleted === true && goneCause?.kind === 'suspended' && (
               // Not green: nothing here confirms the post was removed. The
               // relay withholds it while the account is suspended.
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 p-2 rounded bg-muted">
-                  <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
-                </div>
-                {suspendedViewer}
+              <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
               </div>
             )}
             {isEventDeleted === true && (goneCause?.kind === 'unknown' || goneCause?.kind === 'none-found') && (
               // Not green either: the post may still exist (unknown cause), or
               // be withheld for something nothing here reads (none found).
-              <div className="space-y-2">
-                <div className="flex items-center gap-2 p-2 rounded bg-muted">
-                  <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
-                  <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
-                </div>
-                {goneCause.kind === 'unknown' && suspendedViewer}
+              <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
+                <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
               </div>
             )}
+            {/* Under whichever of the two lines above shows, in one slot of its
+                own: the cause moves between them when a ban or decision read
+                fails or recovers, and a viewer rendered inside each would
+                remount, closing what the moderator opened. */}
+            {isEventDeleted === true && (goneCause?.kind === 'suspended' || goneCause?.kind === 'unknown') && suspendedViewer}
             {isEventDeleted === true && (goneCause === undefined || goneCause.kind === 'explained') && (
               // A cause the badge states itself, in its own words: "deleted"
               // only for a recorded delete (and when no cause is passed).

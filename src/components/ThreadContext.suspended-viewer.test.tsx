@@ -1,7 +1,8 @@
 // ABOUTME: Pins where the thread panel puts the suspended-content viewer: under the line
 // ABOUTME: that says a suspension hides the post or that the cause is unknown, and nowhere else.
 
-import { render, screen } from '@testing-library/react';
+import { useState } from 'react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
 import { ThreadContext } from './ThreadContext';
 import type { GoneCause } from '@/lib/goneCause';
@@ -46,4 +47,36 @@ describe('ThreadContext suspended viewer slot', () => {
 
     expect(screen.queryByText('viewer slot')).not.toBeInTheDocument();
   });
+
+  // The cause moves between these two on its own: a decision-log or ban-list
+  // read that fails on a refetch turns 'suspended' into 'unknown', and its
+  // recovery turns it back. A remount would close an opened viewer, and opening
+  // it again is one more audited view.
+  it.each([['suspended to unknown', SUSPENDED, UNKNOWN], ['unknown to suspended', UNKNOWN, SUSPENDED]] as const)(
+    'keeps an opened viewer open when the cause moves from %s',
+    (_move, from, to) => {
+      function Opened() {
+        const [open, setOpen] = useState(false);
+        return open ? <div>viewer opened</div> : <button onClick={() => setOpen(true)}>open viewer</button>;
+      }
+      const tree = (goneCause: GoneCause) => (
+        <ThreadContext
+          ancestors={[]}
+          reportedEvent={null}
+          isEventDeleted
+          isUserBanned={false}
+          goneCause={goneCause}
+          suspendedViewer={<Opened />}
+        />
+      );
+      const view = render(tree(from));
+      fireEvent.click(screen.getByRole('button', { name: 'open viewer' }));
+      expect(screen.getByText('viewer opened')).toBeInTheDocument();
+
+      view.rerender(tree(to));
+
+      expect(screen.getByText(to.line)).toBeInTheDocument();
+      expect(screen.getByText('viewer opened')).toBeInTheDocument();
+    },
+  );
 });
