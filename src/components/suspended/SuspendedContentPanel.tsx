@@ -13,6 +13,7 @@ import { useStartSignIn } from '@/hooks/useStartSignIn';
 import { useSuspendedAccount, useSuspendedPost, type ViewerSession } from '@/hooks/useSuspendedContent';
 import { ApiError } from '@/lib/adminApi';
 import { getKindName } from '@/lib/kindNames';
+import { parseRepostForDisplay } from '@/lib/nip18';
 import {
   SUSPENDED_CONTENT_CODE,
   type NostrEventJson,
@@ -166,7 +167,10 @@ function readProfile(profile: NostrEventJson | null): ProfileFields | null {
  * the relay, which hides a suspended account's profile. The author is the hex
  * pubkey, or the name from the viewer's own profile read. The text is plain, as
  * in the other cards: NoteContent links hashtags and mentions to routes this
- * app does not have, and following one would close the view.
+ * app does not have, and following one would close the view. A repost shows
+ * what it reposted, by the NIP-18 rule the user cards share: the original's text
+ * and media rather than the serialized copy (an out-of-spec one still shows as
+ * text, as evidence).
  */
 function HiddenPostCard({ event, showMediaByDefault, authorName }: {
   event: NostrEventJson;
@@ -174,6 +178,7 @@ function HiddenPostCard({ event, showMediaByDefault, authorName }: {
   authorName?: string;
 }) {
   const nostrEvent = event as NostrEvent;
+  const { isRepost, inner, displayContent, targetDescription } = parseRepostForDisplay(event);
   return (
     <div className="rounded-md border bg-background p-2.5 space-y-1.5">
       <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
@@ -184,8 +189,30 @@ function HiddenPostCard({ event, showMediaByDefault, authorName }: {
         {authorName && <span className="font-medium">{authorName}</span>}
         <CopyableId value={event.pubkey} type="hex" />
       </div>
-      {event.content && <p className="text-sm whitespace-pre-wrap break-words">{event.content}</p>}
-      <MediaPreview event={nostrEvent} showByDefault={showMediaByDefault} />
+      {displayContent && (
+        <p className="text-sm whitespace-pre-wrap break-words">
+          {isRepost && (
+            <span
+              className="text-muted-foreground italic"
+              title={inner?.pubkey ? `Reposted from pubkey ${inner.pubkey}` : undefined}
+            >
+              reposted:{' '}
+            </span>
+          )}
+          {displayContent}
+        </p>
+      )}
+      {isRepost && !displayContent && targetDescription && (
+        <p className="text-xs text-muted-foreground italic break-all">reposted {targetDescription}</p>
+      )}
+      {/* A repost hands over the original's text and tags, as the user cards do:
+          read from the JSON string, its quotes would end up inside the URLs. */}
+      <MediaPreview
+        event={nostrEvent}
+        content={displayContent}
+        tags={isRepost ? (inner?.tags ?? []) : event.tags}
+        showByDefault={showMediaByDefault}
+      />
     </div>
   );
 }

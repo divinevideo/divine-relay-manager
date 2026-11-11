@@ -42,8 +42,13 @@ vi.mock('@/hooks/useDivineSession', () => ({
 // The media viewer has its own tests. Here it records the rule it was handed
 // and what it was asked to show.
 vi.mock('@/components/MediaPreview', () => ({
-  MediaPreview: (props: { showByDefault?: boolean | null }) => (
-    <div data-testid="media" data-show={String(props.showByDefault)} />
+  MediaPreview: (props: { showByDefault?: boolean | null; content?: string; tags?: string[][] }) => (
+    <div
+      data-testid="media"
+      data-show={String(props.showByDefault)}
+      data-content={props.content}
+      data-tags={props.tags === undefined ? undefined : JSON.stringify(props.tags)}
+    />
   ),
 }));
 // Radix's AvatarImage starts a request just by mounting, so what matters is
@@ -156,6 +161,34 @@ describe('SuspendedPostViewer', () => {
     const shown = await screen.findByText(/^look/);
     expect(screen.queryByRole('link')).not.toBeInTheDocument();
     expect(shown).toHaveTextContent(text);
+  });
+
+  // The shared NIP-18 rule the user cards follow: a repost shows what it
+  // reposted, marked as a repost, never the serialized event.
+  it("shows a repost's inner text, marked as reposted, not its JSON, and reads media from the original", async () => {
+    const imeta = ['imeta', 'url https://example.invalid/clip.mp4', 'm video/mp4'];
+    const original = { ...event('1'.repeat(64), 'the original words'), pubkey: MOD, tags: [imeta] };
+    answerWith({
+      success: true,
+      event: { ...event(EVENT_ID, JSON.stringify(original)), kind: 6, tags: [['e', original.id], ['p', MOD]] },
+    });
+    await openPost();
+
+    expect(await screen.findByText('the original words')).toBeInTheDocument();
+    expect(screen.getByText(/reposted:/)).toBeInTheDocument();
+    expect(screen.queryByText(/"sig"/)).not.toBeInTheDocument();
+    // As the user cards do: the original's text and tags, not the JSON string,
+    // whose quotes and brackets would end up inside the extracted URLs.
+    const media = screen.getByTestId('media');
+    expect(media.dataset.content).toBe('the original words');
+    expect(JSON.parse(media.dataset.tags ?? 'null')).toEqual([imeta]);
+  });
+
+  it('names what a repost with no copy of the original reposted', async () => {
+    answerWith({ success: true, event: { ...event(EVENT_ID, ''), kind: 6, tags: [['e', '1'.repeat(64)]] } });
+    await openPost();
+
+    expect(await screen.findByText(/^reposted /)).toBeInTheDocument();
   });
 
   it.each([[false], [null], [true]] as const)('hands the media viewer the screen rule (%s)', async (rule) => {
