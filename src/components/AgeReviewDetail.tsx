@@ -562,7 +562,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             recentPosts={userStats?.recentPosts ?? []}
             onRetry={() => { void refetchUserStats(); void refetchAccountStatus(); }}
             reportedEvent={reportedEvent}
-            reportedEventLoading={reportedEventFetching}
+            // Loading only while there is no settled answer, or the answer on
+            // screen is the error a Retry is replacing. A background refetch
+            // (focus after staleTime) keeps the answer: under a missing target
+            // sits the suspended-content viewer, and swapping in "Loading"
+            // would close it, so reopening writes one more audit row.
+            reportedEventLoading={reportedEventFetching && (!reportedEvent || reportedEventFailed)}
             reportedEventError={reportedEventFailed}
             onRetryReported={() => { void refetchReported(); }}
             hasReportId={!!c.report_id}
