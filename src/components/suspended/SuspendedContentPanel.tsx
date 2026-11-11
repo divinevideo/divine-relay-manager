@@ -131,17 +131,28 @@ function OpenButton({ label, onOpen }: { label: string; onOpen: () => void }) {
   );
 }
 
-/** The open panel: labelled, so nothing in it reads as public content. */
-function Frame({ children }: { children: ReactNode }) {
+/**
+ * The open panel. Over served content it is labelled, so nothing in it reads as
+ * public content. Only then: the worker records a view only when it serves one,
+ * so while loading, or after a refusal or failure, nothing confirms the
+ * "recorded" note (a refusal records nothing at all), and the label would
+ * contradict an answer like "no longer suspended".
+ */
+function Frame({ served, children }: { served: boolean; children: ReactNode }) {
   return (
-    <section aria-label={SUSPENDED_VIEW_LABEL} className="rounded-md border border-amber-500/40 bg-muted/30 p-3 space-y-3">
-      <div className="space-y-0.5">
-        <p className="flex items-center gap-2 text-sm font-medium">
-          <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
-          {SUSPENDED_VIEW_LABEL}
-        </p>
-        <p className="text-xs text-muted-foreground">{RECORDED_NOTE}</p>
-      </div>
+    <section
+      aria-label={served ? SUSPENDED_VIEW_LABEL : undefined}
+      className="rounded-md border border-amber-500/40 bg-muted/30 p-3 space-y-3"
+    >
+      {served && (
+        <div className="space-y-0.5">
+          <p className="flex items-center gap-2 text-sm font-medium">
+            <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
+            {SUSPENDED_VIEW_LABEL}
+          </p>
+          <p className="text-xs text-muted-foreground">{RECORDED_NOTE}</p>
+        </div>
+      )}
       {children}
     </section>
   );
@@ -237,7 +248,7 @@ export function SuspendedPostViewer({ eventId, surface, showMediaByDefault, expe
   const event = view.data?.event;
   const foreign = !!event && !!expectedAuthor && event.pubkey.toLowerCase() !== expectedAuthor.toLowerCase();
   return (
-    <Frame>
+    <Frame served={!!event}>
       {view.status === 'loading' && <p role="status" className="text-sm text-muted-foreground">Opening the hidden post…</p>}
       {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} />}
       {foreign && <ForeignAuthorWarning author={event.pubkey} subject={subject} />}
@@ -280,7 +291,7 @@ export function SuspendedAccountViewer({ pubkey, surface, showMediaByDefault }: 
   const authorName = first ? readProfile(first.profile)?.name : undefined;
   const events = view.pages.flatMap(p => p.events);
   return (
-    <Frame>
+    <Frame served={!!first}>
       {view.status === 'loading' && <p role="status" className="text-sm text-muted-foreground">Opening the hidden posts…</p>}
       {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} />}
       {first && (

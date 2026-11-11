@@ -332,6 +332,28 @@ describe('SuspendedPostViewer', () => {
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 
+  // The worker writes the audit row only when it serves the content, so the
+  // header's "recorded" claim, and the suspension label, belong over content.
+  it.each([
+    ['audit_unavailable', 503, "Couldn't record this view, so nothing is shown. Try again."],
+    ['not_suspended', 409, 'This account is no longer suspended. Its posts show in the usual views.'],
+  ])('a %s answer shows neither the suspension label nor the recorded note', async (code, status, copy) => {
+    answerWith({ success: false, error: 'x', code }, status);
+    await openPost();
+
+    expect(await screen.findByText(copy)).toBeInTheDocument();
+    expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
+    expect(screen.queryByText(RECORDED)).not.toBeInTheDocument();
+  });
+
+  it('claims nothing is recorded while the read is still out', async () => {
+    fetchMock.mockImplementation(() => new Promise(() => {}));
+    await openPost();
+
+    expect(await screen.findByText('Opening the hidden post…')).toBeInTheDocument();
+    expect(screen.queryByText(RECORDED)).not.toBeInTheDocument();
+  });
+
   it('a request that never reached the worker offers a retry', async () => {
     fetchMock.mockImplementation(async () => { throw new TypeError('Failed to fetch'); });
     await openPost();
@@ -428,6 +450,19 @@ describe('SuspendedAccountViewer', () => {
     expect(await screen.findByText("Couldn't record this view, so that page isn't shown. Try again.")).toBeInTheDocument();
     expect(screen.queryByText(/so nothing is shown/)).not.toBeInTheDocument();
     expect(screen.getByText('first hidden post')).toBeInTheDocument();
+    // What is on screen was served and recorded, so its header stays.
+    expect(screen.getByText(LABEL)).toBeInTheDocument();
+    expect(screen.getByText(RECORDED)).toBeInTheDocument();
+  });
+
+  it('a first page that failed shows neither the suspension label nor the recorded note', async () => {
+    answerWith({ success: false, error: 'x', code: 'relay_error' }, 502);
+    render(account());
+    fireEvent.click(screen.getByRole('button', { name: 'View hidden posts' }));
+
+    expect(await screen.findByText("Couldn't read from the relay. Try again.")).toBeInTheDocument();
+    expect(screen.queryByText(LABEL)).not.toBeInTheDocument();
+    expect(screen.queryByText(RECORDED)).not.toBeInTheDocument();
   });
 
   it("never commits the previous moderator's posts under the next moderator, not even once", async () => {
