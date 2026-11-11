@@ -25,6 +25,7 @@ vi.mock('@/lib/divineLogin', () => ({
   getSession: session.getSession,
   startLogin: session.startLogin,
   logout: session.logout,
+  acceptSignOutFromOtherTab: vi.fn(() => false),
   completeLogin: vi.fn(),
   DIVINE_LOGIN_SERVER_URL: 'https://login.example.test',
   DIVINE_LOGIN_CLIENT_ID: 'divine-relay-admin',
@@ -54,13 +55,34 @@ function Sentinel() {
   return <div data-testid='state'>{isResolving ? 'resolving' : `settled:${!!user}`}</div>;
 }
 
+// The session's own sign-out, as the header's Sign out button calls it.
+function SignOut() {
+  const { logout } = useDivineSession();
+  return <button onClick={logout}>test-sign-out</button>;
+}
+
 function renderNotice() {
   return render(
     <DivineSessionProvider>
       <AttributionNotice />
       <Sentinel />
+      <SignOut />
     </DivineSessionProvider>,
   );
+}
+
+const DISMISS_KEY = 'attribution-notice:dismissed';
+const NOTICE = /without attribution/i;
+
+// The provider re-reads the session on window focus: how a sign-in made by the
+// login redirect, or in another tab, reaches an open tab.
+async function signInByFocus() {
+  session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+  getPublicKey.mockResolvedValue(PUBKEY);
+  act(() => {
+    window.dispatchEvent(new Event('focus'));
+  });
+  await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:true'));
 }
 
 beforeEach(() => {
@@ -154,6 +176,98 @@ describe('AttributionNotice', () => {
   });
 });
 
+// #397: a dismissal lasts only while the moderator stays signed out. Once they
+// are identified it is forgotten, so the next sign-out or expiry brings the
+// notice back, in this tab and in others.
+describe('AttributionNotice dismissal (#397)', () => {
+  it('returns after the moderator signs in and then signs out', async () => {
+    session.getSession.mockResolvedValue(null);
+    renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(NOTICE)).toBeNull();
+
+    await signInByFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'test-sign-out' }));
+
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+  });
+
+  it('is forgotten once the moderator is identified, so it does not hide the notice on a later load', async () => {
+    localStorage.setItem(DISMISS_KEY, '1');
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockResolvedValue(PUBKEY);
+
+    renderNotice();
+
+    await waitFor(() => expect(localStorage.getItem(DISMISS_KEY)).toBeNull());
+  });
+
+  it('returns when another tab forgets the dismissal', async () => {
+    session.getSession.mockResolvedValue(null);
+    renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(NOTICE)).toBeNull();
+
+    // Another tab saw the moderator signed in and removed the key.
+    localStorage.removeItem(DISMISS_KEY);
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: DISMISS_KEY, oldValue: '1', newValue: null }));
+    });
+
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+  });
+
+  // localStorage.clear() in another tab reports key null, not the key's name.
+  it('returns when another tab clears all of storage', async () => {
+    session.getSession.mockResolvedValue(null);
+    renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(NOTICE)).toBeNull();
+
+    localStorage.clear();
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: null }));
+    });
+
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
+  });
+
+  // A tab that has not caught up with the sign-in yet still shows the notice,
+  // and dismissing it there must not keep it hidden here after a sign-out.
+  it('ignores a dismissal from another tab while identified here', async () => {
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockResolvedValue(PUBKEY);
+    renderNotice();
+    await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:true'));
+
+    localStorage.setItem(DISMISS_KEY, '1');
+    act(() => {
+      window.dispatchEvent(new StorageEvent('storage', { key: DISMISS_KEY, oldValue: null, newValue: '1' }));
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'test-sign-out' }));
+
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+    expect(localStorage.getItem(DISMISS_KEY)).toBeNull();
+  });
+
+  it('returns after a sign-in and sign-out when storage is unavailable', async () => {
+    const fail = () => { throw new Error('storage disabled'); };
+    Object.defineProperty(window, 'localStorage', {
+      value: { getItem: fail, setItem: fail, removeItem: fail },
+      writable: true,
+    });
+    session.getSession.mockResolvedValue(null);
+    renderNotice();
+    fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
+    expect(screen.queryByText(NOTICE)).toBeNull();
+
+    await signInByFocus();
+    fireEvent.click(screen.getByRole('button', { name: 'test-sign-out' }));
+
+    expect(await screen.findByText(NOTICE)).toBeInTheDocument();
+  });
+});
+
 // The worker records nobody for an expired login token, so the notice has to
 // come back when the token expires and is not replaced (#178 phase 2). Before
 // this, the pubkey stayed cached and the moderator kept looking attributed.
@@ -184,6 +298,18 @@ describe('AttributionNotice after the login token expires', () => {
     expect(screen.queryByText(/without attribution/i)).toBeNull();
 
     // The scheduled refresh fails: the SDK answers null (and drops the session).
+    session.getSession.mockResolvedValue(null);
+    await flush(6 * MIN);
+
+    expect(screen.getByText(/without attribution/i)).toBeInTheDocument();
+  });
+
+  it('shows once the refresh fails, though it was dismissed while signed out before', async () => {
+    localStorage.setItem(DISMISS_KEY, '1');
+    renderNotice();
+    await flush();
+    expect(screen.getByTestId('state')).toHaveTextContent('settled:true');
+
     session.getSession.mockResolvedValue(null);
     await flush(6 * MIN);
 

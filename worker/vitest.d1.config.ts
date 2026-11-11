@@ -10,6 +10,9 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: ['test/**/*.d1.test.ts'],
+    // tsconfig.test.json loads vitest/globals; match it at runtime so a test
+    // that relies on the globals type-checks and also runs.
+    globals: true,
     environment: 'node',
     // Reuse connections to the local workerd so a full run doesn't exhaust
     // macOS ephemeral ports (#349). See the file for details.

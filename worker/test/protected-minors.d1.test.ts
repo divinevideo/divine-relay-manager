@@ -1,7 +1,8 @@
 import { Miniflare } from 'miniflare';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleCreateMinorAccount } from '../src/age-review';
+import { handleCreateMinorAccount, type AgeReviewEnv } from '../src/age-review';
+import { partialEnv } from '../src/test-helpers/partial-env';
 import { backfillProtectedMinorSubjects, clearSubject, closeBinding, convergeProjection, createSubjectWithBinding, fingerprintProvisioningRequest, handleProtectedMinorServiceRoute, pendingProjectionJobs, pendingSubjectClears, resolveByPubkey, startOrResumeReplacement } from '../src/protected-minors';
 import { digestProvisioningFingerprint } from '../src/retention';
 
@@ -287,7 +288,7 @@ describe('protected-minor registry on real D1', () => {
         username: 'new-minor', zendesk_ticket_id: ticketId, provisioning_operation_id: operationId,
       }),
     });
-    const env = { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' };
+    const env = partialEnv<AgeReviewEnv>({ DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' });
     expect((await handleCreateMinorAccount(request(101), env, {})).status).toBe(200);
     expect((await handleCreateMinorAccount(request(202), env, {})).status).toBe(409);
 
@@ -313,7 +314,7 @@ describe('protected-minor registry on real D1', () => {
     const makeRequest = () => new Request('https://api.test/api/age-review/create-minor-account', {
       method: 'POST', body: JSON.stringify({ username: 'new-minor', provisioning_operation_id: operationId }),
     });
-    const env = { DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' };
+    const env = partialEnv<AgeReviewEnv>({ DB, KEYCAST_URL: 'https://keycast.test', KEYCAST_SERVICE_TOKEN: 'token' });
     expect((await handleCreateMinorAccount(makeRequest(), env, {})).status).toBe(200);
     expect((await handleCreateMinorAccount(makeRequest(), env, {})).status).toBe(200);
     const counts = await DB.prepare(`SELECT

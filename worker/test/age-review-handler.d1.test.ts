@@ -13,6 +13,7 @@ import { createSubjectWithBinding, approvalRegistryStatements, resolveByPubkey, 
 import { submitSignedConsent, consentPayloadHash } from '../src/test-helpers/signed-consent';
 import worker from '../src/index';
 import { __clearModeratorLoginCache } from '../src/moderator-identity';
+import { partialEnv } from '../src/test-helpers/partial-env';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -30,7 +31,7 @@ beforeAll(async () => {
   DB = (await mf.getD1Database('DB')) as unknown as D1Database;
   // No KEYCAST_URL / RELAY_URL / MODERATION bindings: enforcement legs fail,
   // which is what we want for the surfacing test.
-  env = { DB };
+  env = partialEnv<typeof env>({ DB });
 });
 afterAll(async () => { await mf?.dispose(); });
 

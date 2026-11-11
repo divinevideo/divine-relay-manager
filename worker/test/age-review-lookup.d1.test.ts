@@ -203,7 +203,7 @@ describe('a case stored under an uppercase pubkey', () => {
   it('does not stop a queued Un-age-restrict All at its next chunk', async () => {
     const enqueued = await handleBulkModerateEnqueue(new Request('https://relay.example/api/bulk-moderate', {
       method: 'POST', body: JSON.stringify({ pubkey: LOWER, action: 'un-age-restrict-all' }),
-    }), env(), {});
+    }), env(), {}, undefined);
     expect(enqueued.status).toBe(200);
     const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async () => Response.json({}));
     try {
@@ -217,7 +217,7 @@ describe('a case stored under an uppercase pubkey', () => {
   it('leaves a queued Un-age-restrict All stopping at its next chunk for the lowercase case', async () => {
     const enqueued = await handleBulkModerateEnqueue(new Request('https://relay.example/api/bulk-moderate', {
       method: 'POST', body: JSON.stringify({ pubkey: LOWER, action: 'un-age-restrict-all' }),
-    }), env(), {});
+    }), env(), {}, undefined);
     expect(enqueued.status).toBe(200);
     const { jobId } = await enqueued.json() as BulkEnqueueResponse;
     await insertCase(LOWER, 'open_reported'); // opened after the job was queued

@@ -10,6 +10,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { checkAgeReviewDeadlines } from '../src/age-review';
+import { partialEnv } from '../src/test-helpers/partial-env';
 import { clearSubject, createSubjectWithBinding, markProjectionComplete, pendingSubjectClears, rearmLiveSubjectProjection } from '../src/protected-minors';
 
 let mf: Miniflare;
@@ -28,7 +29,7 @@ beforeAll(async () => {
   // Minimal env: no Keycast/Slack/Zendesk/moderation bindings. The cron's
   // downstream calls (banUser, Slack, Zendesk, bulk-delete) then no-op / early
   // out / are swallowed; the DB state transition we assert happens first.
-  cronEnv = { DB };
+  cronEnv = partialEnv<typeof cronEnv>({ DB });
 });
 
 afterAll(async () => {

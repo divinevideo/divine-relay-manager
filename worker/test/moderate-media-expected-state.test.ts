@@ -396,12 +396,11 @@ describe('/api/moderate-media expected-state check', () => {
     // internal binding instead of the 503 this block otherwise commits to -- and
     // "misconfigured" is exactly the "could not check" case the fail-closed
     // reasoning says must be retryable and must not read as success.
-    const broken = env(moderationApi('age_restricted')) as unknown as Record<string, unknown>;
-    delete broken.MODERATION_SERVICE_URL;
+    const { MODERATION_SERVICE_URL: _unbound, ...broken } = env(moderationApi('age_restricted'));
 
     const res = await worker.fetch(
       post({ sha256: SHA, action: 'SAFE', from: 'AGE_RESTRICTED' }),
-      broken as Parameters<typeof worker.fetch>[1],
+      broken,
       {} as ExecutionContext,
     );
 

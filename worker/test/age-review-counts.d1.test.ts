@@ -5,6 +5,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { handleGetAgeReviewCaseCounts } from '../src/age-review';
+import { partialEnv } from '../src/test-helpers/partial-env';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -20,7 +21,7 @@ beforeAll(async () => {
     d1Databases: ['DB'],
   });
   DB = (await mf.getD1Database('DB')) as unknown as D1Database;
-  env = { DB };
+  env = partialEnv<typeof env>({ DB });
 });
 afterAll(async () => { await mf?.dispose(); });
 

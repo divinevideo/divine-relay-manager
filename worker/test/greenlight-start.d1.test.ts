@@ -2,7 +2,8 @@ import { Miniflare } from 'miniflare';
 import { DEADLINE_DAYS, type AgeReviewCase } from '../../shared/age-review';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { handleStartGreenlight, handleGetModerationStatus, handleUpdateAgeReviewCase } from '../src/age-review';
+import { handleStartGreenlight, handleGetModerationStatus, handleUpdateAgeReviewCase, type AgeReviewEnv } from '../src/age-review';
+import { partialEnv } from '../src/test-helpers/partial-env';
 
 type StartResponse = {
   restriction: { status: string };
@@ -16,11 +17,13 @@ type StartResponse = {
 
 let mf: Miniflare;
 let DB: D1Database;
+let env: AgeReviewEnv;
 const owner = 'a'.repeat(64);
 const other = 'b'.repeat(64);
 beforeAll(async () => {
   mf = new Miniflare({ modules: true, script: 'export default { fetch() { return new Response("ok"); } };', compatibilityDate: '2024-12-01', d1Databases: ['DB'] });
   DB = (await mf.getD1Database('DB')) as unknown as D1Database;
+  env = partialEnv<AgeReviewEnv>({ DB });
   await ensureSchema(DB);
 });
 afterAll(async () => { await mf.dispose(); });
@@ -28,7 +31,7 @@ beforeEach(async () => { await DB.prepare('DELETE FROM age_review_cases').run();
 afterEach(() => { vi.restoreAllMocks(); });
 
 async function start(pubkey = owner) {
-  return handleStartGreenlight(pubkey, { DB }, {});
+  return handleStartGreenlight(pubkey, env, {});
 }
 describe('starting the existing Greenlight consent process', () => {
   it('creates a real owned 13–15 case without making a voluntary application a moderation restriction', async () => {
@@ -43,7 +46,7 @@ describe('starting the existing Greenlight consent process', () => {
     expect(row?.pubkey).toBe(owner);
     expect(row?.state).toBe('open_reported');
     expect(row?.deadline_at).toBeNull();
-    const reloaded = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
+    const reloaded = await (await handleGetModerationStatus(owner, env, {})).json() as StartResponse;
     expect(reloaded.restriction.status).toBe('active');
     expect(reloaded.minorReviewCase.id).toBe(status.minorReviewCase.id);
     expect(reloaded.minorReviewCase.responseDeadline.clock).toBe('not_applicable');
@@ -53,7 +56,7 @@ describe('starting the existing Greenlight consent process', () => {
     const id = body.minorReviewCase.id;
     const patch = (state: string) => handleUpdateAgeReviewCase(new Request('https://api.test/case', {
       method: 'PATCH', body: JSON.stringify({ state }),
-    }), id, { DB }, {}, undefined);
+    }), id, env, {}, undefined);
     await patch('under_moderator_review');
     const reviewed = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(id).first<AgeReviewCase>();
     expect(reviewed?.moderation_started_at).toBeTruthy();
@@ -65,7 +68,7 @@ describe('starting the existing Greenlight consent process', () => {
     expect(Date.parse(restricted!.deadline_at!)).toBeGreaterThanOrEqual(before + DEADLINE_DAYS * 864e5);
     expect(Date.parse(restricted!.deadline_at!)).toBeLessThanOrEqual(Date.now() + DEADLINE_DAYS * 864e5);
     expect(restricted?.moderation_started_at).toBe(reviewed?.moderation_started_at);
-    const status = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
+    const status = await (await handleGetModerationStatus(owner, env, {})).json() as StartResponse;
     expect(status.restriction.status).toBe('restricted_minor_review');
     expect(status.minorReviewCase.responseDeadline.clock).toBe('running');
   });
@@ -74,10 +77,10 @@ describe('starting the existing Greenlight consent process', () => {
     const id = body.minorReviewCase.id;
     const patch = (body: Record<string, unknown>) => handleUpdateAgeReviewCase(new Request('https://api.test/case', {
       method: 'PATCH', body: JSON.stringify(body),
-    }), id, { DB }, {}, undefined);
+    }), id, env, {}, undefined);
     await patch({ state: 'under_moderator_review' });
     await patch({ state: 'restricted_pending_user_response', clock_paused: true });
-    const status = await (await handleGetModerationStatus(owner, { DB }, {})).json() as StartResponse;
+    const status = await (await handleGetModerationStatus(owner, env, {})).json() as StartResponse;
     expect(status.minorReviewCase.responseDeadline.clock).toBe('paused');
   });
   // #178 phase 2: the PATCH no longer writes moderator_pubkey from its body, and
@@ -90,7 +93,7 @@ describe('starting the existing Greenlight consent process', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await handleUpdateAgeReviewCase(new Request('https://api.test/case', {
       method: 'PATCH', body: JSON.stringify({ resolution_note: 'family called', moderator_pubkey: other }),
-    }), id, { DB }, {}, 'e'.repeat(64));
+    }), id, env, {}, 'e'.repeat(64));
     expect(res.status).toBe(200);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(`claimed moderator ${other} differs`));
     const row = await DB.prepare('SELECT * FROM age_review_cases WHERE id = ?').bind(id).first<AgeReviewCase>();
@@ -106,7 +109,7 @@ describe('starting the existing Greenlight consent process', () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const res = await handleUpdateAgeReviewCase(new Request('https://api.test/case', {
       method: 'PATCH', body: JSON.stringify({ resolution_note: 'looked', moderator_pubkey: other }),
-    }), 'named', { DB }, {}, 'e'.repeat(64));
+    }), 'named', env, {}, 'e'.repeat(64));
     expect(res.status).toBe(200);
     expect(warn).toHaveBeenCalledWith(expect.stringContaining(`claimed moderator ${other} differs`));
     const response = await start();

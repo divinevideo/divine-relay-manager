@@ -23,15 +23,15 @@ function publish(signed: object): Promise<void> {
   return new Promise((resolve, reject) => {
     const ws = new WebSocket(CAKE_WS);
     const timer = setTimeout(() => { ws.close(); reject(new Error('publish timeout')); }, 8000);
-    ws.onopen = () => ws.send(JSON.stringify(['EVENT', signed]));
-    ws.onmessage = (e) => {
+    ws.addEventListener('open', () => ws.send(JSON.stringify(['EVENT', signed])));
+    ws.addEventListener('message', (e) => {
       const msg = JSON.parse(e.data as string);
       if (msg[0] === 'OK') {
         clearTimeout(timer); ws.close();
         if (msg[2]) resolve(); else reject(new Error(`relay rejected EVENT: ${msg[3]}`));
       }
-    };
-    ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error (publish)')); };
+    });
+    ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('ws error (publish)')); });
   });
 }
 
@@ -41,13 +41,13 @@ function reqAuthorIds(pubkey: string): Promise<string[]> {
     const ids: string[] = [];
     const sub = `s${Math.floor(performance.now())}`;
     const timer = setTimeout(() => { ws.close(); reject(new Error('req timeout')); }, 8000);
-    ws.onopen = () => ws.send(JSON.stringify(['REQ', sub, { authors: [pubkey], kinds: [1] }]));
-    ws.onmessage = (e) => {
+    ws.addEventListener('open', () => ws.send(JSON.stringify(['REQ', sub, { authors: [pubkey], kinds: [1] }])));
+    ws.addEventListener('message', (e) => {
       const msg = JSON.parse(e.data as string);
       if (msg[0] === 'EVENT' && msg[1] === sub) ids.push(msg[2].id);
       else if (msg[0] === 'EOSE' && msg[1] === sub) { clearTimeout(timer); ws.close(); resolve(ids); }
-    };
-    ws.onerror = () => { clearTimeout(timer); reject(new Error('ws error (req)')); };
+    });
+    ws.addEventListener('error', () => { clearTimeout(timer); reject(new Error('ws error (req)')); });
   });
 }
 

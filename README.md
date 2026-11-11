@@ -79,7 +79,7 @@ Worker development lives under `worker/`:
 cd worker
 npm run dev          # wrangler dev --config wrangler.local.toml
 npm run test:run     # worker unit tests
-npm run typecheck    # tsc --noEmit
+npm run typecheck    # tsc over src/ (tsconfig.json), then test/ (tsconfig.test.json)
 ```
 
 For the full local stack (Worker + Caddy HTTPS proxy + Vite), run `./scripts/dev-local.sh`.
