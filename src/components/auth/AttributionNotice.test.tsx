@@ -182,16 +182,27 @@ describe('AttributionNotice', () => {
   it('says the identity is unavailable, not that the moderator is signed out, when a session exists', async () => {
     // A live session whose public-key lookup settles as a failure: the provider
     // keeps the credentials (identityUnavailable), so "not signed in" would be false.
-    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
-    getPublicKey.mockRejectedValue(new Error('rpc down'));
+    // The provider warns on that failure by design. Capture the warning so the
+    // run stays quiet, and check it came from the failure this test drives.
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+      getPublicKey.mockRejectedValue(new Error('rpc down'));
 
-    renderNotice();
+      renderNotice();
 
-    expect(
-      await screen.findByText("Your Divine identity isn't available right now, so your moderation actions may not be recorded under your name. Try signing in again."),
-    ).toBeInTheDocument();
-    expect(screen.getByText(ANY_NOTICE)).toBeInTheDocument();
-    expect(screen.queryByText(NOTICE)).toBeNull();
+      expect(
+        await screen.findByText("Your Divine identity isn't available right now, so your moderation actions may not be recorded under your name. Try signing in again."),
+      ).toBeInTheDocument();
+      expect(screen.getByText(ANY_NOTICE)).toBeInTheDocument();
+      expect(screen.queryByText(NOTICE)).toBeNull();
+      expect(warn).toHaveBeenCalledWith(
+        '[divine-login] getPublicKey failed; attribution unavailable',
+        expect.objectContaining({ message: 'rpc down' }),
+      );
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it('does not flash while the session is still resolving', async () => {
