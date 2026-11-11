@@ -23,6 +23,12 @@ import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
 import { authoredContentStat, historyCount, historyStat } from "@/lib/historyCount";
 import { useJustRestored } from "@/lib/userStatsCache";
+import { SuspendedAccountViewer } from "@/components/suspended/SuspendedContentPanel";
+import type { SuspendedViewSurface } from "../../shared/suspended-content";
+
+// Report detail's pubkey comes from the report's own p tag, so the viewer is
+// offered only for a real key.
+const HEX64 = /^[0-9a-f]{64}$/i;
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -76,9 +82,15 @@ interface UserProfileCardProps {
    * "checking" over "couldn't check".
    */
   isSuspensionChecking?: boolean;
+  /**
+   * Where this card sits, for the audited suspended-content viewer. Set, the
+   * card offers the viewer for an account the list confirms suspended, under
+   * this card's media rule. Unset, no viewer.
+   */
+  suspendedViewerSurface?: SuspendedViewSurface;
 }
 
-export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false, isSuspended = null, isSuspendedStale = false, isSuspensionChecking = false }: UserProfileCardProps) {
+export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEvent, onViewActivity, isFunnelcakeUser, hideMediaByDefault = false, isSuspended = null, isSuspendedStale = false, isSuspensionChecking = false, suspendedViewerSurface }: UserProfileCardProps) {
   const [copied, setCopied] = useState(false);
   const mediaShownByDefault = hideMediaByDefault === null ? null : !hideMediaByDefault;
   // The hook forgets a reveal when the account changes or the default turns
@@ -276,6 +288,17 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
             </Button>
           )}
         </div>
+
+        {/* The relay hides a suspended account's posts from the reads above;
+            the audited viewer shows them on a click. */}
+        {suspendedViewerSurface && isSuspended === true && HEX64.test(pubkey) && (
+          <SuspendedAccountViewer
+            key={pubkey}
+            pubkey={pubkey}
+            surface={suspendedViewerSurface}
+            showMediaByDefault={mediaShownByDefault}
+          />
+        )}
 
         {/* Existing Labels */}
         {labelCounts.size > 0 && (

@@ -84,6 +84,12 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
     // against this login, so it lives here, not with the plain reads.
     getSexualQuarantineSnapshot: (eventId: string) =>
       adminApi.getSexualQuarantineCase(apiUrl, eventId, { snapshot: true, ...login }),
+    // The suspended-content viewer: refused without a verified login, and each
+    // call is recorded against it.
+    viewSuspendedPost: (body: Parameters<typeof adminApi.viewSuspendedPost>[1]) =>
+      adminApi.viewSuspendedPost(apiUrl, body, login),
+    viewSuspendedAccount: (body: Parameters<typeof adminApi.viewSuspendedAccount>[1]) =>
+      adminApi.viewSuspendedAccount(apiUrl, body, login),
 
     // Event publishing
     publishEvent: (event: adminApi.UnsignedEvent) => adminApi.publishEvent(apiUrl, event, login),

@@ -566,6 +566,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             reportedEventError={reportedEventFailed}
             onRetryReported={() => { void refetchReported(); }}
             hasReportId={!!c.report_id}
+            subjectPubkey={subjectPubkey}
           />
 
           {/* Protections that apply to an approved protected minor (#143).

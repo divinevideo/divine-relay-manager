@@ -12,7 +12,7 @@ import {
   AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX, EyeOff,
 } from "lucide-react";
 import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import type { FetchSource } from "@/hooks/useThread";
@@ -66,6 +66,12 @@ interface ThreadContextProps {
   isRechecking?: boolean;
   /** Withhold every participant's avatar image, keeping the initials (sensitive reports) */
   hideAvatars?: boolean;
+  /**
+   * Shown under the line that says a suspension hides the post, or that the
+   * cause is unknown: the audited viewer, which ReportDetail builds with the
+   * report's media rule and passes only when the suspension is confirmed.
+   */
+  suspendedViewer?: ReactNode;
 }
 
 function PostCard({
@@ -300,6 +306,7 @@ export function ThreadContext({
   onRecheck,
   isRechecking,
   hideAvatars = false,
+  suspendedViewer,
 }: ThreadContextProps) {
   if (isLoading) {
     return (
@@ -359,17 +366,23 @@ export function ThreadContext({
             {isEventDeleted === true && goneCause?.kind === 'suspended' && (
               // Not green: nothing here confirms the post was removed. The
               // relay withholds it while the account is suspended.
-              <div className="flex items-center gap-2 p-2 rounded bg-muted">
-                <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
-                <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                  <EyeOff className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
+                </div>
+                {suspendedViewer}
               </div>
             )}
             {isEventDeleted === true && (goneCause?.kind === 'unknown' || goneCause?.kind === 'none-found') && (
               // Not green either: the post may still exist (unknown cause), or
               // be withheld for something nothing here reads (none found).
-              <div className="flex items-center gap-2 p-2 rounded bg-muted">
-                <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
-                <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
+              <div className="space-y-2">
+                <div className="flex items-center gap-2 p-2 rounded bg-muted">
+                  <AlertTriangle className="h-4 w-4 text-muted-foreground shrink-0" />
+                  <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
+                </div>
+                {goneCause.kind === 'unknown' && suspendedViewer}
               </div>
             )}
             {isEventDeleted === true && (goneCause === undefined || goneCause.kind === 'explained') && (

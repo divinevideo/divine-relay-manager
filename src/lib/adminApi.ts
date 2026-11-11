@@ -22,6 +22,12 @@ import {
 } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import type { SexualCase } from "../../shared/sexual-quarantine";
+import type {
+  SuspendedAccountRequest,
+  SuspendedAccountResponse,
+  SuspendedEventRequest,
+  SuspendedEventResponse,
+} from "../../shared/suspended-content";
 
 // The moderator's Divine login token, sent on every write. The worker verifies it
 // and records that moderator (it never reads one from a body), and refuses a
@@ -58,6 +64,14 @@ export const getSexualQuarantineHistory = (apiUrl: string, eventId: string) =>
   apiRequest<SexualQuarantineAudit[]>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}/history`, 'GET');
 export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { revision: number; decision: 'restore' | 'remove'; reason: string }, opts?: LoginOpts) =>
   apiRequest<SexualCase>(apiUrl, `${SEXUAL_QUARANTINE}/${encodeURIComponent(eventId)}`, 'POST', withoutModerator(body), opts);
+
+// The audited suspended-content viewer. The worker answers only to a verified
+// login and writes one audit row per call, so these are called on a moderator's
+// click and never retried on their own.
+export const viewSuspendedPost = (apiUrl: string, body: SuspendedEventRequest, opts?: LoginOpts) =>
+  apiRequest<SuspendedEventResponse>(apiUrl, '/api/suspended-content/event', 'POST', body, opts);
+export const viewSuspendedAccount = (apiUrl: string, body: SuspendedAccountRequest, opts?: LoginOpts) =>
+  apiRequest<SuspendedAccountResponse>(apiUrl, '/api/suspended-content/account', 'POST', body, opts);
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.

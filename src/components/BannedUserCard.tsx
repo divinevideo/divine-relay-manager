@@ -25,6 +25,9 @@ import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
 import { queryStrict } from "@/lib/relayRead";
 import { authoredContentStat } from "@/lib/historyCount";
+import { SuspendedAccountViewer } from "@/components/suspended/SuspendedContentPanel";
+
+const HEX64 = /^[0-9a-f]{64}$/i;
 
 // One capped page of authored content. A count at this limit is a floor.
 const RECENT_CONTENT_LIMIT = 50;
@@ -307,9 +310,16 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   })}
                 </div>
               ) : suspended ? (
-                <p className="text-sm text-muted-foreground">
-                  The relay hides a suspended account's content, so none is shown here.
-                </p>
+                <div className="space-y-2">
+                  <p className="text-sm text-muted-foreground">
+                    The relay hides a suspended account's content, so none is shown here.
+                  </p>
+                  {/* The audited viewer. Media starts hidden: this list has no
+                      report to say whether the account's media is sensitive. */}
+                  {HEX64.test(pubkey) && (
+                    <SuspendedAccountViewer key={pubkey} pubkey={pubkey} surface="user" showMediaByDefault={false} />
+                  )}
+                </div>
               ) : readFailed ? (
                 <p className="text-sm text-muted-foreground">
                   Couldn't load this account's content (relay error).
