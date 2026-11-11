@@ -64,13 +64,24 @@ function viewerErrorCopy(error: unknown, olderPage: boolean): ErrorCopy {
       };
     case SUSPENDED_CONTENT_CODE.relayError:
       return { text: "Couldn't read from the relay. Try again.", retry: true };
+    // The worker's access gate (a 503) when Cloudflare's signing keys can't be
+    // fetched: an outage before the viewer route, not a refusal.
+    case 'access_unavailable':
+      return { text: "The server couldn't answer. Try again.", retry: true };
   }
   // No HTTP answer at all (offline, timed out): the worker may never have seen
-  // it, so a retry is worth offering. Any other answer, including a code this
-  // client does not know, means the viewer can't serve this here.
+  // it, so a retry is worth offering.
   if (!(error instanceof ApiError) || error.statusCode === undefined) {
     return { text: "Couldn't reach the server. Try again.", retry: true };
   }
+  // A server failure with no code at all is transient: the worker's catch-all
+  // 500, an edge 502/524 page, a 429. Each of the viewer's own refusals carries
+  // a code, so none of them lands here.
+  if (code === undefined && (error.statusCode >= 500 || error.statusCode === 429)) {
+    return { text: "The server couldn't answer. Try again.", retry: true };
+  }
+  // Any other answer, a bare 404 from an old worker or a code this client does
+  // not know included, means the viewer can't serve this here.
   return { text: "The suspended-content viewer isn't available here yet.", retry: false };
 }
 

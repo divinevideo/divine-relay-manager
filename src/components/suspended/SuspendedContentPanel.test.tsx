@@ -354,6 +354,34 @@ describe('SuspendedPostViewer', () => {
     expect(screen.queryByText(RECORDED)).not.toBeInTheDocument();
   });
 
+  // The worker's catch-all answers 500 { error: 'Internal error' } with no code,
+  // and an edge 502/524 page or a 429 carries none either. The access gate's
+  // outage has its own code. All are transient.
+  it.each([
+    ['the worker catch-all 500', () => Response.json({ success: false, error: 'Internal error' }, { status: 500 })],
+    ['an edge 502 page', () => new Response('<html>Bad gateway</html>', { status: 502 })],
+    ['a 429', () => new Response('Too many requests', { status: 429 })],
+    ['the access gate\'s access_unavailable 503', () => Response.json({ success: false, error: 'x', code: 'access_unavailable' }, { status: 503 })],
+  ])('%s offers a retry, not "unavailable"', async (_name, answer) => {
+    fetchMock.mockImplementation(async () => answer());
+    await openPost();
+
+    expect(await screen.findByText("The server couldn't answer. Try again.")).toBeInTheDocument();
+    expect(screen.queryByText(/isn't available here yet/)).not.toBeInTheDocument();
+    answerWith({ success: true, event: event(EVENT_ID, 'the hidden post') });
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(await screen.findByText('the hidden post')).toBeInTheDocument();
+  });
+
+  it('a code this client does not know still reads as unavailable, even on a 5xx', async () => {
+    answerWith({ success: false, error: 'x', code: 'some_future_code' }, 500);
+    await openPost();
+
+    expect(await screen.findByText("The suspended-content viewer isn't available here yet.")).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
+  });
+
   it('a request that never reached the worker offers a retry', async () => {
     fetchMock.mockImplementation(async () => { throw new TypeError('Failed to fetch'); });
     await openPost();
