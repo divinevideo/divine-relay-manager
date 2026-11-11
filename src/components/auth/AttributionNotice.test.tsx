@@ -72,7 +72,15 @@ function renderNotice() {
 }
 
 const DISMISS_KEY = 'attribution-notice:dismissed';
+// The signed-out line. Checks that the signed-out line shows use it, and so
+// does the identity-unavailable test's check that it is absent.
 const NOTICE = /not signed in with Divine/i;
+// Either line: the signed-out one and the identity-unavailable one both say
+// "recorded under your name". Checks that the notice is absent use it, so they
+// cannot pass while the other line is on screen. The first test and the
+// identity-unavailable test check that it matches their line, so a rewording
+// that drops the phrase fails there rather than blinding the absence checks.
+const ANY_NOTICE = /recorded under your name/i;
 
 // The provider re-reads the session on window focus: how a sign-in made by the
 // login redirect, or in another tab, reaches an open tab.
@@ -114,6 +122,7 @@ describe('AttributionNotice', () => {
     expect(
       await screen.findByText("You're not signed in with Divine. Sign in so your moderation actions are recorded under your name."),
     ).toBeInTheDocument();
+    expect(screen.getByText(ANY_NOTICE)).toBeInTheDocument();
     expect(screen.queryByText(/being recorded without attribution/i)).toBeNull();
   });
 
@@ -132,14 +141,14 @@ describe('AttributionNotice', () => {
     const firstRender = renderNotice();
     fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
 
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
     expect(localStorage.getItem('attribution-notice:dismissed')).toBe('1');
 
     firstRender.unmount();
     renderNotice();
 
     await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:false'));
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
   });
 
   it('still renders and dismisses when storage is unavailable', async () => {
@@ -156,7 +165,7 @@ describe('AttributionNotice', () => {
 
     expect(getItem).toHaveBeenCalled();
     expect(setItem).toHaveBeenCalledWith('attribution-notice:dismissed', '1');
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
   });
 
   it('stays out of the way once the moderator is attributed', async () => {
@@ -167,7 +176,7 @@ describe('AttributionNotice', () => {
 
     // Wait for a genuinely settled, signed-in session before asserting absence.
     await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:true'));
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
   });
 
   it('says the identity is unavailable, not that the moderator is signed out, when a session exists', async () => {
@@ -181,7 +190,8 @@ describe('AttributionNotice', () => {
     expect(
       await screen.findByText("Your Divine identity isn't available right now, so your moderation actions may not be recorded under your name. Try signing in again."),
     ).toBeInTheDocument();
-    expect(screen.queryByText(/not signed in with Divine/i)).toBeNull();
+    expect(screen.getByText(ANY_NOTICE)).toBeInTheDocument();
+    expect(screen.queryByText(NOTICE)).toBeNull();
   });
 
   it('does not flash while the session is still resolving', async () => {
@@ -192,7 +202,7 @@ describe('AttributionNotice', () => {
 
     await waitFor(() => expect(session.getSession).toHaveBeenCalled());
     expect(screen.getByTestId('state')).toHaveTextContent('resolving');
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
   });
 });
 
@@ -204,7 +214,7 @@ describe('AttributionNotice dismissal (#397)', () => {
     session.getSession.mockResolvedValue(null);
     renderNotice();
     fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
 
     await signInByFocus();
     fireEvent.click(screen.getByRole('button', { name: 'test-sign-out' }));
@@ -226,7 +236,7 @@ describe('AttributionNotice dismissal (#397)', () => {
     session.getSession.mockResolvedValue(null);
     renderNotice();
     fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
 
     // Another tab saw the moderator signed in and removed the key.
     localStorage.removeItem(DISMISS_KEY);
@@ -242,7 +252,7 @@ describe('AttributionNotice dismissal (#397)', () => {
     session.getSession.mockResolvedValue(null);
     renderNotice();
     fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
 
     localStorage.clear();
     act(() => {
@@ -279,7 +289,7 @@ describe('AttributionNotice dismissal (#397)', () => {
     session.getSession.mockResolvedValue(null);
     renderNotice();
     fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
 
     await signInByFocus();
     fireEvent.click(screen.getByRole('button', { name: 'test-sign-out' }));
@@ -315,7 +325,7 @@ describe('AttributionNotice after the login token expires', () => {
     renderNotice();
     await flush();
     expect(screen.getByTestId('state')).toHaveTextContent('settled:true');
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
 
     // The scheduled refresh fails: the SDK answers null (and drops the session).
     session.getSession.mockResolvedValue(null);
@@ -339,7 +349,7 @@ describe('AttributionNotice after the login token expires', () => {
   it('shows at expiry while the refresh has not replaced the token', async () => {
     renderNotice();
     await flush();
-    expect(screen.queryByText(NOTICE)).toBeNull();
+    expect(screen.queryByText(ANY_NOTICE)).toBeNull();
 
     // Every refresh hangs, so the expired token stays in the session. The
     // session is still present, so the notice says the identity is unavailable
