@@ -41,9 +41,13 @@ interface AgeReviewContentProps {
   // Whether the case has a report_id at all (so the reported section only
   // appears for cases that came from a report).
   hasReportId?: boolean;
-  // The case's subject, for the audited suspended-content viewer. Offered only
-  // while keycast says the account is suspended.
+  // The case's subject, for the audited suspended-content viewer.
   subjectPubkey?: string;
+  // Whether the relay's suspended list holds the subject (true), confirms it
+  // absent (false), or has not answered (null). The viewers are offered only on
+  // true: the worker serves only what that list holds. Keycast's status still
+  // drives every other claim here.
+  relaySuspended?: boolean | null;
 }
 
 // One content item: click-to-reveal media (MediaPreview default; the media-proxy
@@ -114,10 +118,12 @@ export function AgeReviewContent({
   onRetryReported,
   hasReportId,
   subjectPubkey,
+  relaySuspended,
 }: AgeReviewContentProps) {
-  // Offers the audited viewer. Both viewers keep age review's click-to-reveal
-  // rule (showMediaByDefault false), whatever the report says.
-  const suspended = accountStatus?.status === "suspended";
+  // Offers the audited viewer only when the relay's suspended list holds the
+  // subject. Both viewers keep age review's click-to-reveal rule
+  // (showMediaByDefault false), whatever the report says.
+  const offerViewer = relaySuspended === true;
   const vis = deriveContentVisibility({
     postCount,
     contentLoading,
@@ -180,7 +186,7 @@ export function AgeReviewContent({
   ) : reportedEvent?.status === "target_missing" ? (
     <div className="space-y-1.5">
       <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
-      {suspended && isHex64(reportedEvent.targetEventId) && (
+      {offerViewer && isHex64(reportedEvent.targetEventId) && (
         <SuspendedPostViewer
           key={reportedEvent.targetEventId}
           eventId={reportedEvent.targetEventId}
@@ -242,9 +248,9 @@ export function AgeReviewContent({
       )}
 
       {/* The audited viewer, for the posts the suspension hides from the read
-          above. Gated on keycast's confirmed suspension, not on vis.state: a post
+          above. Gated on the relay's suspended list, not on vis.state: a post
           count cached from before the suspension reads as "has content". */}
-      {suspended && subjectPubkey && isHex64(subjectPubkey) && (
+      {offerViewer && subjectPubkey && isHex64(subjectPubkey) && (
         <SuspendedAccountViewer key={subjectPubkey} pubkey={subjectPubkey} surface="age-review" showMediaByDefault={false} />
       )}
     </div>

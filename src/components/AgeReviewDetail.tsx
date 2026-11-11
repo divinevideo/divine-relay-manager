@@ -10,6 +10,7 @@ import { useUserStats } from "@/hooks/useUserStats";
 import { AccountTypeIndicator } from "@/components/AccountTypeIndicator";
 import { AgeReviewContent } from "@/components/AgeReviewContent";
 import { useReportedEvent } from "@/hooks/useReportedEvent";
+import { listMembership, useSuspendedPubkeys } from "@/hooks/useRelayBanLists";
 import { ApiError, type BulkNote } from "@/lib/adminApi";
 import { reconcileCaseIntoList, type AgeReviewListParams } from "@/lib/ageReviewCache";
 import { deriveAccountVerdict } from "@/lib/accountVerdict";
@@ -416,6 +417,17 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   // refetches, so a Retry click would leave the error copy on screen with no
   // sign anything happened.
   const { data: reportedEvent, isFetching: reportedEventFetching, isError: reportedEventFailed, refetch: refetchReported } = useReportedEvent(c.report_id ?? undefined, subjectPubkey);
+  // Whether the relay's suspended list holds the subject: what the viewer
+  // endpoints serve from, and what report detail and the user cards gate their
+  // viewer on (Matt, 2026-11-11). The same shared query and the same reading of
+  // it: a listing kept from a copy whose refresh failed still counts, absence is
+  // confirmed only by a read that succeeded, and an unanswered list is unknown.
+  // Keycast's status keeps everything else on this screen.
+  const suspendedPubkeys = useSuspendedPubkeys();
+  const relaySuspended = listMembership(
+    suspendedPubkeys,
+    entry => typeof entry.pubkey === "string" && entry.pubkey.toLowerCase() === subjectPubkey,
+  );
   // Content presence is trustworthy only once the relay read resolves without
   // error; a failed/in-flight read must not read as "no content" (would
   // under-state available enforcement).
@@ -572,6 +584,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
             onRetryReported={() => { void refetchReported(); }}
             hasReportId={!!c.report_id}
             subjectPubkey={subjectPubkey}
+            relaySuspended={relaySuspended}
           />
 
           {/* Protections that apply to an approved protected minor (#143).
