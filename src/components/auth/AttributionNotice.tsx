@@ -10,7 +10,19 @@
 // it steals vertical space from the report panes. A moderator who cannot (or
 // will not) sign in can dismiss it; the choice persists so it does not return
 // on every load.
-import { useState } from 'react';
+//
+// But only while they stay signed out (#397). Once the moderator is identified
+// the dismissal is forgotten, so the next sign-out, expiry, or failed refresh
+// brings the notice back. It is forgotten at the moment of being identified,
+// not at sign-out, because a session can end without this tab seeing a sign-out
+// event (an expiry, a refresh the SDK drops). Other tabs follow through the
+// storage event, so a tab that never saw the sign-in itself still un-hides.
+// This forgetting, not the choice of storage, is what brings it back: without
+// it, either localStorage or sessionStorage would keep the notice hidden after
+// a sign-out. The storage only sets its reach. A sessionStorage dismissal is
+// per tab and raises no storage event in other tabs, so the cross-tab half
+// above relies on localStorage.
+import { useEffect, useState } from 'react';
 import { LogIn, UserX, X } from 'lucide-react';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
@@ -31,11 +43,42 @@ function readDismissed(): boolean {
   }
 }
 
+function forgetDismissed(): void {
+  try {
+    localStorage.removeItem(DISMISS_KEY);
+  } catch {
+    // Storage unavailable: the in-memory state below is all there is.
+  }
+}
+
 export function AttributionNotice() {
   const { user } = useCurrentUser();
   const { isResolving } = useDivineSession();
   const handleSignIn = useStartSignIn();
   const [dismissed, setDismissed] = useState(readDismissed);
+
+  useEffect(() => {
+    if (!user) return;
+    forgetDismissed();
+    setDismissed(false);
+  }, [user]);
+
+  // A dismissal made or forgotten in another tab. key is null when that tab
+  // cleared all of storage. While identified here, a dismissal from a tab that
+  // has not caught up with the sign-in is void: kept, it would hide the notice
+  // after this tab's next sign-out.
+  useEffect(() => {
+    const onStorage = (event: StorageEvent) => {
+      if (event.key !== DISMISS_KEY && event.key !== null) return;
+      if (user) {
+        forgetDismissed();
+        return;
+      }
+      setDismissed(readDismissed());
+    };
+    window.addEventListener('storage', onStorage);
+    return () => window.removeEventListener('storage', onStorage);
+  }, [user]);
 
   // Nothing to say while the session is still resolving: an already-signed-in
   // moderator would otherwise see the warning flash on every load.

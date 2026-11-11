@@ -11,6 +11,7 @@ import { AppProvider } from '@/components/AppProvider';
 import { AppConfig } from '@/contexts/AppContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { DivineSessionProvider } from '@/components/DivineSessionProvider';
+import { LoginRequiredPrompt } from '@/components/auth/LoginRequiredPrompt';
 import AppRouter from './AppRouter';
 import { createQueryClient } from '@/lib/queryClient';
 
@@ -34,6 +35,9 @@ export function App() {
               <TooltipProvider>
                 <Toaster />
                 <Sonner />
+                {/* Beside the toasters: an app-wide notice for any write the
+                    worker refuses for want of a Divine login. */}
+                <LoginRequiredPrompt />
                 <Suspense>
                   <AppRouter />
                 </Suspense>
