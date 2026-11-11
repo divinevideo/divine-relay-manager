@@ -145,7 +145,9 @@ function CaseDetail({ eventId }: { eventId: string }) {
   const c = item.data;
   const withheldWhy = c && !c.snapshot ? c.snapshotWithheld : undefined;
   const withheld = withheldWhy !== undefined;
-  const opened = withheld && session.isSignedIn && openedSnapshot && openedSnapshot.openedBy === session.pubkey
+  // A resolved owner is required: two unresolved sessions both have an
+  // undefined pubkey, and A's snapshot must not pass as B's.
+  const opened = withheld && session.isSignedIn && openedSnapshot?.openedBy && openedSnapshot.openedBy === session.pubkey
     ? openedSnapshot.snapshot : null;
   const snapshot = c?.snapshot ?? opened;
   return <>
@@ -181,7 +183,7 @@ function CaseDetail({ eventId }: { eventId: string }) {
       </section>
       <section aria-label="Media review" className="space-y-2">
         <h3 className="font-semibold">Media</h3>
-        {withheldWhy && !snapshot && <WithheldSnapshot why={withheldWhy} signedIn={session.isSignedIn} open={openSnapshot} />}
+        {withheldWhy && !snapshot && <WithheldSnapshot why={withheldWhy} signedIn={session.isSignedIn} identified={!!session.pubkey} open={openSnapshot} />}
         {withheldWhy === 'suspended' && snapshot && <p className="text-sm text-muted-foreground">Hidden from everyone else by the suspension.</p>}
         {!snapshot && !withheld && <p>Media snapshot is not available yet.</p>}
         {snapshot?.assets.length === 0 && <p>No reviewable media is mapped in this snapshot.</p>}
@@ -216,12 +218,15 @@ function CaseDetail({ eventId }: { eventId: string }) {
 // The worker leaves a suspended author's snapshot out of the polled case. The
 // moderator opens it here, once, and the worker records that view against
 // their login. Errors map by code, never by status alone.
-function WithheldSnapshot({ why, signedIn, open }: {
+function WithheldSnapshot({ why, signedIn, identified, open }: {
   why: 'suspended' | 'unknown';
   signedIn: boolean;
+  /** The session's moderator pubkey has resolved. The opened snapshot is bound to it, so no open starts without it. */
+  identified: boolean;
   open: { mutate: () => void; isPending: boolean; error: unknown };
 }) {
   if (!signedIn) return <p>Sign in with Divine to view the reported post.</p>;
+  if (!identified) return <p>Your Divine identity hasn't loaded yet, so the reported post can't be opened.</p>;
   const code = open.error instanceof ApiError ? open.error.code : undefined;
   if (code === 'moderator_login_required') return <p>Sign in with Divine to view the reported post.</p>;
   if (open.error) {

@@ -366,6 +366,64 @@ describe("a suspended author's withheld snapshot", () => {
     expect(screen.queryByText('Hidden from everyone else by the suspension.')).not.toBeInTheDocument();
   });
 
+  describe('a session whose moderator pubkey has not resolved', () => {
+    const unresolvedA = () => { context.token = MOD_TOKEN; context.pubkey = undefined; };
+    const unresolvedB = () => { context.token = 'other-moderator-token'; context.pubkey = undefined; };
+    const NOT_YET = "Your Divine identity hasn't loaded yet, so the reported post can't be opened.";
+
+    it('offers no open and sends no request', async () => {
+      unresolvedA();
+      renderQueue();
+      expect(await screen.findByText(NOT_YET)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /view the reported post/i })).not.toBeInTheDocument();
+      expect(caseFetches().some(([url]) => url.includes('snapshot=1'))).toBe(false);
+    });
+
+    // A opens while unresolved (if the screen lets them), then B's token
+    // replaces A's while B is unresolved too: the pubkey stays undefined, so no
+    // effect dependency changes. Nothing A opened may show under B.
+    it("an already-open snapshot never shows after another unresolved moderator's token takes over", async () => {
+      unresolvedA();
+      const { rerender, view } = renderQueue();
+      await screen.findByText(/Revision 3/);
+      const open = screen.queryByRole('button', { name: /view the reported post/i });
+      if (open) {
+        fireEvent.click(open);
+        await waitFor(() => expect(caseFetches().some(([url]) => url.endsWith('?snapshot=1'))).toBe(true));
+        await new Promise(resolve => setTimeout(resolve, 20));
+      }
+      unresolvedB();
+      rerender(view());
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.queryByText(`Review media ${SNAP_HASH}`)).not.toBeInTheDocument();
+    });
+
+    it("a pending open never shows after another unresolved moderator's token takes over", async () => {
+      let release = () => {};
+      vi.stubGlobal('fetch', vi.fn(async (url: string) => {
+        if (url.endsWith('/history')) return Response.json([]);
+        if (url.endsWith('?snapshot=1')) {
+          await new Promise<void>(resolve => { release = resolve; });
+          return Response.json(snapshotBody);
+        }
+        return Response.json(withheldCase());
+      }));
+      unresolvedA();
+      const { rerender, view } = renderQueue();
+      await screen.findByText(/Revision 3/);
+      const open = screen.queryByRole('button', { name: /view the reported post/i });
+      if (open) {
+        fireEvent.click(open);
+        await waitFor(() => expect(caseFetches().some(([url]) => url.endsWith('?snapshot=1'))).toBe(true));
+      }
+      unresolvedB();
+      rerender(view());
+      release();
+      await new Promise(resolve => setTimeout(resolve, 20));
+      expect(screen.queryByText(`Review media ${SNAP_HASH}`)).not.toBeInTheDocument();
+    });
+  });
+
   it('signed out, it asks for a sign-in and makes no request', async () => {
     context.token = undefined;
     renderQueue();
