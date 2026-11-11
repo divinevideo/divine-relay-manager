@@ -2,7 +2,7 @@
 // ABOUTME: account's posts and profile. Opened by a click, audited, emptied on sign-out.
 
 import type { ReactNode } from 'react';
-import type { NostrEvent } from '@nostrify/nostrify';
+import { NSchema as n, type NostrEvent } from '@nostrify/nostrify';
 import { EyeOff, LogIn, RefreshCw } from 'lucide-react';
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar';
 import { Button } from '@/components/ui/button';
@@ -170,17 +170,18 @@ function Frame({ served, children }: { served: boolean; children: ReactNode }) {
 
 interface ProfileFields { name?: string; about?: string; picture?: string }
 
+/**
+ * The kind-0 fields the header shows, read by the metadata schema useAuthor
+ * uses: a field of the wrong shape is dropped on its own, and a picture is kept
+ * only if it is a URL.
+ */
 function readProfile(profile: NostrEventJson | null): ProfileFields | null {
   if (!profile) return null;
-  try {
-    const parsed: unknown = JSON.parse(profile.content);
-    if (!parsed || typeof parsed !== 'object') return null;
-    const p = parsed as Record<string, unknown>;
-    const text = (v: unknown) => (typeof v === 'string' && v.trim() ? v : undefined);
-    return { name: text(p.display_name) ?? text(p.name), about: text(p.about), picture: text(p.picture) };
-  } catch {
-    return null;
-  }
+  const parsed = n.json().pipe(n.metadata()).safeParse(profile.content);
+  if (!parsed.success) return null;
+  const m = parsed.data;
+  const text = (v: string | undefined) => (v?.trim() ? v : undefined);
+  return { name: text(m.display_name) ?? text(m.name), about: text(m.about), picture: m.picture };
 }
 
 /**
@@ -269,8 +270,11 @@ export function SuspendedPostViewer({ eventId, surface, showMediaByDefault, expe
 
 // ─── An account ────────────────────────────────────────────────────────────
 
-function AccountHeader({ page, showMediaByDefault }: { page: SuspendedAccountResponse; showMediaByDefault: boolean | null }) {
-  const profile = readProfile(page.profile);
+function AccountHeader({ page, profile, showMediaByDefault }: {
+  page: SuspendedAccountResponse;
+  profile: ProfileFields | null;
+  showMediaByDefault: boolean | null;
+}) {
   const initials = (profile?.name ?? page.pubkey).slice(0, 2).toUpperCase();
   return (
     <div className="space-y-1.5">
@@ -298,7 +302,8 @@ export function SuspendedAccountViewer({ pubkey, surface, showMediaByDefault }: 
   if (view.session !== 'ready') return <SessionGate session={view.session} />;
   if (view.status === 'idle') return <OpenButton label="View hidden posts" onOpen={view.load} />;
   const [first] = view.pages;
-  const authorName = first ? readProfile(first.profile)?.name : undefined;
+  // Read once: it names the header and each post.
+  const profile = first ? readProfile(first.profile) : null;
   const events = view.pages.flatMap(p => p.events);
   return (
     <Frame served={!!first}>
@@ -306,11 +311,11 @@ export function SuspendedAccountViewer({ pubkey, surface, showMediaByDefault }: 
       {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} />}
       {first && (
         <>
-          <AccountHeader page={first} showMediaByDefault={showMediaByDefault} />
+          <AccountHeader page={first} profile={profile} showMediaByDefault={showMediaByDefault} />
           {events.length === 0 && <p className="text-sm text-muted-foreground">No hidden posts to show.</p>}
           <div className="space-y-2">
             {events.map(e => (
-              <HiddenPostCard key={e.id} event={e} showMediaByDefault={showMediaByDefault} authorName={authorName} />
+              <HiddenPostCard key={e.id} event={e} showMediaByDefault={showMediaByDefault} authorName={profile?.name} />
             ))}
           </div>
           {view.olderStatus === 'error' && <ViewerError error={view.olderError} onRetry={view.loadOlder} olderPage />}

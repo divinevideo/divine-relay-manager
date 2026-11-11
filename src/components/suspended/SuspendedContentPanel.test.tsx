@@ -437,6 +437,19 @@ describe('SuspendedAccountViewer', () => {
     expect(screen.getByTestId('avatar-img')).toHaveAttribute('src', PICTURE);
   });
 
+  // The profile is the suspended account's own text. useAuthor reads kind 0
+  // through nostrify's metadata schema, which keeps a picture only if it is a
+  // URL; the viewer reads it the same way.
+  it('uses a profile picture only when it is a URL, keeping the other fields', async () => {
+    const profile = { ...PROFILE, content: JSON.stringify({ name: 'hidden-name', about: 'hidden bio', picture: '/api/not-a-url' }) };
+    answerWith(accountPage({ profile }));
+    await openAccount(true);
+
+    expect(screen.queryByTestId('avatar-img')).not.toBeInTheDocument();
+    expect(screen.getAllByText('hidden-name').length).toBeGreaterThan(0);
+    expect(screen.getByText('hidden bio')).toBeInTheDocument();
+  });
+
   it('a profile failure is a muted line and the posts still show', async () => {
     answerWith(accountPage({ profile: null, profileError: 'relay_error' }));
     await openAccount();
