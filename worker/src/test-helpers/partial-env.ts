@@ -9,8 +9,12 @@
 // change which code paths run.
 //
 // Prefer this to `as never` or `as unknown as`: the bindings are still checked
-// against the env type (a misspelled or mistyped binding is a type error), and
-// the call site says the env is incomplete by design.
+// against the env type, and the call site says the env is incomplete by design.
+// A mistyped binding is always a type error. A misspelled one is caught only
+// when its key is written out in an object literal in the call, as every
+// caller does today. TypeScript's excess-property check skips keys that come
+// from an object built beforehand, so `partialEnv<E>(base)` and
+// `partialEnv<E>({ ...base })` both accept a misspelled key in `base`.
 export function partialEnv<E extends object>(bindings: Partial<E>): E {
   return bindings as E;
 }
