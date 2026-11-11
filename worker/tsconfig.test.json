@@ -1,0 +1,21 @@
+// Type-checks the TypeScript under test/ (the D1, e2e and other node suites,
+// their setup files) and the vitest configs. tsconfig.json covers src/ only,
+// and vitest strips types without checking them, so without this a signature
+// change could leave these tests broken with nothing but a runtime failure, or
+// no failure at all, to show it (#398). `npm run typecheck` runs both.
+//
+// These files run in Node but import worker code, so both the Workers and the
+// Node globals are loaded. Where the two declare the same global (WebSocket,
+// Request, Response and so on), the Workers declaration wins, so test code
+// should use members both runtimes share (addEventListener rather than onopen).
+// For the same reason the check accepts a Workers-only member that Node's
+// objects lack (Request.cf, Response.webSocket), so it does not prove those
+// globals are used correctly for the Node runtime.
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "types": ["@cloudflare/workers-types", "node", "vitest/globals"]
+  },
+  "include": ["test/**/*", "vitest.config.ts", "vitest.d1.config.ts", "vitest.e2e.config.ts"],
+  "exclude": ["node_modules"]
+}

@@ -7,7 +7,7 @@
     "dev": "wrangler dev --config wrangler.local.toml",
     "deploy:staging": "wrangler deploy --config wrangler.staging.toml",
     "deploy:prod": "wrangler deploy --config wrangler.prod.toml",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "test": "vitest",
     "test:run": "vitest run",
     "test:d1": "vitest run --config vitest.d1.config.ts",
@@ -22,6 +22,7 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.12.8",
     "@cloudflare/workers-types": "^4.20241127.0",
+    "@types/node": "22.15.3",
     "typescript": "^5.9.3",
     "vitest": "^4.0.18",
     "wrangler": "^4.60.0"
