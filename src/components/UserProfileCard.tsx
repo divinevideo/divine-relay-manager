@@ -14,7 +14,7 @@ import { InlineMediaPreview } from "@/components/MediaPreview";
 import { useMediaVisibility } from "@/hooks/useMediaVisibility";
 import type { NostrEvent, NostrMetadata } from "@nostrify/nostrify";
 import type { UserStats } from "@/hooks/useUserStats";
-import { RECENT_AUTHORED_LIMIT, RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl } from "@/lib/constants";
+import { RECENT_AUTHORED_LIMIT, RELAY_PROFILE_BADGE, getProfileUrl, getPublicEventUrl, isHex64 } from "@/lib/constants";
 import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
@@ -25,10 +25,6 @@ import { authoredContentStat, historyCount, historyStat } from "@/lib/historyCou
 import { useJustRestored } from "@/lib/userStatsCache";
 import { SuspendedAccountViewer } from "@/components/suspended/SuspendedContentPanel";
 import type { SuspendedViewSurface } from "../../shared/suspended-content";
-
-// Report detail's pubkey comes from the report's own p tag, so the viewer is
-// offered only for a real key.
-const HEX64 = /^[0-9a-f]{64}$/i;
 
 // Label category colors
 const LABEL_COLORS: Record<string, string> = {
@@ -290,8 +286,9 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
         </div>
 
         {/* The relay hides a suspended account's posts from the reads above;
-            the audited viewer shows them on a click. */}
-        {suspendedViewerSurface && isSuspended === true && HEX64.test(pubkey) && (
+            the audited viewer shows them on a click. Report detail's pubkey
+            comes from the report's own p tag, so only a real key is offered. */}
+        {suspendedViewerSurface && isSuspended === true && isHex64(pubkey) && (
           <SuspendedAccountViewer
             key={pubkey}
             pubkey={pubkey}

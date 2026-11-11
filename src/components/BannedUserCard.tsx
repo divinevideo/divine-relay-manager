@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/collapsible";
 import { ExternalLink, FileText, ChevronDown, Copy, Check, Trash2 } from "lucide-react";
 import { useMemo, useState } from "react";
-import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
+import { getProfileUrl, isHex64, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { ClaimedNip05 } from "@/components/ClaimedNip05";
@@ -26,8 +26,6 @@ import { CommentParentLink } from "@/components/CommentParentLink";
 import { queryStrict } from "@/lib/relayRead";
 import { authoredContentStat } from "@/lib/historyCount";
 import { SuspendedAccountViewer } from "@/components/suspended/SuspendedContentPanel";
-
-const HEX64 = /^[0-9a-f]{64}$/i;
 
 // One capped page of authored content. A count at this limit is a floor.
 const RECENT_CONTENT_LIMIT = 50;
@@ -334,7 +332,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   this read still returned (cached, or a relay not caught up)
                   are not the hidden ones. Media starts hidden: this list has no
                   report to say whether the account's media is sensitive. */}
-              {suspended && HEX64.test(pubkey) && (
+              {suspended && isHex64(pubkey) && (
                 <div className="mt-2">
                   <SuspendedAccountViewer key={pubkey} pubkey={pubkey} surface="user" showMediaByDefault={false} />
                 </div>

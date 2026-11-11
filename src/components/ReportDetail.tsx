@@ -57,7 +57,7 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions, type UserActionChange } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
-import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal, userStatsQueryKey } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal, isHex64, userStatsQueryKey } from "@/lib/constants";
 import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
@@ -67,8 +67,6 @@ import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
 import type { NostrEvent } from "@nostrify/nostrify";
-
-const HEX64 = /^[0-9a-f]{64}$/i;
 
 function getKindLabel(kind: number): string {
   if (isListKind(kind)) return LIST_KIND_LABEL[kind];
@@ -1027,7 +1025,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 // again, and the post is checked against the reported account.
                 suspendedViewer={(goneCause.kind === 'suspended'
                   || (goneCause.kind === 'unknown' && moderationStatus.isUserSuspended === true))
-                  && targetEventId && HEX64.test(targetEventId) ? (
+                  && targetEventId && isHex64(targetEventId) ? (
                   <SuspendedPostViewer
                     key={targetEventId}
                     eventId={targetEventId}

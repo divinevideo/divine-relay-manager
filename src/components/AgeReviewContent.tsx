@@ -15,10 +15,9 @@ import { MediaPreview } from "@/components/MediaPreview";
 import { CopyableId } from "@/components/CopyableId";
 import { getKindName } from "@/lib/kindNames";
 import { deriveContentVisibility } from "@/lib/contentVisibility";
+import { isHex64 } from "@/lib/constants";
 import { SuspendedAccountViewer, SuspendedPostViewer } from "@/components/suspended/SuspendedContentPanel";
 import { ForeignAuthorWarning } from "@/components/ForeignAuthorWarning";
-
-const HEX64 = /^[0-9a-f]{64}$/i;
 
 interface AgeReviewContentProps {
   postCount: number | undefined;
@@ -181,7 +180,7 @@ export function AgeReviewContent({
   ) : reportedEvent?.status === "target_missing" ? (
     <div className="space-y-1.5">
       <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
-      {suspended && HEX64.test(reportedEvent.targetEventId) && (
+      {suspended && isHex64(reportedEvent.targetEventId) && (
         <SuspendedPostViewer
           key={reportedEvent.targetEventId}
           eventId={reportedEvent.targetEventId}
@@ -245,7 +244,7 @@ export function AgeReviewContent({
       {/* The audited viewer, for the posts the suspension hides from the read
           above. Gated on keycast's confirmed suspension, not on vis.state: a post
           count cached from before the suspension reads as "has content". */}
-      {suspended && subjectPubkey && HEX64.test(subjectPubkey) && (
+      {suspended && subjectPubkey && isHex64(subjectPubkey) && (
         <SuspendedAccountViewer key={subjectPubkey} pubkey={subjectPubkey} surface="age-review" showMediaByDefault={false} />
       )}
     </div>
