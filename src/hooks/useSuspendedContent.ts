@@ -40,7 +40,9 @@ export type SuspendedViewStatus = 'idle' | 'loading' | 'success' | 'error';
  */
 export type ViewerSession = 'resolving' | 'signed-out' | 'unverified' | 'ready';
 
-const MODERATOR_LOGIN_REQUIRED = 'moderator_login_required';
+// The worker's code for a login it could not verify (worker/src/moderator-identity.ts).
+// load() also reports it itself when the session has no usable token.
+export const MODERATOR_LOGIN_REQUIRED = 'moderator_login_required';
 
 /** What load() reports when the session has no usable token: no request is sent. */
 function loginRequired(): ApiError {

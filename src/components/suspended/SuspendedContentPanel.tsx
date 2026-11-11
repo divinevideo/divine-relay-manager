@@ -10,7 +10,7 @@ import { CopyableId } from '@/components/CopyableId';
 import { ForeignAuthorWarning } from '@/components/ForeignAuthorWarning';
 import { MediaPreview } from '@/components/MediaPreview';
 import { useStartSignIn } from '@/hooks/useStartSignIn';
-import { useSuspendedAccount, useSuspendedPost, type ViewerSession } from '@/hooks/useSuspendedContent';
+import { MODERATOR_LOGIN_REQUIRED, useSuspendedAccount, useSuspendedPost, type ViewerSession } from '@/hooks/useSuspendedContent';
 import { ApiError } from '@/lib/adminApi';
 import { getKindName } from '@/lib/kindNames';
 import { parseRepostForDisplay } from '@/lib/nip18';
@@ -27,7 +27,6 @@ const RECORDED_NOTE = 'Your view is recorded under your Divine login.';
 const RECORDED_BEFORE_OPEN = 'Viewing is recorded under your Divine login.';
 const SIGN_IN_TO_VIEW = 'Sign in with Divine to view.';
 const LOGIN_UNVERIFIED = `Your Divine login couldn't be verified. ${SIGN_IN_TO_VIEW}`;
-const MODERATOR_LOGIN_REQUIRED = 'moderator_login_required';
 
 interface ViewerProps {
   surface: SuspendedViewSurface;
