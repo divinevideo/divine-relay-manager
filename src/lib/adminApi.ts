@@ -69,10 +69,12 @@ export const decideSexualQuarantine = (apiUrl: string, eventId: string, body: { 
 // The audited suspended-content viewer. The worker answers only to a verified
 // login and writes one audit row per call, so these are called on a moderator's
 // click and never retried on their own.
+// They are POSTs but reads: a refused login raises no app-wide sign-in prompt,
+// because the viewer's panel shows its own sign-in state.
 export const viewSuspendedPost = (apiUrl: string, body: SuspendedEventRequest, opts?: LoginOpts) =>
-  apiRequest<SuspendedEventResponse>(apiUrl, '/api/suspended-content/event', 'POST', body, opts);
+  apiRequest<SuspendedEventResponse>(apiUrl, '/api/suspended-content/event', 'POST', body, { ...opts, prompt: false });
 export const viewSuspendedAccount = (apiUrl: string, body: SuspendedAccountRequest, opts?: LoginOpts) =>
-  apiRequest<SuspendedAccountResponse>(apiUrl, '/api/suspended-content/account', 'POST', body, opts);
+  apiRequest<SuspendedAccountResponse>(apiUrl, '/api/suspended-content/account', 'POST', body, { ...opts, prompt: false });
 
 // Build headers with CF Access service token for cross-origin API requests.
 // The service token authenticates the frontend to CF Access policies on api-relay-* domains.
@@ -246,13 +248,17 @@ async function apiRequest<T>(
   endpoint: string,
   method: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE',
   body?: object,
-  opts?: { timeoutMs?: number } & LoginOpts
+  // `prompt`: whether a refused login raises the app's sign-in prompt. Defaults
+  // to `mutates`, so writes do and reads do not. A POST that is a read (the
+  // suspended-content viewer) passes false.
+  opts?: { timeoutMs?: number; prompt?: boolean } & LoginOpts
 ): Promise<T> {
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
   const label = `Request to ${endpoint}`;
   const mutates = method !== 'GET';
+  const prompt = opts?.prompt ?? mutates;
   const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
   const response = await fetchWithTimeout(`${apiUrl}${endpoint}`, {
     method,
@@ -271,7 +277,7 @@ async function apiRequest<T>(
       // body was empty or not JSON; keep the status-line fallback
     }
     throw new ApiError(
-      handleLoginRefusal(parsed?.code, { prompt: mutates }) ?? (parsed?.error || `HTTP ${response.status}: ${response.statusText}`),
+      handleLoginRefusal(parsed?.code, { prompt }) ?? (parsed?.error || `HTTP ${response.status}: ${response.statusText}`),
       response.status,
       response.statusText,
       parsed?.code,

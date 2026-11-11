@@ -7,6 +7,7 @@ import { nip19 } from 'nostr-tools';
 import { MemoryRouter } from 'react-router-dom';
 import type { NostrEventJson, SuspendedAccountResponse } from '../../../shared/suspended-content';
 import { SuspendedAccountViewer, SuspendedPostViewer } from './SuspendedContentPanel';
+import { subscribeModeratorLoginRequired } from '@/lib/moderatorLoginRequired';
 
 const TOKEN = 'moderator-login-token';
 const MOD = 'a'.repeat(64);
@@ -306,7 +307,8 @@ describe('SuspendedPostViewer', () => {
   });
 
   it.each([
-    ['not_suspended', 409, 'This account is no longer suspended. Its posts show in the usual views.'],
+    // The post's author, which in report detail need not be the reported account.
+    ['not_suspended', 409, "This post's author isn't suspended, so there's no suspension-hidden copy to show."],
     ['viewer_unsupported', 501, "The suspended-content viewer isn't available here yet."],
     ['invalid_request', 400, "The suspended-content viewer isn't available here yet."],
   ])('%s has its own copy and no retry', async (code, status, copy) => {
@@ -336,7 +338,7 @@ describe('SuspendedPostViewer', () => {
   // header's "recorded" claim, and the suspension label, belong over content.
   it.each([
     ['audit_unavailable', 503, "Couldn't record this view, so nothing is shown. Try again."],
-    ['not_suspended', 409, 'This account is no longer suspended. Its posts show in the usual views.'],
+    ['not_suspended', 409, "This post's author isn't suspended, so there's no suspension-hidden copy to show."],
   ])('a %s answer shows neither the suspension label nor the recorded note', async (code, status, copy) => {
     answerWith({ success: false, error: 'x', code }, status);
     await openPost();
@@ -388,6 +390,26 @@ describe('SuspendedPostViewer', () => {
 
     expect(await screen.findByText("Couldn't reach the server. Try again.")).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  // #412's app-wide sign-in prompt is for refused writes. The viewer is a read
+  // with its own sign-in state, which stays the only thing on screen.
+  it.each([
+    ['post', () => post(), 'View hidden post'],
+    ['account', () => account(), 'View hidden posts'],
+  ] as const)('a refused %s view shows its own sign-in state and raises no app-wide prompt', async (_kind, viewer, button) => {
+    const prompted = vi.fn();
+    const unsubscribe = subscribeModeratorLoginRequired(prompted);
+    try {
+      answerWith({ success: false, error: 'Sign in with Divine to continue', code: 'moderator_login_required' }, 401);
+      render(viewer());
+      fireEvent.click(screen.getByRole('button', { name: button }));
+
+      expect(await screen.findByText("Your Divine login couldn't be verified. Sign in with Divine to view.")).toBeInTheDocument();
+      expect(prompted).not.toHaveBeenCalled();
+    } finally {
+      unsubscribe();
+    }
   });
 
   it('a login the worker would not verify asks for sign-in, with a retry', async () => {
@@ -537,7 +559,7 @@ describe('SuspendedAccountViewer', () => {
     render(account());
     fireEvent.click(screen.getByRole('button', { name: 'View hidden posts' }));
 
-    await waitFor(() => expect(screen.getByText('This account is no longer suspended. Its posts show in the usual views.')).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByText("This account isn't suspended, so there are no suspension-hidden posts to show.")).toBeInTheDocument());
   });
 
   it('says so when the account has nothing to show', async () => {

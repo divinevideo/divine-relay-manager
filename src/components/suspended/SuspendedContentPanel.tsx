@@ -36,6 +36,9 @@ interface ViewerProps {
 
 // ─── Error copy ────────────────────────────────────────────────────────────
 
+/** Which viewer an error belongs to: one post, or an account's posts. */
+type ViewerScope = 'post' | 'account';
+
 interface ErrorCopy { text: string; retry: boolean; signIn?: boolean }
 
 /**
@@ -43,13 +46,22 @@ interface ErrorCopy { text: string; retry: boolean; signIn?: boolean }
  * without the route answers a bare 404, which must not read as "hidden for
  * another reason".
  */
-function viewerErrorCopy(error: unknown, olderPage: boolean): ErrorCopy {
+function viewerErrorCopy(error: unknown, scope: ViewerScope, olderPage: boolean): ErrorCopy {
   const code = error instanceof ApiError ? error.code : undefined;
   switch (code) {
     case MODERATOR_LOGIN_REQUIRED:
       return { text: LOGIN_UNVERIFIED, retry: true, signIn: true };
     case SUSPENDED_CONTENT_CODE.notSuspended:
-      return { text: 'This account is no longer suspended. Its posts show in the usual views.', retry: false };
+      // The worker sends this both for a post whose author isn't suspended and
+      // for an account that isn't. The post's author need not be the account
+      // on screen, and nothing here knows what the public sees, so the copy
+      // names only what the viewer has to show.
+      return {
+        text: scope === 'post'
+          ? "This post's author isn't suspended, so there's no suspension-hidden copy to show."
+          : "This account isn't suspended, so there are no suspension-hidden posts to show.",
+        retry: false,
+      };
     case SUSPENDED_CONTENT_CODE.hiddenForAnotherReason:
       return { text: "Hidden for another reason (such as deleted or banned), so it can't be shown here either.", retry: false };
     case SUSPENDED_CONTENT_CODE.auditUnavailable:
@@ -103,8 +115,8 @@ function SignInPrompt({ text = SIGN_IN_TO_VIEW, onRetry }: { text?: string; onRe
   );
 }
 
-function ViewerError({ error, onRetry, olderPage = false }: { error: unknown; onRetry: () => void; olderPage?: boolean }) {
-  const copy = viewerErrorCopy(error, olderPage);
+function ViewerError({ error, onRetry, scope, olderPage = false }: { error: unknown; onRetry: () => void; scope: ViewerScope; olderPage?: boolean }) {
+  const copy = viewerErrorCopy(error, scope, olderPage);
   if (copy.signIn) return <SignInPrompt text={copy.text} onRetry={onRetry} />;
   return (
     <div className="flex flex-wrap items-center gap-2 text-sm text-amber-700 dark:text-amber-400">
@@ -146,7 +158,7 @@ function OpenButton({ label, onOpen }: { label: string; onOpen: () => void }) {
  * public content. Only then: the worker records a view only when it serves one,
  * so while loading, or after a refusal or failure, nothing confirms the
  * "recorded" note (a refusal records nothing at all), and the label would
- * contradict an answer like "no longer suspended".
+ * contradict an answer like "isn't suspended".
  */
 function Frame({ served, children }: { served: boolean; children: ReactNode }) {
   return (
@@ -261,7 +273,7 @@ export function SuspendedPostViewer({ eventId, surface, showMediaByDefault, expe
   return (
     <Frame served={!!event}>
       {view.status === 'loading' && <p role="status" className="text-sm text-muted-foreground">Opening the hidden post…</p>}
-      {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} />}
+      {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} scope="post" />}
       {foreign && <ForeignAuthorWarning author={event.pubkey} subject={subject} />}
       {event && <HiddenPostCard event={event} showMediaByDefault={showMediaByDefault} />}
     </Frame>
@@ -308,7 +320,7 @@ export function SuspendedAccountViewer({ pubkey, surface, showMediaByDefault }: 
   return (
     <Frame served={!!first}>
       {view.status === 'loading' && <p role="status" className="text-sm text-muted-foreground">Opening the hidden posts…</p>}
-      {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} />}
+      {view.status === 'error' && <ViewerError error={view.error} onRetry={view.load} scope="account" />}
       {first && (
         <>
           <AccountHeader page={first} profile={profile} showMediaByDefault={showMediaByDefault} />
@@ -318,7 +330,7 @@ export function SuspendedAccountViewer({ pubkey, surface, showMediaByDefault }: 
               <HiddenPostCard key={e.id} event={e} showMediaByDefault={showMediaByDefault} authorName={profile?.name} />
             ))}
           </div>
-          {view.olderStatus === 'error' && <ViewerError error={view.olderError} onRetry={view.loadOlder} olderPage />}
+          {view.olderStatus === 'error' && <ViewerError error={view.olderError} onRetry={view.loadOlder} scope="account" olderPage />}
           {view.hasOlder && view.olderStatus !== 'error' && (
             <Button size="sm" variant="outline" onClick={view.loadOlder} disabled={view.olderStatus === 'loading'}>
               {view.olderStatus === 'loading' ? 'Loading older…' : 'Load older'}
