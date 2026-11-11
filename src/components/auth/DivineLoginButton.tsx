@@ -76,12 +76,15 @@ export function DivineLoginButton() {
               while actions can still be attributed, and a label that states it
               as fact would be wrong for exactly that window. */}
           {/* Widened with the wording: measured against the built CSS in a
-              headless browser, this label was 300px natural (for the earlier
-              "may be unattributed" wording, three characters shorter than
-              today's, which was not re-measured), so the previous
-              16rem (256px) truncated it mid-phrase and cut off the consequence
-              -- which is the reason the consequence was moved out of the hover
-              title and onto the label in the first place. 24rem clears it.
+              headless browser on macOS, this label is 343px natural in the
+              system font the built stack resolves to there, and 331px in
+              Helvetica (the earlier "may be unattributed" wording, four
+              characters shorter, was 313px and 300px), so the previous 16rem
+              (256px) truncated it mid-phrase and cut off the consequence --
+              which is the reason the consequence was moved out of the hover
+              title and onto the label in the first place. 24rem (384px) clears
+              it on macOS, but only just in a wide font: Verdana measures 383px.
+              Fonts on other systems were not measured.
               truncate caps the width against that max only; it is NOT a
               narrow-viewport guard. Shrink pressure never reaches this label
               because the header's outer flex row (RelayManager's gap-3
