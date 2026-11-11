@@ -6,10 +6,10 @@ import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import type { SexualCase } from '../../shared/sexual-quarantine';
 import { SexualQuarantine } from './SexualQuarantine';
 
-const context = vi.hoisted(() => ({ apiUrl: 'https://api.example.test', relayUrl: 'wss://relay.example.test', token: undefined as string | undefined, pubkey: undefined as string | undefined }));
+const context = vi.hoisted(() => ({ apiUrl: 'https://api.example.test', relayUrl: 'wss://relay.example.test', token: undefined as string | undefined, pubkey: undefined as string | undefined, identityUnavailable: false }));
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: context }) }));
 vi.mock('@/hooks/useDivineSession', () => ({ useDivineSession: () => ({
-  getModeratorToken: () => context.token, identityUnavailable: false, isSignedIn: context.token !== undefined, pubkey: context.pubkey,
+  getModeratorToken: () => context.token, identityUnavailable: context.identityUnavailable, isSignedIn: context.token !== undefined, pubkey: context.pubkey,
 }) }));
 const MOD_TOKEN = 'moderator-login-token';
 
@@ -41,6 +41,7 @@ beforeEach(() => {
   context.apiUrl = 'https://api.example.test';
   context.token = MOD_TOKEN;
   context.pubkey = 'c'.repeat(64);
+  context.identityUnavailable = false;
   current = makeCase(); postStatus = 202; lastDecision = undefined; lastDecisionHeaders = undefined;
   vi.stubGlobal('fetch', vi.fn(async (url: string, init?: RequestInit) => {
     if (init?.method === 'POST') {
@@ -146,6 +147,17 @@ describe('Sexual quarantine review', () => {
     renderQueue();
     expect(await screen.findByText('Human decision saved; recording in Reports is pending.')).toBeInTheDocument();
     expect(screen.getByText('Overdue')).toBeInTheDocument();
+  });
+
+  it('warns that a decision may not carry the moderator\'s name when the identity is unavailable', async () => {
+    // Not "unattributed": with REQUIRE_MODERATOR_LOGIN on, an unverified decision
+    // is refused rather than recorded without a name, and a verified token still
+    // attributes it, so the frontend can only say it may not carry the name.
+    context.identityUnavailable = true;
+    context.pubkey = undefined;
+    renderQueue();
+    expect(await screen.findByText('Moderator identity unavailable. Your decision may not be recorded under your name.')).toBeInTheDocument();
+    expect(screen.queryByText(/attributed as unattributed/i)).toBeNull();
   });
 
   it('explains remaining restrictions after a restore', async () => {

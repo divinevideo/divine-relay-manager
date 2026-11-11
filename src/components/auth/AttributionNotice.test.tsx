@@ -72,7 +72,7 @@ function renderNotice() {
 }
 
 const DISMISS_KEY = 'attribution-notice:dismissed';
-const NOTICE = /without attribution/i;
+const NOTICE = /not signed in with Divine/i;
 
 // The provider re-reads the session on window focus: how a sign-in made by the
 // login redirect, or in another tab, reaches an open tab.
@@ -103,12 +103,18 @@ beforeEach(() => {
 });
 
 describe('AttributionNotice', () => {
-  it('warns a signed-out moderator that their actions are unattributed', async () => {
+  it('tells a signed-out moderator to sign in, in words true whether or not sign-in is required', async () => {
     session.getSession.mockResolvedValue(null);
 
     renderNotice();
 
-    expect(await screen.findByText(/without attribution/i)).toBeInTheDocument();
+    // With REQUIRE_MODERATOR_LOGIN on, a signed-out write is refused rather than
+    // recorded, and the frontend can't read that flag, so the copy must not claim
+    // actions are being recorded.
+    expect(
+      await screen.findByText("You're not signed in with Divine. Sign in so your moderation actions are recorded under your name."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/being recorded without attribution/i)).toBeNull();
   });
 
   it('offers the way to fix it', async () => {
@@ -126,14 +132,14 @@ describe('AttributionNotice', () => {
     const firstRender = renderNotice();
     fireEvent.click(await screen.findByRole('button', { name: /dismiss/i }));
 
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
     expect(localStorage.getItem('attribution-notice:dismissed')).toBe('1');
 
     firstRender.unmount();
     renderNotice();
 
     await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:false'));
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
   });
 
   it('still renders and dismisses when storage is unavailable', async () => {
@@ -150,7 +156,7 @@ describe('AttributionNotice', () => {
 
     expect(getItem).toHaveBeenCalled();
     expect(setItem).toHaveBeenCalledWith('attribution-notice:dismissed', '1');
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
   });
 
   it('stays out of the way once the moderator is attributed', async () => {
@@ -161,7 +167,21 @@ describe('AttributionNotice', () => {
 
     // Wait for a genuinely settled, signed-in session before asserting absence.
     await waitFor(() => expect(screen.getByTestId('state')).toHaveTextContent('settled:true'));
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
+  });
+
+  it('says the identity is unavailable, not that the moderator is signed out, when a session exists', async () => {
+    // A live session whose public-key lookup settles as a failure: the provider
+    // keeps the credentials (identityUnavailable), so "not signed in" would be false.
+    session.getSession.mockResolvedValue({ accessToken: 'tok-abc' });
+    getPublicKey.mockRejectedValue(new Error('rpc down'));
+
+    renderNotice();
+
+    expect(
+      await screen.findByText("Your Divine identity isn't available right now, so your moderation actions may not be recorded under your name. Try signing in again."),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/not signed in with Divine/i)).toBeNull();
   });
 
   it('does not flash while the session is still resolving', async () => {
@@ -172,7 +192,7 @@ describe('AttributionNotice', () => {
 
     await waitFor(() => expect(session.getSession).toHaveBeenCalled());
     expect(screen.getByTestId('state')).toHaveTextContent('resolving');
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
   });
 });
 
@@ -295,13 +315,13 @@ describe('AttributionNotice after the login token expires', () => {
     renderNotice();
     await flush();
     expect(screen.getByTestId('state')).toHaveTextContent('settled:true');
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
 
     // The scheduled refresh fails: the SDK answers null (and drops the session).
     session.getSession.mockResolvedValue(null);
     await flush(6 * MIN);
 
-    expect(screen.getByText(/without attribution/i)).toBeInTheDocument();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 
   it('shows once the refresh fails, though it was dismissed while signed out before', async () => {
@@ -313,18 +333,20 @@ describe('AttributionNotice after the login token expires', () => {
     session.getSession.mockResolvedValue(null);
     await flush(6 * MIN);
 
-    expect(screen.getByText(/without attribution/i)).toBeInTheDocument();
+    expect(screen.getByText(NOTICE)).toBeInTheDocument();
   });
 
   it('shows at expiry while the refresh has not replaced the token', async () => {
     renderNotice();
     await flush();
-    expect(screen.queryByText(/without attribution/i)).toBeNull();
+    expect(screen.queryByText(NOTICE)).toBeNull();
 
-    // Every refresh hangs, so the expired token stays in the session.
+    // Every refresh hangs, so the expired token stays in the session. The
+    // session is still present, so the notice says the identity is unavailable
+    // rather than that the moderator is signed out.
     session.getSession.mockReturnValue(new Promise(() => {}));
     await flush(10 * MIN);
 
-    expect(screen.getByText(/without attribution/i)).toBeInTheDocument();
+    expect(screen.getByText(/identity isn't available right now/i)).toBeInTheDocument();
   });
 });

@@ -190,7 +190,7 @@ function CaseDetail({ eventId }: { eventId: string }) {
         {snapshot?.assets.map(hash => <a key={hash} href={`${apiUrl}/media/${hash}`} target="_blank" rel="noopener noreferrer" className="block underline text-sm break-all">Review media {hash}</a>)}
       </section>
       <div className="space-y-2">
-        {session.identityUnavailable && <p role="alert">Moderator identity unavailable. Decisions will be attributed as unattributed.</p>}
+        {session.identityUnavailable && <p role="alert">Moderator identity unavailable. Your decision may not be recorded under your name.</p>}
         <label htmlFor="sexual-decision-reason" className="font-semibold">Decision reason</label>
         <Textarea id="sexual-decision-reason" value={reason} maxLength={2000} disabled={decision.isPending || c.state === 'out_of_scope'} onChange={e => { viewedRevision.current ??= c.revision; setReason(e.target.value); }} />
         <p className="text-sm text-muted-foreground">Restore releases this case’s hold. Remove keeps the event and media unavailable within Divine. Other restrictions remain in force.</p>
