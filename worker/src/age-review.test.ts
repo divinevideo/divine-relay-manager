@@ -1162,10 +1162,10 @@ describe('Keycast suspension wiring', () => {
     expect(body.enforcement.keycastMinorClear).toBe('not_attempted');
   });
 
-  // Self-custody accounts have no keycast record, so there is no Divine sign-in
+  // Self-custody accounts have no keycast record, so there is no Keycast account
   // to suspend. The relay leg is what enforces against them (it blocks writes
   // and hides content regardless of key custody), and it applied. Reporting the
-  // sign-in leg as failed here told moderators enforcement was incomplete when
+  // Keycast leg as failed here told moderators enforcement was incomplete when
   // it was not, and sent them to escalate a non-problem (issue #191).
   it('reports a not-applicable Keycast leg for an account with no Divine login, and stays complete', async () => {
     vi.mocked(suspendUser).mockResolvedValue({ success: false, status: 404, notFound: true });
@@ -1204,7 +1204,7 @@ describe('Keycast suspension wiring', () => {
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
     expect(body.enforcementComplete).toBe(true);
-    // ...but we still never claim the sign-in was actually changed.
+    // ...but we still never claim the Keycast status was actually changed.
     expect(body.keycastUpdated).toBe(false);
     // The leg that does enforce against a self-custody account ran as usual.
     expect(body.enforcement.relay).toBe('ok');

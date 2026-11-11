@@ -406,8 +406,8 @@ export async function callRelayRpc<T = unknown>(
  *   content removal may be unfinished
  * - follow_ups_unknown: only our own re-check found the ban after our request timed out,
  *   dropped, or failed without the worker's ban_unconfirmed code (e.g. an
- *   uncaught 5xx), so the worker never reported its follow-ups (Keycast login
- *   block, user notice, ticket closure) as done; they may or may not have run
+ *   uncaught 5xx), so the worker never reported its follow-ups (Keycast account
+ *   ban, user notice, ticket closure) as done; they may or may not have run
  * - follow_ups_not_run: the worker answered ban_unconfirmed, which it does
  *   before any follow-up, and our re-check then found the ban: they did not run
  */

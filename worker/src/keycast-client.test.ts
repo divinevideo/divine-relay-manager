@@ -310,7 +310,7 @@ describe('keycast-client', () => {
   });
 
   // A pubkey with no keycast record is a self-custody account: there is no
-  // Divine login to suspend, which is not the same as a failed suspend. The
+  // Keycast account to suspend, which is not the same as a failed suspend. The
   // status legs must report that distinctly so age-review enforcement does not
   // read "nothing to do here" as "enforcement broke" (issue #191).
   describe('status legs on an account keycast does not know', () => {

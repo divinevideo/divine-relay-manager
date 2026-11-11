@@ -725,7 +725,8 @@ describe('relay-rpc account-state side effects', () => {
   it('unbanpubkey is refused when the target has an active age-review case', async () => {
     // unbanpubkey calls unsuspendUser, which sets Keycast status to active and so
     // lifts an age-review suspension as well as a ban. Without the guard, a Coop
-    // Unban-User restores login and signing on an account still under review.
+    // Unban-User lifts the Keycast restriction (encryption, decryption,
+    // sign_canonical, ActivityPub keys) on an account still under review.
     const fetchSpy = makeFetchSpy();
     const waitUntil = vi.fn();
     const testCtx = { waitUntil } as unknown as ExecutionContext;

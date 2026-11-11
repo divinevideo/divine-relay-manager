@@ -1,4 +1,4 @@
-// ABOUTME: Pure synthesis of an account's type and sign-in state from Keycast, plus
+// ABOUTME: Pure synthesis of an account's type and Keycast status, plus
 // ABOUTME: age review's enforcement compliance legs and one-line verdict. No I/O.
 import type { AccountStatusResponse } from './adminApi';
 
@@ -6,16 +6,19 @@ export type AccountType = 'divine' | 'self_custody' | 'unknown';
 export type LegState = 'done' | 'missing' | 'na' | 'not_tracked';
 
 export interface ComplianceLeg {
-  key: 'signin' | 'ticket' | 'content_restrict' | 'relay_suspend';
+  key: 'keycast' | 'ticket' | 'content_restrict' | 'relay_suspend';
   label: string;
   state: LegState;
 }
 
-export type SignInStatus = 'active' | 'blocked' | 'unknown' | 'not_applicable';
+// Keycast's account status, not whether the person can sign in: Keycast lets a
+// suspended or banned account sign in (keycast#235, so they can see the notice)
+// and restricts what it will do for it instead (#417).
+export type KeycastStatus = 'active' | 'restricted' | 'unknown' | 'not_applicable';
 
 export interface AccountVerdict {
   accountType: AccountType;
-  signInStatus: SignInStatus;
+  keycastStatus: KeycastStatus;
   contentPresence: 'visible' | 'hidden_suspended' | 'none' | 'unknown';
   legs: ComplianceLeg[];
   verdict: string;
@@ -34,7 +37,7 @@ export interface DeriveInput {
 
 export interface AccountIdentity {
   accountType: AccountType;
-  signInStatus: SignInStatus;
+  keycastStatus: KeycastStatus;
 }
 
 // What a Keycast status lookup says about an account, on its own: shared by the
@@ -56,23 +59,23 @@ export function deriveAccountIdentity(
     accountType = 'unknown';
   }
 
-  // Both suspended and banned block sign-in.
-  const signInBlocked = accountStatus?.status === 'suspended' || accountStatus?.status === 'banned';
-  const signInStatus: SignInStatus =
+  // Keycast restricts both suspended and banned accounts. Neither blocks sign-in.
+  const keycastRestricted = accountStatus?.status === 'suspended' || accountStatus?.status === 'banned';
+  const keycastStatus: KeycastStatus =
     accountType === 'self_custody' ? 'not_applicable'
     : accountType === 'unknown' ? 'unknown'
-    : signInBlocked ? 'blocked'
+    : keycastRestricted ? 'restricted'
     : accountStatus?.status === 'active' ? 'active'
     : 'unknown';
 
-  return { accountType, signInStatus };
+  return { accountType, keycastStatus };
 }
 
 export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   const { accountStatus, accountStatusError, postCount, contentPresenceKnown, ticketLinked } = input;
-  const { accountType, signInStatus } = deriveAccountIdentity(accountStatus, accountStatusError);
+  const { accountType, keycastStatus } = deriveAccountIdentity(accountStatus, accountStatusError);
 
-  // Kept separate from sign-in blocking because only *suspend* hides content
+  // Kept separate from the Keycast restriction because only *suspend* hides content
   // reversibly; ban purges it.
   const suspended = accountStatus?.status === 'suspended';
   const hasContent = (postCount ?? 0) > 0;
@@ -91,14 +94,16 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
   const contentApplicable = contentPresence !== 'none';
   const contentLegState: LegState = contentApplicable ? 'not_tracked' : 'na';
 
-  const signinState: LegState =
-    signInStatus === 'not_applicable' ? 'na'
-    : signInStatus === 'unknown' ? 'not_tracked'
-    : signInStatus === 'blocked' ? 'done'
+  // Records whether age review's Keycast suspend (or a deny's ban) is in place.
+  // It is not evidence the person cannot sign in: Keycast does not block that.
+  const keycastLegState: LegState =
+    keycastStatus === 'not_applicable' ? 'na'
+    : keycastStatus === 'unknown' ? 'not_tracked'
+    : keycastStatus === 'restricted' ? 'done'
     : 'missing';
 
   const legs: ComplianceLeg[] = [
-    { key: 'signin', label: 'Sign-in (keycast) suspend', state: signinState },
+    { key: 'keycast', label: 'Keycast account suspend', state: keycastLegState },
     { key: 'content_restrict', label: 'Content age-restrict', state: contentLegState },
     { key: 'relay_suspend', label: 'Relay content suspend', state: contentLegState },
     { key: 'ticket', label: 'Age-review ticket', state: ticketLinked ? 'done' : 'missing' },
@@ -106,24 +111,24 @@ export function deriveAccountVerdict(input: DeriveInput): AccountVerdict {
 
   return {
     accountType,
-    signInStatus,
+    keycastStatus,
     contentPresence,
     legs,
-    verdict: buildVerdict(accountType, contentPresence, signinState, ticketLinked),
+    verdict: buildVerdict(accountType, contentPresence, keycastLegState, ticketLinked),
   };
 }
 
 function buildVerdict(
   accountType: AccountType,
   contentPresence: AccountVerdict['contentPresence'],
-  signinState: LegState,
+  keycastLegState: LegState,
   ticketLinked: boolean,
 ): string {
   const contentUnknownNote =
     'Relay content status unavailable — verify content directly before ruling out a content action.';
 
   const available: string[] = [];
-  if (signinState === 'missing') available.push('suspend sign-in');
+  if (keycastLegState === 'missing') available.push('suspend Keycast account');
   // Only offer a content action when content is present or likely-hidden. When
   // the read is 'unknown' we do NOT auto-list it (we can't confirm content) and
   // do NOT conclude "no content" — the note below tells the moderator to verify.
@@ -132,27 +137,27 @@ function buildVerdict(
   }
   if (!ticketLinked) available.push('open ticket');
 
-  // Keycast unavailable: only the SIGN-IN leg is unconfirmed. Content-presence
+  // Keycast unavailable: only the KEYCAST leg is unconfirmed. Content-presence
   // and ticket don't depend on keycast, so still surface those actions instead
-  // of collapsing the whole verdict to "retry". (signinState is 'not_tracked'
-  // here, so 'suspend sign-in' is never in `available`.)
+  // of collapsing the whole verdict to "retry". (keycastLegState is 'not_tracked'
+  // here, so 'suspend Keycast account' is never in `available`.)
   if (accountType === 'unknown') {
-    const note = 'Sign-in lever unconfirmed (account status unavailable) — retry before relying on it.';
+    const note = 'Keycast lever unconfirmed (account status unavailable) — retry before relying on it.';
     const tail = contentPresence === 'unknown' ? ` ${contentUnknownNote}` : '';
     return available.length > 0
       ? `${note} Content/ticket actions still apply: ${available.join(', ')}.${tail}`
       : `${note}${tail}`;
   }
 
-  if (signinState === 'not_tracked') {
-    const note = 'Sign-in status unavailable — retry before relying on it.';
+  if (keycastLegState === 'not_tracked') {
+    const note = 'Keycast status unavailable — retry before relying on it.';
     const tail = contentPresence === 'unknown' ? ` ${contentUnknownNote}` : '';
     return available.length > 0
       ? `${note} Available: ${available.join(', ')}.${tail}`
       : `${note}${tail}`;
   }
 
-  const prefix = accountType === 'self_custody' ? 'Sign-in suspend N/A (self-custody). ' : '';
+  const prefix = accountType === 'self_custody' ? 'Keycast suspend N/A (self-custody). ' : '';
 
   if (available.length > 0) {
     const tail = contentPresence === 'unknown' ? ` ${contentUnknownNote}` : '';

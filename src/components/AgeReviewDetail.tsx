@@ -253,7 +253,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       const failed: string[] = [];
       if (enforcement?.relay === 'failed') failed.push('relay (existing posts and feed)');
       if (enforcement?.bulk === 'failed') failed.push('media and content');
-      if (enforcement?.keycast === 'failed') failed.push('account sign-in');
+      if (enforcement?.keycast === 'failed') failed.push('Keycast account status');
       if (enforcement?.subjectClear === 'failed') failed.push('protected-minor registry');
       if (enforcement?.keycastMinorClear === 'failed') failed.push('protected-minor account projection');
       if (enforcement?.keycastMinorSet === 'failed') failed.push('protected-minor account flag');
@@ -282,7 +282,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         // Only the protected-minor steps have a retry: the deadline cron
         // retries the protected-subject clear and the Keycast projection (the
         // minor flag's clear and set). Nothing retries the relay, media or
-        // sign-in steps, so say so rather than promise one.
+        // Keycast status steps, so say so rather than promise one.
         const minorClearFailed = enforcement?.subjectClear === 'failed' || enforcement?.keycastMinorClear === 'failed';
         const otherStepFailed = enforcement?.relay === 'failed' || enforcement?.bulk === 'failed' || enforcement?.keycast === 'failed';
         const retryWords = (minorStepFailed: boolean) => (!minorStepFailed
@@ -315,12 +315,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
         } else if (enforcement?.keycast === 'not_applicable') {
           // Enforcement is complete, so this is not a failure and must not read
           // as one, but it cannot be silent either. Without it the moderator
-          // walks away believing a sign-in was blocked when the account has no
-          // Divine login and never had one to block (issue #191). "Nothing else"
+          // walks away believing a Keycast account was suspended when the account
+          // has no Divine login and never had one (issue #191). "Nothing else"
           // only when the panel has nothing either.
           toast({
             title: 'Case updated',
-            description: `The sign-in step was not applicable: this account has no Divine login (self-custody), so there was no sign-in to change. ${pointer ?? 'Nothing else was left outstanding.'}`,
+            description: `The Keycast step was not applicable: this account has no Divine login (self-custody), so there was no Keycast account to change. ${pointer ?? 'Nothing else was left outstanding.'}`,
           });
         } else if (pointer) {
           // The panel opens at the top of the case, which may be out of view.
@@ -329,7 +329,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       }
     },
     // Approve and deny write the protected-minor registry and keycast flag, and
-    // every decision can change sign-in status. Settled, not success: a conflict
+    // every decision can change Keycast status. Settled, not success: a conflict
     // or a lost response can follow a write that did commit. Only this case's
     // account can have changed, and only by a state change: a clock or band edit
     // leaves both statuses alone, unless it lost a version conflict, since the

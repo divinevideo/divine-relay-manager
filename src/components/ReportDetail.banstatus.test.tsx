@@ -224,7 +224,7 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
-  // The reported user's sign-in label shares the account-status query with age
+  // The reported user's Keycast label shares the account-status query with age
   // review, and a ban or suspend flips what it should say. Without this the label
   // keeps its pre-action answer for the query's whole minute of staleness.
   it('refreshes the reported user\'s account-status entry, and only that one, when an account action completes', () => {

@@ -65,6 +65,17 @@ describe('banSuccessNote', () => {
     expect(banSuccessNote({ unconfirmed })?.includes('in a few minutes')).toBe(suggests);
   });
 
+  // The Keycast follow-up is a Keycast account ban, not a login block: Keycast
+  // lets a banned account log in to see the notice (#417).
+  it.each(['follow_ups_unknown', 'follow_ups_not_run'] as const)(
+    'names the %s Keycast step as a Keycast account ban, not a login block',
+    (unconfirmed) => {
+      const note = banSuccessNote({ unconfirmed });
+      expect(note).toContain('(Keycast account ban, notice to the user, ticket closure)');
+      expect(note).not.toMatch(/log ?in/i);
+    },
+  );
+
   it('routes skipped follow-ups to T&S Engineering', () => {
     expect(banSuccessNote({ unconfirmed: 'follow_ups_not_run' })).toContain('Let T&S Engineering know');
   });
