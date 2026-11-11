@@ -30,6 +30,7 @@ import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
+import { SuspendedPostViewer } from "@/components/suspended/SuspendedContentPanel";
 import { deriveGoneCause } from "@/lib/goneCause";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
@@ -56,7 +57,7 @@ import { EventActions } from "@/components/EventActions";
 import { UserActions, type UserActionChange } from "@/components/UserActions";
 import { LinkedTicketPanel } from "@/components/LinkedTicketPanel";
 import { linkedTicketTarget } from "@/lib/linkedTicketTarget";
-import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal, userStatsQueryKey } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, getCategoryLabel, getReportCategory, hasCsamSignal, isHex64, userStatsQueryKey } from "@/lib/constants";
 import { SWITCH_STATE_LABELS, type SwitchState } from "@/lib/sensitiveSwitch";
 import { ageReviewCategory, classifyReport } from "../../shared/report-classification";
 import { KIND_NAMES } from "@/lib/kindNames";
@@ -1016,6 +1017,24 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 onRecheck={moderationStatus.recheck}
                 isRechecking={moderationStatus.isChecking}
                 hideAvatars={hasHighPriorityReports !== false}
+                // The audited viewer, for a post the confirmed suspension
+                // explains, or may explain beside a ban nothing could check
+                // (Matt, 2026-11-09: a banned post then reads as hidden for
+                // another reason). The target id comes from the report's own
+                // tags, so only a 64-hex id is offered, the worker checks it
+                // again, and the post is checked against the reported account.
+                suspendedViewer={(goneCause.kind === 'suspended'
+                  || (goneCause.kind === 'unknown' && moderationStatus.isUserSuspended === true))
+                  && targetEventId && isHex64(targetEventId) ? (
+                  <SuspendedPostViewer
+                    key={targetEventId}
+                    eventId={targetEventId}
+                    surface="report"
+                    showMediaByDefault={mediaShownByDefault}
+                    expectedAuthor={reportedPubkey || undefined}
+                    subject="the reported account"
+                  />
+                ) : undefined}
               />
             </>
           )}
@@ -1187,6 +1206,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             isSuspendedStale={moderationStatus.isUserSuspendedStale}
             isSuspensionChecking={moderationStatus.isUserSuspensionChecking}
             hideMediaByDefault={mediaShownByDefault === null ? null : !mediaShownByDefault}
+            suspendedViewerSurface="report"
             onViewActivity={reportedPubkey ? () => {
               // Same drill-down the reporter rows get: Events tab filtered to this
               // user (#156). Encoded: the p tag comes from an attacker-authored

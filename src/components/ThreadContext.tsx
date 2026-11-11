@@ -12,7 +12,7 @@ import {
   AlertTriangle, Globe, Search, Ban, RefreshCw, ShieldX, EyeOff,
 } from "lucide-react";
 import { NoRelayProfileIcon } from "@/components/NoRelayProfileIcon";
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import type { NostrEvent } from "@nostrify/nostrify";
 import { getProfileUrl, getPublicEventUrl } from "@/lib/constants";
 import type { FetchSource } from "@/hooks/useThread";
@@ -66,6 +66,12 @@ interface ThreadContextProps {
   isRechecking?: boolean;
   /** Withhold every participant's avatar image, keeping the initials (sensitive reports) */
   hideAvatars?: boolean;
+  /**
+   * Shown under the line that says a suspension hides the post, or that the
+   * cause is unknown: the audited viewer, which ReportDetail builds with the
+   * report's media rule and passes only when the suspension is confirmed.
+   */
+  suspendedViewer?: ReactNode;
 }
 
 function PostCard({
@@ -300,6 +306,7 @@ export function ThreadContext({
   onRecheck,
   isRechecking,
   hideAvatars = false,
+  suspendedViewer,
 }: ThreadContextProps) {
   if (isLoading) {
     return (
@@ -372,6 +379,11 @@ export function ThreadContext({
                 <span className="text-sm font-medium text-muted-foreground">{goneCause.line}</span>
               </div>
             )}
+            {/* Under whichever of the two lines above shows, in one slot of its
+                own: the cause moves between them when a ban or decision read
+                fails or recovers, and a viewer rendered inside each would
+                remount, closing what the moderator opened. */}
+            {isEventDeleted === true && (goneCause?.kind === 'suspended' || goneCause?.kind === 'unknown') && suspendedViewer}
             {isEventDeleted === true && (goneCause === undefined || goneCause.kind === 'explained') && (
               // A cause the badge states itself, in its own words: "deleted"
               // only for a recorded delete (and when no cause is passed).

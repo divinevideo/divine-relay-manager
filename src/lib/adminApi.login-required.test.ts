@@ -13,6 +13,8 @@ import {
   listBannedPubkeys,
   moderateAction,
   submitAIDetection,
+  viewSuspendedAccount,
+  viewSuspendedPost,
 } from './adminApi';
 import {
   MODERATOR_LOGIN_REQUIRED_MESSAGE,
@@ -138,6 +140,20 @@ describe('a read refused for want of a login', () => {
 
     await rejection(listBannedPubkeys(API));
 
+    expect(prompted).not.toHaveBeenCalled();
+  });
+  // POSTs, but reads: the viewer's panel has its own sign-in state, so a modal
+  // on top of it would say the same thing twice.
+  it.each([
+    ['viewSuspendedPost', () => viewSuspendedPost(API, { eventId: 'e'.repeat(64), surface: 'report' })],
+    ['viewSuspendedAccount', () => viewSuspendedAccount(API, { pubkey: 'a'.repeat(64), surface: 'user' })],
+  ] as const)('the suspended-content viewer (%s) keeps the code but raises no prompt', async (_name, view) => {
+    fetchMock.mockResolvedValueOnce(loginRefusal());
+
+    const err = await rejection(view());
+
+    expect(err.code).toBe('moderator_login_required');
+    expect(err.statusCode).toBe(401);
     expect(prompted).not.toHaveBeenCalled();
   });
 });

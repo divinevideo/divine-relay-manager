@@ -45,6 +45,10 @@ const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]
   // Opens a suspended author's quarantine snapshot, which the worker audits
   // against the verified login.
   ['getSexualQuarantineSnapshot', (a) => a.getSexualQuarantineSnapshot('e1')],
+  // The suspended-content viewer: the worker refuses without a verified login
+  // and records each view against it.
+  ['viewSuspendedPost', (a) => a.viewSuspendedPost({ eventId: PK, surface: 'report' })],
+  ['viewSuspendedAccount', (a) => a.viewSuspendedAccount({ pubkey: PK, surface: 'user' })],
   // Also /api/relay-rpc, which records the verified moderator: UserManagement
   // and DebugPanel call callRelayRpc directly for account actions.
   ['callRelayRpc', (a) => a.callRelayRpc('unbanpubkey', [PK])],
@@ -94,6 +98,18 @@ describe('useAdminApi attribution header', () => {
       `${API_URL}/api/report-watcher/sexual-quarantine/e1`,
     ]);
     expect(sentHeaders()[1]).not.toHaveProperty(HEADER);
+  });
+
+  it('the viewer calls POST the request body to the audited endpoints', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    const act = result.current.asModerator(TOKEN);
+    await act.viewSuspendedPost({ eventId: PK, surface: 'report' });
+    await act.viewSuspendedAccount({ pubkey: PK, surface: 'age-review', until: 5, untilId: PK });
+    const calls = mockFetch.mock.calls.map(([url, init]) => [String(url), (init as RequestInit).method, JSON.parse((init as RequestInit).body as string)]);
+    expect(calls).toEqual([
+      [`${API_URL}/api/suspended-content/event`, 'POST', { eventId: PK, surface: 'report' }],
+      [`${API_URL}/api/suspended-content/account`, 'POST', { pubkey: PK, surface: 'age-review', until: 5, untilId: PK }],
+    ]);
   });
 
   it.each(ATTRIBUTION_CALLS)('asModerator(token).%s sends X-Divine-Login-Token', async (_name, invoke) => {
@@ -163,6 +179,10 @@ export function plainApiHasNoAttributionCalls(api: PlainAdminApi): void {
   void api.decideSexualQuarantine;
   // @ts-expect-error attribution calls go through asModerator(token)
   void api.getSexualQuarantineSnapshot;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.viewSuspendedPost;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.viewSuspendedAccount;
   // @ts-expect-error attribution calls go through asModerator(token)
   void api.publishEvent;
   // @ts-expect-error attribution calls go through asModerator(token)

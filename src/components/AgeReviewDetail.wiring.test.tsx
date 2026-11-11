@@ -175,6 +175,30 @@ describe('AgeReviewDetail feeds the content derivations', () => {
     await waitFor(() => expect(screen.getByText(/loading reported content/i)).toBeInTheDocument());
   });
 
+  // A background refetch (window focus after staleTime) must not swap a settled
+  // answer for "Loading": under a missing target sits the suspended-content
+  // viewer, and unmounting it closes the moderator's view, so opening it again
+  // writes one more audit row.
+  it('keeps a settled reported-event answer on screen through a background refetch', async () => {
+    accountStatus.mockReturnValue({ data: { success: true, status: 'suspended' }, isError: false, isLoading: false, refetch: vi.fn() });
+    reportedEvent.mockReturnValue({
+      data: { status: 'target_missing', targetEventId: 'd'.repeat(64) },
+      isFetching: true, isError: false, refetch: vi.fn(),
+    });
+    show();
+    await waitFor(() => expect(screen.getByText(/hidden by the account's suspension, so it cannot be shown here/i)).toBeInTheDocument());
+    expect(screen.queryByText(/loading reported content/i)).not.toBeInTheDocument();
+  });
+
+  it('still shows loading when a Retry replaces an error kept beside an older answer', async () => {
+    reportedEvent.mockReturnValue({
+      data: { status: 'target_missing', targetEventId: 'd'.repeat(64) },
+      isFetching: true, isError: true, refetch: vi.fn(),
+    });
+    show();
+    await waitFor(() => expect(screen.getByText(/loading reported content/i)).toBeInTheDocument());
+  });
+
   it('passes the case subject to the lookup, so the author check can run at all', async () => {
     // The guard is `if (casePubkey && ...)`, so dropping this argument silently
     // disables author verification with no type error and no visible change.

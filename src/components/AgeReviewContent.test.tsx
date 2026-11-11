@@ -11,6 +11,12 @@ vi.mock("@/components/MediaPreview", () => ({
   ),
 }));
 
+// The suspended-content viewer has its own tests (AgeReviewContent.suspended-viewer).
+vi.mock("@/components/suspended/SuspendedContentPanel", () => ({
+  SuspendedPostViewer: () => null,
+  SuspendedAccountViewer: () => null,
+}));
+
 const active: AccountStatusResponse = { success: true, status: "active" };
 const suspended: AccountStatusResponse = { success: true, status: "suspended" };
 const banned: AccountStatusResponse = { success: true, status: "banned" };

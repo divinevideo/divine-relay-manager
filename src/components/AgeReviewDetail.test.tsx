@@ -54,6 +54,8 @@ const moderatorApi = withAsModerator({
   moderateMedia,
   logDecision,
   suspendPubkey,
+  // The relay's suspended list, which gates the viewer: empty here.
+  listSuspendedPubkeys: vi.fn().mockResolvedValue([]),
 });
 vi.mock('@/hooks/useAdminApi', () => ({
   useApiUrl: () => 'https://api.test.divine.video',

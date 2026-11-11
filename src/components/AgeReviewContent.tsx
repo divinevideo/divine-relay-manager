@@ -15,6 +15,9 @@ import { MediaPreview } from "@/components/MediaPreview";
 import { CopyableId } from "@/components/CopyableId";
 import { getKindName } from "@/lib/kindNames";
 import { deriveContentVisibility } from "@/lib/contentVisibility";
+import { isHex64 } from "@/lib/constants";
+import { SuspendedAccountViewer, SuspendedPostViewer } from "@/components/suspended/SuspendedContentPanel";
+import { ForeignAuthorWarning } from "@/components/ForeignAuthorWarning";
 
 interface AgeReviewContentProps {
   postCount: number | undefined;
@@ -38,6 +41,13 @@ interface AgeReviewContentProps {
   // Whether the case has a report_id at all (so the reported section only
   // appears for cases that came from a report).
   hasReportId?: boolean;
+  // The case's subject, for the audited suspended-content viewer.
+  subjectPubkey?: string;
+  // Whether the relay's suspended list holds the subject (true), confirms it
+  // absent (false), or has not answered (null). The viewers are offered only on
+  // true: the worker serves only what that list holds. Keycast's status still
+  // drives every other claim here.
+  relaySuspended?: boolean | null;
 }
 
 // One content item: click-to-reveal media (MediaPreview default; the media-proxy
@@ -107,7 +117,13 @@ export function AgeReviewContent({
   reportedEventError,
   onRetryReported,
   hasReportId,
+  subjectPubkey,
+  relaySuspended,
 }: AgeReviewContentProps) {
+  // Offers the audited viewer only when the relay's suspended list holds the
+  // subject. Both viewers keep age review's click-to-reveal rule
+  // (showMediaByDefault false), whatever the report says.
+  const offerViewer = relaySuspended === true;
   const vis = deriveContentVisibility({
     postCount,
     contentLoading,
@@ -138,11 +154,7 @@ export function AgeReviewContent({
       // carries the attribution instead. Stated as a fact about the tag rather
       // than an accusation: a client quirk is likelier than bad faith.
       <div className="space-y-1.5">
-        <div className="rounded-md border border-amber-500/40 p-2.5 text-xs text-amber-700 dark:text-amber-400">
-          This post was authored by{" "}
-          <CopyableId value={shown.event.pubkey} type="hex" className="text-amber-700 dark:text-amber-400" />, not by this case's
-          subject. Do not judge this account by it without confirming the connection.
-        </div>
+        <ForeignAuthorWarning author={shown.event.pubkey} />
         <ContentCard key={shown.event.id} event={shown.event} />
       </div>
     ) : (
@@ -172,7 +184,18 @@ export function AgeReviewContent({
   ) : reportedEvent?.status === "target_unreadable" ? (
     <Note>This report names a target we cannot read, so the reported post cannot be resolved.</Note>
   ) : reportedEvent?.status === "target_missing" ? (
-    <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
+    <div className="space-y-1.5">
+      <Note>{reportedMissingReason(accountStatus, accountStatusFailed)}</Note>
+      {offerViewer && isHex64(reportedEvent.targetEventId) && (
+        <SuspendedPostViewer
+          key={reportedEvent.targetEventId}
+          eventId={reportedEvent.targetEventId}
+          surface="age-review"
+          showMediaByDefault={false}
+          expectedAuthor={subjectPubkey}
+        />
+      )}
+    </div>
   ) : null;
 
   return (
@@ -222,6 +245,13 @@ export function AgeReviewContent({
             </div>
           </CardContent>
         </Card>
+      )}
+
+      {/* The audited viewer, for the posts the suspension hides from the read
+          above. Gated on the relay's suspended list, not on vis.state: a post
+          count cached from before the suspension reads as "has content". */}
+      {offerViewer && subjectPubkey && isHex64(subjectPubkey) && (
+        <SuspendedAccountViewer key={subjectPubkey} pubkey={subjectPubkey} surface="age-review" showMediaByDefault={false} />
       )}
     </div>
   );
