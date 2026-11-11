@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "npm i && vite",
     "build": "npm i && vite build && cp dist/index.html dist/404.html",
-    "test": "tsc -p tsconfig.app.json --noEmit && eslint && vitest run && vite build --mode development",
+    "typecheck": "tsc -p tsconfig.app.json --noEmit && tsc -p tsconfig.shared.json --noEmit && tsc -p tsconfig.shared.test.json --noEmit",
+    "test": "npm run typecheck && eslint && vitest run && vite build --mode development",
     "deploy": "npm run build && npx wrangler pages deploy dist"
   },
   "dependencies": {

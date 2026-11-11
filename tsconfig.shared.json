@@ -1,0 +1,29 @@
+// Type-checks the shipping code under shared/ on its own. Those modules are
+// bundled into both the frontend and the worker, so this check gives them only
+// what both runtimes provide: ES2020 (the lower of the two consumers' libs) and
+// no ambient types at all, so no DOM, Node or Workers globals.
+//
+// tsconfig.app.json and worker/tsconfig.json also check most of these files
+// through their importers, but each with its own runtime's globals loaded, and
+// the app check with strict off. Neither would catch shared code that leans on
+// a global only one runtime has.
+//
+// The tests are checked separately by tsconfig.shared.test.json. They cannot
+// share this program: importing vitest pulls in @types/node through vite's
+// declarations, and those globals would then apply to every file here.
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "types": [],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true
+  },
+  "include": ["shared/**/*.ts"],
+  "exclude": ["shared/**/*.test.ts"]
+}
