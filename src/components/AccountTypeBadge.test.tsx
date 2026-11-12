@@ -1,5 +1,5 @@
 // ABOUTME: Pins the account-type badge's wording: what a Keycast account lookup
-// ABOUTME: can and can't say about an account, and its sign-in state (#132).
+// ABOUTME: can and can't say about an account, and its Keycast status (#132, #417).
 
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -18,24 +18,29 @@ function renderBadge(accountStatus: AccountStatusResponse | undefined, { error =
 }
 
 describe('AccountTypeBadge', () => {
-  it('names a Keycast account a Divine login account, with sign-in active', () => {
+  it('names a Keycast account a Divine login account, with Keycast active', () => {
     renderBadge({ success: true, status: 'active' });
     expect(screen.getByText('Divine login account')).toBeInTheDocument();
-    expect(screen.getByText('sign-in active')).toBeInTheDocument();
+    expect(screen.getByText('Keycast active')).toBeInTheDocument();
   });
 
+  // Keycast does not block sign-in for a suspended or banned account (#417): the
+  // person can still log in to see the notice. What it restricts is encryption,
+  // decryption, canonical signing and ActivityPub keys, so the badge names the
+  // restriction, not a sign-in block.
   it.each([
-    ['suspended', 'sign-in blocked (suspended)'],
-    ['banned', 'sign-in blocked (banned)'],
-  ])('says sign-in is blocked, and why, for a %s account', (status, text) => {
+    ['suspended', 'Keycast restricted (suspended)'],
+    ['banned', 'Keycast restricted (banned)'],
+  ])('says Keycast restricts a %s account, and why, without claiming sign-in is blocked', (status, text) => {
     renderBadge({ success: true, status });
     expect(screen.getByText(text)).toBeInTheDocument();
-    expect(screen.queryByText('sign-in active')).not.toBeInTheDocument();
+    expect(screen.queryByText('Keycast active')).not.toBeInTheDocument();
+    expect(screen.queryByText(/sign-in/i)).not.toBeInTheDocument();
   });
 
-  it('does not claim sign-in is active when Keycast omits the status', () => {
+  it('does not claim the account is active when Keycast omits the status', () => {
     renderBadge({ success: true });
-    expect(screen.getByText('sign-in status unavailable')).toBeInTheDocument();
+    expect(screen.getByText('Keycast status unavailable')).toBeInTheDocument();
   });
 
   it('says only that there is no Divine login account when Keycast has none, not that it is not Divine', () => {
@@ -44,13 +49,13 @@ describe('AccountTypeBadge', () => {
     // The caveat opens on keyboard focus, not only on mouse hover.
     act(() => { fireEvent.focus(screen.getByText('No Divine login account').closest('[tabindex="0"]')!); });
     expect(screen.getAllByText(/holds their own key/).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/sign-in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Keycast (active|restricted|status)/)).not.toBeInTheDocument();
   });
 
   it('says the account type is unavailable when the lookup failed', () => {
     renderBadge({ success: false, error: 'unavailable' });
     expect(screen.getByText('Account type unavailable')).toBeInTheDocument();
-    expect(screen.queryByText(/sign-in/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^Keycast (active|restricted|status)/)).not.toBeInTheDocument();
   });
 
   it('says the account type is unavailable when the request errored with nothing cached', () => {

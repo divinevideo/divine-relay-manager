@@ -30,23 +30,38 @@ describe('deriveAccountVerdict — account type', () => {
 });
 
 describe('deriveAccountVerdict — legs', () => {
-  it('sign-in done when divine + suspended', () => {
-    expect(legState(deriveAccountVerdict({ accountStatus: divineSuspended, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: true }), 'signin')).toBe('done');
+  it('keycast leg done when divine + suspended', () => {
+    expect(legState(deriveAccountVerdict({ accountStatus: divineSuspended, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: true }), 'keycast')).toBe('done');
   });
-  it('sign-in missing when divine + active', () => {
-    expect(legState(deriveAccountVerdict({ accountStatus: divineActive, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false }), 'signin')).toBe('missing');
+  it('keycast leg missing when divine + active, and offered as a Keycast suspend', () => {
+    const v = deriveAccountVerdict({ accountStatus: divineActive, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false });
+    expect(legState(v, 'keycast')).toBe('missing');
+    expect(v.verdict).toContain('suspend Keycast account');
   });
-  it('sign-in not_tracked when keycast omits status', () => {
+  // Keycast does not block sign-in for a suspended or banned account (#417), so
+  // neither the leg nor the verdict may describe the Keycast lever as sign-in.
+  it.each([
+    ['active', divineActive],
+    ['suspended', divineSuspended],
+    ['banned', divineBanned],
+    ['self-custody', selfCustody],
+    ['unavailable', unavailable],
+  ])('never describes the Keycast lever as sign-in (%s)', (_name, accountStatus) => {
+    const v = deriveAccountVerdict({ accountStatus, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false });
+    expect(v.legs.find((l) => l.key === 'keycast')!.label).toBe('Keycast account suspend');
+    expect(v.verdict).not.toMatch(/sign-in/i);
+  });
+  it('keycast leg not_tracked when keycast omits status', () => {
     const v = deriveAccountVerdict({ accountStatus: { success: true }, accountStatusError: false, contentPresenceKnown: true, postCount: 0, ticketLinked: true });
     expect(v.accountType).toBe('divine');
-    expect(v.signInStatus).toBe('unknown');
-    expect(legState(v, 'signin')).toBe('not_tracked');
-    expect(v.verdict.toLowerCase()).not.toContain('suspend sign-in');
+    expect(v.keycastStatus).toBe('unknown');
+    expect(legState(v, 'keycast')).toBe('not_tracked');
+    expect(v.verdict.toLowerCase()).not.toContain('suspend keycast account');
     expect(v.verdict.toLowerCase()).not.toContain('fully enforced');
-    expect(v.verdict.toLowerCase()).toContain('sign-in status unavailable');
+    expect(v.verdict.toLowerCase()).toContain('keycast status unavailable');
   });
-  it('sign-in na when self-custody', () => {
-    expect(legState(deriveAccountVerdict({ accountStatus: selfCustody, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false }), 'signin')).toBe('na');
+  it('keycast leg na when self-custody', () => {
+    expect(legState(deriveAccountVerdict({ accountStatus: selfCustody, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: false }), 'keycast')).toBe('na');
   });
   it('ticket done when linked, missing otherwise', () => {
     expect(legState(deriveAccountVerdict({ accountStatus: divineActive, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: true }), 'ticket')).toBe('done');
@@ -78,16 +93,16 @@ describe('deriveAccountVerdict — content presence + verdict', () => {
     expect(legState(v, 'content_restrict')).toBe('not_tracked');
   });
 
-  it('treats banned as sign-in blocked (done), never offers "suspend sign-in" (review)', () => {
+  it('treats banned as Keycast-restricted (done), never offers "suspend Keycast account" (review)', () => {
     const v = deriveAccountVerdict({ accountStatus: divineBanned, accountStatusError: false, contentPresenceKnown: true, postCount: 2, ticketLinked: true });
-    expect(legState(v, 'signin')).toBe('done');
-    expect(v.verdict.toLowerCase()).not.toContain('suspend sign-in');
+    expect(legState(v, 'keycast')).toBe('done');
+    expect(v.verdict.toLowerCase()).not.toContain('suspend keycast account');
   });
 
   it('keycast-unavailable still surfaces content/ticket actions, not just "retry" (review)', () => {
     const v = deriveAccountVerdict({ accountStatus: unavailable, accountStatusError: false, contentPresenceKnown: true, postCount: 5, ticketLinked: false });
     expect(v.accountType).toBe('unknown');
-    expect(v.verdict.toLowerCase()).toContain('unavailable'); // sign-in note preserved
+    expect(v.verdict.toLowerCase()).toContain('keycast lever unconfirmed'); // Keycast note preserved
     expect(v.verdict.toLowerCase()).toContain('age-restrict'); // content action still shown
     expect(v.verdict.toLowerCase()).toContain('open ticket'); // ticket action still shown
   });

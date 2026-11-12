@@ -1,5 +1,5 @@
 // ABOUTME: Badge for what Keycast says about an account (Divine login account or
-// ABOUTME: not) and its sign-in state; shared by age review and the report view.
+// ABOUTME: not) and its Keycast status; shared by age review and the report view.
 import { Badge } from '@/components/ui/badge';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip';
 import type { AccountStatusResponse } from '@/lib/adminApi';
@@ -25,12 +25,15 @@ export function AccountTypeBadge({ accountStatus, accountStatusError, accountSta
     return <span className="text-xs text-muted-foreground">Checking account type…</span>;
   }
 
-  const { accountType, signInStatus } = deriveAccountIdentity(accountStatus, accountStatusError);
+  const { accountType, keycastStatus } = deriveAccountIdentity(accountStatus, accountStatusError);
   const { label, title } = ACCOUNT_TYPE_BADGE[accountType];
-  const signIn =
-    signInStatus === 'active' ? 'sign-in active'
-    : signInStatus === 'blocked' ? `sign-in blocked (${accountStatus?.status === 'banned' ? 'banned' : 'suspended'})`
-    : signInStatus === 'unknown' && accountType === 'divine' ? 'sign-in status unavailable'
+  // Keycast's status, not a sign-in state: a suspended or banned account can still
+  // sign in. Keycast restricts encryption, decryption, canonical signing and
+  // ActivityPub keys instead (#417).
+  const keycastLine =
+    keycastStatus === 'active' ? 'Keycast active'
+    : keycastStatus === 'restricted' ? `Keycast restricted (${accountStatus?.status === 'banned' ? 'banned' : 'suspended'})`
+    : keycastStatus === 'unknown' && accountType === 'divine' ? 'Keycast status unavailable'
     : null;
 
   return (
@@ -49,7 +52,7 @@ export function AccountTypeBadge({ accountStatus, accountStatusError, accountSta
           </TooltipContent>
         </Tooltip>
       </TooltipProvider>
-      {signIn ? <span className="text-xs text-muted-foreground">{signIn}</span> : null}
+      {keycastLine ? <span className="text-xs text-muted-foreground">{keycastLine}</span> : null}
     </span>
   );
 }

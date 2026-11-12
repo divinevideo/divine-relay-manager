@@ -251,11 +251,11 @@ describe('AgeReviewDetail', () => {
     expect(toast).not.toHaveBeenCalled();
   });
 
-  // Self-custody targets have no Divine login, so the sign-in leg has nothing to
+  // Self-custody targets have no Divine login, so the Keycast leg has nothing to
   // act on. That is not a failed enforcement and must not read as one -- but it
-  // must still be visible, or the moderator walks away believing a sign-in was
-  // blocked when none exists (issue #191).
-  it('reports a not-applicable sign-in leg as information, not a failure', async () => {
+  // must still be visible, or the moderator walks away believing a Keycast
+  // account was suspended when none exists (issue #191).
+  it('reports a not-applicable Keycast leg as information, not a failure', async () => {
     updateAgeReviewCase.mockResolvedValueOnce({
       success: true,
       case: makeCase({ state: 'restricted_pending_user_response' }),
@@ -270,7 +270,9 @@ describe('AgeReviewDetail', () => {
     const arg = toast.mock.calls[0][0];
     expect(arg.title).not.toBe('Enforcement incomplete');
     expect(arg.variant).not.toBe('destructive');
-    expect(arg.description).toMatch(/sign-in/i);
+    expect(arg.description).toMatch(/Keycast step was not applicable/);
+    // Keycast does not block sign-in (#417), so the step is not named as one.
+    expect(arg.description).not.toMatch(/sign-in/i);
     expect(arg.description).toMatch(/no Divine login/i);
     // No "retry or escalate" instruction: there is nothing to retry.
     expect(arg.description).not.toMatch(/escalate/i);
@@ -320,7 +322,31 @@ describe('AgeReviewDetail', () => {
         variant: 'destructive',
       }));
     });
-    expect(toast.mock.calls[0][0].description).not.toMatch(/account sign-in/);
+    expect(toast.mock.calls[0][0].description).not.toMatch(/Keycast account status/);
+  });
+
+  // A failed Keycast leg is named for what it changes: the account's Keycast
+  // status. Keycast does not block sign-in (#417), so it is not "sign-in".
+  it('names a failed Keycast leg as the Keycast account status, not sign-in', async () => {
+    updateAgeReviewCase.mockResolvedValueOnce({
+      success: false,
+      case: makeCase({ state: 'restricted_pending_user_response' }),
+      enforcementComplete: false,
+      enforcement: { relay: 'ok', bulk: 'ok', keycast: 'failed' },
+    });
+    renderDetail(makeCase({ suspected_age_band: 'age_13_15' }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => {
+      expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+        title: 'Enforcement incomplete',
+        variant: 'destructive',
+      }));
+    });
+    const description = toast.mock.calls[0][0].description as string;
+    expect(description).toContain('these did not apply: Keycast account status.');
+    expect(description).not.toMatch(/sign-in/i);
   });
 
   it('toasts a reload notice on a 409 version_conflict', async () => {
@@ -728,7 +754,7 @@ describe('AgeReviewDetail', () => {
       await waitFor(() => expect(getAccountStatus.mock.calls.length).toBeGreaterThan(callsBefore));
     });
 
-    // A clock or note edit cannot change registry or sign-in status; refetching on it
+    // A clock or note edit cannot change registry or Keycast status; refetching on it
     // costs a keycast round trip per click.
     it('does not refetch account status after an edit that is not a decision', async () => {
       const { queryClient } = renderDetail(makeCase());

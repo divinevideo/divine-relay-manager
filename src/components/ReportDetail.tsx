@@ -588,7 +588,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
-      // The acted-on account's sign-in label reads the shared account-status query,
+      // The acted-on account's Keycast label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
       // runs after the worker responds, so the first read can beat it; a second

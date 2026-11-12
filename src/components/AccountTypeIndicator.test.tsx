@@ -17,12 +17,13 @@ describe('AccountTypeIndicator', () => {
   it('renders a Divine account with a compliance checklist', () => {
     render(<AccountTypeIndicator accountStatus={{ success: true, status: 'active' }} accountStatusError={false} accountStatusLoading={false} contentPresenceKnown={true} postCount={4} ticketLinked={false} />);
     expect(screen.getByText('Divine login account')).toBeInTheDocument();
-    expect(screen.getByText(/Sign-in \(keycast\) suspend/i)).toBeInTheDocument();
+    expect(screen.getByText('Keycast account suspend')).toBeInTheDocument();
+    expect(screen.queryByText(/sign-in/i)).not.toBeInTheDocument();
   });
-  it('does not assert active sign-in when keycast omits status', () => {
+  it('does not assert an active Keycast account when keycast omits status', () => {
     render(<AccountTypeIndicator accountStatus={{ success: true }} accountStatusError={false} accountStatusLoading={false} contentPresenceKnown={true} postCount={4} ticketLinked={false} />);
-    expect(screen.getAllByText(/sign-in status unavailable/i).length).toBeGreaterThan(0);
-    expect(screen.queryByText(/sign-in active/i)).not.toBeInTheDocument();
+    expect(screen.getAllByText(/Keycast status unavailable/i).length).toBeGreaterThan(0);
+    expect(screen.queryByText(/Keycast active/i)).not.toBeInTheDocument();
   });
   it('shows a checking state while account status loads (no unavailable flash)', () => {
     render(<AccountTypeIndicator accountStatus={undefined} accountStatusError={false} accountStatusLoading={true} contentPresenceKnown={false} postCount={undefined} ticketLinked={false} />);

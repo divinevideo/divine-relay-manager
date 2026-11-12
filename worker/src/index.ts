@@ -1717,8 +1717,11 @@ async function runRelayRpc(
   //
   // unbanpubkey is included because it calls unsuspendUser, which sets Keycast
   // status to active and so lifts a suspension as well as a ban. An unban on an
-  // account under age review therefore restores login and signing while skipping
-  // the case, which is exactly what this guard exists to prevent. Two callers
+  // account under age review therefore lifts the case's Keycast restriction while
+  // skipping the case, which is exactly what this guard exists to prevent. That
+  // restriction covers encryption, decryption, sign_canonical and ActivityPub
+  // keys; a suspended account can still log in and sign (keycast#235, #373), and
+  // the relay is what stops it publishing. Two callers
   // outside this repo reach it: divine-moderation-service, which has mapped
   // allow_pubkey -> unbanpubkey onto /api/relay-rpc since 2026-06-08, and the
   // Coop enforcement adapter, whose reversal routes followed on 2026-06-17.
@@ -1734,8 +1737,8 @@ async function runRelayRpc(
   // unbanpubkey cannot reverse (see nip86.ts, where suspendpubkey is documented
   // as the reversible alternative "without the destructive purge that banpubkey
   // performs"). So guarding the unban removes no recovery path that ever existed
-  // for content; it defers only restoring login and signing, which is precisely
-  // the hold the case owns. Nor is it a one-way door: once the case reaches a
+  // for content; it defers only lifting the Keycast restriction, which is the
+  // case's hold to lift. Nor is it a one-way door: once the case reaches a
   // terminal state getActiveAgeReviewCase returns null and the unban proceeds.
   //
   // Age-review's own enforcement calls the nip86 helpers directly, so it does not
@@ -1855,9 +1858,10 @@ async function runRelayRpc(
     const reason = body.params[1] ? String(body.params[1]) : undefined;
 
     // Mirror each account-state relay action into Keycast (non-critical) and DM
-    // the user. unbanpubkey lifts the Keycast ban (status -> active) so a
-    // reinstated user can log in again, but sends no DM here -- restore-on-unban
-    // DM is tracked in #96.
+    // the user. unbanpubkey lifts the Keycast ban (status -> active), restoring
+    // encryption, decryption, sign_canonical and ActivityPub keys (a banned account
+    // could already log in and sign), but sends no DM here -- restore-on-unban DM
+    // is tracked in #96.
     switch (body.method) {
       case 'banpubkey':
         enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env, moderator), ctx);
