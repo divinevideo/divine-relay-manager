@@ -3,10 +3,12 @@
 // signature change could leave a test asserting against code that no longer
 // exists with nothing to show it (#418).
 //
-// These tests run in Node under vitest and import it explicitly, so Node's
-// types are loaded and vitest's globals are not. The shared modules they import
-// are checked here too, but with Node's globals visible, so this is not the
-// check for the shipping code; tsconfig.shared.json is.
+// These tests run under root vitest, in its jsdom environment on Node, and
+// import vitest explicitly. Only Node's types are loaded here, not the DOM's or
+// vitest's globals, so a test that uses document or a vitest global without
+// importing it fails this check even though vitest would run it. The shared
+// modules they import are checked here too, but with Node's globals visible, so
+// this is not the check for the shipping code; tsconfig.shared.json is.
 //
 // The include lists every TypeScript test file name root vitest collects
 // (*.test.* and *.spec.*, in .ts, .tsx, .mts or .cts), so a shared test under

@@ -1,7 +1,9 @@
-// Type-checks the shipping code under shared/ on its own. Those modules are
-// bundled into both the frontend and the worker, so this check gives them only
-// what both runtimes provide: ES2020 (the lower of the two consumers' libs) and
-// no ambient types at all, so no DOM, Node or Workers globals.
+// Type-checks the shipping code under shared/ on its own. That code is meant
+// for both the frontend and the worker, and most of it is bundled by both, so
+// this check loads only ES2020 (the lower of the two consumers' libs) and no
+// ambient types at all. That rules out DOM, Node and Workers globals, and also
+// the ones both runtimes have, such as console, URL, TextEncoder and
+// setTimeout.
 //
 // tsconfig.app.json and worker/tsconfig.json also check most of these files
 // through their importers, but each with its own runtime's globals loaded, and
