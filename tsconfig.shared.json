@@ -16,7 +16,10 @@
 // file in this program may import vitest. The exclude below drops every
 // TypeScript test file name root vitest collects (the .tsx, .mts and .cts forms
 // are outside the include already), and a shared test helper that imports
-// vitest needs one of those names too.
+// vitest needs one of those names too. The exclude only governs which files
+// are discovered, though: an import can still pull a test file or vitest back
+// in, so scripts/check-shared-isolation.mjs (run by `npm run typecheck`) lists
+// what this program actually resolves and fails on either.
 {
   "compilerOptions": {
     "target": "ES2020",
