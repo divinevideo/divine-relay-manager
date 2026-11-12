@@ -7,6 +7,11 @@
 // types are loaded and vitest's globals are not. The shared modules they import
 // are checked here too, but with Node's globals visible, so this is not the
 // check for the shipping code; tsconfig.shared.json is.
+//
+// The include lists every TypeScript test file name root vitest collects
+// (*.test.* and *.spec.*, in .ts, .tsx, .mts or .cts), so a shared test under
+// any of them is checked here. JSX is not enabled, since shared code has no
+// React.
 {
   "extends": "./tsconfig.shared.json",
   "compilerOptions": {
@@ -14,6 +19,15 @@
     "lib": ["ES2022"],
     "types": ["node"]
   },
-  "include": ["shared/**/*.test.ts"],
+  "include": [
+    "shared/**/*.test.ts",
+    "shared/**/*.test.tsx",
+    "shared/**/*.test.mts",
+    "shared/**/*.test.cts",
+    "shared/**/*.spec.ts",
+    "shared/**/*.spec.tsx",
+    "shared/**/*.spec.mts",
+    "shared/**/*.spec.cts"
+  ],
   "exclude": []
 }

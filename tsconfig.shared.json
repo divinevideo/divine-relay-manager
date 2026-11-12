@@ -10,7 +10,11 @@
 //
 // The tests are checked separately by tsconfig.shared.test.json. They cannot
 // share this program: importing vitest pulls in @types/node through vite's
-// declarations, and those globals would then apply to every file here.
+// declarations, and those globals would then apply to every file here. So no
+// file in this program may import vitest. The exclude below drops every
+// TypeScript test file name root vitest collects (the .tsx, .mts and .cts forms
+// are outside the include already), and a shared test helper that imports
+// vitest needs one of those names too.
 {
   "compilerOptions": {
     "target": "ES2020",
@@ -25,5 +29,5 @@
     "strict": true
   },
   "include": ["shared/**/*.ts"],
-  "exclude": ["shared/**/*.test.ts"]
+  "exclude": ["shared/**/*.test.ts", "shared/**/*.spec.ts"]
 }

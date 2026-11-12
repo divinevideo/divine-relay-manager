@@ -70,7 +70,7 @@ Requires Node.js 22.
 ```bash
 npm run dev          # install deps and start the Vite dev server (http://localhost:5173)
 npm run test         # type-check, lint, run Vitest, and build
-npm run typecheck    # type-check only: src/ and shared/, including shared/*.test.ts
+npm run typecheck    # type-check only: src/ and shared/, including the shared/ tests
 ```
 
 Worker development lives under `worker/`:
