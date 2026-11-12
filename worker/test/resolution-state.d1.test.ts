@@ -94,7 +94,7 @@ async function resolutionState(db: D1Database = DB) {
   const body = (await res.json()) as {
     success: boolean;
     resolved: Array<{ target_type: string; target_id: string; automated?: true }>;
-    states: Array<{ target_type: string; target_id: string; action: string }>;
+    states: Array<{ target_type: string; target_id: string; action: string; at: number | null }>;
     handling_rows: Array<{
       target_type: string; target_id: string; action: string; moderator_pubkey: string | null; at: number | null;
     }>;
@@ -132,7 +132,19 @@ describe('/api/resolution-state against real D1', () => {
       target_type: 'event',
       target_id: PRE_CAP_HIDDEN_TARGET,
       action: 'auto_hidden',
+      at: Date.UTC(2026, 0, 1, 0, 0, 1) / 1000,
     });
+  });
+
+  // The sensitive switch compares a report with the time a person confirmed or
+  // restored an auto-hide (#324), so each state row carries its unix seconds.
+  it('dates each auto-hide state row in unix seconds', async () => {
+    const { body } = await resolutionState();
+
+    const confirmed = body.states.find(
+      (s) => s.target_id === PRE_CAP_CONFIRMED_TARGET && s.action === 'auto_hide_confirmed'
+    );
+    expect(confirmed?.at).toBe(Date.UTC(2026, 0, 1, 0, 0, 3) / 1000);
   });
 
   it("orders a target's auto-hide actions newest-first", async () => {
@@ -263,6 +275,8 @@ describe('resolution-state chunking against real D1', () => {
     expect(
       chunked.filter((s) => s.target_id === NULL_DATED_TARGET).map((s) => s.action)
     ).toEqual(['auto_hidden']);
+    // An undated row says so, rather than carrying a made-up time.
+    expect(chunked.find((s) => s.target_id === NULL_DATED_TARGET)?.at).toBeNull();
   });
 });
 
@@ -509,6 +523,11 @@ describe('handling rows and reopened targets, against real D1', () => {
     expect(Object.keys(body).sort()).toEqual(['handling_rows', 'resolved', 'states', 'success']);
     expect(body.handling_rows).toStrictEqual(await getHandlingRows(rowsDB));
     expect(body.resolved).toStrictEqual(await getResolvedTargets(rowsDB));
-    expect(body.states).toContainEqual({ target_type: 'event', target_id: AUTO_HIDDEN, action: 'auto_hide_confirmed' });
+    expect(body.states).toContainEqual({
+      target_type: 'event',
+      target_id: AUTO_HIDDEN,
+      action: 'auto_hide_confirmed',
+      at: Date.UTC(2026, 2, 1, 0, 0, 4) / 1000,
+    });
   });
 });

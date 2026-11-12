@@ -1015,9 +1015,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [autoHideStates],
   );
 
+  // Each target a person handled through auto-hide, dated so the switch counts
+  // it as answering only the reports that reached us first (#324), with the
+  // decision log's reopens cancelling the rows before them.
   const humanHandledTargets = useMemo(
-    () => humanHandledAutoHideTargets(autoHideStates ?? []),
-    [autoHideStates],
+    () => humanHandledAutoHideTargets(autoHideStates ?? [], handlingRows),
+    [autoHideStates, handlingRows],
   );
 
   // The four sources that build resolvedTargets, described once so the gate,

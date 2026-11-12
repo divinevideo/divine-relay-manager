@@ -794,7 +794,9 @@ export interface ResolutionStateResult {
   // target. Hide resolved counts it only against a worker without
   // handlingRows (#332); the sensitive switch does not.
   resolved: Array<{ target_type: string; target_id: string; automated?: boolean }>;
-  states: Array<{ target_type: string; target_id: string; action: string }>;
+  // `at`: unix seconds, null for an undated row (#324). Absent from a worker
+  // that predates it.
+  states: Array<{ target_type: string; target_id: string; action: string; at?: number | null }>;
   // Every event and pubkey decision row, auto-hide actions left out, each
   // dated in unix seconds (null for a row written before decisions were
   // dated): the handled-before rule's input (#324), which the queue reduces

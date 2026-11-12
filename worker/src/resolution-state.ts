@@ -17,6 +17,10 @@ export interface AutoHideStateRow {
   target_type: string;
   target_id: string;
   action: string;
+  // Unix seconds, or null for a row with no created_at, as getHandlingRows
+  // dates its rows. The sensitive switch compares a report with the time a
+  // person confirmed or restored an auto-hide (#324).
+  at: number | null;
 }
 
 // Rows per D1 query. Neither read is capped -- both loop until the table is
@@ -198,7 +202,8 @@ export async function getAutoHideStates(
     const result: D1Result = cursor === null
       ? await db
           .prepare(
-            `SELECT id, created_at, target_type, target_id, action
+            `SELECT id, created_at, target_type, target_id, action,
+                    CAST(strftime('%s', created_at) AS INTEGER) AS at
                FROM moderation_decisions
               WHERE action IN (${placeholders})
               ORDER BY COALESCE(created_at, '') DESC, id DESC
@@ -208,7 +213,8 @@ export async function getAutoHideStates(
           .all()
       : await db
           .prepare(
-            `SELECT id, created_at, target_type, target_id, action
+            `SELECT id, created_at, target_type, target_id, action,
+                    CAST(strftime('%s', created_at) AS INTEGER) AS at
                FROM moderation_decisions
               WHERE action IN (${placeholders})
                 AND (COALESCE(created_at, '') < ?
@@ -227,6 +233,7 @@ export async function getAutoHideStates(
         target_type: row.target_type,
         target_id: row.target_id,
         action: row.action,
+        at: row.at ?? null,
       });
     }
 

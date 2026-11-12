@@ -42,10 +42,11 @@ function membership(handledTargets: string[] = [], bannedPubkeys: string[] = [])
 function dated(
   rows: { target_type: string; target_id: string; action: string; at: number | null; moderator_pubkey?: string }[],
   labels: { type: 'event' | 'pubkey'; value: string; at: number }[] = [],
+  arrivals: Map<string, number> = new Map(),
 ): QueueResolution {
   return queueResolution({
     dated: datedHandling(rows.map(r => ({ moderator_pubkey: 'd'.repeat(64), ...r })), labels),
-    arrivals: new Map(),
+    arrivals,
     bannedPubkeys: new Set(),
     bannedEvents: new Set(),
     resolvedTargets: new Set(),
@@ -56,7 +57,7 @@ function build(overrides: Partial<Parameters<typeof buildSwitchMembership>[0]> =
   return buildSwitchMembership({
     consolidated: [],
     pendingReview: new Map(),
-    humanHandled: new Set(),
+    humanHandled: new Map(),
     resolution: membership(),
     ...overrides,
   });
@@ -81,10 +82,12 @@ describe('buildSwitchMembership', () => {
     expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
   });
 
+  // A worker from before #324 sends no dates, so any human auto-hide row
+  // answers every report, as the switch always read it.
   it('leaves a CSAM target a person already handled through auto-hide out', () => {
     const m = build({
       consolidated: [profileTarget([CSAM_REPORT])],
-      humanHandled: new Set([`pubkey:${PROFILE}`]),
+      humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
     });
     expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
   });
@@ -126,6 +129,73 @@ describe('buildSwitchMembership', () => {
       expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
     });
 
+    // A person confirming or restoring an auto-hide answers the reports that
+    // arrived before it, not the ones that came after.
+    it('keeps a CSAM report that came after a person confirmed its auto-hide behind the switch', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
+        resolution: dated([]),
+      });
+      expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
+    it('leaves a CSAM report out when a person confirmed its auto-hide after it', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, 200]]),
+        resolution: dated([]),
+      });
+      expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
+    });
+
+    it('keeps a CSAM report in the same second as the auto-hide confirmation behind the switch', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, CSAM_REPORT.created_at]]),
+        resolution: dated([]),
+      });
+      expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
+    it('dates a report by its arrival, not its created_at, against the auto-hide confirmation', () => {
+      const m = build({
+        consolidated: [profileTarget([{ ...CSAM_REPORT, created_at: 50 }])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
+        resolution: dated([], [], new Map([[CSAM_REPORT.id, 150]])),
+      });
+      expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
+    it('leaves a CSAM target out when its only human auto-hide row is undated', () => {
+      const m = build({
+        consolidated: [profileTarget([CSAM_REPORT])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, null]]),
+        resolution: dated([]),
+      });
+      expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
+    });
+
+    // Each report needs an answer from one or the other: the auto-hide
+    // confirmation answers the earlier report, the decision the later one.
+    it('leaves a CSAM target out when the auto-hide answers one report and a decision the other', () => {
+      const early = { ...CSAM_REPORT, id: '4'.repeat(64), created_at: 50 };
+      const late = { ...CSAM_REPORT, id: '5'.repeat(64), created_at: 150 };
+      const answered = build({
+        consolidated: [profileTarget([early, late])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
+        resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'reviewed', at: 200 }]),
+      });
+      expect(answered.has(`pubkey:${PROFILE}`)).toBe(false);
+      // Control: without the decision, the later report is unanswered.
+      const open = build({
+        consolidated: [profileTarget([early, late])],
+        humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
+        resolution: dated([]),
+      });
+      expect(open.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
     it('keeps a CSAM target behind the switch when only the worker decided on it', () => {
       const m = build({
         consolidated: [profileTarget([CSAM_REPORT])],
@@ -165,17 +235,17 @@ describe('buildSwitchMembership', () => {
 describe('humanHandledAutoHideTargets', () => {
   it('returns only targets with a confirmed, restored or reversed row', () => {
     const rows = [
-      { target_type: 'event', target_id: '1'.repeat(64), action: 'auto_hide_confirmed' },
-      { target_type: 'event', target_id: '2'.repeat(64), action: 'auto_hide_restored' },
-      { target_type: 'pubkey', target_id: '3'.repeat(64), action: 'auto_hide_reversed' },
+      { target_type: 'event', target_id: '1'.repeat(64), action: 'auto_hide_confirmed', at: 100 },
+      { target_type: 'event', target_id: '2'.repeat(64), action: 'auto_hide_restored', at: 100 },
+      { target_type: 'pubkey', target_id: '3'.repeat(64), action: 'auto_hide_reversed', at: 100 },
       // A later machine hide does not undo the earlier human handling.
-      { target_type: 'event', target_id: '4'.repeat(64), action: 'auto_hidden' },
-      { target_type: 'event', target_id: '4'.repeat(64), action: 'auto_hide_restored' },
-      { target_type: 'event', target_id: '5'.repeat(64), action: 'auto_hidden' },
-      { target_type: 'event', target_id: '6'.repeat(64), action: 'auto_hide_unresolved' },
-      { target_type: 'event', target_id: '7'.repeat(64), action: 'auto_hide_restore_failed' },
+      { target_type: 'event', target_id: '4'.repeat(64), action: 'auto_hidden', at: 200 },
+      { target_type: 'event', target_id: '4'.repeat(64), action: 'auto_hide_restored', at: 100 },
+      { target_type: 'event', target_id: '5'.repeat(64), action: 'auto_hidden', at: 100 },
+      { target_type: 'event', target_id: '6'.repeat(64), action: 'auto_hide_unresolved', at: 100 },
+      { target_type: 'event', target_id: '7'.repeat(64), action: 'auto_hide_restore_failed', at: 100 },
     ];
-    expect([...humanHandledAutoHideTargets(rows)].sort()).toEqual([
+    expect([...humanHandledAutoHideTargets(rows).keys()].sort()).toEqual([
       `event:${'1'.repeat(64)}`,
       `event:${'2'.repeat(64)}`,
       `event:${'4'.repeat(64)}`,
@@ -185,8 +255,75 @@ describe('humanHandledAutoHideTargets', () => {
 
   it('keys a human row as stored, as every stored decision is keyed', () => {
     const id = 'ab'.repeat(32);
-    const rows = [{ target_type: 'event', target_id: id.toUpperCase(), action: 'auto_hide_confirmed' }];
-    expect([...humanHandledAutoHideTargets(rows)]).toEqual([`event:${id.toUpperCase()}`]);
+    const rows = [{ target_type: 'event', target_id: id.toUpperCase(), action: 'auto_hide_confirmed', at: 100 }];
+    expect([...humanHandledAutoHideTargets(rows).keys()]).toEqual([`event:${id.toUpperCase()}`]);
+  });
+
+  it("dates a target by its latest human auto-hide row, whatever the rows' order", () => {
+    const key = `event:${EVENT}`;
+    const rows = [
+      { target_type: 'event', target_id: EVENT, action: 'auto_hide_restored', at: 200 },
+      { target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: 300 },
+    ];
+    expect(humanHandledAutoHideTargets(rows).get(key)).toBe(300);
+    expect(humanHandledAutoHideTargets([...rows].reverse()).get(key)).toBe(300);
+  });
+
+  // An undated row predates every dated one, as in handlingByTarget.
+  it('dates a target null only when every human row is undated', () => {
+    const key = `event:${EVENT}`;
+    const undated = { target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: null };
+    expect(humanHandledAutoHideTargets([undated]).get(key)).toBeNull();
+    expect(humanHandledAutoHideTargets([
+      undated,
+      { target_type: 'event', target_id: EVENT, action: 'auto_hide_restored', at: 100 },
+    ]).get(key)).toBe(100);
+  });
+
+  // A worker from before #324 sends rows with no `at`: the target is still
+  // handled, with no date, as the switch always read it.
+  it('dates a target null when its rows carry no date at all', () => {
+    const rows = [{ target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed' }];
+    const handled = humanHandledAutoHideTargets(rows);
+    expect(handled.has(`event:${EVENT}`)).toBe(true);
+    expect(handled.get(`event:${EVENT}`)).toBeNull();
+  });
+
+  it('skips a row with a malformed date rather than reading it as undated', () => {
+    const rows = [{ target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: 'soon' as unknown as number }];
+    expect(humanHandledAutoHideTargets(rows).has(`event:${EVENT}`)).toBe(false);
+  });
+
+  describe('with the decision log a reopen is read from (#324)', () => {
+    const key = `event:${EVENT}`;
+    const reopen = (at: number | null) => [{ target_type: 'event', target_id: EVENT, action: 'reopened', at }];
+
+    it('drops a human auto-hide row a later reopen cancelled', () => {
+      const rows = [{ target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: 200 }];
+      expect(humanHandledAutoHideTargets(rows, reopen(250)).has(key)).toBe(false);
+      // The same second as the reopen does not survive it either.
+      expect(humanHandledAutoHideTargets(rows, reopen(200)).has(key)).toBe(false);
+    });
+
+    it('keeps a human auto-hide row that came after the reopen', () => {
+      const rows = [
+        { target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: 300 },
+        { target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: 100 },
+      ];
+      expect(humanHandledAutoHideTargets(rows, reopen(250)).get(key)).toBe(300);
+    });
+
+    it('drops an undated human auto-hide row once the target was reopened', () => {
+      const rows = [{ target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed', at: null }];
+      expect(humanHandledAutoHideTargets(rows, reopen(250)).has(key)).toBe(false);
+      expect(humanHandledAutoHideTargets(rows, reopen(null)).has(key)).toBe(false);
+    });
+
+    it("leaves another target's rows alone", () => {
+      const other = 'e'.repeat(64);
+      const rows = [{ target_type: 'event', target_id: other, action: 'auto_hide_confirmed', at: 200 }];
+      expect(humanHandledAutoHideTargets(rows, reopen(250)).get(`event:${other}`)).toBe(200);
+    });
   });
 });
 

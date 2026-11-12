@@ -431,6 +431,43 @@ describe('Reports sensitive pending-review switch', () => {
 
       await expectHandled(user, NPUB_CSAM);
     });
+
+    // A person confirming an auto-hide answers only the reports before it.
+    const autoHideRows = (confirmedAt: number) => [
+      { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hide_confirmed', at: confirmedAt },
+      { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hidden', at: confirmedAt - 10 },
+    ];
+
+    it('keeps a CSAM report that came after a person confirmed its auto-hide behind the switch', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], states: autoHideRows(T - 50), handlingRows: [] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    it('keeps a CSAM target behind the switch when a reopen came after its auto-hide confirmation', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        states: autoHideRows(T + 50),
+        handlingRows: [handlingRow('reopened', T + 100)],
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    // As before #324: the confirmation answered the report, and auto-hide is
+    // not handling to the queue, so the report shows in the main list.
+    it('takes a CSAM target out of the switch when a person confirmed its auto-hide after its reports', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], states: autoHideRows(T + 50), handlingRows: [] });
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await screen.findByText(NOTE_SPAM);
+      await waitFor(() => expect(screen.getByText(NPUB_CSAM)).toBeInTheDocument());
+      expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
+    });
   });
 
   describe('while resolution labels load', () => {
