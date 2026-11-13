@@ -1251,14 +1251,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // carries every report on them only when it did not stop early. A feed that
   // did (the red "stopped reading" banner) is missing reports older than its
   // cut-off for every target in it, so none of them counts as fully read.
+  // Nor does a target the feed lists as handled before (#324): it sends only
+  // the reports that came after the handling, so the ones before it, which
+  // may carry a CSAM signal, are not in hand.
   const queueFeedTargetKeys = useMemo(
     () => reportTargetKeys(queueFeed?.events ?? []),
     [queueFeed],
   );
-  const needsAttentionTargetKeys = useMemo(
-    () => (queueFeed?.truncated ? new Set<string>() : queueFeedTargetKeys),
-    [queueFeed, queueFeedTargetKeys],
-  );
+  const needsAttentionTargetKeys = useMemo(() => {
+    if (queueFeed?.truncated) return new Set<string>();
+    const handledBefore = queueFeed?.handledBeforeTargets ?? [];
+    if (handledBefore.length === 0) return queueFeedTargetKeys;
+    const readInFull = new Set(queueFeedTargetKeys);
+    for (const key of handledBefore) readInFull.delete(key);
+    return readInFull;
+  }, [queueFeed, queueFeedTargetKeys]);
   const feedTargetKeys = useMemo(
     () => new Set(feedConsolidated.map(c => reportTargetKey(c.target))),
     [feedConsolidated],
@@ -2186,9 +2193,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // stop early. Anything else may be missing a CSAM-signal report: a target
   // opened from history pages not yet loaded, a read cut short by the worker's
   // page bound, a feed that itself stopped early (it gives no credit to any
-  // target in it), or a post opened by a ?pubkey= link, whose read was the
-  // account's and misses a report that lacks the author's p tag. Those start
-  // hidden until clicked.
+  // target in it), a handled-before target (the feed leaves out its reports
+  // from before the handling), or a post opened by a ?pubkey= link, whose read
+  // was the account's and misses a report that lacks the author's p tag. Those
+  // start hidden until clicked.
   const selectedTargetReportsPartial = !!selectedTarget
     && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
     && !targetedReadComplete;

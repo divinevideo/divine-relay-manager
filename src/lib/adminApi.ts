@@ -642,6 +642,12 @@ export interface ReportsNeedingAttention {
   // Unix seconds by report id, from `report_arrivals`. Empty from a worker
   // that predates it. A plain object for the same reason as automatedTargets.
   reportArrivals: Readonly<Record<string, number>>;
+  // Target keys from `handled_before` (#324): returned targets a person handled
+  // before some of their reports arrived. The feed sends only those later
+  // reports, so these targets may not be read in full. Empty from a worker that
+  // predates it, which sends every report of each target it returns. A plain
+  // array for the same reason as automatedTargets.
+  handledBeforeTargets: readonly string[];
 }
 
 // Only finite numbers: anything else is no arrival, and the report compares
@@ -663,6 +669,7 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     oldest_covered?: number | null;
     automated_targets?: unknown;
     report_arrivals?: unknown;
+    handled_before?: unknown;
     error?: string;
   }>(apiUrl, '/api/reports?needs_attention=1', 'GET');
 
@@ -679,6 +686,9 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
       ? data.automated_targets.filter((key): key is string => typeof key === 'string')
       : [],
     reportArrivals: parseReportArrivals(data.report_arrivals),
+    handledBeforeTargets: Array.isArray(data.handled_before)
+      ? data.handled_before.filter((key): key is string => typeof key === 'string')
+      : [],
   };
 }
 

@@ -290,7 +290,8 @@ export async function getReportsNeedingAttention(
         // worker that sends no dates) still does.
         automated_targets: automatedTargets,
         // Keys of the returned targets a person handled before some of their
-        // reports arrived (#324). Those reports are returned; older ones are not.
+        // reports arrived (#324). Those reports are returned; older ones are not,
+        // so the screen does not count these targets as read in full.
         handled_before: handledBefore,
         // First-seen unix seconds by report id, for the returned events the
         // watcher saw arrive. Absent: compare by created_at.
