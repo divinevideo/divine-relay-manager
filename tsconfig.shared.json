@@ -1,0 +1,38 @@
+// Type-checks the shipping code under shared/ on its own. That code is meant
+// for both the frontend and the worker, and most of it is bundled by both, so
+// this check loads only ES2020 (the lower of the two consumers' libs) and no
+// ambient types at all. That rules out DOM, Node and Workers globals, and also
+// the ones both runtimes have, such as console, URL, TextEncoder and
+// setTimeout.
+//
+// tsconfig.app.json and worker/tsconfig.json also check most of these files
+// through their importers, but each with its own runtime's globals loaded, and
+// the app check with strict off. Neither would catch shared code that leans on
+// a global only one runtime has.
+//
+// The tests are checked separately by tsconfig.shared.test.json. They cannot
+// share this program: importing vitest pulls in @types/node through vite's
+// declarations, and those globals would then apply to every file here. So no
+// file in this program may import vitest. The exclude below drops every
+// TypeScript test file name root vitest collects (the .tsx, .mts and .cts forms
+// are outside the include already), and a shared test helper that imports
+// vitest needs one of those names too. The exclude only governs which files
+// are discovered, though: an import can still pull a test file or vitest back
+// in, so scripts/check-shared-isolation.mjs (run by `npm run typecheck`) lists
+// what this program actually resolves and fails on either.
+{
+  "compilerOptions": {
+    "target": "ES2020",
+    "lib": ["ES2020"],
+    "types": [],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "isolatedModules": true,
+    "moduleDetection": "force",
+    "noEmit": true,
+    "skipLibCheck": true,
+    "strict": true
+  },
+  "include": ["shared/**/*.ts"],
+  "exclude": ["shared/**/*.test.ts", "shared/**/*.spec.ts"]
+}

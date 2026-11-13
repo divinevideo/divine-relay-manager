@@ -191,7 +191,7 @@ worker/
 
 ## Build, Test, and Validation Commands
 - `npm run test`: primary repo test command.
-- `npx tsc -p tsconfig.app.json --noEmit`: frontend type-check. **Bare `npx tsc --noEmit` is a false green here** — the root `tsconfig.json` has `"files": []` with project references, so in non-build mode it type-checks nothing and exits 0. Always pass `-p tsconfig.app.json` (or run `npm run test`).
+- `npm run typecheck`: frontend and `shared/` type-check, run first by `npm run test`. It runs `tsconfig.app.json` (`src/`), then `tsconfig.shared.json` (the shipping `shared/` modules, with no DOM, Node or Workers globals, and not even the ones both runtimes have, such as `console` or `URL`, since that code is meant for both the frontend and the worker), then `scripts/check-shared-isolation.mjs` (fails if that shipping check resolves a test file, vitest or Node's types, which an import can pull back in past the exclude), then `tsconfig.shared.test.json` (the `shared/` tests). Root vitest runs the shared tests but strips their types without checking them, so a shared test that no longer matches a signature passes vitest and fails only here. **Bare `npx tsc --noEmit` is a false green here** — the root `tsconfig.json` has `"files": []` with project references, so in non-build mode it type-checks nothing and exits 0. Always pass `-p <config>`, or use `npm run typecheck`.
 - `npx vite build`: frontend production build. Stops unless `.env.local` holds the Cloudflare Access token; to check the code compiles without it, use `npx vite build --mode development`.
 - `npx vite --port 8080`: frontend dev server.
 - `cd worker && npx vitest run`: worker tests when touching worker code. **This is a partial run.** `worker/vitest.config.ts` deliberately excludes `test/**/*.d1.test.ts` and `test/**/*.e2e.test.ts` to keep the default suite fast and free of a Miniflare/workerd or local-relay dependency. Tests living in those files do not run here and their absence looks like a pass.
@@ -205,7 +205,7 @@ worker/
 npx vite --port 8080          # dev server
 npx vite build                # production build (needs the Access token in .env.local)
 npx vite build --mode development   # check build, no token needed
-npx tsc -p tsconfig.app.json --noEmit   # type-check (bare `tsc --noEmit` checks nothing here)
+npm run typecheck             # src/ and shared/ (bare `tsc --noEmit` checks nothing here)
 
 # Worker
 cd worker
@@ -418,7 +418,7 @@ These must stay in sync. The frontend environment selector reads VITE_ vars to d
 ### Always do first
 - Read the file(s) you're modifying. Don't assume current state.
 - Check `wrangler.staging.toml` and `wrangler.prod.toml` for env vars and bindings.
-- Run `npx tsc -p tsconfig.app.json --noEmit` after edits (bare `tsc --noEmit` is a false green — see Build/Test/Validation).
+- Run `npm run typecheck` after edits (bare `tsc --noEmit` is a false green — see Build/Test/Validation). `npx tsc -p tsconfig.app.json --noEmit` alone skips the `shared/` tests and the no-globals check on `shared/`.
 - If touching any worker behavior that reads or writes D1 — including schema, migrations, or a D1-backed route — run `cd worker && npm run test:d1`. The default `npx vitest run` excludes `*.d1.test.ts`, so a change whose tests all live there passes without running any of them (a second false green, see Build/Test/Validation).
 - If touching anything under `worker/`, run `cd worker && npm run typecheck`. Vitest strips types without checking them, so a test that no longer matches a signature passes every worker suite and fails only here (see Build/Test/Validation).
 - If touching `handleModerate()`: trace ALL side effects. Verify none are duplicated and none are fire-and-forget.

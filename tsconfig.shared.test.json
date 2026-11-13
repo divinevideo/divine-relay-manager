@@ -1,0 +1,35 @@
+// Type-checks the tests under shared/. Root vitest runs them but strips their
+// types without checking them, and no other tsconfig includes them, so a
+// signature change could leave a test asserting against code that no longer
+// exists with nothing to show it (#418).
+//
+// These tests run under root vitest, in its jsdom environment on Node, and
+// import vitest explicitly. Only Node's types are loaded here, not the DOM's or
+// vitest's globals, so a test that uses document or a vitest global without
+// importing it fails this check even though vitest would run it. The shared
+// modules they import are checked here too, but with Node's globals visible, so
+// this is not the check for the shipping code; tsconfig.shared.json is.
+//
+// The include lists every TypeScript test file name root vitest collects
+// (*.test.* and *.spec.*, in .ts, .tsx, .mts or .cts), so a shared test under
+// any of them is checked here. JSX is not enabled, since shared code has no
+// React.
+{
+  "extends": "./tsconfig.shared.json",
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022"],
+    "types": ["node"]
+  },
+  "include": [
+    "shared/**/*.test.ts",
+    "shared/**/*.test.tsx",
+    "shared/**/*.test.mts",
+    "shared/**/*.test.cts",
+    "shared/**/*.spec.ts",
+    "shared/**/*.spec.tsx",
+    "shared/**/*.spec.mts",
+    "shared/**/*.spec.cts"
+  ],
+  "exclude": []
+}
