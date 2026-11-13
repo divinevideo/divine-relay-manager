@@ -984,15 +984,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // history view each loaded page's, so a history row is dated by the arrival
   // the worker put it in history by. A report with no time -- one from before
   // arrivals were recorded, or from a worker that sends none -- compares by
-  // its created_at (shared/handling.ts reportTime). `?? {}` also covers data
-  // cached by a build without the field.
+  // its created_at (shared/handling.ts reportTime). The `?? {}`s cover no deep
+  // link and a feed that has not loaded yet.
   const reportArrivals = queueFeed?.reportArrivals;
   const arrivals = useMemo(() => {
     const merged = new Map(Object.entries(deepLinkedArrivals ?? {}));
     for (const [id, seenAt] of Object.entries(reportArrivals ?? {})) merged.set(id, seenAt);
     if (historyView && historyPages) {
       for (const page of historyPages) {
-        for (const [id, seenAt] of Object.entries(page.reportArrivals ?? {})) merged.set(id, seenAt);
+        for (const [id, seenAt] of Object.entries(page.reportArrivals)) merged.set(id, seenAt);
       }
     }
     return merged;

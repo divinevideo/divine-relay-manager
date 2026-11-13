@@ -712,8 +712,8 @@ export interface ResolvedReportsPage {
   // First-seen unix seconds by report id for this page's events, shaped as the
   // feed's reportArrivals (#324): the worker put these rows in history by
   // their arrival, and the queue dates them the same way. Empty from a worker
-  // that predates it. Optional for a page cached by a build without it.
-  reportArrivals?: Readonly<Record<string, number>>;
+  // that predates it.
+  reportArrivals: Readonly<Record<string, number>>;
 }
 
 export async function fetchResolvedReportsPage(
