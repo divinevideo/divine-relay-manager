@@ -622,9 +622,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // still need attention, so a deep link to a resolved target -- the usual way
   // in from a closed ticket -- would drop out of the list at the next poll
   // while its detail pane stayed open. Keyed by relay so an environment switch
-  // cannot carry them across.
-  const [deepLinked, setDeepLinked] = useState<{ relayUrl: string; events: NostrEvent[] } | null>(null);
+  // cannot carry them across. `reportArrivals` is the lookup's own (#324), so
+  // these reports are dated as the feed's are.
+  const [deepLinked, setDeepLinked] = useState<{
+    relayUrl: string;
+    events: NostrEvent[];
+    reportArrivals: Readonly<Record<string, number>>;
+  } | null>(null);
   const deepLinkedReports = deepLinked?.relayUrl === relayUrl ? deepLinked.events : NO_REPORTS;
+  const deepLinkedArrivals = deepLinked?.relayUrl === relayUrl ? deepLinked.reportArrivals : undefined;
   const reports = useMemo(
     () => (queueFeed ? mergeReportFeeds(queueFeed.events, deepLinkedReports) : undefined),
     [queueFeed, deepLinkedReports],
@@ -972,21 +978,23 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   );
 
   // When the worker first saw each listed report (#324): the feed's arrivals,
-  // and in the history view each loaded page's, so a history row is dated by
-  // the arrival the worker put it in history by. A report with no time -- a
-  // deep-linked one, or one from before arrivals were recorded -- compares by
+  // a deep link's targeted lookup's for the reports it added, and in the
+  // history view each loaded page's, so a history row is dated by the arrival
+  // the worker put it in history by. A report with no time -- one from before
+  // arrivals were recorded, or from a worker that sends none -- compares by
   // its created_at (shared/handling.ts reportTime). `?? {}` also covers data
   // cached by a build without the field.
   const reportArrivals = queueFeed?.reportArrivals;
   const arrivals = useMemo(() => {
-    const merged = new Map(Object.entries(reportArrivals ?? {}));
+    const merged = new Map(Object.entries(deepLinkedArrivals ?? {}));
+    for (const [id, seenAt] of Object.entries(reportArrivals ?? {})) merged.set(id, seenAt);
     if (historyView && historyPages) {
       for (const page of historyPages) {
         for (const [id, seenAt] of Object.entries(page.reportArrivals ?? {})) merged.set(id, seenAt);
       }
     }
     return merged;
-  }, [reportArrivals, historyView, historyPages]);
+  }, [deepLinkedArrivals, reportArrivals, historyView, historyPages]);
 
   // The dated rule's reading of the decision log and labels (#324), with the
   // worker's own handlingByTarget, so the screen dates every target as the
@@ -1908,7 +1916,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     (async () => {
       try {
-        const { events, truncated } = await fetchReportsByTarget(
+        const { events, truncated, reportArrivals: lookupArrivals } = await fetchReportsByTarget(
           target.type === 'event' ? { event: target.value } : { pubkey: target.value }
         );
         // Drop the result if this run was superseded (target changed) or the component
@@ -1941,10 +1949,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           const pool = matching.length > 0 ? matching : events;
           // Held beside the feed so the detail pane has full context and the
           // row survives polls (see deepLinked above),
-          setDeepLinked({ relayUrl, events: pool });
+          setDeepLinked({ relayUrl, events: pool, reportArrivals: lookupArrivals });
           // and select the newest report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
-          const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+          // Newest by arrival, as a row opens (newestReport): a reporter's
+          // clock can stamp an older report in the future. Ties keep the
+          // largest created_at.
+          const latest = newestReport(
+            { reports: pool, latestReport: pool.reduce((a, b) => (b.created_at > a.created_at ? b : a)) },
+            new Map(Object.entries(lookupArrivals)),
+          );
           deepLinkSelectedRef.current = true;
           setSelectedReport(latest);
           // Keyed by the selected report's own target, which is the list the

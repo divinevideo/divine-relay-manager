@@ -1,6 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
-  handledBeforeByLastAction, isResolvedForReview, resolvedKeysFrom, selectReportsNeedingAttention, type RelayReport,
+  getReportsForTarget, handledBeforeByLastAction, isResolvedForReview, resolvedKeysFrom, selectReportsNeedingAttention,
+  type RelayReport,
 } from './reports-needing-attention';
 import { handlingByTarget, type HandlingEntry, type HandlingRow } from '../../shared/handling';
 
@@ -263,5 +264,95 @@ describe('handledBeforeByLastAction', () => {
 
   it('is empty when nothing came back', () => {
     expect(handledBeforeByLastAction([], new Map())).toEqual({});
+  });
+});
+
+// GET /api/reports?event= / ?pubkey=: the deep link's lookup for a target the
+// feed does not carry. Its reports must be dated as the feed's are (#324).
+describe('getReportsForTarget', () => {
+  // A relay that answers every REQ with these events, then EOSE.
+  function stubRelay(events: unknown[]) {
+    class FakeWebSocket {
+      private listeners = new Map<string, Array<(event: unknown) => void>>();
+      constructor(_url: string) {
+        setTimeout(() => this.emit('open', {}), 0);
+      }
+      addEventListener(type: string, listener: (event: unknown) => void) {
+        if (!this.listeners.has(type)) this.listeners.set(type, []);
+        this.listeners.get(type)!.push(listener);
+      }
+      send(raw: string) {
+        const [, subId] = JSON.parse(raw) as [string, string];
+        setTimeout(() => {
+          for (const ev of events) this.emit('message', { data: JSON.stringify(['EVENT', subId, ev]) });
+          this.emit('message', { data: JSON.stringify(['EOSE', subId]) });
+        }, 0);
+      }
+      close() { /* no-op */ }
+      private emit(type: string, event: unknown) {
+        for (const handler of this.listeners.get(type) || []) handler(event);
+      }
+    }
+    vi.stubGlobal('WebSocket', FakeWebSocket as never);
+  }
+
+  // report_arrivals as a map, read through prepare/bind/batch as D1 does.
+  function arrivalsDb(rows: Record<string, number>, opts: { fail?: boolean } = {}) {
+    return {
+      prepare: (_sql: string) => ({ bind: (...ids: string[]) => ({ ids }) }),
+      batch: async (statements: Array<{ ids: string[] }>) => {
+        if (opts.fail) throw new Error('D1 unavailable');
+        return statements.map(({ ids }) => ({
+          results: ids.filter(reportId => reportId in rows).map(reportId => ({ report_id: reportId, first_seen_at: rows[reportId] })),
+        }));
+      },
+    } as unknown as D1Database;
+  }
+
+  const relayReport = (id: string, createdAt: number) =>
+    ({ id, kind: 1984, pubkey: P1, created_at: createdAt, tags: [['e', E1]], content: '', sig: 'f'.repeat(128) });
+  const R1 = '3'.repeat(64);
+  const R2 = '4'.repeat(64);
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it("carries the arrivals of the target's reports the watcher saw, and only those", async () => {
+    stubRelay([relayReport(R1, 2_000), relayReport(R2, 1_000)]);
+    const { status, body } = await getReportsForTarget(
+      { kinds: [1984], '#e': [E1] }, arrivalsDb({ [R1]: 900, ['5'.repeat(64)]: 50 }), 'wss://relay.example',
+    );
+    expect(status).toBe(200);
+    expect((body.events as RelayReport[]).map(e => e.id)).toEqual([R1, R2]);
+    expect(body.report_arrivals).toEqual({ [R1]: 900 });
+  });
+
+  // As on the feed and resolved history: dating every report by created_at
+  // would let a backdated report read as handled before on this path alone.
+  // The lookup also feeds the pane's Related Reports card, so arrivals are
+  // enrichment here: a failed read answers without them, and those reports
+  // compare by created_at, as from a worker that predates #324.
+  it('answers without arrivals when the arrival read fails, and logs it', async () => {
+    stubRelay([relayReport(R1, 2_000)]);
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const { status, body } = await getReportsForTarget(
+      { kinds: [1984], '#e': [E1] }, arrivalsDb({}, { fail: true }), 'wss://relay.example',
+    );
+    expect(status).toBe(200);
+    expect(body.success).toBe(true);
+    expect((body.events as unknown[]).length).toBe(1);
+    expect(body).not.toHaveProperty('report_arrivals');
+    expect(logged).toHaveBeenCalledWith(expect.stringContaining('arrival'), expect.anything());
+  });
+
+  // The deep link tells "gone" from "still loading" with this lookup, so it
+  // still answers with no database bound, and sends no arrivals.
+  it('answers without a database, with no arrivals', async () => {
+    stubRelay([relayReport(R1, 2_000)]);
+    const { status, body } = await getReportsForTarget({ kinds: [1984], '#e': [E1] }, undefined, 'wss://relay.example');
+    expect(status).toBe(200);
+    expect((body.events as RelayReport[]).map(e => e.id)).toEqual([R1]);
+    expect(body).not.toHaveProperty('report_arrivals');
   });
 });

@@ -353,13 +353,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // labels stop counting. The label refresh is kept for a rolled-back
       // worker, which bans them, and without a refresh that target would stay
       // hidden for a poll cycle, a full minute on the label source.
+      // TODO(#409): remove this label refresh once no worker from before #324
+      // can be live.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
-      // Report what the reopen did, not where the report ends up. Whether it
-      // returns to the queue depends on resolvedTargets, which is also built
-      // from relay bans and deletions that reopen never undoes -- so a
-      // ban-resolved report stays hidden even on a fully clean run.
+      // Report what the reopen did, not where the report ends up: whether it
+      // returns to the queue depends on the screen's resolution sources,
+      // which a toast cannot see. Under the dated rule a relay ban the
+      // decision log dates no longer hides the reopened target's reports
+      // (reportResolution.ts), so the copy does not say it does.
       // TODO(#409): remove the labelCleanupFailed toast branch (and labelsDeleted
       // handling); only a pre-#324 worker sets it.
       toast(labelCleanupFailed
@@ -399,7 +402,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           }
         : {
             title: "Report reopened",
-            description: "Its history is kept, and reports filed before now count as new again. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
+            description: "Its history is kept, and reports filed before now count as new again.",
             // Longer than the 5s Radix default can be read in.
             duration: 10000,
           });
@@ -1468,7 +1471,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Its history is kept, and reports filed before now count as new again. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
+                    <p>Reopen this report for review. Its history is kept, and reports filed before now count as new again.</p>
                   </TooltipContent>
                 </Tooltip>
               )}

@@ -354,10 +354,11 @@ describe('ReportDetail reopen reporting', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
   });
 
-  // Even a fully successful reopen cannot promise the report is back in the
-  // queue: resolvedTargets also hides targets via relay bans and deletions,
-  // which reopen never touches, so a ban-resolved report stays hidden. Report
-  // what was actually done instead of asserting a queue state.
+  // Even a fully successful reopen does not promise the report is back in the
+  // queue: the toast cannot see the screen's resolution sources. Report what
+  // was actually done instead of asserting a queue state. Nor does it say a
+  // relay ban keeps the report hidden: under the dated rule a reopen puts the
+  // target in the decision log, so a ban the log dates no longer hides it.
   it('reports what a clean reopen did, without promising the report is back in the queue', async () => {
     renderDetail();
     clickReopen();
@@ -367,11 +368,9 @@ describe('ReportDetail reopen reporting', () => {
     expect(arg.variant).not.toBe('destructive');
     const text = `${arg.title} ${arg.description}`;
     expect(text).not.toMatch(/back in the pending queue/i);
-    // The tooltip carries the ban/deletion caveat, but it is read before the
-    // click. The toast is what a moderator sees after it, so it carries the
-    // caveat too rather than reading as an unqualified success.
-    expect(text).toMatch(/stays hidden until that is lifted/i);
-    // Which makes it too long for Radix's 5s default to be read in.
+    expect(text).toMatch(/reports filed before now count as new again/i);
+    expect(text).not.toMatch(/relay ban|stays hidden/i);
+    // Longer than Radix's 5s default can be read in.
     expect(arg.duration).toBeGreaterThan(5000);
   });
 
@@ -546,7 +545,8 @@ describe('ReportDetail reopen reporting', () => {
 
     const tip = await screen.findByRole('tooltip');
     expect(tip.textContent).not.toMatch(/back in the pending queue/i);
-    expect(tip.textContent).toMatch(/stays hidden until that is lifted/i);
+    expect(tip.textContent).toMatch(/reports filed before now count as new again/i);
+    expect(tip.textContent).not.toMatch(/relay ban|stays hidden/i);
   });
 });
 

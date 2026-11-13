@@ -847,7 +847,10 @@ export default {
           return proxyJsonResponse(body, status, corsHeaders);
         }
         if (mode.kind === 'target') {
-          const { status, body } = await getReportsForTarget(mode.filter, env.RELAY_URL);
+          // No schema step: arrivals are enrichment here, and a read of a table
+          // not created yet fails into the no-arrivals answer (see
+          // getReportsForTarget). The feed and ReportWatcher create it.
+          const { status, body } = await getReportsForTarget(mode.filter, env.DB, env.RELAY_URL);
           return proxyJsonResponse(body, status, corsHeaders);
         }
         // Legacy bulk mode, unchanged.

@@ -223,7 +223,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
       await get('/api/reports?needs_attention=1');
 
       const lines = log.mock.calls.map(args => args.join(' ')).filter(line => line.includes('[needs-attention]'));
-      expect(lines).toEqual(['[needs-attention] handled before: 2 targets, by last handling {"dismissed":1,"reviewed":1}']);
+      expect(lines).toEqual(['[needs-attention] handled before (upper bound, before relay bans): 2 targets, by last handling {"dismissed":1,"reviewed":1}']);
     });
 
     // A failed arrival read is a failed source (#221). Comparing every report by
@@ -495,6 +495,19 @@ describe('GET /api/reports single-target lookups', () => {
     const body = await res.json() as { events: RelayEvent[] };
     expect(res.status).toBe(200);
     expect(body.events.map(e => e.id)).toEqual([id(1)]);
+  });
+
+  // The deep link dates these reports as the feed does (#324), so the lookup
+  // carries the same first-seen times, read the same way.
+  it("carries the arrivals of the target's reports the watcher saw", async () => {
+    stubRelay([report(1, 300, [['e', E(1)]]), report(2, 200, [['e', E(1)]]), report(3, 100, [['e', E(2)]])]);
+    await arrived(id(1), 150);
+    await arrived(id(3), 90);
+    const body = await (await get(`/api/reports?event=${E(1)}`)).json() as {
+      events: RelayEvent[]; report_arrivals: Record<string, number>;
+    };
+    expect(body.events.map(e => e.id)).toEqual([id(1), id(2)]);
+    expect(body.report_arrivals).toEqual({ [id(1)]: 150 });
   });
 
   it('says a lookup was cut short when it stops before the relay runs out', async () => {

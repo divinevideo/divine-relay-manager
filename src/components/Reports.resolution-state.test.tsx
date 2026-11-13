@@ -111,6 +111,9 @@ interface SourceState {
   historyPage?: unknown;
   // Holds /api/resolution-state until this settles.
   decisionsGate?: Promise<void>;
+  // The single-target lookup's answer (/api/reports?event= or ?pubkey=), in
+  // place of the feed's. For a deep link to a target the feed does not carry.
+  targeted?: { events: unknown[]; report_arrivals?: Record<string, number> };
 }
 
 function stubFetch(state: SourceState) {
@@ -121,6 +124,9 @@ function stubFetch(state: SourceState) {
     const url = String(input instanceof Request ? input.url : input);
 
     if (url.includes('/api/reports/resolved')) return jsonResponse(state.historyPage ?? EMPTY_RESOLVED_PAGE);
+    if (state.targeted && /\/api\/reports\?(event|pubkey)=/.test(url)) {
+      return jsonResponse({ success: true, truncated: false, ...state.targeted });
+    }
     if (url.includes('/api/reports')) {
       if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
       const events: unknown[] = [REPORT, ...(state.extraReports ?? [])];
@@ -669,6 +675,77 @@ describe('the handled-before rule (#324)', () => {
       await waitFor(() => expect(window.location.pathname).toBe(`/reports/${REPORT.id}`));
       await act(async () => { release(); });
       await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+    });
+  });
+
+  // A deep link to a target the feed does not carry reads its reports from the
+  // single-target lookup. They are dated by the arrivals that lookup carries,
+  // as the feed's are, so the link does not call a report handled before that
+  // the feed and resolved history call handled.
+  describe('a deep link to a target outside the feed', () => {
+    function RoutedReports() {
+      const { pathname } = useLocation();
+      const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+      return <Reports relayUrl={RELAY_URL} selectedReportId={reportId} />;
+    }
+    const LINKED_EVENT_ID = '2'.repeat(64);
+    const LINKED_NOTE = nip19.noteEncode(LINKED_EVENT_ID);
+    const linkedReport = (id: string, created_at: number) => ({
+      ...EVENT_REPORT, id, created_at, tags: [['e', LINKED_EVENT_ID, 'spam']],
+    });
+    // Stamped 100s after the post was handled, but it arrived 20s before.
+    const backdated = linkedReport('3'.repeat(64), T + 100);
+    const handledPost = [row('event', LINKED_EVENT_ID, 'delete_event', T - 10)];
+
+    it('dates a linked report by the arrival its lookup carries', async () => {
+      stubFetch({
+        ...healthy,
+        handlingRows: handledPost,
+        datedLabels: [],
+        targeted: { events: [backdated], report_arrivals: { [backdated.id]: T - 20 } },
+      });
+      window.history.pushState({}, '', `/reports?event=${LINKED_EVENT_ID}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${backdated.id}`));
+      expect(await screen.findByText(LINKED_NOTE)).toBeInTheDocument();
+      expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
+    });
+
+    // The control: with no arrival the same report compares by its created_at,
+    // after the handling, and the row says so.
+    it('dates a linked report with no arrival by its created_at', async () => {
+      stubFetch({
+        ...healthy,
+        handlingRows: handledPost,
+        datedLabels: [],
+        targeted: { events: [backdated] },
+      });
+      window.history.pushState({}, '', `/reports?event=${LINKED_EVENT_ID}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${backdated.id}`));
+      expect(await screen.findByText(LINKED_NOTE)).toBeInTheDocument();
+      expect(await screen.findByText('Handled before')).toBeInTheDocument();
+    });
+
+    // newestReport's rule: the report that reached us last, not the one with
+    // the largest created_at.
+    it('opens the linked report that arrived last', async () => {
+      const arrivedLast = linkedReport('4'.repeat(64), T + 5);
+      stubFetch({
+        ...healthy,
+        handlingRows: [],
+        datedLabels: [],
+        targeted: {
+          events: [backdated, arrivedLast],
+          report_arrivals: { [backdated.id]: T - 20, [arrivedLast.id]: T + 30 },
+        },
+      });
+      window.history.pushState({}, '', `/reports?event=${LINKED_EVENT_ID}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${arrivedLast.id}`));
     });
   });
 });

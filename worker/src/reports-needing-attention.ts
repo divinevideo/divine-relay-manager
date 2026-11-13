@@ -28,7 +28,9 @@ export interface RelayReport {
 // age_review_case_created), with no label either. No person has looked at
 // these, so they are not handled: the needs-attention read keeps them, where
 // the sensitive switch can take a CSAM-signal one, and resolved history leaves
-// them out. The queue's Hide resolved still counts them as resolved (#332).
+// them out. Under the dated rule the queue's Hide resolved does not count them
+// either (#332). Only its membership fallback, for a pre-#324 Pages build or a
+// worker that sends no dates, still counts them as resolved.
 //
 // Other target types (media) never match a report, which is why the client's
 // resolvedTargets ignores them too.
@@ -266,9 +268,11 @@ export async function getReportsNeedingAttention(
     const { events, counts, automatedTargets, handledBefore } = selectReportsNeedingAttention(
       reports.events, keys.handling, keys.pendingReview, keys.automated, arrivals,
     );
-    // One line per build, counts only: no target or report ids.
+    // One line per build, counts only: no target or report ids. An upper
+    // bound: the worker leaves relay bans and the banned-author rule to the
+    // screen, so some of these targets the screen still hides.
     console.log(
-      `[needs-attention] handled before: ${handledBefore.length} targets, by last handling ${
+      `[needs-attention] handled before (upper bound, before relay bans): ${handledBefore.length} targets, by last handling ${
         JSON.stringify(handledBeforeByLastAction(handledBefore, keys.handling))}`,
     );
     const reportArrivals = arrivalsOf(events, arrivals);
@@ -280,8 +284,10 @@ export async function getReportsNeedingAttention(
         // counts.handled_before is new beside targets and resolved (#324).
         counts,
         // Keys ("pubkey:<hex>", "event:<hex>") of the returned targets that only
-        // the worker's own decisions resolved. Kept for the sensitive switch;
-        // the queue's Hide resolved still hides them (#332).
+        // the worker's own decisions resolved. Kept for the sensitive switch.
+        // Under the dated rule the queue's Hide resolved does not hide them
+        // (#332); only its membership fallback (a pre-#324 Pages build, or a
+        // worker that sends no dates) still does.
         automated_targets: automatedTargets,
         // Keys of the returned targets a person handled before some of their
         // reports arrived (#324). Those reports are returned; older ones are not.
@@ -307,8 +313,17 @@ export async function getReportsNeedingAttention(
 // including resolved ones. Paged, because a 200 cap here was the same silent
 // truncation as everywhere else -- an account with more reports had its
 // history quietly cut.
+//
+// `report_arrivals` (#324) is shaped and read as the feed's, so the screen
+// dates a deep-linked report as it dates the feed's. Unlike the feed, a failed
+// arrival read does not fail the lookup: it also feeds the report pane's
+// Related Reports card, and the deep link tells "gone" from "still loading" by
+// it. So with the read failed, or no database bound, it answers without
+// arrivals, and those reports compare by their created_at, as they did before
+// #324.
 export async function getReportsForTarget(
   filter: Record<string, unknown>,
+  db: D1Database | undefined,
   relayUrl: string,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   try {
@@ -316,7 +331,15 @@ export async function getReportsForTarget(
       relayPageFetcher<RelayReport>(relayUrl, filter, REPORTS_PAGE_SIZE),
       { pageSize: REPORTS_PAGE_SIZE, maxPages: REPORTS_MAX_PAGES },
     );
-    return { status: 200, body: { success: true, events: paged.events, truncated: paged.truncated } };
+    const body: Record<string, unknown> = { success: true, events: paged.events, truncated: paged.truncated };
+    if (db) {
+      try {
+        body.report_arrivals = arrivalsOf(paged.events, await readArrivalsFor(db, paged.events));
+      } catch (error) {
+        console.error('Get reports for target: arrival read failed, answering without arrivals:', error);
+      }
+    }
+    return { status: 200, body };
   } catch (error) {
     console.error('Get reports for target error:', error);
     return failure(502, error);

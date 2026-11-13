@@ -30,6 +30,8 @@ const HUMAN_AUTO_HIDE_ACTIONS: readonly string[] = [
 // unix-seconds time of the latest such row. null: no row has a date, either
 // because it predates timestamps (an undated row predates every dated one, as
 // in handlingByTarget) or because a worker from before #324 sends no `at`.
+// TODO(#409): reading an absent `at` as null serves only a worker from before
+// #324; once none can be live, an absent `at` is malformed like any other.
 //
 // A person's auto-hide choice answers only the reports that reached us before
 // it (#324): buildSwitchMembership compares each report with this time under

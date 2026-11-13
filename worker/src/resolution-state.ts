@@ -43,7 +43,9 @@ const ROW_CHUNK_SIZE = 1000;
 // pending-review queue from the moderators who have to work it.
 //
 // A target the worker alone resolved -- today with an age_review_case_created
-// row -- is still returned, because Hide resolved counts it as handled. It
+// row -- is still returned, because the queue's membership fallback (a pre-#324
+// Pages build, or a worker that sends no dates) counts it as handled under
+// Hide resolved. Under the dated rule it is not handled (#332). It
 // carries `automated: true` so the sensitive-reports switch, which waits for a
 // person, can look past it. One human row anywhere in the walk clears the flag,
 // whichever chunk it falls in. isAutomatedDecision picks out the worker's own

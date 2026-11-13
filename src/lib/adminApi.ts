@@ -581,19 +581,27 @@ function sanitizeRelayEvents(events: unknown): NostrEvent[] {
 // needs-attention feed (a resolved report, or one that is gone), so the screen
 // can tell those apart from "still loading"; and the report pane's Related
 // Reports card, which counts the reported account's reports by pubkey.
+//
+// `reportArrivals` (#324) is shaped and parsed as the feed's, so the queue
+// dates a deep-linked report as it dates the feed's. Empty from a worker that
+// predates it, or one with no database: those reports compare by created_at.
 export async function fetchReportsByTarget(
   apiUrl: string,
   target: { event: string } | { pubkey: string }
-): Promise<{ events: NostrEvent[]; truncated: boolean }> {
+): Promise<{ events: NostrEvent[]; truncated: boolean; reportArrivals: Readonly<Record<string, number>> }> {
   const qs = 'event' in target
     ? `?event=${encodeURIComponent(target.event)}`
     : `?pubkey=${encodeURIComponent(target.pubkey)}`;
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[]; truncated?: boolean }>(
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[]; truncated?: boolean; report_arrivals?: unknown }>(
     apiUrl,
     `/api/reports${qs}`,
     'GET'
   );
-  return { events: sanitizeRelayEvents(data.events), truncated: data.truncated === true };
+  return {
+    events: sanitizeRelayEvents(data.events),
+    truncated: data.truncated === true,
+    reportArrivals: parseReportArrivals(data.report_arrivals),
+  };
 }
 
 // The queue's read: every report whose target still needs a moderator, at any
@@ -613,8 +621,8 @@ export async function fetchReportsByTarget(
 // its created_at. Read but not `handled_before`: the queue dates every target
 // itself, by the same rule, so a resolved-history page, which carries its own
 // arrivals, is dated as the worker dated it. A report a deep link's targeted
-// lookup adds from outside the feed has no arrival here, and is compared by
-// its created_at.
+// lookup adds from outside the feed has no arrival here; the lookup carries
+// its own (fetchReportsByTarget), and the queue dates it by those.
 //
 // `truncated` means the worker's walk over the relay's reports stopped at its
 // page bound, so older reports may be missing. The response's `counts` are
