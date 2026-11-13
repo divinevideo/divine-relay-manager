@@ -27,8 +27,10 @@ export interface HandlingLabel {
 }
 
 export interface HandlingEntry {
-  // Unix seconds of the latest handling that counts. null: handled by a row
-  // with no date, which predates every dated report, so it is handled for good.
+  // Unix seconds of the latest handling that counts. null: handled only by a
+  // row with no date. It can't be compared with a report's time, so every
+  // report on the target reads as handled, as it did before the dated rule
+  // (#324), until a dated handling replaces it or a reopen ends it.
   handledAt: number | null;
   // Newest first, undated last. Human decisions, labels and reopens only.
   history: { action: string; at: number | null }[];
