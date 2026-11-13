@@ -114,6 +114,17 @@ describe('handlingByTarget', () => {
       { action: 'ban_event', at: null },
     ]);
   });
+
+  // Rows arrive in the order they were written (getHandlingRows reads by id),
+  // and decisions are dated to the second, so a later row in the same second
+  // is the newer one.
+  it('lists rows in the same second newest first, by the order they were written', () => {
+    const map = handlingByTarget([row('reviewed', 100), row('delete_event', 100)], []);
+    expect(map.get(KEY)?.history).toEqual([
+      { action: 'delete_event', at: 100 },
+      { action: 'reviewed', at: 100 },
+    ]);
+  });
 });
 
 describe('reportTime', () => {

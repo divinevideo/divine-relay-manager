@@ -104,8 +104,10 @@ export function handlingByTarget(
     else if (p.hasUndatedHuman && !p.hasReopen) handledAt = null;
     else continue;
 
-    // Array#sort is stable, so equal times keep the order the rows arrived in.
-    const history = [...p.history].sort((a, b) => {
+    // Rows arrive in the order they were written, and decisions are dated to
+    // the second, so within one second the later row is the newer. Reversed
+    // first, the stable sort lists equal times newest first.
+    const history = [...p.history].reverse().sort((a, b) => {
       if (a.at === null) return b.at === null ? 0 : 1;
       if (b.at === null) return -1;
       return b.at - a.at;
