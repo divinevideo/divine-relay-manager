@@ -941,6 +941,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // always has, so a Pages build ahead of its worker shows what it showed
     // before. The dated rule does not (#332): handlingByTarget counts only what
     // a person did. The switch counts neither.
+    // TODO(#409): remove with the membership rule; only it reads these.
     for (const key of automated) resolved.add(key);
 
     return { resolvedTargets: resolved, handledTargets: handled };
@@ -1309,6 +1310,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // 'handled_before' is a member (#324). Only against a worker without
   // handling dates does it differ: the membership rule then reads
   // handledTargets, which leaves out targets only the worker decided on.
+  // TODO(#409): once no worker without handling dates can be live, this is
+  // `resolution` itself.
   const switchResolution = useMemo<QueueResolution>(
     () => resolution.rule === 'dated'
       ? resolution
@@ -2265,6 +2268,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Under the dated rule it shows even at none (spec decision 6: the count
   // always shows). Against a worker without handling dates nothing is ever
   // handled before, so a count of none would say nothing, and it stays away.
+  // TODO(#409): drop the rule check with the membership rule.
   const showHandledBeforeSection = (count: number) =>
     !showPendingReview && hideResolved && (count > 0 || resolution.rule === 'dated');
 
