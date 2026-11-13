@@ -1,5 +1,5 @@
-// ABOUTME: Unhandled CSAM reports sit behind the pending-review switch with auto-hidden ones,
-// ABOUTME: out of the default view, and leave it once a person handles them.
+// ABOUTME: Unanswered CSAM reports sit behind the pending-review switch with auto-hidden ones,
+// ABOUTME: out of the default view, and leave it once a person answers them.
 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';

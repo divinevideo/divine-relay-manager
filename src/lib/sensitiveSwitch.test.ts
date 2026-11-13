@@ -1,5 +1,5 @@
 // ABOUTME: Pins who sits behind the sensitive pending-review switch: auto-hidden targets,
-// ABOUTME: plus unhandled CSAM-signal targets that nothing has hidden.
+// ABOUTME: plus targets with an unanswered CSAM-signal report that nothing has hidden.
 
 import { describe, expect, it } from 'vitest';
 import {
@@ -224,6 +224,55 @@ describe('buildSwitchMembership', () => {
       it('leaves a CSAM report from before the confirm out', () => {
         const m = build({ consolidated: [postTarget(50)], ...confirmedAt(100) });
         expect(m.has(`event:${EVENT}`)).toBe(false);
+      });
+    });
+
+    // Only an unanswered report's CSAM signal keeps a target here. A person
+    // answered the CSAM report; the report that came after carries no signal,
+    // so the target goes where the queue puts it (the handled-before section,
+    // when a decision answered it). The answer must not depend on whether the
+    // feed sent the answered report: it drops it, and a deep link's full read
+    // brings it back.
+    describe('a CSAM report a person answered, then a report with no signal', () => {
+      const answeredCsam = { ...CSAM_REPORT, id: '6'.repeat(64), created_at: 50 };
+      const spam: Report = { id: '7'.repeat(64), created_at: 150, tags: [['p', PROFILE, 'spam']], content: '' };
+
+      it('leaves the target out when a decision answered the CSAM report', () => {
+        const m = build({
+          consolidated: [profileTarget([answeredCsam, spam])],
+          resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'reviewed', at: 100 }]),
+        });
+        expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
+      });
+
+      it('leaves the target out when an auto-hide choice answered the CSAM report', () => {
+        const m = build({
+          consolidated: [profileTarget([answeredCsam, spam])],
+          humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
+          resolution: dated([]),
+        });
+        expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
+      });
+
+      // The signal must sit in an unanswered report: an answered report with
+      // no signal beside an unanswered CSAM report keeps the target here.
+      it('keeps the target when the answered report has no signal and the CSAM report came after', () => {
+        const answeredSpam = { ...spam, created_at: 50 };
+        const laterCsam = { ...answeredCsam, created_at: 150 };
+        const m = build({
+          consolidated: [profileTarget([answeredSpam, laterCsam])],
+          resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'reviewed', at: 100 }]),
+        });
+        expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+      });
+
+      // Control: the same spam report beside a CSAM report no one answered.
+      it('keeps the target when the CSAM report is unanswered too', () => {
+        const m = build({
+          consolidated: [profileTarget([answeredCsam, spam])],
+          resolution: dated([{ target_type: 'pubkey', target_id: PROFILE, action: 'reviewed', at: 40 }]),
+        });
+        expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
       });
     });
 

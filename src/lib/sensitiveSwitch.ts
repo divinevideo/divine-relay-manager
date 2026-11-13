@@ -1,5 +1,5 @@
 // ABOUTME: Who sits behind the queue's sensitive pending-review switch, and how each is labelled.
-// ABOUTME: Auto-hidden targets, plus unhandled CSAM-signal targets that nothing has hidden.
+// ABOUTME: Auto-hidden targets, plus targets with an unanswered CSAM-signal report that nothing has hidden.
 
 import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohide';
 import { reportTime } from '../../shared/handling';
@@ -58,10 +58,16 @@ interface SwitchCandidate {
 // resolution reads is partial and a CSAM target stays in. That is the safe
 // direction: it is kept out of the default view, not shown there.
 //
-// A CSAM-signal target leaves only when every report on it is 'handled'. One
-// that is 'handled_before' (a person handled it, then a report came) is as
-// unanswered as a new one, so it stays here rather than reaching the main
-// list or the queue's handled-before section (#324).
+// A target is here while a report no person has answered carries a CSAM
+// signal. A CSAM-signal report that is 'handled_before' (a person handled the
+// target, then the report came) is as unanswered as a new one, so it stays
+// here rather than reaching the main list or the queue's handled-before
+// section (#324). A CSAM-signal report a person did answer keeps nothing here:
+// the target goes where the queue's own rule puts it, the handled-before
+// section when a decision or label answered it and a later report has no
+// signal. The feed drops answered reports, and a deep link's full read brings
+// them back, so counting their signal would move the target with what is in
+// hand.
 //
 // A person's auto-hide choice (humanHandled) answers a report too, but under
 // the dated rule only one that reached us before it, by the same comparison
@@ -101,36 +107,36 @@ export function buildSwitchMembership(args: {
     const key = `${c.target.type}:${c.target.value}`;
     // Auto-hidden wins: a hidden target with a CSAM report is listed once.
     if (membership.has(key)) continue;
-    if (!hasCsamSignal(c.reports)) continue;
-    if (isAnswered(c, key, args.humanHandled, args.resolution)) continue;
+    if (!hasCsamSignal(unansweredReports(c, key, args.humanHandled, args.resolution))) continue;
     membership.set(key, 'not-hidden');
   }
   return membership;
 }
 
-function isAnswered(
+// The candidate's reports that no person has answered.
+function unansweredReports(
   c: SwitchCandidate,
   key: string,
   humanHandled: ReadonlyMap<string, number | null>,
   resolution: QueueResolution,
-): boolean {
+): SwitchCandidate['reports'] {
   // TODO(#409): the membership branch serves only a worker without handling
   // dates; it reads any human auto-hide row as answering every report, as the
   // switch did before #324.
   if (resolution.rule === 'membership') {
-    return humanHandled.has(key) || groupResolutionStatus(c, resolution) === 'handled';
+    const answered = humanHandled.has(key) || groupResolutionStatus(c, resolution) === 'handled';
+    return answered ? [] : c.reports;
   }
-  // A candidate here has at least one report: its CSAM signal comes from one.
   const autoHideAt = humanHandled.get(key);
-  return c.reports.every(report => {
+  return c.reports.filter(report => {
     if (humanHandled.has(key)) {
-      if (autoHideAt === null || autoHideAt === undefined) return true;
-      if (autoHideAt > reportTime(report, resolution.ctx.arrivals)) return true;
+      if (autoHideAt === null || autoHideAt === undefined) return false;
+      if (autoHideAt > reportTime(report, resolution.ctx.arrivals)) return false;
     }
     return reportResolutionStatus(
       { target: c.target, authorPubkey: c.authorPubkey, id: report.id, created_at: report.created_at },
       resolution,
-    ) === 'handled';
+    ) !== 'handled';
   });
 }
 

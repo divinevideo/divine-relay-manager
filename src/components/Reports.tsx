@@ -1132,10 +1132,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // with them in its footer, so a failed or unlanded read there would state a
   // count, even "No resolved reports.", with nothing to back it. The
   // pending-review view lists the switch's members: auto-hidden targets, which
-  // the decisions source alone builds, and unhandled CSAM-signal targets, which
-  // labels and the ban lists only subtract from. So an unlanded or failed read
-  // there keeps a target behind the switch, the safe direction (#323), and does
-  // not need to gate that view. Two other consumers -- the deep-link
+  // the decisions source alone builds, and targets with an unanswered
+  // CSAM-signal report, which labels and the ban lists only subtract from. So
+  // an unlanded or failed read there keeps a target behind the switch, the
+  // safe direction (#323), and does not need to gate that view. Two other
+  // consumers -- the deep-link
   // auto-deselect and the deep-link resolved branch -- key on Hide resolved
   // alone, so they stay live in the pending-review view, where these three do
   // not gate. That is deliberate: both fail in the show-more direction on a
@@ -1309,12 +1310,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const switchCandidates = reports ? feedConsolidated : deepLinkedConsolidated;
 
   // Who sits behind the Pending review switch: every auto-hidden target, plus
-  // any target in the feed or the deep-linked reports with a CSAM signal that
-  // no person has handled yet. Not loaded history; see switchCandidates. It
-  // does not read hideResolved; see buildSwitchMembership.
+  // any target in the feed or the deep-linked reports with a CSAM-signal
+  // report that no person has answered. Not loaded history; see
+  // switchCandidates. It does not read hideResolved; see buildSwitchMembership.
   //
-  // It reads the queue's own rule, so a CSAM-signal target that is 'new' or
-  // 'handled_before' is a member (#324). Only against a worker without
+  // It reads the queue's own rule, so a CSAM-signal report that is 'new' or
+  // 'handled_before' makes its target a member, and an answered one keeps
+  // nothing here (#324). Only against a worker without
   // handling dates does it differ: the membership rule then reads
   // handledTargets, which leaves out targets only the worker decided on.
   // TODO(#409): once no worker without handling dates can be live, this is
@@ -1603,9 +1605,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const headerCount = viewMode === 'consolidated' ? uniqueTargets : filteredReportsCount;
 
   // The pending-review badge counts the rows that view will list on entry: the
-  // grouped targets behind the switch, auto-hidden or CSAM-signal and not yet
-  // handled. Not switchMembership.size -- auto-hidden members span every
-  // decision on record, and a member with no report loaded here is a badge
+  // grouped targets behind the switch, auto-hidden or with an unanswered
+  // CSAM-signal report. Not switchMembership.size -- auto-hidden members span
+  // every decision on record, and a member with no report loaded here is a badge
   // with no row behind it. Counted from the feed and deep-linked reports, which
   // is what the view lists, not from loaded history. "On entry" because
   // entering clears the category and type filters; a filter chosen inside
