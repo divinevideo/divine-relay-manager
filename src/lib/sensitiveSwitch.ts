@@ -2,9 +2,14 @@
 // ABOUTME: Auto-hidden targets, plus unhandled CSAM-signal targets that nothing has hidden.
 
 import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohide';
-import { REOPENED_ACTION, reportTime } from '../../shared/handling';
+import { reportTime } from '../../shared/handling';
 import { hasCsamSignal } from './constants';
-import { groupResolutionStatus, reportResolutionStatus, type QueueResolution } from './reportResolution';
+import {
+  groupResolutionStatus,
+  latestAutoHideAtByTarget,
+  reportResolutionStatus,
+  type QueueResolution,
+} from './reportResolution';
 
 // 'hidden-needs-check' is an auto-hidden target whose latest state is
 // auto_hide_unresolved or auto_hide_restore_failed. The worker writes both only
@@ -27,48 +32,17 @@ const HUMAN_AUTO_HIDE_ACTIONS: readonly string[] = [
 ];
 
 // Each target a person handled through auto-hide, keyed as stored, with the
-// unix-seconds time of the latest such row. null: no row has a date, either
-// because it predates timestamps (an undated row predates every dated one, as
-// in handlingByTarget) or because a worker from before #324 sends no `at`.
-// TODO(#409): reading an absent `at` as null serves only a worker from before
-// #324; once none can be live, an absent `at` is malformed like any other.
+// unix-seconds time of the latest such row (see latestAutoHideAtByTarget for
+// undated rows and reopens).
 //
 // A person's auto-hide choice answers only the reports that reached us before
 // it (#324): buildSwitchMembership compares each report with this time under
-// the dated rule. So, as there, a reopen cancels the rows before it. Pass the
-// decision log's handling rows to apply that; without them (a worker from
-// before #324, whose Reopen deleted rows instead) nothing is cancelled.
+// the dated rule.
 export function humanHandledAutoHideTargets(
   states: readonly AutoHideStateRowLike[],
   handlingRows: readonly { target_type: string; target_id: string; action: string; at: number | null }[] = [],
 ): Map<string, number | null> {
-  const reopened = new Map<string, number | null>();
-  for (const row of handlingRows) {
-    if (row.action !== REOPENED_ACTION) continue;
-    const key = `${row.target_type}:${row.target_id}`;
-    const prev = reopened.get(key);
-    // An undated reopen still cancels every undated row; any dated one wins.
-    reopened.set(key, row.at === null ? (prev ?? null) : Math.max(prev ?? -Infinity, row.at));
-  }
-
-  const handled = new Map<string, number | null>();
-  for (const row of states) {
-    if (!HUMAN_AUTO_HIDE_ACTIONS.includes(row.action)) continue;
-    // A malformed date is skipped, as parseHandlingRows skips a human row's:
-    // read as undated it would answer every report and take a CSAM-signal
-    // target out of here. Dropping handling keeps a target in, never out.
-    if (row.at !== undefined && row.at !== null && !(typeof row.at === 'number' && Number.isFinite(row.at))) continue;
-    const key = `${row.target_type}:${row.target_id}`;
-    const at = typeof row.at === 'number' ? row.at : null;
-    if (reopened.has(key)) {
-      // Only a dated row after the latest dated reopen survives it.
-      const reopenedAt = reopened.get(key) ?? -Infinity;
-      if (at === null || at <= reopenedAt) continue;
-    }
-    const prev = handled.get(key);
-    handled.set(key, at === null ? (prev ?? null) : Math.max(prev ?? -Infinity, at));
-  }
-  return handled;
+  return latestAutoHideAtByTarget(states, HUMAN_AUTO_HIDE_ACTIONS, handlingRows);
 }
 
 interface SwitchCandidate {
@@ -92,9 +66,12 @@ interface SwitchCandidate {
 // A person's auto-hide choice (humanHandled) answers a report too, but under
 // the dated rule only one that reached us before it, by the same comparison
 // as reportStatus: strictly before, so a report in the same second stays. Auto-
-// hide rows are not handling to the queue (#332), so without this a target
-// whose hide a person confirmed would leave here for good, and a CSAM-signal
-// report that came after would land in the main list.
+// hide rows are not handling to the queue (#332), so without this a post whose
+// hide a person restored would leave here for good, and a CSAM-signal report
+// that came after would land in the main list. A confirmed hide leaves the
+// post banned, and the queue's own rule dates that ban by the confirm
+// (reportResolution.ts withConfirmedBan), so a later report there is
+// 'handled_before' and stays here too.
 export function buildSwitchMembership(args: {
   consolidated: readonly SwitchCandidate[];
   // Auto-hidden targets pending review, keyed to their latest auto-hide state.

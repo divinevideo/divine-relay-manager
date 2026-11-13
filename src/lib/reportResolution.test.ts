@@ -8,6 +8,7 @@ import {
   isBanDecision,
   isConsolidatedReportResolved,
   newestReport,
+  confirmedAutoHideTargets,
   queueResolution,
   reportHandling,
   reportHandlingStatus,
@@ -322,6 +323,106 @@ describe('reportHandling', () => {
     for (const t of [50, 100, 150]) {
       expect(reportHandling(profileReport(t), ctx).status).toBe(reportHandlingStatus(profileReport(t), ctx));
     }
+  });
+});
+
+// Auto-hide bans posts on the relay, and a moderator's Confirm hide leaves the
+// ban in place with only an auto_hide_confirmed row. That confirm dates the
+// ban: reports before it stay handled, later ones are handled before.
+describe('a relay-banned post whose auto-hide a person confirmed', () => {
+  const confirmed = (at: number | null) => new Map([[`event:${EVENT}`, at]]);
+
+  it('keeps reports from before the confirm handled and shows later ones as handled before', () => {
+    const ctx = ctxWith({ bannedEvents: new Set([EVENT]), confirmedAutoHide: confirmed(100) });
+    expect(reportHandlingStatus(eventReport(50), ctx)).toBe('handled');
+    expect(reportHandlingStatus(eventReport(150), ctx)).toBe('handled_before');
+    // Same second: shown, not presumed covered.
+    expect(reportHandlingStatus(eventReport(100), ctx)).toBe('handled_before');
+  });
+
+  it('carries the confirm as the history a later report came after', () => {
+    const ctx = ctxWith({ bannedEvents: new Set([EVENT]), confirmedAutoHide: confirmed(100) });
+    expect(reportHandling(eventReport(150), ctx)).toEqual({
+      status: 'handled_before',
+      entry: { handledAt: 100, history: [{ action: 'auto_hide_confirmed', at: 100 }] },
+      via: 'own',
+    });
+  });
+
+  it('does not count a confirm on a post the relay no longer bans', () => {
+    // A restored post is not banned; the confirm alone is not handling.
+    const ctx = ctxWith({ confirmedAutoHide: confirmed(100) });
+    expect(reportHandlingStatus(eventReport(50), ctx)).toBe('new');
+  });
+
+  it('keeps an undated confirm on a banned post handled for good, as an undated ban', () => {
+    const ctx = ctxWith({ bannedEvents: new Set([EVENT]), confirmedAutoHide: confirmed(null) });
+    expect(reportHandlingStatus(eventReport(10_000), ctx)).toBe('handled');
+  });
+
+  it("dates the ban by the later of the confirm and the post's own handling", () => {
+    const own: HandlingEntry = { handledAt: 80, history: [{ action: 'reviewed', at: 80 }] };
+    const ctx = ctxWith({
+      bannedEvents: new Set([EVENT]),
+      handling: new Map([[`event:${EVENT}`, own]]),
+      logged: new Set([`event:${EVENT}`]),
+      confirmedAutoHide: confirmed(100),
+    });
+    expect(reportHandlingStatus(eventReport(90), ctx)).toBe('handled');
+    expect(reportHandling(eventReport(150), ctx)).toEqual({
+      status: 'handled_before',
+      entry: {
+        handledAt: 100,
+        history: [{ action: 'auto_hide_confirmed', at: 100 }, { action: 'reviewed', at: 80 }],
+      },
+      via: 'own',
+    });
+  });
+
+  it("leaves the post's own handling alone when it is later than the confirm", () => {
+    const own: HandlingEntry = { handledAt: 200, history: [{ action: 'reviewed', at: 200 }] };
+    const ctx = ctxWith({
+      bannedEvents: new Set([EVENT]),
+      handling: new Map([[`event:${EVENT}`, own]]),
+      logged: new Set([`event:${EVENT}`]),
+      confirmedAutoHide: confirmed(100),
+    });
+    expect(reportHandlingStatus(eventReport(150), ctx)).toBe('handled');
+    expect(reportHandlingStatus(eventReport(250), ctx)).toBe('handled_before');
+  });
+
+  it('answers a report on a reopened post only through a confirm after the reopen', () => {
+    // The reopen put the post in `logged`; confirmedAutoHideTargets drops a
+    // confirm before the reopen, so with none left the report is new.
+    const ctx = ctxWith({ bannedEvents: new Set([EVENT]), logged: new Set([`event:${EVENT}`]) });
+    expect(reportHandlingStatus(eventReport(50), ctx)).toBe('new');
+    const after = ctxWith({
+      bannedEvents: new Set([EVENT]),
+      logged: new Set([`event:${EVENT}`]),
+      confirmedAutoHide: confirmed(300),
+    });
+    expect(reportHandlingStatus(eventReport(250), after)).toBe('handled');
+  });
+});
+
+describe('confirmedAutoHideTargets', () => {
+  const key = `event:${EVENT}`;
+  const row = (action: string, at: number | null) => ({ target_type: 'event', target_id: EVENT, action, at });
+
+  it('dates a post by its latest confirm, and only by confirms', () => {
+    const states = [row('auto_hide_confirmed', 100), row('auto_hide_confirmed', 300), row('auto_hide_restored', 400), row('auto_hidden', 500)];
+    expect(confirmedAutoHideTargets(states).get(key)).toBe(300);
+    expect(confirmedAutoHideTargets([row('auto_hide_restored', 100)]).has(key)).toBe(false);
+  });
+
+  it('drops a confirm a later reopen cancelled', () => {
+    const states = [row('auto_hide_confirmed', 100)];
+    expect(confirmedAutoHideTargets(states, [row(REOPENED_ACTION, 150)]).has(key)).toBe(false);
+    expect(confirmedAutoHideTargets(states, [row(REOPENED_ACTION, 50)]).get(key)).toBe(100);
+  });
+
+  it('reads an undated confirm as null', () => {
+    expect(confirmedAutoHideTargets([row('auto_hide_confirmed', null)]).get(key)).toBeNull();
   });
 });
 

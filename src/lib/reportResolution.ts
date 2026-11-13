@@ -1,6 +1,7 @@
 // ABOUTME: Whether the queue counts a report as handled: by the dated rule (#324) when the
 // ABOUTME: worker sends handling dates, by target membership when it predates them.
 
+import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohide';
 import { reportTargetKey } from '../../shared/report-target';
 import {
   handlingByTarget,
@@ -76,11 +77,100 @@ export interface HandlingContext {
   // `handling` is. A relay ban on one of these is not undated: the log dates
   // it, so it counts only through `handling`.
   logged: ReadonlySet<string>;
+  // confirmedAutoHideTargets: when a person last confirmed each target's
+  // auto-hide, after any reopen. While the relay still bans the target, that
+  // confirm dates the ban (see withConfirmedBan). Absent: no confirms known.
+  confirmedAutoHide?: ReadonlyMap<string, number | null>;
 }
 
 export interface DatedReport extends ResolvableReport {
   id: string;
   created_at: number;
+}
+
+type AutoHideTimingRow = { target_type: string; target_id: string; action: string; at: number | null };
+
+// Each target with a row of one of `actions`, keyed as stored, with the
+// unix-seconds time of the latest such row. null: no such row has a date,
+// either because it predates timestamps (an undated row predates every dated
+// one, as in handlingByTarget) or because a worker from before #324 sends no
+// `at`. TODO(#409): reading an absent `at` as null serves only a worker from
+// before #324; once none can be live, an absent `at` is malformed like any
+// other.
+//
+// A reopen cancels the rows before it, as it cancels any handling. Pass the
+// decision log's handling rows to apply that; without them (a worker from
+// before #324, whose Reopen deleted rows instead) nothing is cancelled.
+export function latestAutoHideAtByTarget(
+  states: readonly AutoHideStateRowLike[],
+  actions: readonly string[],
+  handlingRows: readonly AutoHideTimingRow[] = [],
+): Map<string, number | null> {
+  const reopened = new Map<string, number | null>();
+  for (const row of handlingRows) {
+    if (row.action !== REOPENED_ACTION) continue;
+    const key = `${row.target_type}:${row.target_id}`;
+    const prev = reopened.get(key);
+    // An undated reopen still cancels every undated row; any dated one wins.
+    reopened.set(key, row.at === null ? (prev ?? null) : Math.max(prev ?? -Infinity, row.at));
+  }
+
+  const latest = new Map<string, number | null>();
+  for (const row of states) {
+    if (!actions.includes(row.action)) continue;
+    // A malformed date is skipped, as parseHandlingRows skips a human row's:
+    // read as undated it would answer every report. Dropping it shows more
+    // reports, never fewer.
+    if (row.at !== undefined && row.at !== null && !(typeof row.at === 'number' && Number.isFinite(row.at))) continue;
+    const key = `${row.target_type}:${row.target_id}`;
+    const at = typeof row.at === 'number' ? row.at : null;
+    if (reopened.has(key)) {
+      // Only a dated row after the latest dated reopen survives it.
+      const reopenedAt = reopened.get(key) ?? -Infinity;
+      if (at === null || at <= reopenedAt) continue;
+    }
+    const prev = latest.get(key);
+    latest.set(key, at === null ? (prev ?? null) : Math.max(prev ?? -Infinity, at));
+  }
+  return latest;
+}
+
+// When a person last confirmed each target's auto-hide (#324). Auto-hide bans a
+// post on the relay, and Confirm hide records only an auto_hide_confirmed row
+// and leaves the ban in place. Auto-hide rows are not handling (spec: "Auto-hide
+// rows stay out"), so without this the ban would read as undated and hide every
+// later report on the post for good.
+export function confirmedAutoHideTargets(
+  states: readonly AutoHideStateRowLike[],
+  handlingRows: readonly AutoHideTimingRow[] = [],
+): Map<string, number | null> {
+  return latestAutoHideAtByTarget(states, [AUTO_HIDE_ACTION.confirmed], handlingRows);
+}
+
+// A relay-banned target's handling with its confirmed auto-hide folded in: the
+// confirm dates the ban, so it answers the reports before it and not the ones
+// after. Only while the relay bans the target: a restored post is unbanned, and
+// a confirm alone is not handling. An undated confirm adds nothing; an undated
+// ban on a target the log does not date already keeps its reports handled.
+function withConfirmedBan(
+  entry: HandlingEntry | undefined,
+  banned: boolean,
+  key: string,
+  ctx: HandlingContext,
+): HandlingEntry | undefined {
+  const confirmedAt = banned ? ctx.confirmedAutoHide?.get(key) : undefined;
+  if (typeof confirmedAt !== 'number') return entry;
+  const confirm = { action: AUTO_HIDE_ACTION.confirmed, at: confirmedAt };
+  if (!entry) return { handledAt: confirmedAt, history: [confirm] };
+  if (entry.handledAt === null) return entry;
+  // Newest first, undated last, as handlingByTarget orders history. On a tie
+  // the confirm goes first.
+  const at = (e: { at: number | null }) => (e.at === null ? -Infinity : e.at);
+  const index = entry.history.findIndex(e => at(e) <= confirmedAt);
+  const history = index === -1
+    ? [...entry.history, confirm]
+    : [...entry.history.slice(0, index), confirm, ...entry.history.slice(index)];
+  return { handledAt: Math.max(entry.handledAt, confirmedAt), history };
 }
 
 // A relay ban that the decision log has no dated row for, and no reopen
@@ -181,10 +271,10 @@ export function handledBeforeBanText(ban: HandledBeforeBan): string {
 export function reportHandling(report: DatedReport, ctx: HandlingContext): HandlingVerdict {
   const time = reportTime(report, ctx.arrivals);
   const key = reportTargetKey(report.target);
-  const entry = ctx.handling.get(key);
   const banned = report.target.type === 'pubkey'
     ? ctx.bannedPubkeys.has(report.target.value)
     : ctx.bannedEvents.has(report.target.value);
+  const entry = withConfirmedBan(ctx.handling.get(key), banned, key, ctx);
   const own: ReportStatus = entry
     ? reportStatus(time, entry)
     : isUndatedBan(banned, key, ctx) ? 'handled' : 'new';
@@ -318,6 +408,8 @@ export function queueResolution(args: {
   bannedEvents: ReadonlySet<string>;
   // The membership rule's set (Reports.tsx resolvedTargets).
   resolvedTargets: ReadonlySet<string>;
+  // confirmedAutoHideTargets; the dated rule only.
+  confirmedAutoHide?: ReadonlyMap<string, number | null>;
 }): QueueResolution {
   if (!args.dated) {
     return { rule: 'membership', resolvedTargets: args.resolvedTargets, bannedPubkeys: args.bannedPubkeys };
@@ -330,6 +422,7 @@ export function queueResolution(args: {
       arrivals: args.arrivals,
       bannedPubkeys: args.bannedPubkeys,
       bannedEvents: args.bannedEvents,
+      confirmedAutoHide: args.confirmedAutoHide,
     },
   };
 }

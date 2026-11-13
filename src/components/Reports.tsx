@@ -63,6 +63,7 @@ import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
 import {
+  confirmedAutoHideTargets,
   datedHandling,
   groupResolutionVerdict,
   handledBeforeBanText,
@@ -1004,6 +1005,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const handlingRows = decisionsResult?.handlingRows;
   const dated = useMemo(() => datedHandling(handlingRows, labelTargets), [handlingRows, labelTargets]);
 
+  // When a person last confirmed each target's auto-hide, after any reopen. A
+  // confirm leaves the post banned on the relay, and it dates that ban: reports
+  // before it stay handled, later ones are handled before (#324).
+  const confirmedAutoHide = useMemo(
+    () => confirmedAutoHideTargets(autoHideStates ?? [], handlingRows),
+    [autoHideStates, handlingRows],
+  );
+
   // Which rule decides whether a report is handled, and what it reads.
   const resolution = useMemo(() => queueResolution({
     dated,
@@ -1011,7 +1020,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     bannedPubkeys: bannedPubkeySet,
     bannedEvents: bannedEventSet,
     resolvedTargets,
-  }), [dated, arrivals, bannedPubkeySet, bannedEventSet, resolvedTargets]);
+    confirmedAutoHide,
+  }), [dated, arrivals, bannedPubkeySet, bannedEventSet, resolvedTargets, confirmedAutoHide]);
 
   // Targets auto-hidden and still waiting for a human, keyed to their latest
   // auto-hide state so a row can say when a hide needs a check

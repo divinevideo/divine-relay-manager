@@ -43,13 +43,15 @@ function dated(
   rows: { target_type: string; target_id: string; action: string; at: number | null; moderator_pubkey?: string }[],
   labels: { type: 'event' | 'pubkey'; value: string; at: number }[] = [],
   arrivals: Map<string, number> = new Map(),
+  extra: { bannedEvents?: Set<string>; confirmedAutoHide?: Map<string, number | null> } = {},
 ): QueueResolution {
   return queueResolution({
     dated: datedHandling(rows.map(r => ({ moderator_pubkey: 'd'.repeat(64), ...r })), labels),
     arrivals,
     bannedPubkeys: new Set(),
-    bannedEvents: new Set(),
+    bannedEvents: extra.bannedEvents ?? new Set(),
     resolvedTargets: new Set(),
+    confirmedAutoHide: extra.confirmedAutoHide,
   });
 }
 
@@ -129,9 +131,10 @@ describe('buildSwitchMembership', () => {
       expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
     });
 
-    // A person confirming or restoring an auto-hide answers the reports that
-    // arrived before it, not the ones that came after.
-    it('keeps a CSAM report that came after a person confirmed its auto-hide behind the switch', () => {
+    // A person restoring an auto-hide answers the reports that arrived before
+    // it, not the ones that came after. A restore leaves the target unbanned,
+    // as these fixtures are; the confirmed, still-banned post is below.
+    it('keeps a CSAM report that came after a person restored its auto-hide behind the switch', () => {
       const m = build({
         consolidated: [profileTarget([CSAM_REPORT])],
         humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
@@ -140,7 +143,7 @@ describe('buildSwitchMembership', () => {
       expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
     });
 
-    it('leaves a CSAM report out when a person confirmed its auto-hide after it', () => {
+    it('leaves a CSAM report out when a person restored its auto-hide after it', () => {
       const m = build({
         consolidated: [profileTarget([CSAM_REPORT])],
         humanHandled: new Map([[`pubkey:${PROFILE}`, 200]]),
@@ -149,7 +152,7 @@ describe('buildSwitchMembership', () => {
       expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
     });
 
-    it('keeps a CSAM report in the same second as the auto-hide confirmation behind the switch', () => {
+    it('keeps a CSAM report in the same second as the auto-hide restore behind the switch', () => {
       const m = build({
         consolidated: [profileTarget([CSAM_REPORT])],
         humanHandled: new Map([[`pubkey:${PROFILE}`, CSAM_REPORT.created_at]]),
@@ -158,7 +161,7 @@ describe('buildSwitchMembership', () => {
       expect(m.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
     });
 
-    it('dates a report by its arrival, not its created_at, against the auto-hide confirmation', () => {
+    it('dates a report by its arrival, not its created_at, against the auto-hide restore', () => {
       const m = build({
         consolidated: [profileTarget([{ ...CSAM_REPORT, created_at: 50 }])],
         humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
@@ -194,6 +197,34 @@ describe('buildSwitchMembership', () => {
         resolution: dated([]),
       });
       expect(open.get(`pubkey:${PROFILE}`)).toBe('not-hidden');
+    });
+
+    // What production produces: auto-hide bans the post, and Confirm hide
+    // leaves the ban with only an auto_hide_confirmed row. The confirm dates
+    // the ban, so it answers the reports before it and not later ones.
+    describe('a post whose auto-hide a person confirmed, still banned on the relay', () => {
+      const postTarget = (created_at: number) => ({
+        target: { type: 'event' as const, value: EVENT },
+        authorPubkey: AUTHOR,
+        reports: [{ ...eventTarget.reports[0], created_at }],
+      });
+      const confirmedAt = (at: number) => ({
+        humanHandled: new Map([[`event:${EVENT}`, at]]),
+        resolution: dated([], [], new Map(), {
+          bannedEvents: new Set([EVENT]),
+          confirmedAutoHide: new Map([[`event:${EVENT}`, at]]),
+        }),
+      });
+
+      it('keeps a CSAM report that came after the confirm behind the switch', () => {
+        const m = build({ consolidated: [postTarget(150)], ...confirmedAt(100) });
+        expect(m.get(`event:${EVENT}`)).toBe('not-hidden');
+      });
+
+      it('leaves a CSAM report from before the confirm out', () => {
+        const m = build({ consolidated: [postTarget(50)], ...confirmedAt(100) });
+        expect(m.has(`event:${EVENT}`)).toBe(false);
+      });
     });
 
     it('keeps a CSAM target behind the switch when only the worker decided on it', () => {
