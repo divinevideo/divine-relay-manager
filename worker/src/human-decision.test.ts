@@ -75,6 +75,9 @@ function createMockDB() {
       };
       return stmt;
     }),
+    // Each statement is already logged at bind; a batch just runs them.
+    batch: vi.fn().mockImplementation(async (stmts: Array<{ run: () => Promise<unknown> }>) =>
+      Promise.all(stmts.map(stmt => stmt.run()))),
   };
 
   return { db, sqlLog };

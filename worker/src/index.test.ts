@@ -3259,6 +3259,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
   describe('DELETE /api/decisions/:id records a reopen (#324)', () => {
     function recordingDb(opts?: { failInsert?: boolean }) {
       const statements: Array<{ sql: string; binds: unknown[] }> = [];
+      const batches: number[] = [];
       const db = {
         prepare: (sql: string) => {
           const entry = { sql, binds: [] as unknown[] };
@@ -3274,12 +3275,19 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
           };
           return stmt;
         },
+        // The size of each batch, in order. D1 runs a batch as one transaction.
+        batch: async (stmts: Array<{ run: () => Promise<unknown> }>) => {
+          batches.push(stmts.length);
+          const results = [];
+          for (const stmt of stmts) results.push(await stmt.run());
+          return results;
+        },
       };
       // Writes to the decision log only: the schema bootstrap also names the
       // table, in CREATE and ALTER statements that change no rows.
       const decisionWrites = () => statements.filter((s) =>
         /^\s*(INSERT|DELETE|UPDATE|REPLACE)\b/i.test(s.sql) && /moderation_decisions/.test(s.sql));
-      return { db, decisionWrites };
+      return { db, decisionWrites, batches };
     }
 
     const reopen = (id: string, query = '') => new Request(`https://api.example/api/decisions/${id}${query}`, {
@@ -3418,7 +3426,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     // types: the old delete matched target_id alone. A row under the type the id
     // is not changes nothing, since that target has no handling to end.
     it('reopens both target types when no type is given', async () => {
-      const { db, decisionWrites } = recordingDb();
+      const { db, decisionWrites, batches } = recordingDb();
 
       const res = await worker.fetch(
         reopen('a'.repeat(64)),
@@ -3431,6 +3439,8 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
         ['event', 'a'.repeat(64), 'reopened', 'Reopened', null],
         ['pubkey', 'a'.repeat(64), 'reopened', 'Reopened', null],
       ]);
+      // Both rows in one batch, so they are written together or not at all.
+      expect(batches).toEqual([2]);
     });
 
     // An unrecognised value is not trusted as a type: written as given, it would

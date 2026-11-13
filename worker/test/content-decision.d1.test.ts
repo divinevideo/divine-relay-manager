@@ -432,6 +432,38 @@ describe('recorded content decisions on real D1', () => {
     expect(await resolved()).toBe(true);
   });
 
+  // A typeless reopen (an older frontend, or an admin-key caller) writes an
+  // event row and a pubkey row. They go in one batch, so when the second
+  // cannot be written the first is not left behind: the reopen answers 500
+  // with nothing recorded, and a retry does not log the event side twice.
+  it('records neither row of a typeless reopen when one of them cannot be written', async () => {
+    const targetId = 'e7'.repeat(32);
+    await DB.prepare(`
+      CREATE TRIGGER test_reject_pubkey_reopen BEFORE INSERT ON moderation_decisions
+      WHEN NEW.target_type = 'pubkey' AND NEW.action = 'reopened'
+      BEGIN SELECT RAISE(ABORT, 'pubkey reopen rejected'); END
+    `).run();
+    try {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const env = { ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never;
+      const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await worker.fetch(
+        new Request(`https://api.example.test/api/decisions/${targetId}`, {
+          method: 'DELETE', headers: { 'X-Admin-Key': 'test-admin-key' },
+        }),
+        env, context,
+      );
+
+      expect(response.status).toBe(500);
+      const rows = await DB.prepare('SELECT target_type FROM moderation_decisions WHERE target_id = ?')
+        .bind(targetId).all<{ target_type: string }>();
+      expect(rows.results).toEqual([]);
+    } finally {
+      await DB.prepare('DROP TRIGGER IF EXISTS test_reject_pubkey_reopen').run();
+    }
+  });
+
   it('adds last_human_action to a pre-upgrade moderation_targets table', async () => {
     const legacyMf = new Miniflare({
       modules: true,

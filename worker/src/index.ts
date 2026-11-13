@@ -2419,19 +2419,22 @@ async function handleReopenTarget(
     await ensureSchemaOnce(env.DB);
 
     const types = targetType ? [targetType] : (['event', 'pubkey'] as const);
-    for (const type of types) {
-      // The moderator is the one verified from the login the admin UI sends
-      // (#405), as on POST /api/decisions. No verified login (an admin-key
-      // caller, or a failed check while REQUIRE_MODERATOR_LOGIN is off) records
-      // NULL, never the worker's own 'auto'. Readers decide a reopen by its
-      // action, so who wrote it changes no handling. created_at is left to the
-      // column default, so D1 dates the row; an undated reopen would cut off
-      // nothing.
-      await env.DB.prepare(`
-        INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey)
-        VALUES (?, ?, ?, ?, ?)
-      `).bind(type, targetId, REOPENED_ACTION, 'Reopened', moderator ?? null).run();
-    }
+    const db = env.DB;
+    // The moderator is the one verified from the login the admin UI sends
+    // (#405), as on POST /api/decisions. No verified login (an admin-key
+    // caller, or a failed check while REQUIRE_MODERATOR_LOGIN is off) records
+    // NULL, never the worker's own 'auto'. Readers decide a reopen by its
+    // action, so who wrote it changes no handling. created_at is left to the
+    // column default, so D1 dates the row; an undated reopen would cut off
+    // nothing.
+    //
+    // One batch, which D1 runs as a transaction: a typeless reopen writes both
+    // rows or neither, so a failed write answers 500 with nothing recorded and
+    // a retry does not log the event side twice.
+    await db.batch(types.map(type => db.prepare(`
+      INSERT INTO moderation_decisions (target_type, target_id, action, reason, moderator_pubkey)
+      VALUES (?, ?, ?, ?, ?)
+    `).bind(type, targetId, REOPENED_ACTION, 'Reopened', moderator ?? null)));
 
     return jsonResponse({
       success: true,
