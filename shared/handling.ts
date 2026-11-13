@@ -52,7 +52,9 @@ interface Pending {
   hasUndatedHuman: boolean;
   reopenDated: number[];
   hasReopen: boolean;
-  history: { action: string; at: number | null }[];
+  // Rows in the order they were written, and the label apart from them.
+  rowHistory: { action: string; at: number | null }[];
+  labelHistory: { action: string; at: number | null }[];
 }
 
 // Keys are `${type}:${value}` exactly as stored (see reportTargetKey): a record
@@ -66,7 +68,7 @@ export function handlingByTarget(
   const slot = (key: string): Pending => {
     let p = pending.get(key);
     if (!p) {
-      p = { humanDated: [], hasUndatedHuman: false, reopenDated: [], hasReopen: false, history: [] };
+      p = { humanDated: [], hasUndatedHuman: false, reopenDated: [], hasReopen: false, rowHistory: [], labelHistory: [] };
       pending.set(key, p);
     }
     return p;
@@ -79,18 +81,18 @@ export function handlingByTarget(
       const p = slot(key);
       p.hasReopen = true;
       if (row.at !== null) p.reopenDated.push(row.at);
-      p.history.push({ action: row.action, at: row.at });
+      p.rowHistory.push({ action: row.action, at: row.at });
     } else if (isHumanHandling(row)) {
       const p = slot(key);
       if (row.at === null) p.hasUndatedHuman = true;
       else p.humanDated.push(row.at);
-      p.history.push({ action: row.action, at: row.at });
+      p.rowHistory.push({ action: row.action, at: row.at });
     }
   }
   for (const label of labels) {
     const p = slot(`${label.type}:${label.value}`);
     p.humanDated.push(label.at);
-    p.history.push({ action: LABEL_ACTION, at: label.at });
+    p.labelHistory.push({ action: LABEL_ACTION, at: label.at });
   }
 
   const result = new Map<string, HandlingEntry>();
@@ -105,9 +107,11 @@ export function handlingByTarget(
     else continue;
 
     // Rows arrive in the order they were written, and decisions are dated to
-    // the second, so within one second the later row is the newer. Reversed
-    // first, the stable sort lists equal times newest first.
-    const history = [...p.history].reverse().sort((a, b) => {
+    // the second, so within one second the later row is the newer: reversed
+    // first, the stable sort lists them newest first. A label goes after the
+    // rows, so in the same second it lists as the older entry: dismissing a
+    // report publishes its label first, then logs the decision.
+    const history = [...p.rowHistory].reverse().concat(p.labelHistory).sort((a, b) => {
       if (a.at === null) return b.at === null ? 0 : 1;
       if (b.at === null) return -1;
       return b.at - a.at;

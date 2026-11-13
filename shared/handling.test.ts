@@ -125,6 +125,16 @@ describe('handlingByTarget', () => {
       { action: 'reviewed', at: 100 },
     ]);
   });
+
+  // Dismissing a report publishes its resolution label first, then logs the
+  // decision, so a label in the same second as a row is the older entry.
+  it('lists a resolution label after a decision row in the same second', () => {
+    const map = handlingByTarget([row('false-positive', 100)], [{ type: 'event', value: TARGET, at: 100 }]);
+    expect(map.get(KEY)?.history).toEqual([
+      { action: 'false-positive', at: 100 },
+      { action: 'resolution_label', at: 100 },
+    ]);
+  });
 });
 
 describe('reportTime', () => {
