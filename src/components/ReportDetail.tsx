@@ -254,9 +254,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // which asks the lists to re-read once it answers.
   const isEventBanForActionsPending = isEventBannedForActions === null
     && (moderationStatus.isEventBanChecking || moderationStatus.isChecking);
-  const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
+  // The author's handling covers a post only while the author is banned, as in
+  // the queue (spec decision 3, reportResolution.ts). Counted otherwise, a new
+  // post report by an author once marked OK would read as resolved here, with
+  // a Reopen, while the queue lists it as new.
+  const isResolved = decisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
   // The banner names what handled the report, not a skip logged after it.
-  const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
+  const lastHandlingDecision = decisionLog.latestHandlingDecision
+    || (isUserBanned ? pubkeyDecisionLog.latestHandlingDecision : undefined);
 
   // The decision log card's "Already Handled" title and colour.
   const showAlreadyHandled = decisionLog.hasHandlingDecisions && !handledBefore;
@@ -1454,8 +1459,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
               {/* Reopen: only when something handled the target since its last
-                  reopen, by the decision log or, for a label, by the queue */}
-              {(decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || queueHandled) && !isUserBanned && !isEventDeleted && (
+                  reopen, by the decision log or, for a label, by the queue. Not
+                  the author's log: it covers a post only while the author is
+                  banned, and Reopen is not offered then. */}
+              {(decisionLog.hasHandlingDecisions || queueHandled) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button

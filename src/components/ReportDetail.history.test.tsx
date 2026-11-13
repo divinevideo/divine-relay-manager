@@ -18,6 +18,10 @@ const MOD_PUBKEY = 'e'.repeat(64);
 const history = vi.hoisted(() => ({
   target: { type: 'event', value: 'c'.repeat(64) } as { type: 'event' | 'pubkey'; value: string },
   decisions: [] as { id: number; action: string; reason?: string; created_at: string; moderator_pubkey: string }[],
+  // The reported account's own log, an event report's second read.
+  authorDecisions: [] as { id: number; action: string; reason?: string; created_at: string; moderator_pubkey: string }[],
+  userBanned: false,
+  eventGone: false,
   userStats: undefined as { reportsIncomplete: boolean; labelsIncomplete: boolean } | undefined,
   summary: { data: null as { summary: string; riskLevel: 'low' } | null, isLoading: false, error: null as Error | null },
 }));
@@ -45,10 +49,12 @@ vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
 }));
 // The target's own log reads history.decisions; the author's log (an event
-// report's second read) stays empty.
+// report's second read) reads history.authorDecisions.
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: (targetId: string | null | undefined) => {
-    const decisions = targetId === history.target.value ? history.decisions : [];
+    const decisions = targetId === history.target.value ? history.decisions
+      : targetId === 'd'.repeat(64) ? history.authorDecisions
+      : [];
     const latestHandlingDecision = decisions[0];
     return {
       hasDecisions: decisions.length > 0,
@@ -64,7 +70,7 @@ vi.mock('@/hooks/useDecisionLog', () => ({
   },
 }));
 vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false, recheck: vi.fn() }),
+  useModerationStatus: () => ({ isUserBanned: history.userBanned, isEventGone: history.eventGone, recheck: vi.fn() }),
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => history.summary }));
@@ -143,6 +149,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   history.target = { type: 'event', value: TARGET_EVENT };
   history.decisions = [];
+  history.authorDecisions = [];
+  history.userBanned = false;
+  history.eventGone = false;
   history.userStats = { reportsIncomplete: false, labelsIncomplete: false };
   history.summary = { data: null, isLoading: false, error: null };
 });
@@ -343,6 +352,41 @@ describe('ReportDetail history for a report on an item handled before', () => {
 
     expect(cardOf()).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+  });
+
+  // The queue counts the author's handling on a post only while the author is
+  // banned (spec decision 3), so the pane does too: otherwise a new post report
+  // by an author once marked OK would read as resolved here and new in the queue.
+  it('shows no Last action banner or Reopen on a new post report whose author was handled but is not banned', () => {
+    history.authorDecisions = [
+      { id: 2, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-01 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.queryByText(/^Last action:/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
+  });
+
+  // A gone post reads as resolved, but an unbanned author's decision did not
+  // handle it, so the banner does not name one.
+  it("does not name an unbanned author's decision as a gone post's last action", () => {
+    history.eventGone = true;
+    history.authorDecisions = [
+      { id: 2, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-01 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.queryByText(/^Last action: reviewed/)).not.toBeInTheDocument();
+  });
+
+  it("names the banned author's ban in the Last action banner", () => {
+    history.userBanned = true;
+    history.authorDecisions = [
+      { id: 2, action: 'ban_user', reason: 'Spam', created_at: '2026-07-01 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.getByText(/^Last action: ban user on /)).toBeInTheDocument();
   });
 
   it('offers no Reopen when neither the decision log nor the queue has handling', () => {
