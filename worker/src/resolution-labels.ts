@@ -1,5 +1,5 @@
 // ABOUTME: Reduces kind-1985 moderation/resolution labels to the distinct
-// ABOUTME: target keys the reports queue subtracts as already handled.
+// ABOUTME: targets they handled, each dated by its newest label.
 
 import { pageByUntil } from '../../shared/relay-pager';
 import { relayPageFetcher } from './relay-profile';
@@ -7,6 +7,9 @@ import { relayPageFetcher } from './relay-profile';
 export interface LabelTarget {
   type: 'event' | 'pubkey';
   value: string;
+  // Unix seconds of the newest label on this target: when a person last
+  // resolved it, which the handled-before rule compares reports with (#324).
+  at: number;
 }
 
 export interface ResolutionLabelEvent {
@@ -96,23 +99,28 @@ export function readResolutionLabelTargets(
 //
 // Relay payloads are untrusted, so a tag without a value is dropped rather than
 // becoming a target key of `event:undefined` that matches nothing.
+//
+// `at` is the newest label's created_at. It takes the maximum rather than the
+// first label seen, so it does not lean on the relay's order. A label with no
+// usable created_at dates at 0: it still names a handled target, but covers no
+// report, since hiding one is the costly mistake.
 export function reduceLabelsToTargets(events: ResolutionLabelEvent[]): LabelTarget[] {
-  const seen = new Set<string>();
-  const targets: LabelTarget[] = [];
+  const byKey = new Map<string, LabelTarget>();
 
-  const add = (type: LabelTarget['type'], value: unknown) => {
+  const add = (type: LabelTarget['type'], value: unknown, at: number) => {
     if (typeof value !== 'string' || value.length === 0) return;
     const key = `${type}:${value}`;
-    if (seen.has(key)) return;
-    seen.add(key);
-    targets.push({ type, value });
+    const target = byKey.get(key);
+    if (!target) byKey.set(key, { type, value, at });
+    else if (at > target.at) target.at = at;
   };
 
   for (const event of events) {
     const tags = Array.isArray(event?.tags) ? event.tags : [];
-    add('event', tags.find((t) => t[0] === 'e')?.[1]);
-    add('pubkey', tags.find((t) => t[0] === 'p')?.[1]);
+    const at = Number.isFinite(event?.created_at) ? event.created_at : 0;
+    add('event', tags.find((t) => t[0] === 'e')?.[1], at);
+    add('pubkey', tags.find((t) => t[0] === 'p')?.[1], at);
   }
 
-  return targets;
+  return [...byKey.values()];
 }

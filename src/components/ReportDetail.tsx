@@ -66,6 +66,7 @@ import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
+import { handledBeforeBanText, type HandledBeforeView } from "@/lib/reportResolution";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 function getKindLabel(kind: number): string {
@@ -103,9 +104,23 @@ interface ReportDetailProps {
   // on. Undefined outside it. Only 'not-hidden' gets a badge here: the pane's
   // own auto-hide banner and badge already describe the auto-hidden states.
   switchState?: SwitchState;
+  // Set only when the queue counts this report as handled before (#324): a
+  // person handled its item, then this report came. The history of that
+  // handling (newest first), whose it is, and a relay ban on the account or
+  // the post's author, as the queue read them, so the pane and the queue row
+  // cannot disagree. The Handled before card lists it.
+  handledBefore?: HandledBeforeView;
+  // The queue's dated rule has a person's handling on this report's own target
+  // since its last reopen: a decision, or a resolution label (#324). A target
+  // handled only by a label has no handling row in the decision log, yet the
+  // queue counts it and a Reopen cancels it, so Reopen shows on this as well.
+  queueHandled?: boolean;
 }
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState }: ReportDetailProps) {
+const ACCOUNT_HANDLED_BEFORE_PROMPT =
+  "This account was handled before. Does this report, with the account's current state, change the call?";
+
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBefore, queueHandled = false }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
@@ -239,9 +254,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // which asks the lists to re-read once it answers.
   const isEventBanForActionsPending = isEventBannedForActions === null
     && (moderationStatus.isEventBanChecking || moderationStatus.isChecking);
-  const isResolved = decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
+  // The author's handling covers a post only while the author is banned, as in
+  // the queue (spec decision 3, reportResolution.ts). Counted otherwise, a new
+  // post report by an author once marked OK would read as resolved here, with
+  // a Reopen, while the queue lists it as new.
+  const isResolved = decisionLog.hasHandlingDecisions || isUserBanned || isEventDeleted;
   // The banner names what handled the report, not a skip logged after it.
-  const lastHandlingDecision = decisionLog.latestHandlingDecision || pubkeyDecisionLog.latestHandlingDecision;
+  const lastHandlingDecision = decisionLog.latestHandlingDecision
+    || (isUserBanned ? pubkeyDecisionLog.latestHandlingDecision : undefined);
+
+  // The decision log card's "Already Handled" title and colour.
+  const showAlreadyHandled = decisionLog.hasHandlingDecisions && !handledBefore;
 
   // Auto-hide specific status
   const isPendingReview = decisionLog.isPendingReview;
@@ -308,16 +331,18 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // re-renders ReportDetail rather than remounting it), and mutate() rebuilds
   // the mutation from the observer's LATEST options -- so a mutationFn closing
   // over `context` would send the retry at whichever report is selected when
-  // it is clicked, deleting that report's decisions instead.
+  // it is clicked, reopening that report instead.
   type ReopenTarget = { type: 'event' | 'pubkey'; value: string; reportedPubkey?: string | null };
 
   const reopenMutation = useMutation({
     mutationFn: async (target: ReopenTarget | null) => {
       if (!target) throw new Error('No target');
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      // Delete all decisions for this target
+      // Reopen the target. The worker records a dated `reopened` row and keeps
+      // the history (#324); the call keeps its old name and route.
       const primary = await act.deleteDecisions(target.value, target.type);
-      // Also delete decisions for the pubkey if this is an event report
+      // A post's reopen also reopens its author's account, as it did when it
+      // deleted both targets' decisions.
       let secondary = { labelCleanupFailed: false };
       if (target.type === 'event' && target.reportedPubkey) {
         secondary = await act.deleteDecisions(target.reportedPubkey, 'pubkey');
@@ -327,20 +352,32 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
-      // Resolution labels also gate whether the report reappears, so a reopen
-      // that does not refresh them can leave the target hidden for a poll cycle
-      // -- a full minute on the label source. The helper above refreshes the
-      // report feeds: a reopen moves the target out of resolved history and
-      // back into the needs-attention feed.
+      // The helper above refreshes the report feeds: a reopen moves the target
+      // out of resolved history and back into the needs-attention feed. Reopen
+      // no longer changes resolution labels (#324): the reopen row makes older
+      // labels stop counting. The label refresh is kept for a rolled-back
+      // worker, which bans them, and without a refresh that target would stay
+      // hidden for a poll cycle, a full minute on the label source.
+      // TODO(#409): remove this label refresh once no worker from before #324
+      // can be live.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       pubkeyDecisionLog.refetch();
-      // Report what the reopen did, not where the report ends up. Whether it
-      // returns to the queue depends on resolvedTargets, which is also built
-      // from relay bans and deletions that reopen never undoes -- so a
-      // ban-resolved report stays hidden even on a fully clean run.
+      // Report what the reopen did, not where the report ends up: whether it
+      // returns to the queue depends on the screen's resolution sources,
+      // which a toast cannot see. Under the dated rule a relay ban the
+      // decision log dates no longer hides the reopened target's reports
+      // (reportResolution.ts), so the copy does not say it does.
+      // TODO(#409): remove the labelCleanupFailed toast branch (and labelsDeleted
+      // handling); only a pre-#324 worker sets it.
       toast(labelCleanupFailed
         ? {
+            // Only a worker from before #324 reports this: it deleted the
+            // decisions and banned the resolution labels, and this says the
+            // label half fell short. The current worker clears nothing and
+            // always answers false. Kept so a rolled-back worker still reads
+            // right.
+            //
             // Deliberately does not name the relay: one of the causes is our
             // own page cap, where the relay did exactly what it was asked.
             title: "Reopened, but resolution labels could not all be cleared",
@@ -370,16 +407,17 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           }
         : {
             title: "Report reopened",
-            description: "Decisions and resolution labels cleared. A report hidden by a relay ban or deletion stays hidden until that is lifted.",
+            description: "Its history is kept, and reports filed before now count as new again.",
             // Longer than the 5s Radix default can be read in.
             duration: 10000,
           });
     },
     onError: (error: Error) => {
-      // The first delete may already have committed server-side before the
-      // second threw, so the cached decision state can be stale even though
-      // the action reports failure. Refresh it rather than leaving the panel
-      // showing decisions the server no longer has.
+      // The post's reopen row may already be written when the author's call
+      // throws. Nothing is removed, but the post now reads as reopened, so the
+      // cached decisions and the queue's view can be stale even though the
+      // action reports failure. Refresh them rather than leaving the panel
+      // calling the post handled.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
@@ -765,8 +803,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             </div>
           )}
 
-          {/* Decision log banner - show when there's a recorded moderation action (but not pending review) */}
-          {isResolved && !isPendingReview && lastHandlingDecision && (
+          {/* Decision log banner - show when there's a recorded moderation action (but not pending review).
+              Never on a report handled before (#324): its green check would
+              say resolved above the Handled before card, about the report no
+              one has answered. */}
+          {isResolved && !isPendingReview && lastHandlingDecision && !handledBefore && (
             <div className="bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800 rounded-lg px-3 py-2 flex items-center gap-2">
               <CheckCircle className="h-4 w-4 text-green-600 shrink-0" />
               <p className="text-sm text-green-700 dark:text-green-400">
@@ -947,13 +988,61 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             </Card>
           )}
 
-          {/* Decision History - show if target already has decisions */}
-          {decisionLog.hasDecisions && (
-            <Card className={decisionLog.hasHandlingDecisions ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
+          {/* Handled before (#324): a person handled this item, then this
+              report came. Every entry of that handling's history, dated,
+              reopens and reversals included, and for an account a prompt to
+              look again at its current state. The decision log card stays
+              below it for the reasons and the rows that handle nothing. */}
+          {handledBefore && (
+            <Card className="border-amber-200 bg-amber-50/50 dark:bg-amber-950/20">
               <CardHeader className="py-3">
-                <CardTitle className={`text-sm flex items-center gap-2 ${decisionLog.hasHandlingDecisions ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
+                <CardTitle className="text-sm flex items-center gap-2 text-amber-700 dark:text-amber-400">
                   <History className="h-4 w-4" />
-                  {decisionLog.hasHandlingDecisions ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
+                  Handled before
+                </CardTitle>
+              </CardHeader>
+              <CardContent className="py-0 pb-3 space-y-2">
+                {handledBefore.ban && (
+                  <Badge variant="outline" className="text-xs">
+                    {handledBeforeBanText(handledBefore.ban)}
+                  </Badge>
+                )}
+                {context.target?.type === 'pubkey' && (
+                  <p className="text-sm">{ACCOUNT_HANDLED_BEFORE_PROMPT}</p>
+                )}
+                {/* Through the post's banned author: not the post's own handling. */}
+                {handledBefore.via === 'author' && (
+                  <p className="text-xs text-muted-foreground">History of the post's author</p>
+                )}
+                <div className="space-y-2">
+                  {handledBefore.history.map((entry, i) => (
+                    <div
+                      key={i}
+                      data-testid="handled-before-entry"
+                      className="flex items-start justify-between text-xs p-2 bg-background rounded"
+                    >
+                      <Badge variant="outline" className="text-xs">
+                        {entry.action.replace(/_/g, ' ')}
+                      </Badge>
+                      <span className="text-muted-foreground shrink-0">
+                        {entry.at === null ? 'date unknown' : new Date(entry.at * 1000).toLocaleDateString()}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Decision History - show if target already has decisions. For a
+              report handled before (#324) it is never "Already Handled": this
+              report is the one no one has answered. */}
+          {decisionLog.hasDecisions && (
+            <Card className={showAlreadyHandled ? 'border-green-200 bg-green-50/50 dark:bg-green-950/20' : undefined}>
+              <CardHeader className="py-3">
+                <CardTitle className={`text-sm flex items-center gap-2 ${showAlreadyHandled ? 'text-green-700 dark:text-green-400' : 'text-muted-foreground'}`}>
+                  <History className="h-4 w-4" />
+                  {showAlreadyHandled ? 'Already Handled' : 'Decision History'} ({decisionLog.decisions.length} action{decisionLog.decisions.length !== 1 ? 's' : ''})
                 </CardTitle>
               </CardHeader>
               <CardContent className="py-0 pb-3">
@@ -1369,8 +1458,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       <div className="border-t bg-background p-4 space-y-3 shrink-0">
             {/* Resolution actions - dismiss or reopen */}
             <div className="flex flex-wrap gap-2">
-              {/* Reopen: only when there are decisions to undo */}
-              {(decisionLog.hasHandlingDecisions || pubkeyDecisionLog.hasHandlingDecisions) && !isUserBanned && !isEventDeleted && (
+              {/* Reopen: only when something handled the target since its last
+                  reopen, by the decision log or, for a label, by the queue. Not
+                  the author's log: it covers a post only while the author is
+                  banned, and Reopen is not offered then. */}
+              {(decisionLog.hasHandlingDecisions || queueHandled) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
@@ -1386,7 +1478,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Clears its moderation decisions and resolution labels. A report hidden by a relay ban or deletion stays hidden until that is lifted.</p>
+                    <p>Reopen this report for review. Its history is kept, and reports filed before now count as new again.</p>
                   </TooltipContent>
                 </Tooltip>
               )}

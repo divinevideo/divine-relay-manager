@@ -31,10 +31,12 @@ afterAll(async () => {
 
 beforeEach(async () => {
   await DB.exec('DELETE FROM moderation_decisions');
+  await DB.exec('DELETE FROM report_arrivals');
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 type RelayEvent = { id: string; created_at: number; kind: number; tags: string[][] };
@@ -90,10 +92,22 @@ const label = (n: number, createdAt: number, target: string[]): RelayEvent => ({
   tags: [['L', 'moderation/resolution'], ['l', 'resolved', 'moderation/resolution'], target],
 });
 
-async function decide(targetType: string, targetId: string, action: string, moderatorPubkey: string | null = null) {
+// Every decision below is dated DECIDED_AT, unless a test says otherwise. Reports
+// at small created_at values (100, 99...) are older than it, so a decision
+// handles them.
+const DECIDED_AT = '2026-01-01 00:00:00';
+const DECIDED_AT_S = 1_767_225_600;
+
+async function decide(
+  targetType: string, targetId: string, action: string, moderatorPubkey: string | null = null, createdAt = DECIDED_AT,
+) {
   await DB.prepare(
     'INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?)',
-  ).bind(targetType, targetId, action, moderatorPubkey, '2026-01-01 00:00:00').run();
+  ).bind(targetType, targetId, action, moderatorPubkey, createdAt).run();
+}
+
+async function arrived(reportId: string, seenAt: number) {
+  await DB.prepare('INSERT INTO report_arrivals (report_id, first_seen_at) VALUES (?, ?)').bind(reportId, seenAt).run();
 }
 
 function env(withDb = true) {
@@ -120,6 +134,9 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     expect(Object.keys(body).sort()).toEqual(['events', 'success']);
   });
 
+  // Every handled target here has no report newer than its handling, so each
+  // old field keeps the value it had before the handled-before rule (#324):
+  // an old Pages build reading only those sees no change.
   it('returns unresolved and pending-review targets, and drops resolved ones', async () => {
     stubRelay([
       report(1, 100, [['e', E(1)]]),        // unresolved
@@ -128,24 +145,135 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
       report(4, 97, [['e', E(4)]]),         // auto-hidden only: never counted as resolved
       report(5, 96, [['e', E(5)]]),         // resolved by a label AND pending review
       report(6, 95, [['p', P1]]),           // unresolved account report
-      label(1, 50, ['e', E(3)]),
-      label(2, 49, ['e', E(5)]),
+      // Labelled after the reports, so the labels handle them.
+      label(1, 150, ['e', E(3)]),
+      label(2, 149, ['e', E(5)]),
     ]);
     await decide('event', E(2), 'reviewed');
     await decide('event', E(4), 'auto_hidden');
     await decide('event', E(5), 'auto_hidden');
 
     const body = await (await get('/api/reports?needs_attention=1')).json() as {
-      success: boolean; events: RelayEvent[]; counts: { targets: number; resolved: number };
+      success: boolean; events: RelayEvent[]; counts: { targets: number; resolved: number; handled_before: number };
       truncated: boolean; resolution_truncated: boolean; oldest_covered: number | null;
+      automated_targets: string[]; handled_before: string[]; report_arrivals: Record<string, number>;
     };
 
     expect(body.success).toBe(true);
     expect(body.events.map(e => e.id).sort()).toEqual([id(1), id(4), id(5), id(6)].sort());
-    expect(body.counts).toEqual({ targets: 4, resolved: 2 });
+    expect(body.counts).toEqual({ targets: 4, resolved: 2, handled_before: 0 });
+    expect(body.automated_targets).toEqual([]);
     expect(body.truncated).toBe(false);
     expect(body.resolution_truncated).toBe(false);
     expect(body.oldest_covered).toBe(95);
+    expect(body.handled_before).toEqual([]);
+    expect(body.report_arrivals).toEqual({});
+  });
+
+  describe('the handled-before rule (#324)', () => {
+    // E(1)-E(4) were each handled by a person at DECIDED_AT; E(5) never was.
+    async function seed() {
+      stubRelay([
+        report(1, DECIDED_AT_S - 100, [['e', E(1)]]),   // before the handling: handled
+        report(2, DECIDED_AT_S + 100, [['e', E(2)]]),   // after: handled before
+        report(3, DECIDED_AT_S + 100, [['e', E(3)]]),   // stamped after, but arrived before: handled
+        report(4, DECIDED_AT_S - 100, [['e', E(4)]]),   // stamped before, but arrived after: handled before
+        report(5, DECIDED_AT_S - 200, [['e', E(5)]]),   // never handled: new
+      ]);
+      for (const n of [1, 2, 3, 4]) await decide('event', E(n), n === 2 ? 'dismissed' : 'reviewed', 'f'.repeat(64));
+      await arrived(id(3), DECIDED_AT_S - 50);
+      await arrived(id(4), DECIDED_AT_S + 50);
+    }
+
+    it('keeps reports newer than the handling, by arrival when known, and lists their targets', async () => {
+      await seed();
+
+      const body = await (await get('/api/reports?needs_attention=1')).json() as {
+        events: RelayEvent[]; counts: { targets: number; resolved: number; handled_before: number };
+        handled_before: string[]; report_arrivals: Record<string, number>;
+      };
+
+      expect(body.events.map(e => e.id).sort()).toEqual([id(2), id(4), id(5)].sort());
+      expect([...body.handled_before].sort()).toEqual([`event:${E(2)}`, `event:${E(4)}`].sort());
+      expect(body.counts).toEqual({ targets: 3, resolved: 2, handled_before: 2 });
+      // Only for the events returned: report 3's arrival decided its drop, but
+      // the screen never sees report 3.
+      expect(body.report_arrivals).toEqual({ [id(4)]: DECIDED_AT_S + 50 });
+    });
+
+    it('puts only the reports the feed drops in resolved history', async () => {
+      await seed();
+
+      const history = await (await get('/api/reports/resolved?limit=50')).json() as {
+        events: RelayEvent[]; report_arrivals: Record<string, number>;
+      };
+
+      expect(history.events.map(e => e.id).sort()).toEqual([id(1), id(3)].sort());
+      // Shaped as the feed's, for the returned events only: report 3 was
+      // stamped after the handling but arrived before it, and the screen must
+      // date it by the arrival too. Report 4's arrival is not sent: it is not
+      // on this page.
+      expect(history.report_arrivals).toEqual({ [id(3)]: DECIDED_AT_S - 50 });
+    });
+
+    it('logs once per build how many handled targets came back, by the call that last handled them', async () => {
+      await seed();
+      const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+      await get('/api/reports?needs_attention=1');
+
+      const lines = log.mock.calls.map(args => args.join(' ')).filter(line => line.includes('[needs-attention]'));
+      expect(lines).toEqual(['[needs-attention] handled before (upper bound, before relay bans): 2 targets, by last handling {"dismissed":1,"reviewed":1}']);
+    });
+
+    // A failed arrival read is a failed source (#221). Comparing every report by
+    // created_at instead would drop a backdated report the watcher saw arrive
+    // after the handling, with nothing to say so.
+    it('fails the feed and resolved history, rather than dropping a report, when the arrival read fails', async () => {
+      stubRelay([report(1, DECIDED_AT_S - 100, [['e', E(1)]])]);
+      const brokenMf = new Miniflare({
+        modules: true,
+        script: 'export default { fetch() { return new Response("ok"); } };',
+        compatibilityDate: '2024-12-01',
+        compatibilityFlags: ['nodejs_compat'],
+        d1Databases: ['DB'],
+      });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      try {
+        const brokenDb = (await brokenMf.getD1Database('DB')) as unknown as D1Database;
+        await ensureSchema(brokenDb);
+        await brokenDb.prepare('INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at) VALUES (?, ?, ?, ?, ?)')
+          .bind('event', E(1), 'reviewed', 'f'.repeat(64), DECIDED_AT).run();
+        await brokenDb.exec('DROP TABLE report_arrivals');
+
+        const feed = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video');
+        expect(feed.status).toBe(502);
+        expect(feed.body).not.toHaveProperty('events');
+
+        const history = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video');
+        expect(history.status).toBe(502);
+        expect(history.body).not.toHaveProperty('events');
+      } finally {
+        await brokenMf.dispose();
+      }
+    });
+
+    it('treats a report as new again after a reopen, until a person handles the target again', async () => {
+      stubRelay([report(1, DECIDED_AT_S + 100, [['e', E(1)]]), report(2, DECIDED_AT_S + 100, [['e', E(2)]])]);
+      await decide('event', E(1), 'reviewed', 'f'.repeat(64), '2025-12-31 00:00:00');
+      await decide('event', E(1), 'reopened', 'f'.repeat(64), DECIDED_AT);
+      await decide('event', E(2), 'reviewed', 'f'.repeat(64), '2025-12-31 00:00:00');
+      await decide('event', E(2), 'reopened', 'f'.repeat(64), DECIDED_AT);
+      await decide('event', E(2), 'dismissed', 'f'.repeat(64), '2026-01-02 00:00:00');
+
+      const body = await (await get('/api/reports?needs_attention=1')).json() as {
+        events: RelayEvent[]; counts: { targets: number; resolved: number; handled_before: number }; handled_before: string[];
+      };
+
+      expect(body.events.map(e => e.id)).toEqual([id(1)]);
+      expect(body.handled_before).toEqual([]);
+      expect(body.counts).toEqual({ targets: 1, resolved: 1, handled_before: 0 });
+    });
   });
 
   // No person has handled a target only the worker has decided on, so the
@@ -167,7 +295,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
 
     expect(body.events.map(e => e.id)).toEqual([id(1), id(2)]);
     expect(body.automated_targets).toEqual([`pubkey:${P1}`]);
-    expect(body.counts).toEqual({ targets: 2, resolved: 1 });
+    expect(body.counts).toEqual({ targets: 2, resolved: 1, handled_before: 0 });
   });
 
   it('asks the relay for the page size its pager treats as full, and walks past a full page', async () => {
@@ -264,6 +392,26 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     } finally {
       await brokenMf.dispose();
     }
+  });
+
+  // The feed reads its `automated` set from the handling rows it already holds,
+  // so one poll walks the decision log's non-auto-hide rows once, not twice.
+  it('walks the decision log once for its handling and automated reads', async () => {
+    stubRelay([report(1, 100, [['e', E(1)]])]);
+    await decide('event', E(1), 'reviewed');
+    const sql: string[] = [];
+    const counting = new Proxy(DB, {
+      get(target, prop) {
+        if (prop === 'prepare') return (query: string) => { sql.push(query); return target.prepare(query); };
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const { status } = await getReportsNeedingAttention(counting, 'wss://relay.divine.video');
+
+    expect(status).toBe(200);
+    expect(sql.filter(q => /FROM moderation_decisions/.test(q) && /action NOT IN/.test(q))).toHaveLength(1);
   });
 
   describe('truncation flags point in the direction that failed', () => {
@@ -369,6 +517,19 @@ describe('GET /api/reports single-target lookups', () => {
     expect(body.events.map(e => e.id)).toEqual([id(1)]);
   });
 
+  // The deep link dates these reports as the feed does (#324), so the lookup
+  // carries the same first-seen times, read the same way.
+  it("carries the arrivals of the target's reports the watcher saw", async () => {
+    stubRelay([report(1, 300, [['e', E(1)]]), report(2, 200, [['e', E(1)]]), report(3, 100, [['e', E(2)]])]);
+    await arrived(id(1), 150);
+    await arrived(id(3), 90);
+    const body = await (await get(`/api/reports?event=${E(1)}`)).json() as {
+      events: RelayEvent[]; report_arrivals: Record<string, number>;
+    };
+    expect(body.events.map(e => e.id)).toEqual([id(1), id(2)]);
+    expect(body.report_arrivals).toEqual({ [id(1)]: 150 });
+  });
+
   it('says a lookup was cut short when it stops before the relay runs out', async () => {
     // The client turns this flag into an "N+" count, and into "unavailable"
     // rather than "gone" when nothing came back. The lookup's page bounds are
@@ -392,8 +553,8 @@ describe('GET /api/reports/resolved', () => {
       report(1, 100, [['e', E(1)]]),   // resolved by a decision
       report(2, 99, [['e', E(2)]]),    // unresolved: belongs to the queue, not here
       report(3, 98, [['e', E(3)]]),    // resolved but pending review: the queue shows it
-      report(4, 97, [['e', E(4)]]),    // resolved by a label
-      label(1, 50, ['e', E(4)]),
+      report(4, 97, [['e', E(4)]]),    // resolved by a label, dated after the report
+      label(1, 150, ['e', E(4)]),
     ]);
     await decide('event', E(1), 'reviewed');
     await decide('event', E(3), 'reviewed');

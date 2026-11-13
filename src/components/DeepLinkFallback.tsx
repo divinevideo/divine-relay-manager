@@ -3,6 +3,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import type { ModerationDecision } from '@/lib/adminApi';
+import { REOPENED_ACTION } from '../../shared/handling';
 
 const GONE_COPY =
   "This report's event is no longer on the relay. The reported content was deleted, or the account was removed. The report was recorded when it arrived.";
@@ -22,6 +23,11 @@ interface DeepLinkFallbackProps {
 }
 
 export function DeepLinkFallback({ status, target, decisions, decisionsFailed, onRetry }: DeepLinkFallbackProps) {
+  // A Reopen (#324) records a `reopened` row rather than deleting history. It
+  // is listed beside the actions it reopened, but is not an action on its own:
+  // an untyped reopen writes one under both target types, so one can stand
+  // alone on a target nobody acted on.
+  const hasPriorAction = decisions?.some(d => d.action !== REOPENED_ACTION) ?? false;
   return (
     <Card className="h-full">
       <CardHeader>
@@ -52,7 +58,7 @@ export function DeepLinkFallback({ status, target, decisions, decisionsFailed, o
               : 'Loading prior moderation actions…'}
           </p>
         )}
-        {status === 'gone' && decisions !== undefined && decisions.length > 0 && (
+        {status === 'gone' && decisions !== undefined && hasPriorAction && (
           <div className="space-y-1">
             <p className="text-xs font-medium">Prior moderation actions on this target:</p>
             <ul className="text-xs text-muted-foreground space-y-2">
@@ -70,7 +76,7 @@ export function DeepLinkFallback({ status, target, decisions, decisionsFailed, o
             </ul>
           </div>
         )}
-        {status === 'gone' && decisions !== undefined && decisions.length === 0 && (
+        {status === 'gone' && decisions !== undefined && !hasPriorAction && (
           <p className="text-xs text-muted-foreground">
             No prior moderation actions recorded for this target.
           </p>

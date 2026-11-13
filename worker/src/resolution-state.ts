@@ -3,6 +3,7 @@
 
 import { AUTO_HIDE_ACTIONS, AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAutomatedDecision } from '../../shared/automated-decision';
+import { REOPENED_ACTION, type HandlingRow } from '../../shared/handling';
 
 export interface ResolvedTargetRow {
   target_type: string;
@@ -16,6 +17,10 @@ export interface AutoHideStateRow {
   target_type: string;
   target_id: string;
   action: string;
+  // Unix seconds, or null for a row with no created_at, as getHandlingRows
+  // dates its rows. The sensitive switch compares a report with the time a
+  // person confirmed or restored an auto-hide (#324).
+  at: number | null;
 }
 
 // Rows per D1 query. Neither read is capped -- both loop until the table is
@@ -38,7 +43,9 @@ const ROW_CHUNK_SIZE = 1000;
 // pending-review queue from the moderators who have to work it.
 //
 // A target the worker alone resolved -- today with an age_review_case_created
-// row -- is still returned, because Hide resolved counts it as handled. It
+// row -- is still returned, because the queue's membership fallback (a pre-#324
+// Pages build, or a worker that sends no dates) counts it as handled under
+// Hide resolved. Under the dated rule it is not handled (#332). It
 // carries `automated: true` so the sensitive-reports switch, which waits for a
 // person, can look past it. One human row anywhere in the walk clears the flag,
 // whichever chunk it falls in. isAutomatedDecision picks out the worker's own
@@ -46,6 +53,13 @@ const ROW_CHUNK_SIZE = 1000;
 // moderator: POST /api/decisions records only a verified login's pubkey or NULL,
 // and bulk moderation always writes a hex pubkey. The worker puts its marker on a
 // person's decision only in an auto-hide row, which this read skips.
+//
+// A `reopened` row (#324) starts the target over: only rows after it count, so a
+// target whose rows end in a reopen is left out. Reopen used to delete the
+// target's rows, and a Pages build that reads only this list sees the same as it
+// did then. Rows are walked in id order, which is the order they were written.
+// TODO(#409): remove the reopen handling here once no older Pages build that
+// reads the `resolved` field can be live.
 export async function getResolvedTargets(
   db: D1Database,
   opts?: { chunkSize?: number }
@@ -53,8 +67,7 @@ export async function getResolvedTargets(
   const chunkSize = opts?.chunkSize ?? ROW_CHUNK_SIZE;
   const placeholders = AUTO_HIDE_ACTIONS.map(() => '?').join(', ');
 
-  // Map insertion order is first-seen order, which the result keeps.
-  const targets = new Map<string, { target_type: string; target_id: string; human: boolean }>();
+  const targets: ResolvedTargetFold = new Map();
   let afterId = 0;
 
   for (;;) {
@@ -77,24 +90,109 @@ export async function getResolvedTargets(
       action: string;
       moderator_pubkey: string | null;
     }>;
+    for (const row of rows) foldResolvedRow(targets, row);
+
+    if (rows.length < chunkSize) break;
+    afterId = rows[rows.length - 1].id;
+  }
+
+  return resolvedTargetsOf(targets);
+}
+
+// getResolvedTargets over rows already read, for a caller that holds
+// getHandlingRows' result: the same rows in the same id order, limited to event
+// and pubkey targets, so it gives the same answer for those targets without a
+// second walk of the table.
+export function resolvedTargetsFromRows(
+  rows: Iterable<{ target_type: string; target_id: string; action: string; moderator_pubkey?: string | null }>
+): ResolvedTargetRow[] {
+  const targets: ResolvedTargetFold = new Map();
+  for (const row of rows) foldResolvedRow(targets, row);
+  return resolvedTargetsOf(targets);
+}
+
+// Map insertion order is first-seen order, which the result keeps.
+type ResolvedTargetFold = Map<string, { target_type: string; target_id: string; human: boolean }>;
+
+// One decision row, in id order, folded into the resolved targets.
+function foldResolvedRow(
+  targets: ResolvedTargetFold,
+  row: { target_type: string; target_id: string; action: string; moderator_pubkey?: string | null }
+): void {
+  const key = `${row.target_type}:${row.target_id}`;
+  if (row.action === REOPENED_ACTION) {
+    // By id, so a human row written in the same second after a reopen
+    // resolves the target here, where handlingByTarget needs a strictly
+    // later time. They differ only within that second, and only an old
+    // Pages build reads this list.
+    targets.delete(key);
+    return;
+  }
+  const human = !isAutomatedDecision(row);
+  const target = targets.get(key);
+  if (!target) {
+    targets.set(key, { target_type: row.target_type, target_id: row.target_id, human });
+  } else if (human) {
+    target.human = true;
+  }
+}
+
+function resolvedTargetsOf(targets: ResolvedTargetFold): ResolvedTargetRow[] {
+  return Array.from(targets.values(), ({ target_type, target_id, human }) =>
+    human ? { target_type, target_id } : { target_type, target_id, automated: true }
+  );
+}
+
+// The dated decision rows the handled-before rule reads (#324): every event and
+// pubkey row except auto-hide actions, with automated and `reopened` rows
+// included, because handlingByTarget (shared/handling.ts) is the one place that
+// decides which of them count. The worker feed and the screen both pass these
+// rows to it, so the two cannot disagree on a target.
+//
+// `at` is unix seconds, or null for a row with no created_at. Uncapped and
+// keyset-paged on id, as getResolvedTargets is. The result grows with decision
+// rows rather than targets, but carries no reason or report text.
+export async function getHandlingRows(
+  db: D1Database,
+  opts?: { chunkSize?: number }
+): Promise<HandlingRow[]> {
+  const chunkSize = opts?.chunkSize ?? ROW_CHUNK_SIZE;
+  const placeholders = AUTO_HIDE_ACTIONS.map(() => '?').join(', ');
+
+  const handling: HandlingRow[] = [];
+  let afterId = 0;
+
+  for (;;) {
+    const result = await db
+      .prepare(
+        `SELECT id, target_type, target_id, action, moderator_pubkey,
+                CAST(strftime('%s', created_at) AS INTEGER) AS at
+           FROM moderation_decisions
+          WHERE action NOT IN (${placeholders})
+            AND target_type IN ('event', 'pubkey')
+            AND id > ?
+          ORDER BY id
+          LIMIT ?`
+      )
+      .bind(...AUTO_HIDE_ACTIONS, afterId, chunkSize)
+      .all();
+
+    const rows = (result.results || []) as unknown as Array<HandlingRow & { id: number }>;
     for (const row of rows) {
-      const key = `${row.target_type}:${row.target_id}`;
-      const human = !isAutomatedDecision(row);
-      const target = targets.get(key);
-      if (!target) {
-        targets.set(key, { target_type: row.target_type, target_id: row.target_id, human });
-      } else if (human) {
-        target.human = true;
-      }
+      handling.push({
+        target_type: row.target_type,
+        target_id: row.target_id,
+        action: row.action,
+        moderator_pubkey: row.moderator_pubkey ?? null,
+        at: row.at ?? null,
+      });
     }
 
     if (rows.length < chunkSize) break;
     afterId = rows[rows.length - 1].id;
   }
 
-  return Array.from(targets.values(), ({ target_type, target_id, human }) =>
-    human ? { target_type, target_id } : { target_type, target_id, automated: true }
-  );
+  return handling;
 }
 
 // Feeds the pending-review queue. Only the STATE actions are read, because
@@ -130,7 +228,8 @@ export async function getAutoHideStates(
     const result: D1Result = cursor === null
       ? await db
           .prepare(
-            `SELECT id, created_at, target_type, target_id, action
+            `SELECT id, created_at, target_type, target_id, action,
+                    CAST(strftime('%s', created_at) AS INTEGER) AS at
                FROM moderation_decisions
               WHERE action IN (${placeholders})
               ORDER BY COALESCE(created_at, '') DESC, id DESC
@@ -140,7 +239,8 @@ export async function getAutoHideStates(
           .all()
       : await db
           .prepare(
-            `SELECT id, created_at, target_type, target_id, action
+            `SELECT id, created_at, target_type, target_id, action,
+                    CAST(strftime('%s', created_at) AS INTEGER) AS at
                FROM moderation_decisions
               WHERE action IN (${placeholders})
                 AND (COALESCE(created_at, '') < ?
@@ -159,6 +259,7 @@ export async function getAutoHideStates(
         target_type: row.target_type,
         target_id: row.target_id,
         action: row.action,
+        at: row.at ?? null,
       });
     }
 

@@ -1,12 +1,16 @@
-// ABOUTME: Selects the reports whose target still needs a moderator, at any age.
+// ABOUTME: Selects the reports a moderator still needs to see, at any age.
 // ABOUTME: The worker's half of resolution: decisions and labels. Bans stay client-side.
 
 import { getReportTarget, reportTargetKey } from '../../shared/report-target';
 import { relayPageFetcher } from './relay-profile';
 import { pageByUntil } from '../../shared/relay-pager';
 import { pendingReviewTargetKeys } from '../../shared/autohide';
-import { getAutoHideStates, getResolvedTargets } from './resolution-state';
+import {
+  handlingByTarget, reportStatus, reportTime, REOPENED_ACTION, type HandlingEntry, type ReportStatus,
+} from '../../shared/handling';
+import { getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from './resolution-state';
 import { readResolutionLabelTargets } from './resolution-labels';
+import { readReportArrivals } from './report-arrivals';
 import { REPORT_KIND, REPORTS_MAX_PAGES, REPORTS_PAGE_SIZE } from './reports-filter';
 
 export interface RelayReport {
@@ -15,18 +19,18 @@ export interface RelayReport {
   tags: string[][];
 }
 
-// The targets the worker can call resolved, split by who resolved them.
-//
-// `resolved`: handled -- any resolution label, and any event or pubkey decision
-// getResolvedTargets returns without the `automated` flag, so one a person made.
-// Auto-hide actions are never here (getResolvedTargets leaves them out): auto-
-// hidden content is waiting FOR review, not handled.
+// The targets the worker can call resolved, split by who resolved them. Only
+// `automated` is read now; whether a report is handled is the dated rule in
+// shared/handling.ts (#324). `resolved` (labels and a person's decisions) is
+// what takes a target out of `automated`.
 //
 // `automated`: resolved only by decisions the worker wrote itself (today
 // age_review_case_created), with no label either. No person has looked at
 // these, so they are not handled: the needs-attention read keeps them, where
 // the sensitive switch can take a CSAM-signal one, and resolved history leaves
-// them out. The queue's Hide resolved still counts them as resolved (#332).
+// them out. Under the dated rule the queue's Hide resolved does not count them
+// either (#332). Only its membership fallback, for a pre-#324 Pages build or a
+// worker that sends no dates, still counts them as resolved.
 //
 // Other target types (media) never match a report, which is why the client's
 // resolvedTargets ignores them too.
@@ -53,41 +57,69 @@ export function resolvedKeysFrom(
 }
 
 // The complement invariant selectReportsNeedingAttention and
-// getResolvedReportsPage both rest on: a target is handled -- resolved and not
-// still pending review -- or it needs attention, never both, never neither.
+// getResolvedReportsPage both rest on: a report is in resolved history -- a
+// person handled its target after it arrived, and the target is not still
+// pending review -- or it needs attention, never both, never neither.
 // Extracted so the two endpoints cannot drift apart.
 export function isResolvedForReview(
+  status: ReportStatus,
   key: string,
-  resolved: ReadonlySet<string>,
   pendingReview: ReadonlySet<string>,
 ): boolean {
-  return resolved.has(key) && !pendingReview.has(key);
+  return status === 'handled' && !pendingReview.has(key);
 }
 
-// Needing attention = unresolved OR pending review. The union is load-bearing:
-// a target can be both resolved and pending review, and dropping it would leave
+// A report's standing against its target's handling, by arrival time when the
+// watcher saw it arrive and by created_at otherwise. `key` is
+// reportTargetKey(getReportTarget(report)), and the handling map is keyed as
+// stored, exactly as the old resolved set was (PR #365).
+function statusOf(
+  report: RelayReport,
+  key: string,
+  handling: ReadonlyMap<string, HandlingEntry>,
+  arrivals: ReadonlyMap<string, number>,
+): ReportStatus {
+  return reportStatus(reportTime(report, arrivals), handling.get(key));
+}
+
+// Needing attention = not handled OR pending review. The union is load-bearing:
+// a target can be both handled and pending review, and dropping it would leave
 // the pending-review view with a badge and no rows.
+//
+// A report is handled only when a person handled its target after the report
+// arrived (shared/handling.ts). A newer one is 'handled_before': it is kept, and
+// its target is listed in handledBefore so the queue can mark it and keep it
+// below never-handled work (#324).
 //
 // Resolution here covers decisions and labels only. Targets resolved by a relay
 // ban are returned and filtered client-side, which keeps each ban list's own
 // failure handling in the queue (#221).
 //
-// A target only automation resolved is not in `resolved`, so it is kept.
+// A target only automation touched has no handling, so its reports are kept.
 // automatedTargets lists the kept ones that are, for the client's Hide resolved.
 //
-// counts.targets and counts.resolved are both counts of distinct TARGETS, never
-// of report events. A report naming no usable target is kept, as the client
-// keeps it, and counted in neither. An automation-only target counts in
-// targets, not resolved.
+// counts.targets, counts.resolved and counts.handled_before are counts of
+// distinct TARGETS, never of report events. counts.resolved is the targets
+// whose reports were all dropped; a target with one kept report counts in
+// targets instead. A report naming no usable target is kept, as the client
+// keeps it, and counted in none. An automation-only target counts in targets,
+// not resolved.
 export function selectReportsNeedingAttention<T extends RelayReport>(
   reports: readonly T[],
-  resolved: ReadonlySet<string>,
+  handling: ReadonlyMap<string, HandlingEntry>,
   pendingReview: ReadonlySet<string>,
   automated: ReadonlySet<string> = new Set(),
-): { events: T[]; counts: { targets: number; resolved: number }; automatedTargets: string[] } {
+  arrivals: ReadonlyMap<string, number> = new Map(),
+): {
+  events: T[];
+  counts: { targets: number; resolved: number; handled_before: number };
+  automatedTargets: string[];
+  handledBefore: string[];
+} {
   const events: T[] = [];
   const keptTargets = new Set<string>();
-  const resolvedTargets = new Set<string>();
+  const droppedTargets = new Set<string>();
+  const handledBefore = new Set<string>();
 
   for (const report of reports) {
     const target = getReportTarget(report);
@@ -96,25 +128,49 @@ export function selectReportsNeedingAttention<T extends RelayReport>(
       continue;
     }
     const key = reportTargetKey(target);
-    if (isResolvedForReview(key, resolved, pendingReview)) {
-      resolvedTargets.add(key);
+    const status = statusOf(report, key, handling, arrivals);
+    if (isResolvedForReview(status, key, pendingReview)) {
+      droppedTargets.add(key);
       continue;
     }
     events.push(report);
     keptTargets.add(key);
+    if (status === 'handled_before') handledBefore.add(key);
   }
+
+  let resolved = 0;
+  for (const key of droppedTargets) if (!keptTargets.has(key)) resolved += 1;
 
   return {
     events,
-    counts: { targets: keptTargets.size, resolved: resolvedTargets.size },
+    counts: { targets: keptTargets.size, resolved, handled_before: handledBefore.size },
     automatedTargets: [...keptTargets].filter(key => automated.has(key)),
+    handledBefore: [...handledBefore],
   };
 }
 
+// The brigading watch (spec decision 6): handled-before targets counted by the
+// action that last handled them -- the newest history entry that is not a
+// reopen -- so a run of items coming back after "no violation" calls shows up
+// in the logs. Keys sorted, so log lines compare across builds.
+export function handledBeforeByLastAction(
+  handledBefore: readonly string[],
+  handling: ReadonlyMap<string, HandlingEntry>,
+): Record<string, number> {
+  const counts = new Map<string, number>();
+  for (const key of handledBefore) {
+    const action = handling.get(key)?.history.find(entry => entry.action !== REOPENED_ACTION)?.action;
+    if (action === undefined) continue;
+    counts.set(action, (counts.get(action) ?? 0) + 1);
+  }
+  return Object.fromEntries([...counts].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)));
+}
+
 export interface ResolutionKeys {
-  // Handled: a label or a person's decision. See resolvedKeysFrom.
-  resolved: Set<string>;
-  // Resolved only by decisions the worker wrote itself; never in `resolved`.
+  // When a person last handled each target, and the history behind it: the
+  // dated rule's input (#324). Keyed `${type}:${id}` as stored.
+  handling: Map<string, HandlingEntry>;
+  // Resolved only by decisions the worker wrote itself. See resolvedKeysFrom.
   automated: Set<string>;
   pendingReview: Set<string>;
   labelsTruncated: boolean;
@@ -132,33 +188,67 @@ export interface PagingOptions {
 // auto-hide states from D1, resolution labels from the relay. The worker's own
 // automated decisions come back apart, in `automated`.
 // getAutoHideStates returns newest first, which pendingReviewTargetKeys needs.
+//
+// The handling map comes from the same handlingByTarget the screen runs over
+// /api/resolution-state's handling_rows and the label targets, so the feed and
+// the queue date every target alike.
 export async function readResolutionKeys(
   db: D1Database,
   relayUrl: string,
   labelsPaging?: PagingOptions,
 ): Promise<ResolutionKeys> {
-  const [decisions, autoHideStates, labels] = await Promise.all([
-    getResolvedTargets(db),
+  const [autoHideStates, labels, handlingRows] = await Promise.all([
     getAutoHideStates(db),
     readResolutionLabelTargets(relayUrl, labelsPaging),
+    getHandlingRows(db),
   ]);
-  const { resolved, automated } = resolvedKeysFrom(decisions, labels.targets);
+  // `automated` comes from the handling rows, which hold every row
+  // getResolvedTargets reads for an event or pubkey target, in the same order,
+  // so the decision log is walked once rather than twice.
+  const { automated } = resolvedKeysFrom(resolvedTargetsFromRows(handlingRows), labels.targets);
   return {
-    resolved,
+    handling: handlingByTarget(handlingRows, labels.targets),
     automated,
     pendingReview: pendingReviewTargetKeys(autoHideStates),
     labelsTruncated: labels.truncated,
   };
 }
 
+// First-seen times for the reports in hand, and only those: a lookup bounded by
+// the page, never a read of the whole table. A report with no row compares by
+// its created_at (reportTime).
+//
+// A failed read throws, failing the request like every other source (#221).
+// Falling back to created_at for every report would let a backdated report the
+// watcher saw arrive after the handling drop out of the feed unflagged.
+function readArrivalsFor(db: D1Database, reports: readonly RelayReport[]): Promise<Map<string, number>> {
+  const ids = reports.map(report => report?.id).filter((id): id is string => typeof id === 'string');
+  return readReportArrivals(db, ids);
+}
+
+// The `report_arrivals` a response carries: first-seen unix seconds by report
+// id, for the returned events the watcher saw arrive, and only those. The
+// screen compares by these as the worker did; a report absent here compares by
+// its created_at.
+function arrivalsOf(events: readonly RelayReport[], arrivals: ReadonlyMap<string, number>): Record<string, number> {
+  const reportArrivals: Record<string, number> = {};
+  for (const event of events) {
+    const seenAt = arrivals.get(event.id);
+    if (seenAt !== undefined) reportArrivals[event.id] = seenAt;
+  }
+  return reportArrivals;
+}
+
 function failure(status: number, error: unknown) {
   return { status, body: { success: false, error: error instanceof Error ? error.message : String(error) } };
 }
 
-// GET /api/reports?needs_attention=1. Every report whose target still needs a
-// moderator, at any age. Any failed source fails the request: resolution sets
-// are subtractive, so a silent empty makes the queue bigger and wrong rather
-// than smaller and safe (#221).
+// GET /api/reports?needs_attention=1. Every report a moderator still needs to
+// see, at any age: those on targets nobody handled, those newer than their
+// target's handling (#324), and every report on a target pending review. Any
+// failed source -- reports, labels, decisions, auto-hide states or arrivals --
+// fails the request: resolution sets are subtractive, so a silent empty makes
+// the queue wrong rather than safe (#221).
 export async function getReportsNeedingAttention(
   db: D1Database | undefined,
   relayUrl: string,
@@ -168,26 +258,46 @@ export async function getReportsNeedingAttention(
   const reportsPageSize = opts?.reportsPaging?.pageSize ?? REPORTS_PAGE_SIZE;
   const reportsMaxPages = opts?.reportsPaging?.maxPages ?? REPORTS_MAX_PAGES;
   try {
-    const [reports, keys] = await Promise.all([
+    // Arrivals need the report ids, so they follow the report walk, alongside
+    // the resolution reads rather than after them.
+    const [{ reports, arrivals }, keys] = await Promise.all([
       pageByUntil<RelayReport>(
         relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, reportsPageSize),
         { pageSize: reportsPageSize, maxPages: reportsMaxPages },
-      ),
+      ).then(async paged => ({ reports: paged, arrivals: await readArrivalsFor(db, paged.events) })),
       readResolutionKeys(db, relayUrl, opts?.labelsPaging),
     ]);
-    const { events, counts, automatedTargets } = selectReportsNeedingAttention(
-      reports.events, keys.resolved, keys.pendingReview, keys.automated,
+    const { events, counts, automatedTargets, handledBefore } = selectReportsNeedingAttention(
+      reports.events, keys.handling, keys.pendingReview, keys.automated, arrivals,
     );
+    // One line per build, counts only: no target or report ids. An upper
+    // bound: the worker leaves relay bans and the banned-author rule to the
+    // screen, so some of these targets the screen still hides.
+    console.log(
+      `[needs-attention] handled before (upper bound, before relay bans): ${handledBefore.length} targets, by last handling ${
+        JSON.stringify(handledBeforeByLastAction(handledBefore, keys.handling))}`,
+    );
+    const reportArrivals = arrivalsOf(events, arrivals);
     return {
       status: 200,
       body: {
         success: true,
         events,
+        // counts.handled_before is new beside targets and resolved (#324).
         counts,
         // Keys ("pubkey:<hex>", "event:<hex>") of the returned targets that only
-        // the worker's own decisions resolved. Kept for the sensitive switch;
-        // the queue's Hide resolved still hides them (#332).
+        // the worker's own decisions resolved. Kept for the sensitive switch.
+        // Under the dated rule the queue's Hide resolved does not hide them
+        // (#332); only its membership fallback (a pre-#324 Pages build, or a
+        // worker that sends no dates) still does.
         automated_targets: automatedTargets,
+        // Keys of the returned targets a person handled before some of their
+        // reports arrived (#324). Those reports are returned; older ones are not,
+        // so the screen does not count these targets as read in full.
+        handled_before: handledBefore,
+        // First-seen unix seconds by report id, for the returned events the
+        // watcher saw arrive. Absent: compare by created_at.
+        report_arrivals: reportArrivals,
         // The report walk stopped early: reports may be missing.
         truncated: reports.truncated,
         // The label walk stopped early: some handled targets may appear.
@@ -206,8 +316,17 @@ export async function getReportsNeedingAttention(
 // including resolved ones. Paged, because a 200 cap here was the same silent
 // truncation as everywhere else -- an account with more reports had its
 // history quietly cut.
+//
+// `report_arrivals` (#324) is shaped and read as the feed's, so the screen
+// dates a deep-linked report as it dates the feed's. Unlike the feed, a failed
+// arrival read does not fail the lookup: it also feeds the report pane's
+// Related Reports card, and the deep link tells "gone" from "still loading" by
+// it. So with the read failed, or no database bound, it answers without
+// arrivals, and those reports compare by their created_at, as they did before
+// #324.
 export async function getReportsForTarget(
   filter: Record<string, unknown>,
+  db: D1Database | undefined,
   relayUrl: string,
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   try {
@@ -215,7 +334,15 @@ export async function getReportsForTarget(
       relayPageFetcher<RelayReport>(relayUrl, filter, REPORTS_PAGE_SIZE),
       { pageSize: REPORTS_PAGE_SIZE, maxPages: REPORTS_MAX_PAGES },
     );
-    return { status: 200, body: { success: true, events: paged.events, truncated: paged.truncated } };
+    const body: Record<string, unknown> = { success: true, events: paged.events, truncated: paged.truncated };
+    if (db) {
+      try {
+        body.report_arrivals = arrivalsOf(paged.events, await readArrivalsFor(db, paged.events));
+      } catch (error) {
+        console.error('Get reports for target: arrival read failed, answering without arrivals:', error);
+      }
+    }
+    return { status: 200, body };
   } catch (error) {
     console.error('Get reports for target error:', error);
     return failure(502, error);
@@ -229,10 +356,12 @@ export const RESOLVED_PAGE_MAX = 500;
 // resolved history, fetched only when a moderator asks for it.
 //
 // Reads one relay page of `limit` reports ending at `cursor` (`until`,
-// inclusive), and returns the ones the worker resolved: resolved by a person's
-// decision or a label, and not pending review -- the exact complement of the
-// needs-attention filter. Targets resolved only by a ban are not here; they
-// arrive in the needs-attention payload and the client filters them. Nor are
+// inclusive), and returns the ones the worker resolved: a person's decision or
+// a label on the target after the report arrived, and the target not pending
+// review -- the exact complement of the needs-attention filter. A report newer
+// than its target's handling is not here (#324). Targets resolved only by a ban
+// are not here either; they arrive in the needs-attention payload and the
+// client filters them. Nor are
 // targets only the worker's own decisions resolved: no person has handled
 // them, and the needs-attention payload carries them instead.
 //
@@ -262,8 +391,9 @@ export async function getResolvedReportsPage(
     : RESOLVED_PAGE_DEFAULT;
 
   try {
-    const [page, keys] = await Promise.all([
-      relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, limit)(cursor),
+    const [{ page, arrivals }, keys] = await Promise.all([
+      relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, limit)(cursor)
+        .then(async fetched => ({ page: fetched, arrivals: await readArrivalsFor(db, fetched) })),
       readResolutionKeys(db, relayUrl, labelsPaging),
     ]);
 
@@ -271,7 +401,7 @@ export async function getResolvedReportsPage(
       const target = getReportTarget(report);
       if (!target) return false;
       const key = reportTargetKey(target);
-      return isResolvedForReview(key, keys.resolved, keys.pendingReview);
+      return isResolvedForReview(statusOf(report, key, keys.handling, arrivals), key, keys.pendingReview);
     });
 
     // Only a whole, non-negative second anchors a cursor: it is sent back
@@ -321,6 +451,9 @@ export async function getResolvedReportsPage(
         // The label walk stopped early: a label-resolved target beyond its
         // cap is missing from this page's resolved set.
         resolution_truncated: keys.labelsTruncated,
+        // New beside the fields above (#324), shaped as the feed's: the
+        // screen dates these rows by the arrival this page was filtered by.
+        report_arrivals: arrivalsOf(events, arrivals),
       },
     };
   } catch (error) {

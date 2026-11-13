@@ -21,6 +21,7 @@ import {
   type MediaFiles,
 } from "../../shared/media-hashes";
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
+import { REOPENED_ACTION, type HandlingRow } from "../../shared/handling";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 import { handleLoginRefusal, isModeratorLoginRequired } from "./moderatorLoginRequired";
 import type {
@@ -580,19 +581,27 @@ function sanitizeRelayEvents(events: unknown): NostrEvent[] {
 // needs-attention feed (a resolved report, or one that is gone), so the screen
 // can tell those apart from "still loading"; and the report pane's Related
 // Reports card, which counts the reported account's reports by pubkey.
+//
+// `reportArrivals` (#324) is shaped and parsed as the feed's, so the queue
+// dates a deep-linked report as it dates the feed's. Empty from a worker that
+// predates it, or one with no database: those reports compare by created_at.
 export async function fetchReportsByTarget(
   apiUrl: string,
   target: { event: string } | { pubkey: string }
-): Promise<{ events: NostrEvent[]; truncated: boolean }> {
+): Promise<{ events: NostrEvent[]; truncated: boolean; reportArrivals: Readonly<Record<string, number>> }> {
   const qs = 'event' in target
     ? `?event=${encodeURIComponent(target.event)}`
     : `?pubkey=${encodeURIComponent(target.pubkey)}`;
-  const data = await apiRequest<{ success: boolean; events: NostrEvent[]; truncated?: boolean }>(
+  const data = await apiRequest<{ success: boolean; events: NostrEvent[]; truncated?: boolean; report_arrivals?: unknown }>(
     apiUrl,
     `/api/reports${qs}`,
     'GET'
   );
-  return { events: sanitizeRelayEvents(data.events), truncated: data.truncated === true };
+  return {
+    events: sanitizeRelayEvents(data.events),
+    truncated: data.truncated === true,
+    reportArrivals: parseReportArrivals(data.report_arrivals),
+  };
 }
 
 // The queue's read: every report whose target still needs a moderator, at any
@@ -602,8 +611,18 @@ export async function fetchReportsByTarget(
 // each ban list keeps its own failure handling (#221). So are targets only the
 // worker's own decisions resolved: no person has handled them, so the
 // sensitive switch must be able to take them. `automatedTargets` holds their
-// keys, which the queue's Hide resolved still counts as resolved (#332). A
-// worker from before this field sends none and leaves those targets out.
+// keys. Under the handled-before rule (#324) Hide resolved does not count
+// them, as no person handled them (#332); against a worker without that rule
+// it still does. A worker from before this field sends none and leaves those
+// targets out.
+//
+// `reportArrivals` (#324) is when the worker first saw each returned report,
+// the time the handled-before rule compares; a report without one compares by
+// its created_at. Read but not `handled_before`: the queue dates every target
+// itself, by the same rule, so a resolved-history page, which carries its own
+// arrivals, is dated as the worker dated it. A report a deep link's targeted
+// lookup adds from outside the feed has no arrival here; the lookup carries
+// its own (fetchReportsByTarget), and the queue dates it by those.
 //
 // `truncated` means the worker's walk over the relay's reports stopped at its
 // page bound, so older reports may be missing. The response's `counts` are
@@ -620,6 +639,26 @@ export interface ReportsNeedingAttention {
   // plain array, not a Set: TanStack Query keeps the previous data only for
   // plain values, so a Set here rebuilt the whole queue on every unchanged poll.
   automatedTargets: readonly string[];
+  // Unix seconds by report id, from `report_arrivals`. Empty from a worker
+  // that predates it. A plain object for the same reason as automatedTargets.
+  reportArrivals: Readonly<Record<string, number>>;
+  // Target keys from `handled_before` (#324): returned targets a person handled
+  // before some of their reports arrived. The feed sends only those later
+  // reports, so these targets may not be read in full. Empty from a worker that
+  // predates it, which sends every report of each target it returns. A plain
+  // array for the same reason as automatedTargets.
+  handledBeforeTargets: readonly string[];
+}
+
+// Only finite numbers: anything else is no arrival, and the report compares
+// by its created_at.
+function parseReportArrivals(value: unknown): Record<string, number> {
+  const arrivals: Record<string, number> = {};
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return arrivals;
+  for (const [id, seenAt] of Object.entries(value)) {
+    if (typeof seenAt === 'number' && Number.isFinite(seenAt)) arrivals[id] = seenAt;
+  }
+  return arrivals;
 }
 
 export async function fetchReportsNeedingAttention(apiUrl: string): Promise<ReportsNeedingAttention> {
@@ -629,6 +668,8 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     truncated?: boolean;
     oldest_covered?: number | null;
     automated_targets?: unknown;
+    report_arrivals?: unknown;
+    handled_before?: unknown;
     error?: string;
   }>(apiUrl, '/api/reports?needs_attention=1', 'GET');
 
@@ -643,6 +684,10 @@ export async function fetchReportsNeedingAttention(apiUrl: string): Promise<Repo
     // Only strings: anything else in the list names no target.
     automatedTargets: Array.isArray(data.automated_targets)
       ? data.automated_targets.filter((key): key is string => typeof key === 'string')
+      : [],
+    reportArrivals: parseReportArrivals(data.report_arrivals),
+    handledBeforeTargets: Array.isArray(data.handled_before)
+      ? data.handled_before.filter((key): key is string => typeof key === 'string')
       : [],
   };
 }
@@ -664,6 +709,11 @@ export interface ResolvedReportsPage {
   // The worker's walk over resolution labels stopped early, so some
   // label-resolved reports may be missing from this page.
   resolutionTruncated: boolean;
+  // First-seen unix seconds by report id for this page's events, shaped as the
+  // feed's reportArrivals (#324): the worker put these rows in history by
+  // their arrival, and the queue dates them the same way. Empty from a worker
+  // that predates it.
+  reportArrivals: Readonly<Record<string, number>>;
 }
 
 export async function fetchResolvedReportsPage(
@@ -681,6 +731,7 @@ export async function fetchResolvedReportsPage(
     done?: unknown;
     skipped_within_second?: unknown;
     resolution_truncated?: unknown;
+    report_arrivals?: unknown;
     error?: string;
   }>(apiUrl, `/api/reports/resolved${query ? `?${query}` : ''}`, 'GET');
 
@@ -700,6 +751,7 @@ export async function fetchResolvedReportsPage(
     done: data.done,
     skippedWithinSecond: data.skipped_within_second === true,
     resolutionTruncated: data.resolution_truncated === true,
+    reportArrivals: parseReportArrivals(data.report_arrivals),
   };
 }
 
@@ -757,9 +809,48 @@ export async function fetchResolutionLabels(
 
 export interface ResolutionStateResult {
   // automated: the worker itself wrote every decision that resolves this
-  // target. Hide resolved still counts it; the sensitive switch does not.
+  // target. Hide resolved counts it only against a worker without
+  // handlingRows (#332); the sensitive switch does not.
   resolved: Array<{ target_type: string; target_id: string; automated?: boolean }>;
-  states: Array<{ target_type: string; target_id: string; action: string }>;
+  // `at`: unix seconds, null for an undated row (#324). Absent from a worker
+  // that predates it.
+  states: Array<{ target_type: string; target_id: string; action: string; at?: number | null }>;
+  // Every event and pubkey decision row, auto-hide actions left out, each
+  // dated in unix seconds (null for a row written before decisions were
+  // dated): the handled-before rule's input (#324), which the queue reduces
+  // with the worker's own handlingByTarget. Undefined from a worker that
+  // predates it, which keeps the queue on the membership rule.
+  handlingRows?: HandlingRow[];
+}
+
+// A row that does not name its target and action is dropped. So is a
+// handling row with a malformed date or author: dropping handling shows more
+// reports, never fewer. A reopen row is the exception, because a reopen
+// un-handles: dropping one would hide reports it brought back. A reopen with a
+// malformed date is kept, read as undated (it still supersedes undated rows,
+// and marks its target's relay ban as dated; see datedHandling).
+function parseHandlingRows(value: unknown): HandlingRow[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const rows: HandlingRow[] = [];
+  for (const row of value) {
+    if (!row || typeof row !== 'object') continue;
+    if (typeof row.target_type !== 'string' || typeof row.target_id !== 'string' || typeof row.action !== 'string') continue;
+    const datedOk = row.at === null || (typeof row.at === 'number' && Number.isFinite(row.at));
+    const authorOk = row.moderator_pubkey === undefined || row.moderator_pubkey === null
+      || typeof row.moderator_pubkey === 'string';
+    if (row.action === REOPENED_ACTION) {
+      rows.push({
+        target_type: row.target_type,
+        target_id: row.target_id,
+        action: row.action,
+        moderator_pubkey: authorOk ? row.moderator_pubkey : null,
+        at: datedOk ? row.at : null,
+      });
+    } else if (datedOk && authorOk) {
+      rows.push(row as HandlingRow);
+    }
+  }
+  return rows;
 }
 
 export async function fetchResolutionState(
@@ -770,6 +861,7 @@ export async function fetchResolutionState(
     success: boolean;
     resolved?: ResolutionStateResult['resolved'];
     states?: ResolutionStateResult['states'];
+    handling_rows?: unknown;
     error?: string;
   }>(apiUrl, '/api/resolution-state', 'GET', undefined, opts);
 
@@ -778,11 +870,17 @@ export async function fetchResolutionState(
     throw new ApiError(data.error || 'Failed to get resolution state');
   }
 
-  return { resolved: data.resolved || [], states: data.states || [] };
+  return {
+    resolved: data.resolved || [],
+    states: data.states || [],
+    handlingRows: parseHandlingRows(data.handling_rows),
+  };
 }
 
 export interface ResolutionLabelTargetsResult {
-  targets: Array<{ type: 'event' | 'pubkey'; value: string }>;
+  // `at` (#324): unix seconds of the newest label on the target. Absent from a
+  // worker that predates it, which keeps the queue on the membership rule.
+  targets: Array<{ type: 'event' | 'pubkey'; value: string; at?: number }>;
   truncated: boolean;
   oldestCovered: number | null;
 }
@@ -1074,15 +1172,19 @@ export async function getAllDecisions(
   };
 }
 
-// Delete all decisions for a target (reopens the report).
-// labelCleanupFailed means the relay-side resolution labels could not be fully
-// cleared -- the read failed, the read filled its page so there may be more
-// beyond it, or a label was read but could not be removed. Any of those leaves
-// labels alive that keep the report hidden even though its decisions are gone,
-// so callers must surface it rather than reporting a clean reopen.
-// targetType lets the worker query only the label tag that can match ('e' for
-// an event, 'p' for a pubkey). Omitting it is safe: the worker then checks
-// both, which is what an older frontend gets.
+// Reopen a target (#324). The name and DELETE route predate the change. The
+// worker writes one dated `reopened` decision row per call and removes
+// nothing: the target's decisions and resolution labels stay as history, and
+// only handling recorded after the newest reopen counts. `deleted` is the
+// number of rows written (1, or 2 when no targetType is sent, since the worker
+// then reopens the id as both an event and a pubkey).
+// labelCleanupFailed is always false from the current worker, and labelsDeleted
+// is always 0. They are kept for older frontends. A worker from before #324
+// deleted the decisions, banned the labels, and set labelCleanupFailed when a
+// label might have survived, so callers still surface it for a rolled-back
+// worker.
+// targetType names the row's target type. Always send it: omitting it reopens
+// both types.
 export async function deleteDecisions(
   apiUrl: string,
   targetId: string,

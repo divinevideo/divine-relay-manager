@@ -7,7 +7,8 @@ import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } fr
 import { QueryClient, onlineManager } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
-import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
+import { EMPTY_RESOLVED_PAGE, resolvedPage } from '@/test/resolvedHistory';
+import { useLocation } from 'react-router-dom';
 import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
@@ -96,6 +97,23 @@ interface SourceState {
   // they disagree, which must not cross-resolve (the burying case).
   secondAuthoredEventReportP?: string;
   secondAuthoredEventReportWithoutP?: boolean;
+  // A worker with the handled-before rule (#324): /api/resolution-state sends
+  // these as handling_rows, and /api/resolution-label-targets sends
+  // `datedLabels` in place of the targets `labels` would. Both absent: a
+  // worker from before it, which sends neither.
+  handlingRows?: unknown[];
+  datedLabels?: unknown[];
+  // The feed's report_arrivals: first-seen unix seconds by report id.
+  reportArrivals?: Record<string, number>;
+  // More feed reports, after the ones above.
+  extraReports?: unknown[];
+  // The resolved-history page, in place of an empty one.
+  historyPage?: unknown;
+  // Holds /api/resolution-state until this settles.
+  decisionsGate?: Promise<void>;
+  // The single-target lookup's answer (/api/reports?event= or ?pubkey=), in
+  // place of the feed's. For a deep link to a target the feed does not carry.
+  targeted?: { events: unknown[]; report_arrivals?: Record<string, number> };
 }
 
 function stubFetch(state: SourceState) {
@@ -105,10 +123,13 @@ function stubFetch(state: SourceState) {
   const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
 
-    if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
+    if (url.includes('/api/reports/resolved')) return jsonResponse(state.historyPage ?? EMPTY_RESOLVED_PAGE);
+    if (state.targeted && /\/api\/reports\?(event|pubkey)=/.test(url)) {
+      return jsonResponse({ success: true, truncated: false, ...state.targeted });
+    }
     if (url.includes('/api/reports')) {
       if (state.reports === 'error') return jsonResponse({ success: false, error: 'relay unreachable' }, 500);
-      const events: unknown[] = [REPORT];
+      const events: unknown[] = [REPORT, ...(state.extraReports ?? [])];
       if (state.includeEventReport) events.push(EVENT_REPORT);
       if (state.authoredEventReportP) events.push(authoredEventReport(state.authoredEventReportP));
       if (state.secondAuthoredEventReportP) {
@@ -120,7 +141,11 @@ function stubFetch(state: SourceState) {
           tags: [['e', AUTHORED_EVENT_ID, 'spam']],
         });
       }
-      return jsonResponse({ success: true, events });
+      return jsonResponse({
+        success: true,
+        events,
+        ...(state.reportArrivals ? { report_arrivals: state.reportArrivals } : {}),
+      });
     }
 
     // The worker now reduces every page of resolution labels to target keys,
@@ -128,6 +153,9 @@ function stubFetch(state: SourceState) {
     if (url.includes('/api/resolution-label-targets')) {
       if (slow.has('labels')) return never;
       if (state.labels === 'error') return jsonResponse({ success: false, error: 'relay timeout' }, 502);
+      if (state.datedLabels) {
+        return jsonResponse({ success: true, targets: state.datedLabels, truncated: false, oldest_covered: null });
+      }
       return jsonResponse({
         success: true,
         targets: state.labels === 'resolves' || state.labels === 'resolves-uppercase'
@@ -142,6 +170,7 @@ function stubFetch(state: SourceState) {
     // set, plus the auto-hide state actions that feed pendingReviewTargets.
     if (url.includes('/api/resolution-state')) {
       if (slow.has('decisions')) return never;
+      if (state.decisionsGate) await state.decisionsGate;
       if (state.decisions === 'error') return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
       return jsonResponse({
         success: true,
@@ -149,6 +178,7 @@ function stubFetch(state: SourceState) {
           ? [{ target_type: 'pubkey', target_id: state.decisions === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase() }]
           : [],
         states: [],
+        ...(state.handlingRows ? { handling_rows: state.handlingRows } : {}),
       });
     }
 
@@ -192,6 +222,8 @@ afterEach(() => {
   // implementation for every test after the first in this file.
   consoleWarn.mockRestore();
   consoleError.mockRestore();
+  // Deep-link tests leave the URL behind.
+  window.history.pushState({}, '', '/');
 });
 
 function renderReports(queryClient?: QueryClient) {
@@ -389,6 +421,332 @@ describe('resolution sources genuinely hide handled work (controls)', () => {
 
     await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
     expect(screen.queryByText(AUTHORED_NOTE)).not.toBeInTheDocument();
+  });
+});
+
+// A report counts as handled only when a person handled its target after the
+// report arrived (#324). The screen dates every target from the worker's
+// handling_rows and the dated label targets, as the worker's feed does.
+describe('the handled-before rule (#324)', () => {
+  const T = REPORT.created_at;
+  const MODERATOR = '1'.repeat(64);
+  const row = (target_type: string, target_id: string, action: string, at: number | null, moderator_pubkey = MODERATOR) =>
+    ({ target_type, target_id, action, moderator_pubkey, at });
+  const healthy = { bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' } as const;
+
+  it('takes a target handled before its newest report out of the main list, keeps an older one hidden, and lists both with Hide resolved off', async () => {
+    stubFetch({
+      ...healthy,
+      // A worker with the rule still sends `resolved`, as before.
+      decisions: 'resolves',
+      includeEventReport: true,
+      // An unhandled post by an unhandled account: the control row.
+      authoredEventReportP: 'f'.repeat(64),
+      handlingRows: [
+        // The account was handled 50s before its report arrived.
+        row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 50),
+        // The post was handled 50s after its report arrived.
+        row('event', REPORTED_EVENT_ID, 'delete_event', EVENT_REPORT.created_at + 50),
+      ],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+    expect(screen.queryByText(REPORTED_NOTE)).not.toBeInTheDocument();
+
+    // Hide resolved off: the newer report stays where the feed put it.
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.getByText(REPORTED_NOTE)).toBeInTheDocument();
+    // Only the post counts as resolved: the account has a report no one has
+    // answered yet.
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // Reopen ends the handling before it. A resolution label is never banned
+  // any more, so only its date against the reopen can tell it no longer counts.
+  it('lists a target whose label a later reopen cancelled', async () => {
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50)],
+      datedLabels: [{ type: 'pubkey', value: REPORTED_PUBKEY, at: T - 100 }],
+    });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  it("keeps today's list against a worker that sends neither handling rows nor label dates", async () => {
+    // The same label, from a worker that predates the rule: it hides the target.
+    stubFetch({ ...healthy, labels: 'resolves' });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
+  it("keeps today's list when label targets come without dates, even beside handling rows", async () => {
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50)],
+      datedLabels: [{ type: 'pubkey', value: REPORTED_PUBKEY }],
+    });
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
+  });
+
+  // The worker compares by when it saw a report arrive; the screen must too,
+  // or it calls a backdated report handled that the worker kept as new.
+  it('compares a report by its arrival time from the feed', async () => {
+    const base = {
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T + 10)],
+      datedLabels: [],
+    };
+    stubFetch({ ...base, reportArrivals: { [REPORT.id]: T + 20 } });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(await screen.findByText('No resolved reports.')).toBeInTheDocument();
+  });
+
+  it('compares a report with no arrival by its created_at', async () => {
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T + 10)],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // Spec decision 3: a post by a banned account is compared with the
+  // account's dated ban, not hidden for good by it.
+  it("compares a banned author's post report with the author's dated ban", async () => {
+    stubFetch({
+      ...healthy,
+      bannedPubkeys: 'resolves',
+      authoredEventReportP: REPORTED_PUBKEY,
+      // Banned 10s after the account's own report, 50s before the post's.
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T + 10)],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText(AUTHORED_NOTE)).toBeInTheDocument();
+    // The account's report is resolved; the post's report came after the ban.
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // A relay ban hides as undated only when the decision log has no dated row
+  // for it. After a Reopen, its dated row is superseded, and the ban hides
+  // nothing: Reopen never makes a report less visible.
+  it('lists a reopened account, and its posts, though the relay still lists the ban', async () => {
+    stubFetch({
+      ...healthy,
+      bannedPubkeys: 'resolves',
+      authoredEventReportP: REPORTED_PUBKEY,
+      handlingRows: [
+        row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 100),
+        row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50),
+      ],
+      datedLabels: [],
+    });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+    expect(screen.getByText(AUTHORED_NOTE)).toBeInTheDocument();
+  });
+
+  // A reopen with a malformed date is kept, undated, rather than dropped:
+  // dropping it would let the relay ban hide the account as if undated.
+  it('keeps a reopen row whose date is malformed', async () => {
+    stubFetch({
+      ...healthy,
+      bannedPubkeys: 'resolves',
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', 'not a time' as unknown as number)],
+      datedLabels: [],
+    });
+    renderReports();
+
+    expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
+  });
+
+  // The All tab dates each report by itself: by its id's arrival, else its
+  // created_at. Grouped, this target is one handled-before row and counts as
+  // no resolved row.
+  it('counts resolved reports one by one in the All tab, by arrival and created_at', async () => {
+    const byArrival = { ...REPORT, id: '3'.repeat(64), created_at: T + 5 };   // stamped after, arrived before
+    const byCreatedAt = { ...REPORT, id: '4'.repeat(64), created_at: T - 100 }; // before the handling
+    const newer = { ...REPORT, id: '5'.repeat(64), created_at: T + 50 };        // after it
+    stubFetch({
+      ...healthy,
+      // REPORT itself arrived after the handling.
+      extraReports: [byArrival, byCreatedAt, newer],
+      reportArrivals: { [REPORT.id]: T + 20, [byArrival.id]: T - 20 },
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 10)],
+      datedLabels: [],
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    expect(await screen.findByText('No resolved reports.')).toBeInTheDocument();
+    await user.click(screen.getByRole('tab', { name: /^All/ }));
+    expect(await screen.findByText('Showing 2 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  // Resolved history carries the arrivals its page was filtered by, so a row
+  // the worker put in history by arrival reads as resolved here too.
+  it('dates a resolved-history row by the arrival its page carries', async () => {
+    const historyRow = { ...REPORT, id: '6'.repeat(64), created_at: T + 100 };
+    stubFetch({
+      ...healthy,
+      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 10)],
+      datedLabels: [],
+      historyPage: {
+        ...resolvedPage([historyRow], { nextCursor: null, done: true }),
+        report_arrivals: { [historyRow.id]: T - 20 },
+      },
+    });
+    const user = userEvent.setup();
+    renderReports();
+
+    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
+    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+    await user.click(screen.getByRole('tab', { name: /^All/ }));
+    // The feed's REPORT came after the handling; the history row arrived before it.
+    expect(await screen.findByText('Showing 1 resolved. End of resolved history.')).toBeInTheDocument();
+  });
+
+  describe('a deep link to a target handled before its newest report', () => {
+    function RoutedReports() {
+      const { pathname } = useLocation();
+      const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+      return <Reports relayUrl={RELAY_URL} selectedReportId={reportId} />;
+    }
+    const hideResolvedSwitch = () => screen.getByRole('switch', { name: /hide resolved/i });
+
+    it('turns Hide resolved off so its row is in the list', async () => {
+      stubFetch({
+        ...healthy,
+        handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 50)],
+        datedLabels: [],
+      });
+      window.history.pushState({}, '', `/reports?pubkey=${REPORTED_PUBKEY}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${REPORT.id}`));
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+      expect(screen.getByText(REPORTED_NPUB)).toBeInTheDocument();
+    });
+
+    // The decisions read lands after the link opened the row, so the
+    // re-check as resolution data arrives is what unhides it.
+    it('turns Hide resolved off once the decisions read lands after the link opened', async () => {
+      let release!: () => void;
+      const decisionsGate = new Promise<void>(resolve => { release = resolve; });
+      stubFetch({
+        ...healthy,
+        handlingRows: [row('pubkey', REPORTED_PUBKEY, 'ban_user', T - 50)],
+        datedLabels: [],
+        decisionsGate,
+      });
+      window.history.pushState({}, '', `/reports?pubkey=${REPORTED_PUBKEY}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${REPORT.id}`));
+      await act(async () => { release(); });
+      await waitFor(() => expect(hideResolvedSwitch()).not.toBeChecked());
+    });
+  });
+
+  // A deep link to a target the feed does not carry reads its reports from the
+  // single-target lookup. They are dated by the arrivals that lookup carries,
+  // as the feed's are, so the link does not call a report handled before that
+  // the feed and resolved history call handled.
+  describe('a deep link to a target outside the feed', () => {
+    function RoutedReports() {
+      const { pathname } = useLocation();
+      const reportId = pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1];
+      return <Reports relayUrl={RELAY_URL} selectedReportId={reportId} />;
+    }
+    const LINKED_EVENT_ID = '2'.repeat(64);
+    const LINKED_NOTE = nip19.noteEncode(LINKED_EVENT_ID);
+    const linkedReport = (id: string, created_at: number) => ({
+      ...EVENT_REPORT, id, created_at, tags: [['e', LINKED_EVENT_ID, 'spam']],
+    });
+    // Stamped 100s after the post was handled, but it arrived 20s before.
+    const backdated = linkedReport('3'.repeat(64), T + 100);
+    const handledPost = [row('event', LINKED_EVENT_ID, 'delete_event', T - 10)];
+
+    it('dates a linked report by the arrival its lookup carries', async () => {
+      stubFetch({
+        ...healthy,
+        handlingRows: handledPost,
+        datedLabels: [],
+        targeted: { events: [backdated], report_arrivals: { [backdated.id]: T - 20 } },
+      });
+      window.history.pushState({}, '', `/reports?event=${LINKED_EVENT_ID}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${backdated.id}`));
+      expect(await screen.findByText(LINKED_NOTE)).toBeInTheDocument();
+      expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
+    });
+
+    // The control: with no arrival the same report compares by its created_at,
+    // after the handling, and the row says so.
+    it('dates a linked report with no arrival by its created_at', async () => {
+      stubFetch({
+        ...healthy,
+        handlingRows: handledPost,
+        datedLabels: [],
+        targeted: { events: [backdated] },
+      });
+      window.history.pushState({}, '', `/reports?event=${LINKED_EVENT_ID}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${backdated.id}`));
+      expect(await screen.findByText(LINKED_NOTE)).toBeInTheDocument();
+      expect(await screen.findByText('Handled before')).toBeInTheDocument();
+    });
+
+    // newestReport's rule: the report that reached us last, not the one with
+    // the largest created_at.
+    it('opens the linked report that arrived last', async () => {
+      const arrivedLast = linkedReport('4'.repeat(64), T + 5);
+      stubFetch({
+        ...healthy,
+        handlingRows: [],
+        datedLabels: [],
+        targeted: {
+          events: [backdated, arrivedLast],
+          report_arrivals: { [backdated.id]: T - 20, [arrivedLast.id]: T + 30 },
+        },
+      });
+      window.history.pushState({}, '', `/reports?event=${LINKED_EVENT_ID}`);
+      render(<TestApp><RoutedReports /></TestApp>);
+
+      await waitFor(() => expect(window.location.pathname).toBe(`/reports/${arrivedLast.id}`));
+    });
   });
 });
 

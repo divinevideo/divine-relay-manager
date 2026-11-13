@@ -67,6 +67,9 @@ export interface AutoHideStateRowLike {
   target_type: string;
   target_id: string;
   action: string;
+  // Unix seconds; null for an undated row. Absent from a worker before #324.
+  // TODO(#409): make it required once no worker from before #324 can be live.
+  at?: number | null;
 }
 
 // Targets auto-hidden and still waiting for a human, each keyed to its latest

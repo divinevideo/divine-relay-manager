@@ -8,7 +8,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { getResolvedTargets, getAutoHideStates } from '../src/resolution-state';
+import { getResolvedTargets, getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from '../src/resolution-state';
 import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
 import worker from '../src/index';
 
@@ -94,7 +94,10 @@ async function resolutionState(db: D1Database = DB) {
   const body = (await res.json()) as {
     success: boolean;
     resolved: Array<{ target_type: string; target_id: string; automated?: true }>;
-    states: Array<{ target_type: string; target_id: string; action: string }>;
+    states: Array<{ target_type: string; target_id: string; action: string; at: number | null }>;
+    handling_rows: Array<{
+      target_type: string; target_id: string; action: string; moderator_pubkey: string | null; at: number | null;
+    }>;
   };
   return { res, body };
 }
@@ -129,7 +132,19 @@ describe('/api/resolution-state against real D1', () => {
       target_type: 'event',
       target_id: PRE_CAP_HIDDEN_TARGET,
       action: 'auto_hidden',
+      at: Date.UTC(2026, 0, 1, 0, 0, 1) / 1000,
     });
+  });
+
+  // The sensitive switch compares a report with the time a person confirmed or
+  // restored an auto-hide (#324), so each state row carries its unix seconds.
+  it('dates each auto-hide state row in unix seconds', async () => {
+    const { body } = await resolutionState();
+
+    const confirmed = body.states.find(
+      (s) => s.target_id === PRE_CAP_CONFIRMED_TARGET && s.action === 'auto_hide_confirmed'
+    );
+    expect(confirmed?.at).toBe(Date.UTC(2026, 0, 1, 0, 0, 3) / 1000);
   });
 
   it("orders a target's auto-hide actions newest-first", async () => {
@@ -260,6 +275,8 @@ describe('resolution-state chunking against real D1', () => {
     expect(
       chunked.filter((s) => s.target_id === NULL_DATED_TARGET).map((s) => s.action)
     ).toEqual(['auto_hidden']);
+    // An undated row says so, rather than carrying a made-up time.
+    expect(chunked.find((s) => s.target_id === NULL_DATED_TARGET)?.at).toBeNull();
   });
 });
 
@@ -313,6 +330,12 @@ describe('resolved targets only automation has touched, against real D1', () => 
   async function resolvedFor(targetId: string, opts?: { chunkSize?: number }) {
     return (await getResolvedTargets(autoDB, opts)).filter((t) => t.target_id === targetId);
   }
+
+  // The feed derives these targets from the handling rows rather than walking
+  // the table a second time, so the two reads must agree on every target.
+  it('gives the same targets from the handling rows as from its own walk', async () => {
+    expect(resolvedTargetsFromRows(await getHandlingRows(autoDB))).toStrictEqual(await getResolvedTargets(autoDB));
+  });
 
   // toStrictEqual, not toEqual: toEqual also accepts `automated: undefined`,
   // and a target a person touched must carry no flag at all.
@@ -384,5 +407,143 @@ describe('resolved targets only automation has touched, against real D1', () => 
     expect(await resolvedFor(reported)).toStrictEqual([
       { target_type: 'pubkey', target_id: reported, automated: true },
     ]);
+  });
+});
+
+// The dated decision rows the handled-before rule reads (#324), and Reopen as
+// an old Pages build sees it through `resolved`. Its own small database.
+describe('handling rows and reopened targets, against real D1', () => {
+  let rowsMf: Miniflare;
+  let rowsDB: D1Database;
+
+  const MODERATOR = '7e'.repeat(32);
+  const HANDLED = '11'.repeat(32);
+  const AUTO_HIDDEN = '22'.repeat(32);
+  const REOPENED = '33'.repeat(32);
+  const REOPENED_THEN_HANDLED = '44'.repeat(32);
+  const REOPENED_THEN_AUTOMATED = '55'.repeat(32);
+  const UNDATED = '66'.repeat(32);
+  const MAR_1 = 1_772_323_200; // 2026-03-01 00:00:00 UTC
+
+  beforeAll(async () => {
+    rowsMf = new Miniflare({
+      modules: true,
+      script: 'export default { fetch() { return new Response("ok"); } };',
+      compatibilityDate: '2024-12-01',
+      compatibilityFlags: ['nodejs_compat'],
+      d1Databases: ['DB'],
+    });
+    rowsDB = (await rowsMf.getD1Database('DB')) as unknown as D1Database;
+    await ensureSchema(rowsDB);
+
+    const stmt = rowsDB.prepare(
+      `INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    );
+    // Interleaved, so each target's rows sit apart in id order; with
+    // chunkSize: 1 every row is its own chunk.
+    await rowsDB.batch([
+      stmt.bind('event', HANDLED, 'reviewed', MODERATOR, '2026-03-01 00:00:00'),
+      stmt.bind('event', AUTO_HIDDEN, 'auto_hidden', 'auto', '2026-03-01 00:00:01'),
+      stmt.bind('pubkey', REOPENED, 'banned', MODERATOR, '2026-03-01 00:00:02'),
+      stmt.bind('event', REOPENED_THEN_HANDLED, 'reviewed', MODERATOR, '2026-03-01 00:00:03'),
+      stmt.bind('event', AUTO_HIDDEN, 'auto_hide_confirmed', MODERATOR, '2026-03-01 00:00:04'),
+      stmt.bind('pubkey', REOPENED_THEN_AUTOMATED, 'reviewed', MODERATOR, '2026-03-01 00:00:05'),
+      stmt.bind('media', 'f'.repeat(64), 'blocked', MODERATOR, '2026-03-01 00:00:06'),
+      stmt.bind('pubkey', REOPENED, 'reopened', MODERATOR, '2026-03-01 00:00:07'),
+      stmt.bind('event', REOPENED_THEN_HANDLED, 'reopened', MODERATOR, '2026-03-01 00:00:08'),
+      stmt.bind('pubkey', REOPENED_THEN_AUTOMATED, 'reopened', MODERATOR, '2026-03-01 00:00:09'),
+      stmt.bind('event', REOPENED_THEN_HANDLED, 'dismissed', MODERATOR, '2026-03-01 00:00:10'),
+      stmt.bind('pubkey', REOPENED_THEN_AUTOMATED, 'age_review_case_created', 'auto', '2026-03-01 00:00:11'),
+      stmt.bind('event', UNDATED, 'reviewed', null, null),
+    ]);
+  });
+
+  afterAll(async () => {
+    await rowsMf?.dispose();
+  });
+
+  it('returns event and pubkey rows dated in unix seconds, without auto-hide rows', async () => {
+    const rows = await getHandlingRows(rowsDB);
+
+    expect(rows.filter((r) => r.target_id === HANDLED)).toStrictEqual([
+      { target_type: 'event', target_id: HANDLED, action: 'reviewed', moderator_pubkey: MODERATOR, at: MAR_1 },
+    ]);
+    // A person confirming an auto-hide is not handling (spec): every auto-hide
+    // action stays out. And a media decision names no report.
+    expect(rows.some((r) => r.target_id === AUTO_HIDDEN)).toBe(false);
+    expect(rows.some((r) => r.target_type === 'media')).toBe(false);
+  });
+
+  it('keeps the reopened and automated rows the rule needs, and an undated row as null', async () => {
+    const rows = await getHandlingRows(rowsDB);
+
+    expect(rows.filter((r) => r.target_id === REOPENED_THEN_AUTOMATED)).toStrictEqual([
+      { target_type: 'pubkey', target_id: REOPENED_THEN_AUTOMATED, action: 'reviewed', moderator_pubkey: MODERATOR, at: MAR_1 + 5 },
+      { target_type: 'pubkey', target_id: REOPENED_THEN_AUTOMATED, action: 'reopened', moderator_pubkey: MODERATOR, at: MAR_1 + 9 },
+      { target_type: 'pubkey', target_id: REOPENED_THEN_AUTOMATED, action: 'age_review_case_created', moderator_pubkey: 'auto', at: MAR_1 + 11 },
+    ]);
+    expect(rows.filter((r) => r.target_id === UNDATED)).toStrictEqual([
+      { target_type: 'event', target_id: UNDATED, action: 'reviewed', moderator_pubkey: null, at: null },
+    ]);
+  });
+
+  it('returns every row across chunk boundaries', async () => {
+    const all = await getHandlingRows(rowsDB);
+    const chunked = await getHandlingRows(rowsDB, { chunkSize: 1 });
+
+    // 13 rows seeded, less two auto-hide rows and one media row.
+    expect(all).toHaveLength(10);
+    expect(chunked).toStrictEqual(all);
+  });
+
+  // The handling rows leave out targets that are neither an event nor a
+  // pubkey (the media row here); for every other target the two agree,
+  // reopens and automated rows included.
+  it('gives the same event and pubkey targets from the handling rows as from its own walk', async () => {
+    const walked = (await getResolvedTargets(rowsDB))
+      .filter((t) => t.target_type === 'event' || t.target_type === 'pubkey');
+    expect(walked.length).toBeGreaterThan(2);
+    expect(resolvedTargetsFromRows(await getHandlingRows(rowsDB))).toStrictEqual(walked);
+  });
+
+  it('leaves a target out of resolved once it is reopened, as Reopen did by deleting its rows', async () => {
+    const resolved = await getResolvedTargets(rowsDB, { chunkSize: 1 });
+
+    expect(resolved.some((t) => t.target_id === REOPENED)).toBe(false);
+    expect(resolved).toContainEqual({ target_type: 'event', target_id: HANDLED });
+  });
+
+  it('resolves a reopened target again when a person handles it after the reopen', async () => {
+    const resolved = await getResolvedTargets(rowsDB, { chunkSize: 1 });
+
+    expect(resolved.filter((t) => t.target_id === REOPENED_THEN_HANDLED)).toStrictEqual([
+      { target_type: 'event', target_id: REOPENED_THEN_HANDLED },
+    ]);
+  });
+
+  it('counts only what came after the reopen: a later automated row alone is automated', async () => {
+    // The person's decision before the reopen no longer counts, so the target
+    // is the worker's alone, as it would be had Reopen deleted that decision.
+    const resolved = await getResolvedTargets(rowsDB, { chunkSize: 1 });
+
+    expect(resolved.filter((t) => t.target_id === REOPENED_THEN_AUTOMATED)).toStrictEqual([
+      { target_type: 'pubkey', target_id: REOPENED_THEN_AUTOMATED, automated: true },
+    ]);
+  });
+
+  it('sends the rows through /api/resolution-state, beside the fields it already had', async () => {
+    const { res, body } = await resolutionState(rowsDB);
+
+    expect(res.status).toBe(200);
+    expect(Object.keys(body).sort()).toEqual(['handling_rows', 'resolved', 'states', 'success']);
+    expect(body.handling_rows).toStrictEqual(await getHandlingRows(rowsDB));
+    expect(body.resolved).toStrictEqual(await getResolvedTargets(rowsDB));
+    expect(body.states).toContainEqual({
+      target_type: 'event',
+      target_id: AUTO_HIDDEN,
+      action: 'auto_hide_confirmed',
+      at: Date.UTC(2026, 2, 1, 0, 0, 4) / 1000,
+    });
   });
 });

@@ -10,6 +10,8 @@ import { finalizeEvent } from 'nostr-tools';
 import { SexualQuarantine } from '../src/sexual-quarantine';
 import { createQuarantineIO } from '../src/sexual-quarantine-io';
 import { markHumanAction, markHumanReviewed } from '../src/human-decision';
+import { getHandlingRows, getResolvedTargets } from '../src/resolution-state';
+import { handlingByTarget } from '../../shared/handling';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 
@@ -378,6 +380,88 @@ describe('recorded content decisions on real D1', () => {
       'auto_hide_restored',
       'auto_hide_unresolved',
     ]);
+  });
+
+  // Reopen (#324) keeps the history and ends the handling before it. The row
+  // has to be dated by D1 itself: an undated reopen would cut off nothing.
+  it('reopens a target by recording a dated row, and a later decision handles it again', async () => {
+    const eventId = 'f2'.repeat(32);
+    const moderator = '9'.repeat(64);
+    await DB.prepare(`INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at)
+      VALUES ('event', ?, 'delete_event', ?, '2026-08-15 00:00:00')`).bind(eventId, moderator).run();
+    const env = { ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never;
+    const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+    const entryFor = async () =>
+      handlingByTarget(await getHandlingRows(DB), []).get(`event:${eventId}`);
+    const resolved = async () =>
+      (await getResolvedTargets(DB)).some(t => t.target_type === 'event' && t.target_id === eventId);
+
+    expect(await entryFor()).toBeDefined();
+
+    const response = await worker.fetch(
+      new Request(`https://api.example.test/api/decisions/${eventId}?targetType=event`, {
+        method: 'DELETE', headers: { 'X-Admin-Key': 'test-admin-key' },
+      }),
+      env, context,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ success: true, deleted: 1, labelsDeleted: 0, labelCleanupFailed: false });
+
+    const rows = (await DB.prepare(`
+      SELECT action, reason, moderator_pubkey, created_at FROM moderation_decisions
+      WHERE target_id = ? ORDER BY id
+    `).bind(eventId).all<{ action: string; reason: string | null; moderator_pubkey: string | null; created_at: string | null }>()).results;
+    // The earlier decision is still there, unchanged.
+    expect(rows[0]).toEqual({ action: 'delete_event', reason: null, moderator_pubkey: moderator, created_at: '2026-08-15 00:00:00' });
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({ action: 'reopened', reason: 'Reopened', moderator_pubkey: null });
+    expect(rows[1].created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
+
+    // The handling the reopen ended no longer counts, on either read.
+    expect(await entryFor()).toBeUndefined();
+    expect(await resolved()).toBe(false);
+
+    // A decision after the reopen handles the target again. Dated a minute
+    // ahead: the rule needs a strictly later second than the reopen.
+    await DB.prepare(`INSERT INTO moderation_decisions (target_type, target_id, action, moderator_pubkey, created_at)
+      VALUES ('event', ?, 'reviewed', ?, datetime('now', '+1 minute'))`).bind(eventId, moderator).run();
+    const entry = await entryFor();
+    expect(entry).toBeDefined();
+    expect(entry!.handledAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    expect(entry!.history.map(h => h.action)).toEqual(['reviewed', 'reopened', 'delete_event']);
+    expect(await resolved()).toBe(true);
+  });
+
+  // A typeless reopen (an older frontend, or an admin-key caller) writes an
+  // event row and a pubkey row. They go in one batch, so when the second
+  // cannot be written the first is not left behind: the reopen answers 500
+  // with nothing recorded, and a retry does not log the event side twice.
+  it('records neither row of a typeless reopen when one of them cannot be written', async () => {
+    const targetId = 'e7'.repeat(32);
+    await DB.prepare(`
+      CREATE TRIGGER test_reject_pubkey_reopen BEFORE INSERT ON moderation_decisions
+      WHEN NEW.target_type = 'pubkey' AND NEW.action = 'reopened'
+      BEGIN SELECT RAISE(ABORT, 'pubkey reopen rejected'); END
+    `).run();
+    try {
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+      const env = { ALLOWED_ORIGINS: '', ADMIN_API_KEY: 'test-admin-key', DB } as never;
+      const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
+
+      const response = await worker.fetch(
+        new Request(`https://api.example.test/api/decisions/${targetId}`, {
+          method: 'DELETE', headers: { 'X-Admin-Key': 'test-admin-key' },
+        }),
+        env, context,
+      );
+
+      expect(response.status).toBe(500);
+      const rows = await DB.prepare('SELECT target_type FROM moderation_decisions WHERE target_id = ?')
+        .bind(targetId).all<{ target_type: string }>();
+      expect(rows.results).toEqual([]);
+    } finally {
+      await DB.prepare('DROP TRIGGER IF EXISTS test_reject_pubkey_reopen').run();
+    }
   });
 
   it('adds last_human_action to a pre-upgrade moderation_targets table', async () => {

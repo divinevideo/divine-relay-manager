@@ -55,7 +55,7 @@ vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
     hasDecisions: false, hasHandlingDecisions: false, latestHandlingDecision: undefined, isPendingReview: false,
     isAutoHideRestoreFailed: false, isAutoHideUnresolved: false, isDeleted: false, isAutoHidden: false,
-    isAutoHideRestored: false, decisions: [], latestDecision: null, refetch: vi.fn(),
+    isAutoHideRestored: false, decisions: [], refetch: vi.fn(),
   }),
 }));
 vi.mock('@/hooks/useModerationStatus', () => ({
@@ -507,5 +507,70 @@ describe('in the history view, the open target moving into resolved history', ()
     await land({ open: openFeed }, feed);
     expect(screen.getByText(nip19.noteEncode(EVENT))).toBeInTheDocument();
     expect(hasImg(POST_IMG)).toBe(true);
+  });
+});
+
+// A person handled the post before its spam report came (#324). The feed then
+// sends only that later report and lists the post in `handled_before`, so the
+// reports from before the handling, which may carry a CSAM signal, are not in
+// hand. The pane treats the target as partial, as it treats a feed that
+// stopped early.
+describe('a target the feed lists as handled before', () => {
+  const HANDLING = {
+    target_type: 'event', target_id: EVENT, action: 'reviewed', moderator_pubkey: 'e'.repeat(64),
+    at: SPAM_REPORT.created_at - 100,
+  };
+
+  function stubFeed(handledBefore: string[] | undefined) {
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/reports?needs_attention=1')) {
+        return jsonResponse({
+          success: true, events: [SPAM_REPORT], truncated: false,
+          ...(handledBefore ? { handled_before: handledBefore } : {}),
+        });
+      }
+      if (url.includes('/api/reports/resolved')) return jsonResponse(resolvedPage([], { nextCursor: null, done: true }));
+      if (url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
+      }
+      if (url.includes('/api/resolution-state')) {
+        return jsonResponse({ success: true, resolved: [], states: [], handling_rows: [HANDLING] });
+      }
+      if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
+      return jsonResponse({ success: true });
+    }));
+  }
+
+  async function openFromHandledBeforeSection() {
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
+    const user = userEvent.setup();
+    render(<TestApp queryClient={queryClient}><TooltipProvider><Reports relayUrl={RELAY_URL} /></TooltipProvider></TestApp>);
+    await user.click(await screen.findByRole('button', { name: '1 new on an item already handled' }));
+    await user.click(await screen.findByText(nip19.noteEncode(EVENT)));
+    await screen.findByText('Media Content');
+  }
+
+  it("starts the post media, avatar and recent-post media hidden, and counts its reports as a floor", async () => {
+    stubFeed([`event:${EVENT}`]);
+    await openFromHandledBeforeSection();
+    // The post media waits behind its Show, so the pane has settled on hidden.
+    await screen.findByRole('button', { name: /show 1 media/i });
+    expect(hasImg(POST_IMG)).toBe(false);
+    expect(hasImg(AVATAR)).toBe(false);
+    expect(hasImg(RECENT_IMG)).toBe(false);
+    expect(screen.getByText('Why This Was Reported (1+ reports)')).toBeInTheDocument();
+  });
+
+  // The same handled-before row, from a feed that does not list it, so its
+  // reports count as read in full: the pane starts them shown. This ties each
+  // check above to something it can see.
+  it('shows them when the feed does not list the target', async () => {
+    stubFeed(undefined);
+    await openFromHandledBeforeSection();
+    expect(screen.getByText('Why This Was Reported (1 report)')).toBeInTheDocument();
+    await waitFor(() => expect(hasImg(POST_IMG)).toBe(true));
+    expect(hasImg(AVATAR)).toBe(true);
+    expect(hasImg(RECENT_IMG)).toBe(true);
   });
 });

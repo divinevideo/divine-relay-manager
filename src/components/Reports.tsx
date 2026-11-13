@@ -43,6 +43,8 @@ import {
   Copy,
   Check,
   ChevronDown,
+  ChevronRight,
+  History,
 } from "lucide-react";
 import { nip19 } from "nostr-tools";
 import { ReportDetail } from "@/components/ReportDetail";
@@ -60,7 +62,23 @@ import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel,
 import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
-import { isConsolidatedReportResolved } from "@/lib/reportResolution";
+import {
+  confirmedAutoHideTargets,
+  datedHandling,
+  groupResolutionVerdict,
+  handledBeforeBanText,
+  handledBeforeView,
+  newestReport,
+  queueResolution,
+  reportHandling,
+  reportResolutionStatus,
+  reportResolutionVerdict,
+  sortsLowest,
+  type HandledBeforeView,
+  type HandlingVerdict,
+  type QueueResolution,
+} from "@/lib/reportResolution";
+import type { ReportStatus } from "../../shared/handling";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
 import { mergeReportFeeds } from "@/lib/reportFeeds";
 import { historyFooterState } from "@/lib/historyFooter";
@@ -234,17 +252,93 @@ function SwitchStateBadge({ state }: { state?: SwitchState }) {
   );
 }
 
+// Marks a row whose item a person handled before a newer report came (#324),
+// and, on a banned account or a banned author's post, since when (spec
+// decisions 3 and 5). Text, not colour alone, so it reads the same to every
+// moderator.
+function HandledBeforeBadge({ handling }: { handling?: HandlingVerdict }) {
+  if (handling?.status !== 'handled_before') return null;
+  return (
+    <>
+      <Badge variant="outline" className="text-xs">
+        Handled before
+      </Badge>
+      {handling.ban && (
+        <Badge variant="outline" className="text-xs">
+          {handledBeforeBanText(handling.ban)}
+        </Badge>
+      )}
+    </>
+  );
+}
+
+// Spec decisions 3 and 5: banned handled-before items sort lowest. A stable
+// split, so each group keeps the moderator's chosen sort.
+function withBannedLast<T>(items: T[], handlingOf: (item: T) => HandlingVerdict | undefined): T[] {
+  const low = items.filter(item => sortsLowest(handlingOf(item)));
+  if (low.length === 0) return items;
+  return [...items.filter(item => !sortsLowest(handlingOf(item))), ...low];
+}
+
+function handledBeforeCountText(count: number): string {
+  return count === 1 ? '1 new on an item already handled' : `${count} new on items already handled`;
+}
+
+// With Hide resolved on, the items handled before a newer report (#324) leave
+// the main list and wait here, below it: counted, collapsed until opened, so a
+// moderator always sees that they exist without them crowding never-handled
+// work. The header is the count, as a real button that says whether it is open.
+// It shows at none too (spec decision 6: the count always shows), with
+// nothing to open.
+function HandledBeforeSection({
+  count,
+  open,
+  onToggle,
+  children,
+}: {
+  count: number;
+  open: boolean;
+  onToggle: () => void;
+  children: React.ReactNode;
+}) {
+  const expanded = open && count > 0;
+  return (
+    <div className="pt-2 border-t">
+      <button
+        type="button"
+        aria-expanded={expanded}
+        aria-controls={expanded ? 'handled-before-items' : undefined}
+        onClick={onToggle}
+        disabled={count === 0}
+        className="w-full flex items-center gap-1.5 py-1 text-xs text-muted-foreground enabled:hover:text-foreground disabled:cursor-default transition-colors"
+      >
+        {expanded ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+        <History className="h-3 w-3" />
+        {handledBeforeCountText(count)}
+      </button>
+      {expanded && (
+        <div id="handled-before-items" className="space-y-2 pt-2">
+          {children}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ConsolidatedReportItem({
   consolidated,
   isSelected,
   onClick,
   switchState,
+  handling,
   countTruncated = false,
 }: {
   consolidated: ConsolidatedReport;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
+  // The row's standing; tagged only when 'handled_before'.
+  handling?: HandlingVerdict;
   // The reports of this target may be more than the count: the read that
   // loaded them stopped early. Shown as "N+", as in the open pane.
   countTruncated?: boolean;
@@ -295,6 +389,7 @@ function ConsolidatedReportItem({
               {consolidated.target.type === 'event' ? 'Event' : 'User'}
             </Badge>
             <SwitchStateBadge state={switchState} />
+            <HandledBeforeBadge handling={handling} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -327,11 +422,14 @@ function IndividualReportItem({
   isSelected,
   onClick,
   switchState,
+  handling,
 }: {
   report: NostrEvent;
   isSelected: boolean;
   onClick: () => void;
   switchState?: SwitchState;
+  // The row's standing; tagged only when 'handled_before'.
+  handling?: HandlingVerdict;
 }) {
   const category = getReportCategory(report);
   const target = getReportTarget(report);
@@ -374,6 +472,7 @@ function IndividualReportItem({
               </Badge>
             )}
             <SwitchStateBadge state={switchState} />
+            <HandledBeforeBadge handling={handling} />
           </div>
           <div className="flex items-center gap-1 text-xs text-muted-foreground shrink-0">
             <Clock className="h-3 w-3" />
@@ -403,6 +502,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const detailBoundaryRef = useRef<ErrorBoundary | null>(null);
   const [viewMode, setViewMode] = useState<'consolidated' | 'individual'>('consolidated');
   const [hideResolved, setHideResolved] = useState(true);
+  // The handled-before section below the main list (#324), collapsed by default.
+  const [handledBeforeOpen, setHandledBeforeOpen] = useState(false);
   const [showPendingReview, setShowPendingReview] = useState(false);
   const [sortBy, setSortBy] = useState<SortOption>('reports');
   const [filterCategory, setFilterCategory] = useState<string | null>(null);
@@ -522,9 +623,15 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // still need attention, so a deep link to a resolved target -- the usual way
   // in from a closed ticket -- would drop out of the list at the next poll
   // while its detail pane stayed open. Keyed by relay so an environment switch
-  // cannot carry them across.
-  const [deepLinked, setDeepLinked] = useState<{ relayUrl: string; events: NostrEvent[] } | null>(null);
+  // cannot carry them across. `reportArrivals` is the lookup's own (#324), so
+  // these reports are dated as the feed's are.
+  const [deepLinked, setDeepLinked] = useState<{
+    relayUrl: string;
+    events: NostrEvent[];
+    reportArrivals: Readonly<Record<string, number>>;
+  } | null>(null);
   const deepLinkedReports = deepLinked?.relayUrl === relayUrl ? deepLinked.events : NO_REPORTS;
+  const deepLinkedArrivals = deepLinked?.relayUrl === relayUrl ? deepLinked.reportArrivals : undefined;
   const reports = useMemo(
     () => (queueFeed ? mergeReportFeeds(queueFeed.events, deepLinkedReports) : undefined),
     [queueFeed, deepLinkedReports],
@@ -759,10 +866,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Build set of resolved target keys (from labels, bans, deletions, and decisions)
   //
+  // resolvedTargets is the membership rule's set. The queue reads it only
+  // against a worker that sends no handling dates; otherwise it applies the
+  // dated rule (`resolution` below, #324).
+  //
   // handledTargets is the same set without the decisions only the worker wrote
   // (`automated`, today an age-review case it opened on a reported account).
-  // Only the sensitive switch reads it: Hide resolved still counts those
-  // targets as handled, but no person has looked at them.
+  // The sensitive switch reads it under the membership rule (switchResolution
+  // below): no person has looked at those targets.
   const { resolvedTargets, handledTargets } = useMemo(() => {
     const resolved = new Set<string>();
 
@@ -826,9 +937,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     }
 
-    // TODO(#332): whether Hide resolved should count a target only automation
-    // resolved is open. It does today, as it always has; the switch does not.
-    // Dropping this loop is the whole change if #332 decides otherwise.
+    // The membership rule counts a target only automation resolved, as it
+    // always has, so a Pages build ahead of its worker shows what it showed
+    // before. The dated rule does not (#332): handlingByTarget counts only what
+    // a person did. The switch counts neither.
+    // TODO(#409): remove with the membership rule; only it reads these.
     for (const key of automated) resolved.add(key);
 
     return { resolvedTargets: resolved, handledTargets: handled };
@@ -856,6 +969,61 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [bannedPubkeys],
   );
 
+  // Relay-banned posts, as the relay lists them (it matches a ban exactly), for
+  // the dated rule. Guarded as bannedPubkeySet is.
+  const bannedEventSet = useMemo(
+    () => new Set(
+      (bannedEvents ?? []).flatMap(event =>
+        typeof event.id === 'string' ? [event.id] : []),
+    ),
+    [bannedEvents],
+  );
+
+  // When the worker first saw each listed report (#324): the feed's arrivals,
+  // a deep link's targeted lookup's for the reports it added, and in the
+  // history view each loaded page's, so a history row is dated by the arrival
+  // the worker put it in history by. A report with no time -- one from before
+  // arrivals were recorded, or from a worker that sends none -- compares by
+  // its created_at (shared/handling.ts reportTime). The `?? {}`s cover no deep
+  // link and a feed that has not loaded yet.
+  const reportArrivals = queueFeed?.reportArrivals;
+  const arrivals = useMemo(() => {
+    const merged = new Map(Object.entries(deepLinkedArrivals ?? {}));
+    for (const [id, seenAt] of Object.entries(reportArrivals ?? {})) merged.set(id, seenAt);
+    if (historyView && historyPages) {
+      for (const page of historyPages) {
+        for (const [id, seenAt] of Object.entries(page.reportArrivals)) merged.set(id, seenAt);
+      }
+    }
+    return merged;
+  }, [deepLinkedArrivals, reportArrivals, historyView, historyPages]);
+
+  // The dated rule's reading of the decision log and labels (#324), with the
+  // worker's own handlingByTarget, so the screen dates every target as the
+  // feed does. Null against a worker without handling_rows or label dates,
+  // which keeps the membership rule. Kept apart from `resolution` so feed and
+  // ban-list polls do not rebuild it over the whole decision log.
+  const handlingRows = decisionsResult?.handlingRows;
+  const dated = useMemo(() => datedHandling(handlingRows, labelTargets), [handlingRows, labelTargets]);
+
+  // When a person last confirmed each target's auto-hide, after any reopen. A
+  // confirm leaves the post banned on the relay, and it dates that ban: reports
+  // before it stay handled, later ones are handled before (#324).
+  const confirmedAutoHide = useMemo(
+    () => confirmedAutoHideTargets(autoHideStates ?? [], handlingRows),
+    [autoHideStates, handlingRows],
+  );
+
+  // Which rule decides whether a report is handled, and what it reads.
+  const resolution = useMemo(() => queueResolution({
+    dated,
+    arrivals,
+    bannedPubkeys: bannedPubkeySet,
+    bannedEvents: bannedEventSet,
+    resolvedTargets,
+    confirmedAutoHide,
+  }), [dated, arrivals, bannedPubkeySet, bannedEventSet, resolvedTargets, confirmedAutoHide]);
+
   // Targets auto-hidden and still waiting for a human, keyed to their latest
   // auto-hide state so a row can say when a hide needs a check
   // (auto_hide_unresolved / auto_hide_restore_failed). The same definition the
@@ -866,9 +1034,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [autoHideStates],
   );
 
+  // Each target a person handled through auto-hide, dated so the switch counts
+  // it as answering only the reports that reached us first (#324), with the
+  // decision log's reopens cancelling the rows before them.
   const humanHandledTargets = useMemo(
-    () => humanHandledAutoHideTargets(autoHideStates ?? []),
-    [autoHideStates],
+    () => humanHandledAutoHideTargets(autoHideStates ?? [], handlingRows),
+    [autoHideStates, handlingRows],
   );
 
   // The four sources that build resolvedTargets, described once so the gate,
@@ -961,10 +1132,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // with them in its footer, so a failed or unlanded read there would state a
   // count, even "No resolved reports.", with nothing to back it. The
   // pending-review view lists the switch's members: auto-hidden targets, which
-  // the decisions source alone builds, and unhandled CSAM-signal targets, which
-  // labels and the ban lists only subtract from. So an unlanded or failed read
-  // there keeps a target behind the switch, the safe direction (#323), and does
-  // not need to gate that view. Two other consumers -- the deep-link
+  // the decisions source alone builds, and targets with an unanswered
+  // CSAM-signal report, which labels and the ban lists only subtract from. So
+  // an unlanded or failed read there keeps a target behind the switch, the
+  // safe direction (#323), and does not need to gate that view. Two other
+  // consumers -- the deep-link
   // auto-deselect and the deep-link resolved branch -- key on Hide resolved
   // alone, so they stay live in the pending-review view, where these three do
   // not gate. That is deliberate: both fail in the show-more direction on a
@@ -1080,17 +1252,48 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // carries every report on them only when it did not stop early. A feed that
   // did (the red "stopped reading" banner) is missing reports older than its
   // cut-off for every target in it, so none of them counts as fully read.
+  // Nor does a target the feed lists as handled before (#324): it sends only
+  // the reports that came after the handling, so the ones before it, which
+  // may carry a CSAM signal, are not in hand.
   const queueFeedTargetKeys = useMemo(
     () => reportTargetKeys(queueFeed?.events ?? []),
     [queueFeed],
   );
-  const needsAttentionTargetKeys = useMemo(
-    () => (queueFeed?.truncated ? new Set<string>() : queueFeedTargetKeys),
-    [queueFeed, queueFeedTargetKeys],
-  );
+  const needsAttentionTargetKeys = useMemo(() => {
+    if (queueFeed?.truncated) return new Set<string>();
+    const handledBefore = queueFeed?.handledBeforeTargets ?? [];
+    if (handledBefore.length === 0) return queueFeedTargetKeys;
+    const readInFull = new Set(queueFeedTargetKeys);
+    for (const key of handledBefore) readInFull.delete(key);
+    return readInFull;
+  }, [queueFeed, queueFeedTargetKeys]);
   const feedTargetKeys = useMemo(
     () => new Set(feedConsolidated.map(c => reportTargetKey(c.target))),
     [feedConsolidated],
+  );
+
+  // Each listed target's standing, by `resolution`: 'new' (no one has handled
+  // it), 'handled' (every report predates the latest handling) or
+  // 'handled_before' (a person handled it, and a report has come since; only
+  // the dated rule answers this). With Hide resolved on, the main list keeps
+  // only 'new' targets. The 'handled_before' ones outside the switch are the
+  // targets the queue sets apart as already handled; switch members keep their
+  // place behind the switch, whatever their standing. Kept as the whole
+  // verdict: a handled-before row also shows and sorts by its ban.
+  const groupVerdictByTarget = useMemo(
+    () => new Map<string, HandlingVerdict>(
+      allConsolidated.map(c => [reportTargetKey(c.target), groupResolutionVerdict(c, resolution)]),
+    ),
+    [allConsolidated, resolution],
+  );
+  const groupVerdictOf = useCallback(
+    (c: ConsolidatedReport): HandlingVerdict =>
+      groupVerdictByTarget.get(reportTargetKey(c.target)) ?? groupResolutionVerdict(c, resolution),
+    [groupVerdictByTarget, resolution],
+  );
+  const groupStatusOf = useCallback(
+    (c: ConsolidatedReport): ReportStatus => groupVerdictOf(c).status,
+    [groupVerdictOf],
   );
 
   // The reports the switch classifies: the needs-attention feed plus deep-linked
@@ -1107,22 +1310,42 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const switchCandidates = reports ? feedConsolidated : deepLinkedConsolidated;
 
   // Who sits behind the Pending review switch: every auto-hidden target, plus
-  // any target in the feed or the deep-linked reports with a CSAM signal that
-  // no person has handled yet. Not loaded history; see switchCandidates. It
-  // does not read hideResolved; see buildSwitchMembership.
+  // any target in the feed or the deep-linked reports with a CSAM-signal
+  // report that no person has answered. Not loaded history; see
+  // switchCandidates. It does not read hideResolved; see buildSwitchMembership.
+  //
+  // It reads the queue's own rule, so a CSAM-signal report that is 'new' or
+  // 'handled_before' makes its target a member, and an answered one keeps
+  // nothing here (#324). Only against a worker without
+  // handling dates does it differ: the membership rule then reads
+  // handledTargets, which leaves out targets only the worker decided on.
+  // TODO(#409): once no worker without handling dates can be live, this is
+  // `resolution` itself.
+  const switchResolution = useMemo<QueueResolution>(
+    () => resolution.rule === 'dated'
+      ? resolution
+      : { rule: 'membership', resolvedTargets: handledTargets, bannedPubkeys: bannedPubkeySet },
+    [resolution, handledTargets, bannedPubkeySet],
+  );
   const switchMembership = useMemo(() => buildSwitchMembership({
     consolidated: switchCandidates,
     pendingReview: pendingReviewTargets,
     humanHandled: humanHandledTargets,
-    handledTargets,
-    bannedPubkeys: bannedPubkeySet,
-  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, handledTargets, bannedPubkeySet]);
+    resolution: switchResolution,
+  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, switchResolution]);
 
-  const consolidated = useMemo(() => {
+  // Where each target goes, in this order (#324): behind the switch if it is a
+  // member, whatever its standing; otherwise, with Hide resolved on, 'new' to
+  // the main list, 'handled_before' to the section below it, and 'handled'
+  // nowhere. With Hide resolved off, every target stays in the main list, the
+  // handled-before ones tagged. The section is filtered and sorted with the
+  // main list, so it lists its targets in the chosen sort.
+  const { consolidated, handledBeforeConsolidated } = useMemo(() => {
     // A copy, so the in-place sort below can never reorder allConsolidated.
     // Today both view branches filter into a new array first, so this is
     // belt and braces against a later change that drops a filter.
     let items = [...allConsolidated];
+    const splitHandledBefore = !showPendingReview && hideResolved;
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
@@ -1130,9 +1353,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     } else {
       // Default view: EXCLUDE items behind the switch (moderators don't see CSAM unless they opt in)
       items = items.filter(c => !switchMembership.has(reportTargetKey(c.target)));
-      // Also filter out resolved if toggle is on
+      // Also filter out handled targets if toggle is on: those whose every
+      // report is handled. Those handled before a newer report go to the
+      // section, below.
       if (hideResolved) {
-        items = items.filter(c => !isConsolidatedReportResolved(c, resolvedTargets, bannedPubkeySet));
+        items = items.filter(c => groupStatusOf(c) !== 'handled');
       }
     }
 
@@ -1196,12 +1421,37 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     });
 
-    return items;
-  }, [allConsolidated, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, switchMembership, filterCategory, filterTargetType, sortBy]);
+    items = withBannedLast(items, groupVerdictOf);
+    if (!splitHandledBefore) return { consolidated: items, handledBeforeConsolidated: [] };
+    return {
+      consolidated: items.filter(c => groupStatusOf(c) === 'new'),
+      handledBeforeConsolidated: items.filter(c => groupStatusOf(c) === 'handled_before'),
+    };
+  }, [allConsolidated, hideResolved, showPendingReview, groupStatusOf, groupVerdictOf, switchMembership, filterCategory, filterTargetType, sortBy]);
 
+  // The groups the pane draws a target's context from: every grouped report,
+  // or with the queue failed cold, when there is no list, the deep link's own
+  // lookup.
+  const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
+
+  // Each target's reported author, as its group agrees on it. From the pane's
+  // groups, so with the queue failed cold a deep-linked post still finds its
+  // author, and through it a ban on the author.
   const authorByTarget = useMemo(() => new Map(
-    allConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
-  ), [allConsolidated]);
+    paneConsolidated.map(c => [reportTargetKey(c.target), c.authorPubkey]),
+  ), [paneConsolidated]);
+
+  // The report a group's row, or a deep link to its target, opens: the group's
+  // newest by arrival, the one a handled-before tag is about (newestReport),
+  // not the one with the largest created_at. Memoized: every render walks the
+  // listed rows, including the freshness text's tick every few seconds.
+  const opensByTarget = useMemo(() => new Map(
+    allConsolidated.map(c => [reportTargetKey(c.target), newestReport(c, arrivals)]),
+  ), [allConsolidated, arrivals]);
+  const opensOf = useCallback(
+    (c: ConsolidatedReport) => opensByTarget.get(reportTargetKey(c.target)) ?? newestReport(c, arrivals),
+    [opensByTarget, arrivals],
+  );
 
   // The reports of the open report's target. From every grouped report, not the
   // filtered list: a filter that drops the open row must not empty the pane's
@@ -1210,16 +1460,71 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // so it is memoized (and sits above the early returns, as a hook must): it
   // would otherwise rescan the whole feed on every render, including the
   // freshness text's tick every few seconds.
-  const selectedPaneReports = useMemo(() => {
+  const selectedPaneGroup = useMemo(() => {
     if (!selectedReport) return undefined;
-    const paneConsolidated = listReports ? allConsolidated : deepLinkedConsolidated;
-    return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id))?.reports;
-  }, [selectedReport, listReports, allConsolidated, deepLinkedConsolidated]);
+    return paneConsolidated.find(c => c.reports.some(r => r.id === selectedReport.id));
+  }, [selectedReport, paneConsolidated]);
+  const selectedPaneReports = selectedPaneGroup?.reports;
 
-  // Filter individual reports when hideResolved is on
-  const filteredReports = useMemo(() => {
-    if (!listReports) return [];
+  // The open report's handled-before history (#324), read by the same rule and
+  // context as the queue: the report's own verdict, in either tab. A group row
+  // opens the group's newest report (newestReport), which is handled before
+  // whenever the group is, so the pane and the row agree; a report reached
+  // otherwise, such as an older one by a deep link, shows what it is itself.
+  // Undefined for any other report, and always against a worker without
+  // handling dates.
+  const selectedHandledBefore = useMemo<HandledBeforeView | undefined>(() => {
+    if (resolution.rule !== 'dated' || !selectedReport) return undefined;
+    const target = getReportTarget(selectedReport);
+    if (!target) return undefined;
+    return handledBeforeView(reportHandling(
+      {
+        target,
+        authorPubkey: authorByTarget.get(reportTargetKey(target)),
+        id: selectedReport.id,
+        created_at: selectedReport.created_at,
+      },
+      resolution.ctx,
+    ));
+  }, [resolution, selectedReport, authorByTarget]);
+
+  // Whether the dated rule has a person's handling on the open report's own
+  // target since its last reopen, labels included. The pane offers Reopen on
+  // it, as it does on its decision log, so a target only a label handled can
+  // be reopened. False against a worker without handling dates.
+  const selectedQueueHandled = useMemo(() => {
+    if (resolution.rule !== 'dated' || !selectedReport) return false;
+    const target = getReportTarget(selectedReport);
+    return target ? resolution.ctx.handling.has(reportTargetKey(target)) : false;
+  }, [resolution, selectedReport]);
+
+  // Each listed report's own standing, by `resolution`, for the All tab: its
+  // place (main list or section), its tag, and the resolved count read it.
+  // Each report by its own time (#324): its arrival by id, else its created_at.
+  const reportVerdictById = useMemo(() => {
+    const verdicts = new Map<string, HandlingVerdict>();
+    for (const report of listReports ?? []) {
+      const target = getReportTarget(report);
+      if (!target) continue;
+      verdicts.set(report.id, reportResolutionVerdict(
+        {
+          target,
+          authorPubkey: authorByTarget.get(reportTargetKey(target)),
+          id: report.id,
+          created_at: report.created_at,
+        },
+        resolution,
+      ));
+    }
+    return verdicts;
+  }, [listReports, authorByTarget, resolution]);
+
+  // Filter individual reports when hideResolved is on. Placed as targets are
+  // (see `consolidated`), each report by its own standing.
+  const { filteredReports, handledBeforeReports } = useMemo(() => {
+    if (!listReports) return { filteredReports: [], handledBeforeReports: [] };
     let items = [...listReports];
+    const splitHandledBefore = !showPendingReview && hideResolved;
 
     // If showing pending review, only show items behind the switch
     if (showPendingReview) {
@@ -1235,17 +1540,11 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         if (!target) return true; // Keep reports without targets
         return !switchMembership.has(reportTargetKey(target));
       });
-      // Also filter resolved if toggle is on
+      // Also filter handled reports if toggle is on, each by its own time
+      // (#324). Those newer than a handling go to the section, below.
+      // Reports without targets have no standing and stay.
       if (hideResolved) {
-        items = items.filter(report => {
-          const target = getReportTarget(report);
-          if (!target) return true; // Keep reports without targets
-          return !isConsolidatedReportResolved(
-            { target, authorPubkey: authorByTarget.get(reportTargetKey(target)) },
-            resolvedTargets,
-            bannedPubkeySet,
-          );
-        });
+        items = items.filter(report => reportVerdictById.get(report.id)?.status !== 'handled');
       }
     }
 
@@ -1291,8 +1590,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       }
     });
 
-    return items;
-  }, [listReports, hideResolved, showPendingReview, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembership, filterCategory, filterTargetType, sortBy]);
+    items = withBannedLast(items, report => reportVerdictById.get(report.id));
+    if (!splitHandledBefore) return { filteredReports: items, handledBeforeReports: [] };
+    return {
+      filteredReports: items.filter(report => reportVerdictById.get(report.id)?.status !== 'handled_before'),
+      handledBeforeReports: items.filter(report => reportVerdictById.get(report.id)?.status === 'handled_before'),
+    };
+  }, [listReports, hideResolved, showPendingReview, reportVerdictById, switchMembership, filterCategory, filterTargetType, sortBy]);
 
   const uniqueTargets = consolidated.length;
   const filteredReportsCount = filteredReports.length;
@@ -1301,9 +1605,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const headerCount = viewMode === 'consolidated' ? uniqueTargets : filteredReportsCount;
 
   // The pending-review badge counts the rows that view will list on entry: the
-  // grouped targets behind the switch, auto-hidden or CSAM-signal and not yet
-  // handled. Not switchMembership.size -- auto-hidden members span every
-  // decision on record, and a member with no report loaded here is a badge
+  // grouped targets behind the switch, auto-hidden or with an unanswered
+  // CSAM-signal report. Not switchMembership.size -- auto-hidden members span
+  // every decision on record, and a member with no report loaded here is a badge
   // with no row behind it. Counted from the feed and deep-linked reports, which
   // is what the view lists, not from loaded history. "On entry" because
   // entering clears the category and type filters; a filter chosen inside
@@ -1318,26 +1622,28 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Whether a listed target is resolved, from both halves of the history view.
   // A target neither the feed nor a deep link carries came from resolved
   // history, which the worker resolved by a person's decision or a label. One
-  // they do carry is resolved if the browser's own sources say so: a relay ban,
-  // including a banned author's posts, or a decision or label (which is how a
-  // deep-linked resolved target counts), or only the worker's own decisions
-  // (the feed keeps those; see resolvedTargets).
+  // they do carry is resolved if the browser's own reading of it says
+  // 'handled' (see `resolution`): a relay ban, including a banned author's
+  // posts, or a decision or label after its reports (which is how a
+  // deep-linked resolved target counts). A target handled before a newer
+  // report is not: that report is still unanswered.
   const isListedTargetResolved = useCallback(
-    (target: ReportTarget, authorPubkey: string | undefined) =>
-      !feedTargetKeys.has(reportTargetKey(target))
-      || isConsolidatedReportResolved({ target, authorPubkey }, resolvedTargets, bannedPubkeySet),
-    [feedTargetKeys, resolvedTargets, bannedPubkeySet],
+    (target: ReportTarget, status: ReportStatus) =>
+      !feedTargetKeys.has(reportTargetKey(target)) || status === 'handled',
+    [feedTargetKeys],
   );
 
   // Counted from the rows on screen in the current view (spec: every count
   // beside a list comes from the rows it renders).
   const resolvedRowsShown = useMemo(() => viewMode === 'consolidated'
-    ? consolidated.filter(c => isListedTargetResolved(c.target, c.authorPubkey)).length
+    ? consolidated.filter(c => isListedTargetResolved(c.target, groupStatusOf(c))).length
     : filteredReports.filter(report => {
         const target = getReportTarget(report);
-        return !!target && isListedTargetResolved(target, authorByTarget.get(reportTargetKey(target)));
+        const status = reportVerdictById.get(report.id)?.status;
+        if (!target || !status) return false;
+        return isListedTargetResolved(target, status);
       }).length,
-  [viewMode, consolidated, filteredReports, authorByTarget, isListedTargetResolved]);
+  [viewMode, consolidated, filteredReports, isListedTargetResolved, groupStatusOf, reportVerdictById]);
 
   // The failure a failed Load more left (see refreshFailed), remembered against
   // the cached query's own error: src/lib/loadMoreFailure.ts says why it is not
@@ -1423,7 +1729,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // hidden from the list while its detail pane is open.
   //
   // Scoped to DEEP-LINK selections only. Unscoped, this fights the moderator:
-  // `resolvedTargets` is a dependency and changes on every poll and after every
+  // the resolution state (then `resolvedTargets`, now `groupVerdictByTarget`)
+  // is a dependency and changes on every poll and after every
   // action, so opening a report and actioning it force-cleared Hide resolved
   // underneath them, and clicking it back on re-ran the same branch and cleared
   // it again. Reloading appeared to fix it only because that drops
@@ -1433,18 +1740,24 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Held until switch membership is known. Labels or bans can resolve the
   // target first; unhiding then would turn Hide resolved off before the switch
   // opens, and the switch would save "off" as the moderator's setting.
+  //
+  // Any standing but 'new' takes the row out of the main list, so a target
+  // handled before a newer report (#324) is unhidden too. Its group's standing
+  // where it is listed, else the report's own.
   useEffect(() => {
     if (!hideResolved || !selectedReport || !deepLinkSelectedRef.current || !switchMembershipKnown) return;
     const target = getReportTarget(selectedReport);
-    if (target && isConsolidatedReportResolved(
-      { target, authorPubkey: authorByTarget.get(reportTargetKey(target)) },
-      resolvedTargets,
-      bannedPubkeySet,
-    )) {
+    if (!target) return;
+    const key = reportTargetKey(target);
+    const status = groupVerdictByTarget.get(key)?.status ?? reportResolutionStatus(
+      { target, authorPubkey: authorByTarget.get(key), id: selectedReport.id, created_at: selectedReport.created_at },
+      resolution,
+    );
+    if (status !== 'new') {
       hideResolvedBeforeCourtesyRef.current = hideResolved;
       setHideResolved(false);
     }
-  }, [hideResolved, selectedReport, resolvedTargets, bannedPubkeySet, authorByTarget, switchMembershipKnown]);
+  }, [hideResolved, selectedReport, groupVerdictByTarget, resolution, authorByTarget, switchMembershipKnown]);
 
   // Memoized because the deep-link effect below depends on it; it reads
   // hideResolved, filterCategory and filterTargetType, so it changes only when
@@ -1578,7 +1891,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     );
 
     if (inBulk) {
-      // If target is resolved and we're hiding resolved, temporarily show it.
+      // If the target is out of the main list (handled, or handled before a
+      // newer report) and we're hiding resolved, temporarily show it.
       // Not for a switch member: the switch-opening effect turns Hide resolved
       // off itself and saves the moderator's setting first. Turning it off here
       // would make the switch save "off" and hand that back when it closes.
@@ -1588,18 +1902,20 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         hideResolved
         && switchMembershipKnown
         && !switchMembership.has(reportTargetKey(inBulk.target))
-        && isConsolidatedReportResolved(inBulk, resolvedTargets, bannedPubkeySet)
+        && groupStatusOf(inBulk) !== 'new'
       ) {
         hideResolvedBeforeCourtesyRef.current = hideResolved;
         setHideResolved(false);
       }
+      // The report its row opens (opensOf).
+      const opens = opensOf(inBulk);
       deepLinkSelectedRef.current = true;
-      setSelectedReport(inBulk.latestReport);
+      setSelectedReport(opens);
       setDeepLinkStatus('found');
       // Navigating to the path (no query string) already clears the deep-link params;
       // a separate setSearchParams({}) here would run against the stale pre-navigate path
       // and clobber this back to /reports.
-      navigate(`/reports/${inBulk.latestReport.id}`, { replace: true });
+      navigate(`/reports/${opens.id}`, { replace: true });
       attemptedTargetRef.current = null;
       return;
     }
@@ -1622,7 +1938,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
     (async () => {
       try {
-        const { events, truncated } = await fetchReportsByTarget(
+        const { events, truncated, reportArrivals: lookupArrivals } = await fetchReportsByTarget(
           target.type === 'event' ? { event: target.value } : { pubkey: target.value }
         );
         // Drop the result if this run was superseded (target changed) or the component
@@ -1655,10 +1971,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           const pool = matching.length > 0 ? matching : events;
           // Held beside the feed so the detail pane has full context and the
           // row survives polls (see deepLinked above),
-          setDeepLinked({ relayUrl, events: pool });
+          setDeepLinked({ relayUrl, events: pool, reportArrivals: lookupArrivals });
           // and select the newest report directly — not via a re-run, so a
           // consolidation mismatch can neither loop nor hang the pane on 'resolving'.
-          const latest = pool.reduce((a, b) => (b.created_at > a.created_at ? b : a));
+          // Newest by arrival, as a row opens (newestReport): a reporter's
+          // clock can stamp an older report in the future. Ties keep the
+          // largest created_at.
+          const latest = newestReport(
+            { reports: pool, latestReport: pool.reduce((a, b) => (b.created_at > a.created_at ? b : a)) },
+            new Map(Object.entries(lookupArrivals)),
+          );
           deepLinkSelectedRef.current = true;
           setSelectedReport(latest);
           // Keyed by the selected report's own target, which is the list the
@@ -1691,7 +2013,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         setDeepLinkStatus('unavailable');
       }
     })();
-  }, [allConsolidated, searchParams, hideResolved, resolvedTargets, bannedPubkeySet, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, fetchReportsByTarget, relayUrl, retryNonce]);
+  }, [allConsolidated, opensOf, searchParams, hideResolved, groupStatusOf, switchMembership, switchMembershipKnown, navigate, isLoading, queueFailedCold, config.relayUrl, config.apiUrl, updateConfig, fetchReportsByTarget, relayUrl, retryNonce]);
 
   // Update URL when report selection changes
   const handleSelectReport = (report: NostrEvent | null) => {
@@ -1873,9 +2195,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // stop early. Anything else may be missing a CSAM-signal report: a target
   // opened from history pages not yet loaded, a read cut short by the worker's
   // page bound, a feed that itself stopped early (it gives no credit to any
-  // target in it), or a post opened by a ?pubkey= link, whose read was the
-  // account's and misses a report that lacks the author's p tag. Those start
-  // hidden until clicked.
+  // target in it), a handled-before target (the feed leaves out its reports
+  // from before the handling), or a post opened by a ?pubkey= link, whose read
+  // was the account's and misses a report that lacks the author's p tag. Those
+  // start hidden until clicked.
   const selectedTargetReportsPartial = !!selectedTarget
     && !needsAttentionTargetKeys.has(reportTargetKey(selectedTarget))
     && !targetedReadComplete;
@@ -1938,9 +2261,61 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         targetLeftList={selectedTargetLeftList}
         onDismiss={dismissDetail}
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
+        handledBefore={selectedHandledBefore}
+        queueHandled={selectedQueueHandled}
       />
     </ErrorBoundary>
   );
+
+  const noReportsFound = (
+    <div className="text-center py-8 text-muted-foreground">
+      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
+      <p className="text-sm">No reports found</p>
+    </div>
+  );
+
+  // The handled-before section shows with Hide resolved on in the default view.
+  // Under the dated rule it shows even at none (spec decision 6: the count
+  // always shows). Against a worker without handling dates nothing is ever
+  // handled before, so a count of none would say nothing, and it stays away.
+  // TODO(#409): drop the rule check with the membership rule.
+  const showHandledBeforeSection = (count: number) =>
+    !showPendingReview && hideResolved && (count > 0 || resolution.rule === 'dated');
+
+  // One row each, wherever it is listed: the main list, the handled-before
+  // section, or behind the switch. The tag follows the row's own standing.
+  // A row opens its newest report by arrival (opensOf).
+  const renderConsolidatedRow = (item: ConsolidatedReport) => {
+    const key = reportTargetKey(item.target);
+    const opens = opensOf(item);
+    return (
+      <ConsolidatedReportItem
+        key={key}
+        consolidated={item}
+        isSelected={selectedReport?.id === opens.id}
+        onClick={() => handleSelectReport(opens)}
+        switchState={switchMembership.get(key)}
+        handling={groupVerdictOf(item)}
+        countTruncated={key === selectedSwitchKey
+          ? selectedTargetCountTruncated
+          : targetCountTruncated(key)}
+      />
+    );
+  };
+  const renderIndividualRow = (report: NostrEvent) => {
+    const target = getReportTarget(report);
+    const key = target ? reportTargetKey(target) : undefined;
+    return (
+      <IndividualReportItem
+        key={report.id}
+        report={report}
+        isSelected={selectedReport?.id === report.id}
+        onClick={() => handleSelectReport(report)}
+        switchState={key ? switchMembership.get(key) : undefined}
+        handling={reportVerdictById.get(report.id)}
+      />
+    );
+  };
 
   return (
     <>
@@ -2259,53 +2634,41 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
           <ScrollArea className="h-full [&>[data-radix-scroll-area-viewport]>div]:!block" viewportRef={listViewportRef}>
             <div className="space-y-2 p-4 pt-0">
               {viewMode === 'consolidated' ? (
-                !consolidated || consolidated.length === 0 ? (
-                  listEmptyIsFinal ? (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p className="text-sm">No reports found</p>
-                    </div>
-                  ) : null
-                ) : (
-                  consolidated.map((item) => {
-                    const key = reportTargetKey(item.target);
-                    return (
-                      <ConsolidatedReportItem
-                        key={key}
-                        consolidated={item}
-                        isSelected={selectedReport?.id === item.latestReport.id}
-                        onClick={() => handleSelectReport(item.latestReport)}
-                        switchState={switchMembership.get(key)}
-                        countTruncated={key === selectedSwitchKey
-                          ? selectedTargetCountTruncated
-                          : targetCountTruncated(key)}
-                      />
-                    );
-                  })
-                )
+                <>
+                  {consolidated.length === 0 ? (
+                    // With items set apart below, the section header says
+                    // what there is; "No reports found" above it would not.
+                    listEmptyIsFinal && handledBeforeConsolidated.length === 0 ? noReportsFound : null
+                  ) : (
+                    consolidated.map(renderConsolidatedRow)
+                  )}
+                  {showHandledBeforeSection(handledBeforeConsolidated.length) && (
+                    <HandledBeforeSection
+                      count={handledBeforeConsolidated.length}
+                      open={handledBeforeOpen}
+                      onToggle={() => setHandledBeforeOpen(open => !open)}
+                    >
+                      {handledBeforeConsolidated.map(renderConsolidatedRow)}
+                    </HandledBeforeSection>
+                  )}
+                </>
               ) : (
-                filteredReports.length === 0 ? (
-                  listEmptyIsFinal ? (
-                    <div className="text-center py-8 text-muted-foreground">
-                      <Flag className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                      <p className="text-sm">No reports found</p>
-                    </div>
-                  ) : null
-                ) : (
-                  filteredReports.map((report) => {
-                    const target = getReportTarget(report);
-                    const key = target ? reportTargetKey(target) : undefined;
-                    return (
-                      <IndividualReportItem
-                        key={report.id}
-                        report={report}
-                        isSelected={selectedReport?.id === report.id}
-                        onClick={() => handleSelectReport(report)}
-                        switchState={key ? switchMembership.get(key) : undefined}
-                      />
-                    );
-                  })
-                )
+                <>
+                  {filteredReports.length === 0 ? (
+                    listEmptyIsFinal && handledBeforeReports.length === 0 ? noReportsFound : null
+                  ) : (
+                    filteredReports.map(renderIndividualRow)
+                  )}
+                  {showHandledBeforeSection(handledBeforeReports.length) && (
+                    <HandledBeforeSection
+                      count={handledBeforeReports.length}
+                      open={handledBeforeOpen}
+                      onToggle={() => setHandledBeforeOpen(open => !open)}
+                    >
+                      {handledBeforeReports.map(renderIndividualRow)}
+                    </HandledBeforeSection>
+                  )}
+                </>
               )}
               {historyView && (
                 <ResolvedHistoryFooter

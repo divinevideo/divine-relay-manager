@@ -29,6 +29,7 @@ function page(ids: string[], nextCursor: number | null, done: boolean): Resolved
     done,
     skippedWithinSecond: false,
     resolutionTruncated: false,
+    reportArrivals: {},
   };
 }
 

@@ -1975,6 +1975,30 @@ describe('adminApi', () => {
       expect(result.truncated).toBe(true);
     });
 
+    // Dated as the feed's are (#324): only finite numbers are an arrival.
+    it("returns the lookup's report arrivals, keeping only finite times", async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({
+          success: true,
+          events: [],
+          report_arrivals: { r1: 100, r2: 'soon', r3: null, r4: Number.NaN },
+        }),
+      });
+
+      const result = await fetchReportsByTarget(API_URL, { event: 'abc' });
+
+      expect(result.reportArrivals).toEqual({ r1: 100 });
+    });
+
+    it('returns no arrivals from a worker that sends none', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+
+      const result = await fetchReportsByTarget(API_URL, { event: 'abc' });
+
+      expect(result.reportArrivals).toEqual({});
+    });
+
     it('requests /api/reports?pubkey= when given a pubkey target', async () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
 
@@ -2050,6 +2074,24 @@ describe('adminApi', () => {
 
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [], automated_targets: 'pubkey:x' }) });
       expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
+    });
+
+    it('reads the keys of handled-before targets, keeping strings only', async () => {
+      const key = `event:${'b'.repeat(64)}`;
+      mockFetch.mockResolvedValueOnce({
+        ok: true,
+        json: async () => ({ success: true, events: [], handled_before: [key, 42, null, ['x']] }),
+      });
+
+      expect((await fetchReportsNeedingAttention(API_URL)).handledBeforeTargets).toEqual([key]);
+    });
+
+    it('reads none from a worker that sends no handled_before, or not a list', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
+      expect((await fetchReportsNeedingAttention(API_URL)).handledBeforeTargets).toEqual([]);
+
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [], handled_before: 'event:x' }) });
+      expect((await fetchReportsNeedingAttention(API_URL)).handledBeforeTargets).toEqual([]);
     });
 
     it('normalizes malformed tags and drops non-object events (raw payload is untrusted)', async () => {

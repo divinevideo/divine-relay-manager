@@ -4,6 +4,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 import { AUTO_HIDE_ACTION } from '../../shared/autohide';
+import { finalizeEvent, generateSecretKey } from 'nostr-tools';
 
 vi.mock('./relay-profile', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./relay-profile')>();
@@ -3289,6 +3290,92 @@ describe('ReportWatcher', () => {
       await vi.waitFor(() => {
         expect((ageState.waitUntil as ReturnType<typeof vi.fn>).mock.calls.length).toBeGreaterThan(0);
       }, { timeout: 2000 });
+    });
+  });
+
+  describe('report arrival log (#324)', () => {
+    const TARGET_PK = 'c4'.repeat(32);
+
+    function arrivalDb(opts: { failArrival?: boolean } = {}) {
+      const arrivalBinds: unknown[][] = [];
+      const db = {
+        prepare: vi.fn().mockImplementation((sql: string) => {
+          const isArrival = sql.includes('INSERT OR IGNORE INTO report_arrivals');
+          const run = vi.fn().mockImplementation(async () => {
+            if (isArrival && opts.failArrival) throw new Error('d1 down');
+            return { success: true, meta: { changes: 1 } };
+          });
+          return {
+            run,
+            first: vi.fn().mockResolvedValue(null),
+            bind: vi.fn().mockImplementation((...args: unknown[]) => {
+              if (isArrival) arrivalBinds.push(args);
+              return { run, first: vi.fn().mockResolvedValue(null), all: vi.fn().mockResolvedValue({ results: [] }) };
+            }),
+          };
+        }),
+      } as unknown as D1Database;
+      return { db, arrivalBinds };
+    }
+
+    function signedReport(tags: string[][]): ReportEvent {
+      return finalizeEvent(
+        { kind: 1984, created_at: 1, content: 'r', tags },
+        generateSecretKey(),
+      ) as unknown as ReportEvent;
+    }
+
+    async function feed(w: ReportWatcher, event: ReportEvent) {
+      await (w as unknown as { handleReportEvent(e: ReportEvent): Promise<void> }).handleReportEvent(event);
+    }
+
+    it('records a verified report once, with its id and a seconds timestamp', async () => {
+      const { db, arrivalBinds } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const before = Math.floor(Date.now() / 1000);
+      const event = signedReport([['p', TARGET_PK], ['report', 'spam']]);
+      await feed(w, event);
+      expect(arrivalBinds).toHaveLength(1);
+      expect(arrivalBinds[0][0]).toBe(event.id);
+      expect(arrivalBinds[0][1] as number).toBeGreaterThanOrEqual(before);
+      expect(arrivalBinds[0][1] as number).toBeLessThan(before + 60);
+    });
+
+    it('records nothing for an event that fails signature verification', async () => {
+      const { db, arrivalBinds } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const event = signedReport([['p', TARGET_PK], ['report', 'spam']]);
+      // Round-trip through JSON as a relay frame would: finalizeEvent marks the
+      // object verified, and a spread would copy that mark past the tamper.
+      await feed(w, { ...JSON.parse(JSON.stringify(event)), content: 'tampered' } as ReportEvent);
+      expect(arrivalBinds).toHaveLength(0);
+    });
+
+    it('still runs auto-hide and the age-review path when the arrival write throws', async () => {
+      const { db } = arrivalDb({ failArrival: true });
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const targetEvent = 'e5'.repeat(32);
+      await feed(w, signedReport([['e', targetEvent], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]));
+      expect(autoHide).toHaveBeenCalledTimes(1);
+      expect(ageReview).toHaveBeenCalledTimes(1);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/arrival/i), expect.anything());
+      consoleError.mockRestore();
+    });
+
+    it('records nothing and does not throw without a DB binding', async () => {
+      const w = new ReportWatcher(createMockState(), createMockEnv());
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await expect(feed(w, signedReport([['p', TARGET_PK], ['report', 'spam']]))).resolves.toBeUndefined();
     });
   });
 });

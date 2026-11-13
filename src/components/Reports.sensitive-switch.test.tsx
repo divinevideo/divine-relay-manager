@@ -1,5 +1,5 @@
-// ABOUTME: Unhandled CSAM reports sit behind the pending-review switch with auto-hidden ones,
-// ABOUTME: out of the default view, and leave it once a person handles them.
+// ABOUTME: Unanswered CSAM reports sit behind the pending-review switch with auto-hidden ones,
+// ABOUTME: out of the default view, and leave it once a person answers them.
 
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -51,9 +51,9 @@ const NPUB_CSAM = nip19.npubEncode(CSAM_PROFILE);
 const NOTE_SPAM = nip19.noteEncode(SPAM_EVENT);
 const NOTE_HIDDEN = nip19.noteEncode(HIDDEN_EVENT);
 
-type State = { target_type: string; target_id: string; action: string };
+type State = { target_type: string; target_id: string; action: string; at?: number | null };
 type Resolved = { target_type: string; target_id: string; automated?: boolean };
-type LabelTarget = { type: string; value: string };
+type LabelTarget = { type: string; value: string; at?: number };
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -70,6 +70,7 @@ function stubFetch({
   statesGate,
   statesFail = false,
   reportsGate,
+  handlingRows,
 }: {
   events: unknown[];
   states?: State[];
@@ -90,6 +91,9 @@ function stubFetch({
   // A deep link's targeted lookup (/api/reports?event= or ?pubkey=), keyed by
   // the target's hex. A target with no entry gets an empty result.
   targeted?: Record<string, unknown[]>;
+  // A worker with the handled-before rule (#324) sends these as handling_rows.
+  // Absent: a worker from before it.
+  handlingRows?: unknown[];
 }) {
   const calls = { labels: 0, resolutionState: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -117,7 +121,7 @@ function stubFetch({
       if (typeof statesFail === 'function' ? statesFail() : statesFail) {
         return jsonResponse({ success: false, error: 'unavailable' });
       }
-      return jsonResponse({ success: true, resolved, states });
+      return jsonResponse({ success: true, resolved, states, ...(handlingRows ? { handling_rows: handlingRows } : {}) });
     }
     if (url.includes('/api/relay-rpc')) {
       const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
@@ -374,6 +378,164 @@ describe('Reports sensitive pending-review switch', () => {
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
 
       await expectHandled(user, NPUB_SPAM_PROFILE);
+    });
+  });
+
+  // #324: the switch reads the same handled rule as the queue. A CSAM report
+  // that came after a person handled its target is unanswered, so it goes
+  // behind the switch, never into the main list or the handled-before section.
+  describe('by the handled-before rule (#324)', () => {
+    const T = CSAM_REPORT.created_at;
+    const MODERATOR = '6'.repeat(64);
+    const DECIDED: Resolved = { target_type: 'pubkey', target_id: CSAM_PROFILE };
+    const handlingRow = (action: string, at: number) =>
+      ({ target_type: 'pubkey', target_id: CSAM_PROFILE, action, moderator_pubkey: MODERATOR, at });
+
+    async function expectBehindSwitchOnly(user: ReturnType<typeof userEvent.setup>) {
+      await screen.findByText(NOTE_SPAM);
+      await waitFor(() => expect(switchLabelText()).toBe('Pending review (sensitive)1'));
+      expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
+      // The section's count, which always shows under this rule, does not count it.
+      expect(screen.getByRole('button', { name: '0 new on items already handled' })).toBeInTheDocument();
+
+      await turnSwitchOn(user);
+      expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
+    }
+
+    it('keeps a CSAM report that came after its target was handled behind the switch', async () => {
+      // A worker with the rule still sends the decision in `resolved`.
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [DECIDED], handlingRows: [handlingRow('reviewed', T - 50)] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    // The label still names the target, but the reopen after it cancelled it.
+    it('keeps a CSAM target behind the switch when a reopen cancelled its label', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        handlingRows: [handlingRow('reopened', T - 50)],
+        labels: () => Promise.resolve([{ type: 'pubkey', value: CSAM_PROFILE, at: T - 100 }]),
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    it('takes a CSAM target out once a person handled it after its reports', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [DECIDED], handlingRows: [handlingRow('reviewed', T + 50)] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectHandled(user, NPUB_CSAM);
+    });
+
+    // A person's auto-hide choice answers only the reports before it. These
+    // fixtures leave the target unbanned, as a restore does; the confirmed,
+    // still-banned post is below.
+    const autoHideRows = (confirmedAt: number) => [
+      { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hide_confirmed', at: confirmedAt },
+      { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hidden', at: confirmedAt - 10 },
+    ];
+
+    it('keeps a CSAM report that came after a person confirmed its auto-hide behind the switch', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], states: autoHideRows(T - 50), handlingRows: [] });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    it('keeps a CSAM target behind the switch when a reopen came after its auto-hide confirmation', async () => {
+      stubFetch({
+        events: [CSAM_REPORT, SPAM_REPORT],
+        states: autoHideRows(T + 50),
+        handlingRows: [handlingRow('reopened', T + 100)],
+      });
+      const user = userEvent.setup();
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await expectBehindSwitchOnly(user);
+    });
+
+    // What production produces: auto-hide bans the post, and Confirm hide
+    // leaves the ban with only an auto_hide_confirmed row (#324). The confirm
+    // dates the ban.
+    describe('a post whose auto-hide a person confirmed, still banned on the relay', () => {
+      const POST = 'ab'.repeat(32);
+      const NOTE_POST = nip19.noteEncode(POST);
+      const postReport = (id: string, createdAt: number, csam: boolean) => report(id, createdAt, [
+        ['e', POST, csam ? 'illegal' : 'spam'],
+        ['p', 'cd'.repeat(32), csam ? 'illegal' : 'spam'],
+        ['L', 'social.nos.ontology'],
+        ['l', csam ? 'NS-csam' : 'NS-spam', 'social.nos.ontology'],
+      ]);
+      const confirmedPost = (confirmedAt: number) => [
+        { target_type: 'event', target_id: POST, action: 'auto_hide_confirmed', at: confirmedAt },
+        { target_type: 'event', target_id: POST, action: 'auto_hidden', at: confirmedAt - 10 },
+      ];
+
+      it('keeps a CSAM report that came after the confirm behind the switch', async () => {
+        const later = postReport('ef'.repeat(32), T + 50, true);
+        stubFetch({ events: [later, SPAM_REPORT], states: confirmedPost(T), handlingRows: [], bannedEvents: [POST] });
+        const user = userEvent.setup();
+        render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+        await screen.findByText(NOTE_SPAM);
+        await waitFor(() => expect(switchLabelText()).toBe('Pending review (sensitive)1'));
+        expect(screen.queryByText(NOTE_POST)).not.toBeInTheDocument();
+        await turnSwitchOn(user);
+        expect(within(rowFor(NOTE_POST)).getByText('Not hidden, needs review')).toBeInTheDocument();
+      });
+
+      it('lists a later report without a CSAM signal as handled before', async () => {
+        const later = postReport('ef'.repeat(32), T + 50, false);
+        stubFetch({ events: [later, SPAM_REPORT], states: confirmedPost(T), handlingRows: [], bannedEvents: [POST] });
+        render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+        await screen.findByText(NOTE_SPAM);
+        expect(await screen.findByRole('button', { name: '1 new on an item already handled' })).toBeInTheDocument();
+        expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
+      });
+
+      it('keeps a CSAM target behind the switch when a reopen came after the confirm', async () => {
+        const earlier = postReport('ef'.repeat(32), T - 50, true);
+        stubFetch({
+          events: [earlier, SPAM_REPORT],
+          states: confirmedPost(T),
+          handlingRows: [{ target_type: 'event', target_id: POST, action: 'reopened', moderator_pubkey: MODERATOR, at: T + 50 }],
+          bannedEvents: [POST],
+        });
+        const user = userEvent.setup();
+        render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+        await screen.findByText(NOTE_SPAM);
+        await waitFor(() => expect(switchLabelText()).toBe('Pending review (sensitive)1'));
+        await turnSwitchOn(user);
+        expect(within(rowFor(NOTE_POST)).getByText('Not hidden, needs review')).toBeInTheDocument();
+      });
+
+      it('keeps a report from before the confirm handled', async () => {
+        const earlier = postReport('ef'.repeat(32), T - 50, true);
+        stubFetch({ events: [earlier, SPAM_REPORT], states: confirmedPost(T), handlingRows: [], bannedEvents: [POST] });
+        const user = userEvent.setup();
+        render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+        await expectHandled(user, NOTE_POST);
+      });
+    });
+
+    // As before #324: the confirmation answered the report, and auto-hide is
+    // not handling to the queue, so the report shows in the main list.
+    it('takes a CSAM target out of the switch when a person confirmed its auto-hide after its reports', async () => {
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], states: autoHideRows(T + 50), handlingRows: [] });
+      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
+
+      await screen.findByText(NOTE_SPAM);
+      await waitFor(() => expect(screen.getByText(NPUB_CSAM)).toBeInTheDocument());
+      expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
     });
   });
 

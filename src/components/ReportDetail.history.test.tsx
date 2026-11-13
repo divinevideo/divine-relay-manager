@@ -1,7 +1,8 @@
 // ABOUTME: Pins how the report pane states an account history it could not read whole:
-// ABOUTME: a cut-short report list is a floor ("N+"), and a failed read withholds the AI summary.
+// ABOUTME: a cut-short report list is a floor ("N+"), a failed read withholds the AI summary,
+// ABOUTME: and a report on an item handled before lists that item's dated handling (#324).
 
-import { render, screen } from '@testing-library/react';
+import { render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -15,6 +16,12 @@ const MOD_PUBKEY = 'e'.repeat(64);
 // Mutable per test: which half of the account history failed to read, and
 // what the summary hook would otherwise hand back.
 const history = vi.hoisted(() => ({
+  target: { type: 'event', value: 'c'.repeat(64) } as { type: 'event' | 'pubkey'; value: string },
+  decisions: [] as { id: number; action: string; reason?: string; created_at: string; moderator_pubkey: string }[],
+  // The reported account's own log, an event report's second read.
+  authorDecisions: [] as { id: number; action: string; reason?: string; created_at: string; moderator_pubkey: string }[],
+  userBanned: false,
+  eventGone: false,
   userStats: undefined as { reportsIncomplete: boolean; labelsIncomplete: boolean } | undefined,
   summary: { data: null as { summary: string; riskLevel: 'low' } | null, isLoading: false, error: null as Error | null },
 }));
@@ -41,20 +48,29 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
 }));
+// The target's own log reads history.decisions; the author's log (an event
+// report's second read) reads history.authorDecisions.
 vi.mock('@/hooks/useDecisionLog', () => ({
-  useDecisionLog: () => ({
-    hasDecisions: false,
-    isPendingReview: false,
-    isDeleted: false,
-    isAutoHidden: false,
-    isAutoHideRestored: false,
-    decisions: [],
-    latestDecision: null,
-    refetch: vi.fn(),
-  }),
+  useDecisionLog: (targetId: string | null | undefined) => {
+    const decisions = targetId === history.target.value ? history.decisions
+      : targetId === 'd'.repeat(64) ? history.authorDecisions
+      : [];
+    const latestHandlingDecision = decisions[0];
+    return {
+      hasDecisions: decisions.length > 0,
+      hasHandlingDecisions: latestHandlingDecision !== undefined,
+      latestHandlingDecision,
+      isPendingReview: false,
+      isDeleted: false,
+      isAutoHidden: false,
+      isAutoHideRestored: false,
+      decisions,
+      refetch: vi.fn(),
+    };
+  },
 }));
 vi.mock('@/hooks/useModerationStatus', () => ({
-  useModerationStatus: () => ({ isUserBanned: false, isEventGone: false, recheck: vi.fn() }),
+  useModerationStatus: () => ({ isUserBanned: history.userBanned, isEventGone: history.eventGone, recheck: vi.fn() }),
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => history.summary }));
@@ -72,7 +88,7 @@ const TARGET_EVENT_OBJ: NostrEvent = {
 };
 vi.mock('@/hooks/useReportContext', () => ({
   useReportContext: () => ({
-    target: { type: 'event', value: TARGET_EVENT },
+    target: history.target,
     thread: { event: TARGET_EVENT_OBJ, ancestors: [], replies: [] },
     threadLoading: false,
     reportedUser: { profile: undefined, pubkey: REPORTED_PUBKEY, isFunnelcakeUser: false },
@@ -107,7 +123,16 @@ const REPORT: NostrEvent = {
   sig: 'b'.repeat(128),
 };
 
-function renderDetail(props: { allReportsForTarget?: NostrEvent[]; allReportsForTargetTruncated?: boolean } = {}) {
+function renderDetail(props: {
+  allReportsForTarget?: NostrEvent[];
+  allReportsForTargetTruncated?: boolean;
+  handledBefore?: {
+    history: { action: string; at: number | null }[];
+    via: 'own' | 'author';
+    ban?: { kind: 'account' | 'author'; since: number | null };
+  };
+  queueHandled?: boolean;
+} = {}) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
@@ -122,6 +147,11 @@ function renderDetail(props: { allReportsForTarget?: NostrEvent[]; allReportsFor
 
 beforeEach(() => {
   vi.clearAllMocks();
+  history.target = { type: 'event', value: TARGET_EVENT };
+  history.decisions = [];
+  history.authorDecisions = [];
+  history.userBanned = false;
+  history.eventGone = false;
   history.userStats = { reportsIncomplete: false, labelsIncomplete: false };
   history.summary = { data: null, isLoading: false, error: null };
 });
@@ -186,5 +216,182 @@ describe('ReportDetail AI summary with an unreadable account history', () => {
 
     expect(screen.getByText('AI summary unavailable')).toBeInTheDocument();
     expect(screen.queryByText('Generating summary...')).not.toBeInTheDocument();
+  });
+});
+
+// #324: a report that came after its target was handled shows that handling,
+// dated, so the moderator sees what was decided before and when.
+describe('ReportDetail history for a report on an item handled before', () => {
+  const day = (at: number) => new Date(at * 1000).toLocaleDateString();
+  // Newest first, as handlingByTarget orders it: handled again after a reopen,
+  // which ended the handling before it, and an undated row last.
+  const HISTORY = [
+    { action: 'reviewed', at: 1751600000 },
+    { action: 'reopened', at: 1751500000 },
+    { action: 'unban_user', at: 1751400000 },
+    { action: 'resolution_label', at: 1751300000 },
+    { action: 'ban_user', at: null },
+  ];
+  const OWN = { history: HISTORY, via: 'own' as const };
+  const PROMPT = "This account was handled before. Does this report, with the account's current state, change the call?";
+  const AUTHOR_LINE = "History of the post's author";
+  const cardOf = () => screen.getByText('Handled before').closest('.rounded-lg') as HTMLElement;
+
+  it('titles the card Handled before and lists every entry with its date', () => {
+    renderDetail({ handledBefore: OWN });
+
+    const card = screen.getByText('Handled before').closest('.rounded-lg') as HTMLElement;
+    expect(card).not.toBeNull();
+    const rows = within(card).getAllByTestId('handled-before-entry');
+    expect(rows.map(r => r.textContent)).toEqual([
+      `reviewed${day(1751600000)}`,
+      `reopened${day(1751500000)}`,
+      `unban user${day(1751400000)}`,
+      `resolution label${day(1751300000)}`,
+      'ban userdate unknown',
+    ]);
+    // A post is not an account: no account prompt. Its own history: no author line.
+    expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+    expect(screen.queryByText(AUTHOR_LINE)).not.toBeInTheDocument();
+    expect(within(card).queryByText(/banned/i)).not.toBeInTheDocument();
+  });
+
+  it('asks for a fresh look at an account', () => {
+    history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
+    renderDetail({ handledBefore: OWN });
+
+    expect(screen.getByText('Handled before')).toBeInTheDocument();
+    expect(screen.getByText(PROMPT)).toBeInTheDocument();
+  });
+
+  it('shows no such card for any other report', () => {
+    history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
+    renderDetail();
+
+    expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
+    expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+  });
+
+  // Spec decision 5: a banned account's report says since when.
+  it("names a banned account's ban and its date in the card", () => {
+    history.target = { type: 'pubkey', value: REPORTED_PUBKEY };
+    renderDetail({ handledBefore: { ...OWN, ban: { kind: 'account', since: 1751400000 } } });
+
+    expect(within(cardOf()).getByText(`Banned since ${day(1751400000)}`)).toBeInTheDocument();
+  });
+
+  // Spec decision 3: a post handled before only through its banned author
+  // lists the author's history, and says whose it is.
+  it("says the history is the post author's, and since when the author is banned", () => {
+    renderDetail({
+      handledBefore: { history: [{ action: 'ban_user', at: 1751400000 }], via: 'author', ban: { kind: 'author', since: 1751400000 } },
+    });
+
+    const card = cardOf();
+    expect(within(card).getByText(AUTHOR_LINE)).toBeInTheDocument();
+    expect(within(card).getByText(`Author banned since ${day(1751400000)}`)).toBeInTheDocument();
+    expect(screen.queryByText(PROMPT)).not.toBeInTheDocument();
+  });
+
+  // The Handled before card lists only handling; the decision log card stays
+  // below it with each decision's reason and the rows that handle nothing.
+  it('keeps the decision log, with its reasons, below the Handled before card', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail({ handledBefore: OWN });
+
+    const handledBefore = cardOf();
+    const log = screen.getByText(/^Decision History/).closest('.rounded-lg') as HTMLElement;
+    expect(log).not.toBe(handledBefore);
+    expect(within(log).getByText('Checked, no violation')).toBeInTheDocument();
+    expect(screen.queryByText(/Already Handled/)).not.toBeInTheDocument();
+    expect(log.className).not.toMatch(/green/);
+    expect(handledBefore.compareDocumentPosition(log) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('keeps calling a handled log Already Handled for any other report', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.getByText(/^Already Handled/)).toBeInTheDocument();
+  });
+
+  // The green "Last action" banner at the top of the pane reads as "this is
+  // resolved". Above the Handled before card it would say the opposite of it:
+  // this report is the one no one has answered (spec anti-goal 3).
+  it('shows no green Last action banner on a report handled before', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail({ handledBefore: OWN });
+
+    expect(cardOf()).toBeInTheDocument();
+    expect(screen.queryByText(/^Last action:/)).not.toBeInTheDocument();
+  });
+
+  it('keeps the green Last action banner on any other handled report', () => {
+    history.decisions = [
+      { id: 1, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-03 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.getByText(/^Last action: reviewed on /)).toBeInTheDocument();
+  });
+
+  // A target handled only by a resolution label has no handling row in the
+  // decision log, but the queue counts the label, and a Reopen cancels it.
+  // The queue says so (queueHandled), so the pane offers Reopen too.
+  it('offers Reopen on a report handled before only through a resolution label', () => {
+    renderDetail({
+      handledBefore: { history: [{ action: 'resolution_label', at: 1751300000 }], via: 'own' },
+      queueHandled: true,
+    });
+
+    expect(cardOf()).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reopen' })).toBeInTheDocument();
+  });
+
+  // The queue counts the author's handling on a post only while the author is
+  // banned (spec decision 3), so the pane does too: otherwise a new post report
+  // by an author once marked OK would read as resolved here and new in the queue.
+  it('shows no Last action banner or Reopen on a new post report whose author was handled but is not banned', () => {
+    history.authorDecisions = [
+      { id: 2, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-01 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.queryByText(/^Last action:/)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
+  });
+
+  // A gone post reads as resolved, but an unbanned author's decision did not
+  // handle it, so the banner does not name one.
+  it("does not name an unbanned author's decision as a gone post's last action", () => {
+    history.eventGone = true;
+    history.authorDecisions = [
+      { id: 2, action: 'reviewed', reason: 'Checked, no violation', created_at: '2026-07-01 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.queryByText(/^Last action: reviewed/)).not.toBeInTheDocument();
+  });
+
+  it("names the banned author's ban in the Last action banner", () => {
+    history.userBanned = true;
+    history.authorDecisions = [
+      { id: 2, action: 'ban_user', reason: 'Spam', created_at: '2026-07-01 10:00:00', moderator_pubkey: MOD_PUBKEY },
+    ];
+    renderDetail();
+
+    expect(screen.getByText(/^Last action: ban user on /)).toBeInTheDocument();
+  });
+
+  it('offers no Reopen when neither the decision log nor the queue has handling', () => {
+    renderDetail();
+
+    expect(screen.queryByRole('button', { name: 'Reopen' })).not.toBeInTheDocument();
   });
 });

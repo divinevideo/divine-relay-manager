@@ -2,7 +2,7 @@
 // ABOUTME: Mocks the WebSocket rather than the module, so the real queryRelay is exercised.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { fetchAccountIdentity } from './relay-profile';
+import { fetchAccountIdentity, queryRelay } from './relay-profile';
 
 /**
  * Mirrors mockRelay in bulk-moderate.test.ts. We stub the socket, not the module:
@@ -236,5 +236,126 @@ describe('fetchAccountIdentity', () => {
       completed: false,
       profile: null,
     });
+  });
+});
+
+/**
+ * A socket the test drives frame by frame, so a frame can land after
+ * queryRelay has already resolved. `emit` is live once the REQ is sent.
+ */
+function scriptedRelay() {
+  const relay = {
+    subId: '',
+    emit: (_type: string, _value?: unknown) => {},
+    message: (payload: unknown) => relay.emit('message', { data: JSON.stringify(payload) }),
+    ready: null as unknown as Promise<void>,
+  };
+  let markReady!: () => void;
+  relay.ready = new Promise<void>((r) => { markReady = r; });
+  vi.spyOn(globalThis, 'WebSocket').mockImplementation((function () {
+    const listeners = new Map<string, Array<(value?: unknown) => void>>();
+    relay.emit = (type, value) => listeners.get(type)?.forEach((h) => h(value));
+    queueMicrotask(() => relay.emit('open'));
+    return {
+      addEventListener: (e: string, h: (value?: unknown) => void) => {
+        listeners.set(e, [...(listeners.get(e) || []), h]);
+      },
+      send: vi.fn((payload: string) => {
+        const parsed = JSON.parse(payload);
+        if (parsed[0] === 'REQ') { relay.subId = parsed[1]; markReady(); }
+      }),
+      close: vi.fn(),
+    };
+  } as unknown as typeof WebSocket));
+  return relay;
+}
+
+const EVENT_A = { id: 'a'.repeat(64), kind: 1985 };
+const LATE = { id: 'd'.repeat(64), kind: 1985 };
+
+// The #186 contract: only EOSE makes a read complete, and every failure exit
+// still hands back the events that arrived before it. Callers that act on a
+// partial read (a profile captured before a drop) depend on those events. These
+// were pinned through Reopen's label cleanup until #324 stopped it reading the
+// relay, so they are pinned here, on queryRelay itself.
+describe('queryRelay partial reads and late frames', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // The success exit hands back the live `events` array, so the message
+  // listener's resolved-guard is all that keeps a frame streamed after EOSE
+  // (the worker never sends CLOSE) out of the caller's result.
+  it('does not add a frame that arrives after EOSE to the result', async () => {
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await relay.ready;
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    relay.message(['EOSE', relay.subId]);
+    relay.message(['EVENT', relay.subId, LATE]);
+
+    const res = await pending;
+    expect(res).toMatchObject({ success: true, complete: true });
+    expect(res.events).toEqual([EVENT_A]);
+  });
+
+  // A failure exit can be followed by a frame while the socket is closing. Two
+  // things keep it out: the resolved-guard blocks the push, and every failure
+  // exit returns `events.slice()`, a snapshot the push cannot reach. Either
+  // alone suffices here, so this dies only to removing both; the after-EOSE
+  // case above is the guard's sole pin.
+  it('does not add a frame that arrives after the read failed to the result', async () => {
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await relay.ready;
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    relay.emit('close');
+    relay.message(['EVENT', relay.subId, LATE]);
+
+    const res = await pending;
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/closed before EOSE/i);
+    expect(res.events).toEqual([EVENT_A]);
+  });
+
+  it('hands back the events received before the read timed out', async () => {
+    vi.useFakeTimers();
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await vi.advanceTimersByTimeAsync(0);
+    await relay.ready;
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    const res = await pending;
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/timed out/i);
+    expect(res.events).toEqual([EVENT_A]);
+  });
+
+  it('hands back the events received before the relay CLOSED the subscription', async () => {
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await relay.ready;
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    relay.message(['CLOSED', relay.subId, 'error: could not complete query']);
+
+    const res = await pending;
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/could not complete query/);
+    expect(res.events).toEqual([EVENT_A]);
+  });
+
+  it('hands back the events received before the socket errored', async () => {
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await relay.ready;
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    relay.emit('error');
+
+    const res = await pending;
+    expect(res.success).toBe(false);
+    expect(res.error).toBe('WebSocket error');
+    expect(res.events).toEqual([EVENT_A]);
   });
 });
