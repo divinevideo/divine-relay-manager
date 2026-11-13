@@ -394,6 +394,26 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     }
   });
 
+  // The feed reads its `automated` set from the handling rows it already holds,
+  // so one poll walks the decision log's non-auto-hide rows once, not twice.
+  it('walks the decision log once for its handling and automated reads', async () => {
+    stubRelay([report(1, 100, [['e', E(1)]])]);
+    await decide('event', E(1), 'reviewed');
+    const sql: string[] = [];
+    const counting = new Proxy(DB, {
+      get(target, prop) {
+        if (prop === 'prepare') return (query: string) => { sql.push(query); return target.prepare(query); };
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+
+    const { status } = await getReportsNeedingAttention(counting, 'wss://relay.divine.video');
+
+    expect(status).toBe(200);
+    expect(sql.filter(q => /FROM moderation_decisions/.test(q) && /action NOT IN/.test(q))).toHaveLength(1);
+  });
+
   describe('truncation flags point in the direction that failed', () => {
     it('a report walk that hits its page cap sets truncated but not resolution_truncated', async () => {
       // Page size 2, one page allowed: the first page comes back full (2 of 3),

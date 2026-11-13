@@ -67,8 +67,7 @@ export async function getResolvedTargets(
   const chunkSize = opts?.chunkSize ?? ROW_CHUNK_SIZE;
   const placeholders = AUTO_HIDE_ACTIONS.map(() => '?').join(', ');
 
-  // Map insertion order is first-seen order, which the result keeps.
-  const targets = new Map<string, { target_type: string; target_id: string; human: boolean }>();
+  const targets: ResolvedTargetFold = new Map();
   let afterId = 0;
 
   for (;;) {
@@ -91,29 +90,54 @@ export async function getResolvedTargets(
       action: string;
       moderator_pubkey: string | null;
     }>;
-    for (const row of rows) {
-      const key = `${row.target_type}:${row.target_id}`;
-      if (row.action === REOPENED_ACTION) {
-        // By id, so a human row written in the same second after a reopen
-        // resolves the target here, where handlingByTarget needs a strictly
-        // later time. They differ only within that second, and only an old
-        // Pages build reads this list.
-        targets.delete(key);
-        continue;
-      }
-      const human = !isAutomatedDecision(row);
-      const target = targets.get(key);
-      if (!target) {
-        targets.set(key, { target_type: row.target_type, target_id: row.target_id, human });
-      } else if (human) {
-        target.human = true;
-      }
-    }
+    for (const row of rows) foldResolvedRow(targets, row);
 
     if (rows.length < chunkSize) break;
     afterId = rows[rows.length - 1].id;
   }
 
+  return resolvedTargetsOf(targets);
+}
+
+// getResolvedTargets over rows already read, for a caller that holds
+// getHandlingRows' result: the same rows in the same id order, limited to event
+// and pubkey targets, so it gives the same answer for those targets without a
+// second walk of the table.
+export function resolvedTargetsFromRows(
+  rows: Iterable<{ target_type: string; target_id: string; action: string; moderator_pubkey?: string | null }>
+): ResolvedTargetRow[] {
+  const targets: ResolvedTargetFold = new Map();
+  for (const row of rows) foldResolvedRow(targets, row);
+  return resolvedTargetsOf(targets);
+}
+
+// Map insertion order is first-seen order, which the result keeps.
+type ResolvedTargetFold = Map<string, { target_type: string; target_id: string; human: boolean }>;
+
+// One decision row, in id order, folded into the resolved targets.
+function foldResolvedRow(
+  targets: ResolvedTargetFold,
+  row: { target_type: string; target_id: string; action: string; moderator_pubkey?: string | null }
+): void {
+  const key = `${row.target_type}:${row.target_id}`;
+  if (row.action === REOPENED_ACTION) {
+    // By id, so a human row written in the same second after a reopen
+    // resolves the target here, where handlingByTarget needs a strictly
+    // later time. They differ only within that second, and only an old
+    // Pages build reads this list.
+    targets.delete(key);
+    return;
+  }
+  const human = !isAutomatedDecision(row);
+  const target = targets.get(key);
+  if (!target) {
+    targets.set(key, { target_type: row.target_type, target_id: row.target_id, human });
+  } else if (human) {
+    target.human = true;
+  }
+}
+
+function resolvedTargetsOf(targets: ResolvedTargetFold): ResolvedTargetRow[] {
   return Array.from(targets.values(), ({ target_type, target_id, human }) =>
     human ? { target_type, target_id } : { target_type, target_id, automated: true }
   );

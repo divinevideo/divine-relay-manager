@@ -8,7 +8,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { getResolvedTargets, getAutoHideStates, getHandlingRows } from '../src/resolution-state';
+import { getResolvedTargets, getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from '../src/resolution-state';
 import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
 import worker from '../src/index';
 
@@ -331,6 +331,12 @@ describe('resolved targets only automation has touched, against real D1', () => 
     return (await getResolvedTargets(autoDB, opts)).filter((t) => t.target_id === targetId);
   }
 
+  // The feed derives these targets from the handling rows rather than walking
+  // the table a second time, so the two reads must agree on every target.
+  it('gives the same targets from the handling rows as from its own walk', async () => {
+    expect(resolvedTargetsFromRows(await getHandlingRows(autoDB))).toStrictEqual(await getResolvedTargets(autoDB));
+  });
+
   // toStrictEqual, not toEqual: toEqual also accepts `automated: undefined`,
   // and a target a person touched must carry no flag at all.
   it('flags a target whose only decision the worker wrote itself', async () => {
@@ -489,6 +495,16 @@ describe('handling rows and reopened targets, against real D1', () => {
     // 13 rows seeded, less two auto-hide rows and one media row.
     expect(all).toHaveLength(10);
     expect(chunked).toStrictEqual(all);
+  });
+
+  // The handling rows leave out targets that are neither an event nor a
+  // pubkey (the media row here); for every other target the two agree,
+  // reopens and automated rows included.
+  it('gives the same event and pubkey targets from the handling rows as from its own walk', async () => {
+    const walked = (await getResolvedTargets(rowsDB))
+      .filter((t) => t.target_type === 'event' || t.target_type === 'pubkey');
+    expect(walked.length).toBeGreaterThan(2);
+    expect(resolvedTargetsFromRows(await getHandlingRows(rowsDB))).toStrictEqual(walked);
   });
 
   it('leaves a target out of resolved once it is reopened, as Reopen did by deleting its rows', async () => {

@@ -8,7 +8,7 @@ import { pendingReviewTargetKeys } from '../../shared/autohide';
 import {
   handlingByTarget, reportStatus, reportTime, REOPENED_ACTION, type HandlingEntry, type ReportStatus,
 } from '../../shared/handling';
-import { getAutoHideStates, getHandlingRows, getResolvedTargets } from './resolution-state';
+import { getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from './resolution-state';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { readReportArrivals } from './report-arrivals';
 import { REPORT_KIND, REPORTS_MAX_PAGES, REPORTS_PAGE_SIZE } from './reports-filter';
@@ -197,13 +197,15 @@ export async function readResolutionKeys(
   relayUrl: string,
   labelsPaging?: PagingOptions,
 ): Promise<ResolutionKeys> {
-  const [decisions, autoHideStates, labels, handlingRows] = await Promise.all([
-    getResolvedTargets(db),
+  const [autoHideStates, labels, handlingRows] = await Promise.all([
     getAutoHideStates(db),
     readResolutionLabelTargets(relayUrl, labelsPaging),
     getHandlingRows(db),
   ]);
-  const { automated } = resolvedKeysFrom(decisions, labels.targets);
+  // `automated` comes from the handling rows, which hold every row
+  // getResolvedTargets reads for an event or pubkey target, in the same order,
+  // so the decision log is walked once rather than twice.
+  const { automated } = resolvedKeysFrom(resolvedTargetsFromRows(handlingRows), labels.targets);
   return {
     handling: handlingByTarget(handlingRows, labels.targets),
     automated,
