@@ -1,7 +1,7 @@
 // ABOUTME: Why a reported post the relay won't return is gone, from what was actually answered.
 // ABOUTME: One derivation, so report detail's badge, its tooltip and its thread panel give the same reason.
 
-import { GONE_NO_CAUSE_LINE, goneCauseUnknownLine, suspendedBadgeLabel, suspendedMissingPostLine } from '@/lib/suspendedContent';
+import { GONE_JUST_RESTORED_LINE, GONE_NO_CAUSE_LINE, goneCauseUnknownLine, suspendedBadgeLabel, suspendedMissingPostLine } from '@/lib/suspendedContent';
 import { SWITCH_STATE_LABELS } from '@/lib/sensitiveSwitch';
 
 /** A cause the badge states itself, in the order it is ranked. */
@@ -21,7 +21,11 @@ export type GoneCause =
   | { kind: 'explained'; by: ExplainedBy; line: string; badge: string; tone: GoneTone }
   /** The relay withholds the post because the account is suspended. */
   | { kind: 'suspended'; stale: boolean; line: string; badge: string; tone: GoneTone }
-  /** A status that would explain it has not answered. The post may still exist. */
+  /**
+   * A status that would explain it has not answered, or this tab unsuspended
+   * the account moments ago and the relay has not caught up. The post may
+   * still exist.
+   */
   | { kind: 'unknown'; line: string; badge: string; tone: GoneTone }
   /** Everything answered and nothing explains it. Not a deletion either. */
   | { kind: 'none-found'; line: string; badge: string; tone: GoneTone };
@@ -52,6 +56,12 @@ export interface GoneCauseInput {
    * thread panel's ban line also follows) and isEventBanChecking.
    */
   checking: { suspension: boolean; accountBan: boolean; eventBan: boolean };
+  /**
+   * useJustRestored: this tab unsuspended the account within RESTORE_SETTLE_MS.
+   * The relay can keep hiding its posts that long after the suspended list
+   * drops it, so a post nothing else explains may still exist.
+   */
+  justRestored: boolean;
 }
 
 const EXPLAINED_BADGE: Record<ExplainedBy, string> = {
@@ -77,7 +87,7 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
   const {
     eventGone, recordedDelete, autoHidden, decisionsUnread,
     userBanned, userBannedStale, eventBanned, eventBannedStale,
-    suspended, suspendedStale, checking,
+    suspended, suspendedStale, checking, justRestored,
   } = input;
   if (eventGone !== true) return { kind: 'not-gone' };
 
@@ -126,6 +136,16 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
         : 'Not Found on Relay',
       tone: 'unknown',
     };
+  }
+
+  // Everything answered and nothing explains it, but this tab unsuspended the
+  // account moments ago: the relay's read filter lags the suspended list, so
+  // the post is likely still withheld. Ranked last: a recorded delete,
+  // auto-hide or confirmed ban still explains the post, a suspension the list
+  // still reports is still the headline, and a read that is out or failed is
+  // named for what it is (its line already says the post may still exist).
+  if (justRestored) {
+    return { kind: 'unknown', line: GONE_JUST_RESTORED_LINE, badge: 'Not Found on Relay', tone: 'unknown' };
   }
 
   // Not a removal either: funnelcake withholds things none of these lists

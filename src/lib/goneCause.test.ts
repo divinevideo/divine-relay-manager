@@ -15,6 +15,7 @@ const base: GoneCauseInput = {
   suspended: false,
   suspendedStale: false,
   checking: { suspension: false, accountBan: false, eventBan: false },
+  justRestored: false,
 };
 const checking = (over: Partial<GoneCauseInput['checking']>) => ({ ...base.checking, ...over });
 const line = (over: Partial<GoneCauseInput>) => (deriveGoneCause({ ...base, ...over }) as { line: string }).line;
@@ -97,6 +98,58 @@ describe('deriveGoneCause causes', () => {
       kind: 'none-found',
       line: 'Not returned by the relay. It may have been self-deleted, held for review, or never stored here.',
     });
+  });
+});
+
+// Issue #376: right after this tab unsuspends the account, the suspended list
+// drops it at once but the relay's read filter keeps hiding its posts for a few
+// minutes. "Never stored here" would be wrong for a post that is only withheld.
+describe('deriveGoneCause just after an unsuspend', () => {
+  const JUST_RESTORED_LINE = 'Not returned by the relay yet. The account was just unsuspended, and its posts can take a few minutes to reappear.';
+
+  it('says the post may still exist rather than none found', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true })).toMatchObject({
+      kind: 'unknown',
+      line: JUST_RESTORED_LINE,
+      badge: 'Not Found on Relay',
+      tone: 'unknown',
+    });
+  });
+
+  it('still reads as none found once the window has closed', () => {
+    expect(deriveGoneCause({ ...base, justRestored: false }).kind).toBe('none-found');
+  });
+
+  it('has nothing to explain for a post the live check found', () => {
+    expect(deriveGoneCause({ ...base, eventGone: false, justRestored: true }).kind).toBe('not-gone');
+  });
+
+  it('does not override a recorded delete', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, recordedDelete: true })).toMatchObject({ kind: 'explained', by: 'delete' });
+  });
+
+  it('does not override an auto-hide', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, autoHidden: true })).toMatchObject({ kind: 'explained', by: 'auto-hide' });
+  });
+
+  it('does not override a confirmed ban', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, userBanned: true })).toMatchObject({ kind: 'explained', by: 'ban' });
+  });
+
+  it('does not override a confirmed event ban', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, eventBanned: true })).toMatchObject({ kind: 'explained', by: 'event-ban' });
+  });
+
+  // A read still out or failed is named as such: the window does not hide it.
+  it('leaves an unknown suspension to the unknown-cause line', () => {
+    expect(line({ justRestored: true, suspended: null, checking: checking({ suspension: true }) }))
+      .toBe('Not found on the relay. Still checking whether the account is suspended. That would hide it.');
+  });
+
+  // The suspended list still lists the account (a copy from before the
+  // unsuspend): that is what the badge says, last known.
+  it('leaves a suspension the list still reports to the suspended line', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true }).kind).toBe('suspended');
   });
 });
 

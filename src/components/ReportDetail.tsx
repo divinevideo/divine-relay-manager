@@ -1,7 +1,7 @@
 // ABOUTME: Full detail view for a selected report in the split-pane layout
 // ABOUTME: Combines thread context, user profile, AI summary, and action buttons
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -36,6 +36,7 @@ import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
 import { AccountTypeLabel } from "@/components/AccountTypeBadge";
 import { refreshAccountStatusAfterMirror } from "@/lib/accountStatusCache";
+import { useJustRestored, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { ReportClientText } from "@/components/ReportClientText";
 import { AISummary } from "@/components/AISummary";
 
@@ -217,6 +218,34 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // D1 decisions are audit log only, not status indicators
   const isUserBanned = moderationStatus.isUserBanned;
   const isEventDeleted = moderationStatus.isEventGone;
+  // This tab unsuspended the reported account moments ago. The relay can keep
+  // hiding its posts for that long after the suspended list drops it
+  // (lib/userStatsCache, markRestored).
+  const justRestored = useJustRestored(reportedPubkey);
+  // When that window closes the relay's read filter has caught up, so read the
+  // post again, once: re-run the live check, as a Re-check would, and mark the
+  // cached thread read stale (it holds the post as missing for its staleTime),
+  // so a post the relay returns again shows and one still withheld reads as
+  // none found. Keyed on the account and environment, so opening another
+  // report or switching environment (which runs its own check) is not taken
+  // for the window closing. A ban or suspend ends the window early, so this
+  // also runs then, one check beside the action's own recheckAfterAction;
+  // whichever starts later supersedes the other, so that is harmless.
+  const restoreEnvironment = useRestoreEnvironment();
+  const restoreWindowKey = `${restoreEnvironment ?? ''}|${(reportedPubkey ?? '').toLowerCase()}`;
+  const lastRestoreWindow = useRef({ key: restoreWindowKey, open: justRestored });
+  // The latest recheck, read when the window closes: its identity changes on
+  // most renders, and as an effect dependency it would re-run the effect each time.
+  const recheckRef = useRef(moderationStatus.recheck);
+  recheckRef.current = moderationStatus.recheck;
+  useEffect(() => {
+    const last = lastRestoreWindow.current;
+    lastRestoreWindow.current = { key: restoreWindowKey, open: justRestored };
+    if (last.key !== restoreWindowKey || !last.open || justRestored) return;
+    recheckRef.current();
+    // Prefix match: every depth and relay hint of this post's thread read.
+    if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
+  }, [restoreWindowKey, justRestored, targetEventId, queryClient]);
   // Why a gone post is gone, from what has actually answered (lib/goneCause).
   // The badge (label, icon, tooltip) and the thread panel all read this one answer.
   const goneCause = deriveGoneCause({
@@ -237,6 +266,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       accountBan: moderationStatus.isUserBanChecking,
       eventBan: moderationStatus.isEventBanChecking,
     },
+    justRestored,
   });
   // Whether the reported post is banned, for the post actions: `null` when
   // nothing has said (EventActions then keeps Ban and Delete and leaves out
