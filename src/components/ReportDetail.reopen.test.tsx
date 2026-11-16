@@ -160,7 +160,7 @@ beforeEach(() => {
   decisionLog.isPendingReview = false;
   decisionLog.isAutoHideRestoreFailed = false;
   realDecisionLog.on = false;
-  api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: false });
+  api.deleteDecisions.mockResolvedValue({ deleted: 1, labelCleanupFailed: false });
   api.logDecision.mockResolvedValue(undefined);
 });
 
@@ -179,7 +179,7 @@ function renderDetail(onDismiss?: () => void) {
   const { rerender } = render(tree());
   // Same component instance, fresh props/hook results -- what selecting another
   // report does to this panel.
-  return { invalidate, rerender: () => rerender(tree()) };
+  return { qc, invalidate, rerender: () => rerender(tree()) };
 }
 
 const clickReopen = () => fireEvent.click(screen.getByRole('button', { name: /reopen/i }));
@@ -447,39 +447,8 @@ describe('ReportDetail reopen reporting', () => {
     fireEvent.click(within(container).getByRole('button'));
 
     await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
-    expect(api.deleteDecisions).toHaveBeenNthCalledWith(1, TARGET_EVENT, 'event');
-    expect(api.deleteDecisions).toHaveBeenNthCalledWith(2, REPORTED_PUBKEY, 'pubkey');
-    expect(api.deleteDecisions).not.toHaveBeenCalledWith(OTHER_EVENT, 'event');
-    expect(api.deleteDecisions).not.toHaveBeenCalledWith(OTHER_PUBKEY, 'pubkey');
-  });
-
-  // The other half of the same OR. With only the pubkey-side case below,
-  // returning `secondary.labelCleanupFailed` alone passes the whole suite --
-  // and then a failed cleanup on the event target reports a clean reopen,
-  // which is every pubkey-target report too, since those never make a second
-  // call for `secondary` to be assigned from.
-  it('reports incomplete cleanup when only the event target failed', async () => {
-    api.deleteDecisions
-      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: true })
-      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: false });
-    renderDetail();
-    clickReopen();
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(toast.mock.calls[0][0].variant).toBe('destructive');
-  });
-
-  // An event report reopens two targets. A failure on the second must not be
-  // masked by a clean first result.
-  it('reports incomplete cleanup when only the pubkey target failed', async () => {
-    api.deleteDecisions
-      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: false })
-      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: true });
-    renderDetail();
-    clickReopen();
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(toast.mock.calls[0][0].variant).toBe('destructive');
+    expect(api.deleteDecisions).toHaveBeenCalledTimes(1);
+    expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
   });
 
   // resolvedTargets is built from the worker-side projections of the labels and
@@ -501,14 +470,33 @@ describe('ReportDetail reopen reporting', () => {
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
   });
 
-  // The two deleteDecisions calls are sequential and the first commits
-  // server-side before the second runs. When the second throws, the panel is
-  // showing decisions the server no longer has, so an error toast alone leaves
-  // the moderator looking at stale state.
-  it('refreshes the cached decision state even when the reopen fails part-way', async () => {
-    api.deleteDecisions
-      .mockResolvedValueOnce({ deleted: 1, labelCleanupFailed: false })
-      .mockRejectedValueOnce(new Error('worker 500'));
+  // decisionLog.refetch() refreshes only the read this panel is observing.
+  // Other cached decision reads for the target -- the queue's deep-link
+  // history pane (Reports.tsx), or this panel's own read from an earlier
+  // selection of the same target -- keep the pre-reopen rows and would show
+  // the target as handled the next time they mount. Asserted on the cache
+  // entry, not the call's exact key, so narrowing the invalidation to this
+  // target still passes.
+  it('marks cached decision reads for the target stale, not only the one on screen', async () => {
+    const { qc } = renderDetail();
+    // Nothing in this panel observes this entry (useDecisionLog is mocked
+    // here), as with a cached read whose component has unmounted.
+    qc.setQueryData(['decisions', TARGET_EVENT], []);
+    expect(qc.getQueryState(['decisions', TARGET_EVENT])?.isInvalidated).toBe(false);
+
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].variant).not.toBe('destructive');
+    expect(qc.getQueryState(['decisions', TARGET_EVENT])?.isInvalidated).toBe(true);
+  });
+
+  // A failed call does not prove nothing was written: the reopen row can land
+  // and the response still be lost. The panel may then be showing a handled
+  // target the server reads as reopened, so an error toast alone leaves the
+  // moderator looking at stale state.
+  it('refreshes the cached decision state even when the reopen call fails', async () => {
+    api.deleteDecisions.mockRejectedValueOnce(new Error('network error'));
     const { invalidate } = renderDetail();
     clickReopen();
 
@@ -516,25 +504,13 @@ describe('ReportDetail reopen reporting', () => {
     expect(toast.mock.calls[0][0].variant).toBe('destructive');
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['decisions'] });
     // The queue's projections drive whether the target is hidden, so they go
-    // stale on a part-way failure exactly as the decision log does.
+    // stale on such a failure exactly as the decision log does.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
     // A reopen moves the target out of resolved history and back into the
     // needs-attention feed. Both are cached.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
-  });
-
-  // Each target's type is known here, so the worker never has to run the label
-  // filter that cannot match it. Passing it is easy to drop silently in a
-  // wrapper, so it is asserted at the call the component actually makes.
-  it('names each target type so neither cleanup runs a dead filter', async () => {
-    renderDetail();
-    clickReopen();
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(api.deleteDecisions).toHaveBeenNthCalledWith(1, TARGET_EVENT, 'event');
-    expect(api.deleteDecisions).toHaveBeenNthCalledWith(2, REPORTED_PUBKEY, 'pubkey');
   });
 
   // The tooltip makes the same promise the toast does, and is the copy a
@@ -553,16 +529,37 @@ describe('ReportDetail reopen reporting', () => {
 // Reopen keeps the target's history (#324): the worker records a dated
 // `reopened` row and only handling after it counts.
 describe('ReportDetail reopen keeps history', () => {
-  // A post's Reopen reopens the post and its author's account, one call each,
-  // as it did when Reopen deleted both targets' decisions.
-  it("reopens a post and its author's account, one call each", async () => {
+  // A post's Reopen reopens only the post (#421). Each call writes a dated
+  // `reopened` row (#324), so also reopening the author's account brought every
+  // handled report on that account back to the queue when the moderator meant
+  // one post. The author's handling only counts for a post report while the
+  // author is relay-banned, and Reopen is not offered once that ban is known,
+  // so the post's own row is enough to bring its report back. Reopen does show
+  // while the ban status is loading or failed to load, and is accepted there:
+  // hiding it until the status is known would hide it during every load or
+  // relay outage, and on reports with no author. The target type is asserted too:
+  // it is easy to drop in a wrapper, and without it the worker runs a label
+  // filter that cannot match.
+  it("reopens only the post, not its author's account (#421)", async () => {
     renderDetail();
     clickReopen();
 
     await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(api.deleteDecisions).toHaveBeenCalledTimes(2);
-    expect(api.deleteDecisions).toHaveBeenNthCalledWith(1, TARGET_EVENT, 'event');
-    expect(api.deleteDecisions).toHaveBeenNthCalledWith(2, REPORTED_PUBKEY, 'pubkey');
+    expect(api.deleteDecisions).toHaveBeenCalledTimes(1);
+    expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
+    // By id, whatever type it is sent with, so an untyped author call is caught too.
+    expect(api.deleteDecisions.mock.calls.map(([id]) => id)).not.toContain(REPORTED_PUBKEY);
+  });
+
+  it("reopens an account report's account, once", async () => {
+    ctx.targetType = 'pubkey';
+    ctx.targetValue = REPORTED_PUBKEY;
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(api.deleteDecisions).toHaveBeenCalledTimes(1);
+    expect(api.deleteDecisions).toHaveBeenCalledWith(REPORTED_PUBKEY, 'pubkey');
   });
 
   it('says the history is kept rather than cleared', async () => {
@@ -586,8 +583,11 @@ describe('ReportDetail reopen keeps history', () => {
   });
 
   // The rows stay after a reopen, so the button has to go by what came after
-  // the reopen, or it would offer to reopen a report that already is.
-  it('hides Reopen once both targets are reopened with nothing handled since', async () => {
+  // the reopen, or it would offer to reopen a report that already is. Since
+  // #421 a post's reopen leaves the author's account alone, so the author's
+  // handling is still in force here; it must not bring the button back, since
+  // it covers the post only while the author is banned.
+  it("hides Reopen once the post is reopened with nothing handled since, whatever the author's history", async () => {
     realDecisionLog.on = true;
     api.getDecisions.mockImplementation(async (targetId: string) => targetId === TARGET_EVENT
       ? [
@@ -595,8 +595,7 @@ describe('ReportDetail reopen keeps history', () => {
           { id: 1, action: 'delete_event', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
         ]
       : [
-          { id: 4, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
-          { id: 2, action: 'ban_user', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
+          { id: 2, action: 'reviewed', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
         ]);
     renderDetail();
 
@@ -617,9 +616,7 @@ describe('ReportDetail reopen keeps history', () => {
           { id: 3, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
           { id: 1, action: 'delete_event', moderator_pubkey: MOD_PUBKEY, created_at: '2026-11-09 00:01:40' },
         ]
-      : [
-          { id: 4, action: 'reopened', moderator_pubkey: null, created_at: '2026-11-09 00:03:20' },
-        ]);
+      : []);
     renderDetail();
 
     expect(await screen.findByRole('button', { name: /reopen/i })).toBeInTheDocument();

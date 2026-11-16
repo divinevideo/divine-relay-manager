@@ -332,22 +332,28 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // the mutation from the observer's LATEST options -- so a mutationFn closing
   // over `context` would send the retry at whichever report is selected when
   // it is clicked, reopening that report instead.
-  type ReopenTarget = { type: 'event' | 'pubkey'; value: string; reportedPubkey?: string | null };
+  type ReopenTarget = { type: 'event' | 'pubkey'; value: string };
 
   const reopenMutation = useMutation({
     mutationFn: async (target: ReopenTarget | null) => {
       if (!target) throw new Error('No target');
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      // Reopen the target. The worker records a dated `reopened` row and keeps
-      // the history (#324); the call keeps its old name and route.
-      const primary = await act.deleteDecisions(target.value, target.type);
-      // A post's reopen also reopens its author's account, as it did when it
-      // deleted both targets' decisions.
-      let secondary = { labelCleanupFailed: false };
-      if (target.type === 'event' && target.reportedPubkey) {
-        secondary = await act.deleteDecisions(target.reportedPubkey, 'pubkey');
-      }
-      return { labelCleanupFailed: primary.labelCleanupFailed || secondary.labelCleanupFailed };
+      // Reopen the target, and only the target. The worker records a dated
+      // `reopened` row and keeps the history (#324); the call keeps its old
+      // name and route.
+      //
+      // A post's reopen does not reopen its author's account (#421): that row
+      // would bring every handled report on the account back to the queue. The
+      // post's own row is enough to bring its report back, because the
+      // author's handling only counts for a post report while the author is
+      // relay-banned (reportResolution.ts), and Reopen is not offered once the
+      // ban is known. It is offered while the ban status is loading or failed
+      // to load (isUserBanned null), and reopening a banned author's post then
+      // leaves its report handled by the ban. That is accepted: hiding Reopen
+      // until the status is known would hide it during every load or relay
+      // outage, and on reports with no author, whose status is never known.
+      const { labelCleanupFailed } = await act.deleteDecisions(target.value, target.type);
+      return { labelCleanupFailed };
     },
     onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
@@ -362,7 +368,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // can be live.
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
-      pubkeyDecisionLog.refetch();
       // Report what the reopen did, not where the report ends up: whether it
       // returns to the queue depends on the screen's resolution sources,
       // which a toast cannot see. Under the dated rule a relay ban the
@@ -413,16 +418,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           });
     },
     onError: (error: Error) => {
-      // The post's reopen row may already be written when the author's call
-      // throws. Nothing is removed, but the post now reads as reopened, so the
-      // cached decisions and the queue's view can be stale even though the
-      // action reports failure. Refresh them rather than leaving the panel
-      // calling the post handled.
+      // A failed call does not prove nothing was written. The worker records
+      // the reopen in one transaction, but the row can land and the response
+      // still be lost (a dropped connection, a timeout, a response that does
+      // not parse), and then the target reads as reopened while this panel
+      // reports failure. Refresh the cached decisions and the queue's view
+      // rather than leaving the panel calling the target handled.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
       queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
-      pubkeyDecisionLog.refetch();
       toast({
         title: "Failed to reopen",
         description: error.message,
@@ -1461,16 +1466,15 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               {/* Reopen: only when something handled the target since its last
                   reopen, by the decision log or, for a label, by the queue. Not
                   the author's log: it covers a post only while the author is
-                  banned, and Reopen is not offered then. */}
+                  banned, and Reopen is not offered once that ban is known (see
+                  reopenMutation for the loading and failed-to-load case). */}
               {(decisionLog.hasHandlingDecisions || queueHandled) && !isUserBanned && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="outline"
                       className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                      onClick={() => reopenMutation.mutate(
-                        context.target && { ...context.target, reportedPubkey: context.reportedUser.pubkey }
-                      )}
+                      onClick={() => reopenMutation.mutate(context.target)}
                       disabled={reopenMutation.isPending}
                     >
                       <History className="h-4 w-4 mr-1" />
