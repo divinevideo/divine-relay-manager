@@ -66,6 +66,7 @@ import { CopyableId, CopyableTags } from "@/components/CopyableId";
 import { RelatedReportsCard } from "@/components/RelatedReportsCard";
 import { ReportedListCard } from "@/components/ReportedListCard";
 import { LIST_KIND_LABEL, isListKind } from "../../shared/list-report";
+import type { ReportTarget } from "../../shared/report-target";
 import { handledBeforeBanText, type HandledBeforeView } from "@/lib/reportResolution";
 import type { NostrEvent } from "@nostrify/nostrify";
 
@@ -332,7 +333,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // the mutation from the observer's LATEST options -- so a mutationFn closing
   // over `context` would send the retry at whichever report is selected when
   // it is clicked, reopening that report instead.
-  type ReopenTarget = { type: 'event' | 'pubkey'; value: string };
+  type ReopenTarget = ReportTarget;
 
   const reopenMutation = useMutation({
     mutationFn: async (target: ReopenTarget | null) => {
