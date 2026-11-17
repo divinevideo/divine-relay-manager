@@ -537,14 +537,9 @@ describe('ReportDetail reopen keeps history', () => {
   // A post's Reopen reopens only the post (#421). Each call writes a dated
   // `reopened` row (#324), so also reopening the author's account brought every
   // handled report on that account back to the queue when the moderator meant
-  // one post. The author's handling only counts for a post report while the
-  // author is relay-banned, and Reopen is not offered once that ban is known,
-  // so the post's own row is enough to bring its report back. Reopen does show
-  // while the ban status is loading or failed to load, and is accepted there:
-  // hiding it until the status is known would hide it during every load or
-  // relay outage, and on reports with no author. The target type is asserted too:
-  // it is easy to drop in a wrapper, and without it the worker runs a label
-  // filter that cannot match.
+  // one post. Why the post's own row is enough is in reopenMutation. The target
+  // type is asserted too: it is easy to drop in a wrapper, and without it the
+  // worker runs a label filter that cannot match.
   it("reopens only the post, not its author's account (#421)", async () => {
     renderDetail();
     clickReopen();
