@@ -611,7 +611,7 @@ describe('ReportDetail reopen keeps history', () => {
   // #421 a post's reopen leaves the author's account alone, so the author's
   // handling is still in force here; it must not bring the button back, since
   // it covers the post only while the author is banned.
-  it("hides Reopen once the post is reopened with nothing handled since, whatever the author's history", async () => {
+  it("hides Reopen once the post is reopened with nothing handled since, while the author's own handling stands", async () => {
     realDecisionLog.on = true;
     api.getDecisions.mockImplementation(async (targetId: string) => targetId === TARGET_EVENT
       ? [
