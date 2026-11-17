@@ -353,8 +353,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // leaves its report handled by the ban. That is accepted: hiding Reopen
       // until the status is known would hide it during every load or relay
       // outage, and on reports with no author, whose status is never known.
-      const { labelCleanupFailed } = await act.deleteDecisions(target.value, target.type);
-      return { labelCleanupFailed };
+      return act.deleteDecisions(target.value, target.type);
     },
     onSuccess: ({ labelCleanupFailed }, target) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
