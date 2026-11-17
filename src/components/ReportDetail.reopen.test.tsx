@@ -82,7 +82,11 @@ vi.mock('@/hooks/useDecisionLog', async (orig) => {
       realDecisionLog.on ? actual.useDecisionLog(targetId) : decisionLog,
   };
 });
-const modStatus = vi.hoisted(() => ({ recheck: vi.fn(), recheckAfterAction: vi.fn() }));
+const modStatus = vi.hoisted(() => ({
+  recheck: vi.fn(),
+  recheckAfterAction: vi.fn(),
+  isUserBanned: false as boolean | null,
+}));
 vi.mock('@/hooks/useModerationStatus', async () => {
   const { moderationStatusMock } = await import('@/test/moderationStatusMock');
   return { useModerationStatus: () => moderationStatusMock({ ...modStatus }) };
@@ -157,6 +161,7 @@ beforeEach(() => {
   ctx.targetValue = TARGET_EVENT;
   ctx.targetType = 'event';
   ctx.reportedPubkey = REPORTED_PUBKEY;
+  modStatus.isUserBanned = false;
   decisionLog.isPendingReview = false;
   decisionLog.isAutoHideRestoreFailed = false;
   realDecisionLog.on = false;
@@ -549,6 +554,25 @@ describe('ReportDetail reopen keeps history', () => {
     expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
     // By id, whatever type it is sent with, so an untyped author call is caught too.
     expect(api.deleteDecisions.mock.calls.map(([id]) => id)).not.toContain(REPORTED_PUBKEY);
+  });
+
+  // The post-only reopen above depends on this. Once the author's relay ban is
+  // known, the ban answers the post's reports filed before it, and the post's
+  // own reopen row cannot bring those back, so Reopen must not be offered.
+  it('does not offer Reopen on a post whose author is known to be banned', () => {
+    modStatus.isUserBanned = true;
+    renderDetail();
+
+    expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
+  });
+
+  // The accepted edge: while the author's ban status is loading or failed to
+  // load, Reopen is still offered (see reopenMutation).
+  it("still offers Reopen while the author's ban status is unknown", () => {
+    modStatus.isUserBanned = null;
+    renderDetail();
+
+    expect(screen.getByRole('button', { name: /reopen/i })).toBeInTheDocument();
   });
 
   it("reopens an account report's account, once", async () => {
