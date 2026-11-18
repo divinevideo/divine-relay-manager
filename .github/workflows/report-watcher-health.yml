@@ -29,6 +29,16 @@
 # These are simple integers that persist across runs without accumulating
 # cache entries. The workflow resets them to 0 on recovery.
 #
+# Staging runs only when needed, so its relay is down most of the time and
+# ReportWatcher there can never connect. Before checking staging, the workflow
+# asks the staging relay for its NIP-11 document. If the relay does not answer
+# 200, the check is skipped: the run stays green, logs a notice, and resets
+# RW_FAILS_STAGING to 0 so that staging coming back does not alert on a count
+# left over from the downtime. When the relay answers again, checks resume on
+# their own (the DO retries its connection at least once a minute). The cost:
+# an unplanned staging relay outage alerts nobody. Production has no such skip;
+# a production relay outage still alerts.
+#
 # Setup:
 #   1. Repo secrets (Settings > Secrets and variables > Actions):
 #      - CF_ACCESS_CLIENT_ID     -- Cloudflare Access service token
@@ -80,13 +90,36 @@ jobs:
           - name: staging
             url: https://api-relay-staging.divine.video
             fails_var: RW_FAILS_STAGING
+            # The relay ReportWatcher connects to (RELAY_URL in
+            # worker/wrangler.staging.toml), over HTTPS for NIP-11. Set only
+            # on staging: see the header for why.
+            skip_when_relay_down: https://relay.staging.divine.video
           - name: production
             url: https://api-relay-prod.divine.video
             fails_var: RW_FAILS_PRODUCTION
 
     steps:
+      - name: Check the relay is up
+        id: relay
+        if: matrix.env.skip_when_relay_down != ''
+        env:
+          RELAY_HTTP_URL: ${{ matrix.env.skip_when_relay_down }}
+        run: |
+          # curl retries timeouts and 5xx, so one blip does not skip a check.
+          RELAY_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
+            --retry 2 --retry-delay 5 \
+            -H 'Accept: application/nostr+json' \
+            "$RELAY_HTTP_URL/" 2>/dev/null) || RELAY_CODE="${RELAY_CODE:-000}"
+          if [ "$RELAY_CODE" = "200" ]; then
+            echo "skipped=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ matrix.env.name }} relay $RELAY_HTTP_URL is down (HTTP $RELAY_CODE); skipping the ReportWatcher check until it is back"
+          fi
+
       - name: Check health
         id: check
+        if: steps.relay.outputs.skipped != 'true'
         env:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
@@ -218,6 +251,7 @@ jobs:
           GH_TOKEN: ${{ secrets.RW_HEALTH_VARS_TOKEN }}
           HEALTHY: ${{ steps.check.outputs.healthy }}
           RECOVERED: ${{ steps.recover.outputs.recovered }}
+          SKIPPED: ${{ steps.relay.outputs.skipped }}
           FAILS_VAR: ${{ matrix.env.fails_var }}
         run: |
           # Consecutive-failure persistence uses a repo variable, which the
@@ -241,7 +275,9 @@ jobs:
           FAILS=$(gh variable get "$FAILS_VAR" --repo "$GITHUB_REPOSITORY" 2>/dev/null || echo "0")
           [[ "$FAILS" =~ ^[0-9]+$ ]] || FAILS=0
 
-          if [ "$HEALTHY" = "true" ] || [ "$RECOVERED" = "true" ]; then
+          # A skipped check (relay down, see header) restarts the count, so
+          # the relay coming back does not alert on failures from the downtime.
+          if [ "$SKIPPED" = "true" ] || [ "$HEALTHY" = "true" ] || [ "$RECOVERED" = "true" ]; then
             FAILS=0
           else
             FAILS=$((FAILS + 1))
