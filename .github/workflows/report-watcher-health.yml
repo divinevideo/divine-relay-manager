@@ -35,9 +35,11 @@
 # 200, the check is skipped: the run stays green, logs a notice, and resets
 # RW_FAILS_STAGING to 0 so that staging coming back does not alert on a count
 # left over from the downtime. When the relay answers again, checks resume on
-# their own (the DO retries its connection at least once a minute). The cost:
-# an unplanned staging relay outage alerts nobody. Production has no such skip;
-# a production relay outage still alerts.
+# their own (the DO retries its connection at least once a minute). The costs:
+# an unplanned staging relay outage alerts nobody, and a staging relay that
+# flaps between up and down resets the count on every down run, so a broken
+# staging ReportWatcher may never reach the alert threshold. Production has no
+# such skip; a production relay outage still alerts.
 #
 # Setup:
 #   1. Repo secrets (Settings > Secrets and variables > Actions):
@@ -93,7 +95,7 @@ jobs:
             # The relay ReportWatcher connects to (RELAY_URL in
             # worker/wrangler.staging.toml), over HTTPS for NIP-11. Set only
             # on staging: see the header for why.
-            skip_when_relay_down: https://relay.staging.divine.video
+            relay_probe_url: https://relay.staging.divine.video
           - name: production
             url: https://api-relay-prod.divine.video
             fails_var: RW_FAILS_PRODUCTION
@@ -101,11 +103,12 @@ jobs:
     steps:
       - name: Check the relay is up
         id: relay
-        if: matrix.env.skip_when_relay_down != ''
+        if: matrix.env.relay_probe_url != ''
         env:
-          RELAY_HTTP_URL: ${{ matrix.env.skip_when_relay_down }}
+          RELAY_HTTP_URL: ${{ matrix.env.relay_probe_url }}
         run: |
-          # curl retries timeouts and 5xx, so one blip does not skip a check.
+          # curl retries timeouts and 408/429/500/502/503/504, so one such blip
+          # does not skip a check. Connection refused is not retried.
           RELAY_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
             --retry 2 --retry-delay 5 \
             -H 'Accept: application/nostr+json' \
