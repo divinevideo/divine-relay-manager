@@ -1,7 +1,7 @@
 // ABOUTME: Report detail right after this tab unsuspends the reported account: a post the
 // ABOUTME: relay still withholds must not read as "never stored here", and the window's end re-checks.
 
-import { act, cleanup, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -222,6 +222,28 @@ describe('ReportDetail missing post just after an unsuspend', () => {
 
     await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1000); });
 
+    expect(client.getQueryState(threadKey)?.isInvalidated).toBe(true);
+  });
+
+  // The relay's filter refreshes on its own schedule, so a Re-check while the
+  // window is still open can find the post back. The thread read still holds
+  // it as missing then, so the Re-check reads the post again as well, or the
+  // panel says "Event is still on the relay." with nothing under it.
+  it('reads the post again when the moderator presses Re-check', async () => {
+    const client = qc();
+    const threadKey = ['thread', EVENT_ID, 3, undefined, undefined];
+    // As above: nothing observes it here, so keep it past the default gcTime.
+    client.setQueryDefaults(['thread'], { gcTime: Infinity });
+    client.setQueryData(threadKey, { ancestors: [], event: null, replies: [], repostedEvent: null, isRepost: false, fetchSource: null });
+    await act(async () => { await markRestored(client, REPORTED_PUBKEY, undefined); });
+    render(tree(client, REPORT));
+    expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
+    const before = liveChecksOf(EVENT_ID);
+    expect(client.getQueryState(threadKey)?.isInvalidated).toBe(false);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Re-check' }));
+
+    await waitFor(() => expect(liveChecksOf(EVENT_ID)).toBe(before + 1));
     expect(client.getQueryState(threadKey)?.isInvalidated).toBe(true);
   });
 
