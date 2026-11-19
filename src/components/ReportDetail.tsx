@@ -239,9 +239,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // one still withheld reads as none found. Keyed on the account and
   // environment, so opening another report or switching environment (which
   // runs its own check) is not taken for the window closing. A ban or suspend
-  // ends the window early, so this also runs then, one check beside the
-  // action's own recheckAfterAction; whichever starts later supersedes the
-  // other, so that is harmless.
+  // ends the window early, so this also runs then when the post is owed a
+  // re-check (postToRecheck, below), one check beside the action's own
+  // recheckAfterAction; whichever starts later supersedes the other, so that
+  // is harmless.
   const restoreEnvironment = useRestoreEnvironment();
   const restoreWindowKey = `${restoreEnvironment ?? ''}|${(reportedPubkey ?? '').toLowerCase()}`;
   const lastRestoreWindow = useRef({ key: restoreWindowKey, open: justRestored });
