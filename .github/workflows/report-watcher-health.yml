@@ -31,9 +31,8 @@
 #
 # Staging runs only when needed, so its relay is down most of the time and
 # ReportWatcher there can never connect. Before checking staging, the workflow
-# asks the staging relay (RELAY_URL in worker/wrangler.staging.toml, read at
-# run time) for its NIP-11 document. If the relay does not answer 200, the
-# check is skipped: the run stays green, logs a notice, and resets
+# asks the staging relay for its NIP-11 document. If the relay does not answer
+# 200, the check is skipped: the run stays green, logs a notice, and resets
 # RW_FAILS_STAGING to 0 so that staging coming back does not alert on a count
 # left over from the downtime. When the relay answers again, checks resume on
 # their own (the DO retries its connection at least once a minute). The costs:
@@ -70,10 +69,8 @@ on:
 
 # The default GITHUB_TOKEN needs no write access here: health/restart use CF
 # Access, alerting uses a Slack webhook, and variable persistence uses the
-# dedicated RW_HEALTH_VARS_TOKEN PAT (see header). It only reads the repo, to
-# fetch the staging relay config. Keep the token least-privilege.
-permissions:
-  contents: read
+# dedicated RW_HEALTH_VARS_TOKEN PAT (see header). Keep the token least-privilege.
+permissions: {}
 
 jobs:
   health-check:
@@ -95,63 +92,21 @@ jobs:
           - name: staging
             url: https://api-relay-staging.divine.video
             fails_var: RW_FAILS_STAGING
-            # The worker config whose RELAY_URL is the relay ReportWatcher
-            # connects to. The probe reads the relay from it, so moving staging
-            # to another relay moves the probe too. Set only on staging: see
-            # the header for why.
-            relay_config: worker/wrangler.staging.toml
+            # The relay ReportWatcher connects to (RELAY_URL in
+            # worker/wrangler.staging.toml), over HTTPS for NIP-11. Set only
+            # on staging: see the header for why.
+            relay_probe_url: https://relay.staging.divine.video
           - name: production
             url: https://api-relay-prod.divine.video
             fails_var: RW_FAILS_PRODUCTION
 
     steps:
-      # Fetches only the relay config; nothing else in the job needs the repo.
-      # Skipped where no relay_config is set. If it were skipped on staging by
-      # mistake, the probe below fails on the missing file and the run alerts.
-      # Scheduled runs read the config on main, which can differ from what is
-      # deployed to staging (a RELAY_URL change merged but not yet deployed).
-      # The status endpoint does not report the relay, so main is the best
-      # source available.
-      - name: Fetch the relay config
-        if: matrix.env.relay_config
-        uses: actions/checkout@v4
-        with:
-          sparse-checkout: ${{ matrix.env.relay_config }}
-          sparse-checkout-cone-mode: false
-          persist-credentials: false
-
       - name: Check the relay is up
         id: relay
+        if: matrix.env.relay_probe_url != ''
         env:
-          RELAY_CONFIG: ${{ matrix.env.relay_config }}
+          RELAY_HTTP_URL: ${{ matrix.env.relay_probe_url }}
         run: |
-          # No relay_config (production): always run the check. Deciding this
-          # here rather than in an `if:` keeps the outcome independent of how
-          # GitHub expressions compare a missing value with ''.
-          if [ -z "$RELAY_CONFIG" ]; then
-            echo "skipped=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          # A missing config, or one without a ws(s):// RELAY_URL, fails this
-          # step, so the check is skipped and counted as a failure: it alerts,
-          # it never goes quiet.
-          # The payload goes to the Slack alert so it names the config, not
-          # ReportWatcher; outputs written before a step fails are kept.
-          if [ ! -f "$RELAY_CONFIG" ]; then
-            echo "payload=config_error: $RELAY_CONFIG not found" >> "$GITHUB_OUTPUT"
-            echo "::error::$RELAY_CONFIG not found; cannot tell whether the ${{ matrix.env.name }} relay is up"
-            exit 1
-          fi
-          RELAY_WS_URL=$(sed -n 's/^RELAY_URL[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$RELAY_CONFIG" | head -1)
-          case "$RELAY_WS_URL" in
-            wss://*) RELAY_HTTP_URL="https://${RELAY_WS_URL#wss://}" ;;
-            ws://*) RELAY_HTTP_URL="http://${RELAY_WS_URL#ws://}" ;;
-            *)
-              echo "payload=config_error: no ws(s):// RELAY_URL in $RELAY_CONFIG" >> "$GITHUB_OUTPUT"
-              echo "::error::no ws(s):// RELAY_URL in $RELAY_CONFIG; cannot tell whether the ${{ matrix.env.name }} relay is up"
-              exit 1
-              ;;
-          esac
           # curl retries timeouts and 408/429/500/502/503/504, so one such blip
           # does not skip a check. Connection refused is not retried.
           RELAY_CODE=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 \
@@ -376,7 +331,7 @@ jobs:
           SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_ALERTS }}
           ENV_NAME: ${{ matrix.env.name }}
           FAILS: ${{ steps.counts.outputs.fails }}
-          STATUS_PAYLOAD: ${{ steps.recover.outputs.payload || steps.check.outputs.payload || steps.relay.outputs.payload }}
+          STATUS_PAYLOAD: ${{ steps.recover.outputs.payload || steps.check.outputs.payload }}
         run: |
           if [ -z "$SLACK_WEBHOOK" ]; then
             echo "::warning::SLACK_WEBHOOK_ALERTS secret not configured, skipping alert"
@@ -441,10 +396,7 @@ jobs:
       # --- Fail the run so GitHub notifies, matching the sibling health check ---
       # Red on the same condition as the Slack alert: a repeated outage (>=2
       # consecutive) or the monitor's own persistence being broken. Not on a
-      # single transient blip, so watchers are not emailed on noise. One
-      # exception: if fetching or reading the staging relay config fails, that
-      # step fails and the run is red at once, not after two runs. A broken
-      # config does not fix itself; a one-off checkout error emails once.
+      # single transient blip, so watchers are not emailed on noise.
       - name: Fail the run so GitHub notifies
         if: always() && (steps.counts.outputs.alert == 'true' || steps.counts.outputs.persist_broken == 'true')
         run: exit 1
