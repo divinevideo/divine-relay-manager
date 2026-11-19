@@ -207,6 +207,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     eventNotFound,
   );
 
+  // Re-check on the post: the live check, and a fresh read of the post itself.
+  // The thread read holds a missing post for its staleTime, so without this a
+  // post the live check finds again (an unsuspended account's, once the
+  // relay's read filter catches up) reads "Event is still on the relay." with
+  // nothing under it. Prefix match: every depth and relay hint of its thread read.
+  const recheckPost = () => {
+    moderationStatus.recheck();
+    if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
+  };
+
   // Get decision history for this target
   const decisionLog = useDecisionLog(context.target?.value);
 
@@ -224,29 +234,35 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // (lib/userStatsCache, markRestored).
   const justRestored = useJustRestored(reportedPubkey);
   // When that window closes the relay's read filter has caught up, so read the
-  // post again, once: re-run the live check, as a Re-check would, and mark the
-  // cached thread read stale (it holds the post as missing for its staleTime),
-  // so a post the relay returns again shows and one still withheld reads as
-  // none found. Keyed on the account and environment, so opening another
-  // report or switching environment (which runs its own check) is not taken
-  // for the window closing. A ban or suspend ends the window early, so this
-  // also runs then, one check beside the action's own recheckAfterAction;
-  // whichever starts later supersedes the other, so that is harmless.
+  // post again, once, as a Re-check on it would (recheckPost): re-run the live
+  // check and read the post again, so a post the relay returns again shows and
+  // one still withheld reads as none found. Keyed on the account and
+  // environment, so opening another report or switching environment (which
+  // runs its own check) is not taken for the window closing. A ban or suspend
+  // ends the window early, so this also runs then when the post is owed a
+  // re-check (postToRecheck, below), one check beside the action's own
+  // recheckAfterAction; whichever starts later supersedes the other, so that
+  // is harmless.
   const restoreEnvironment = useRestoreEnvironment();
   const restoreWindowKey = `${restoreEnvironment ?? ''}|${(reportedPubkey ?? '').toLowerCase()}`;
   const lastRestoreWindow = useRef({ key: restoreWindowKey, open: justRestored });
-  // The latest recheck, read when the window closes: its identity changes on
-  // most renders, and as an effect dependency it would re-run the effect each time.
-  const recheckRef = useRef(moderationStatus.recheck);
-  recheckRef.current = moderationStatus.recheck;
+  // The latest recheckPost, read when the window closes: its identity changes
+  // on every render, and as an effect dependency it would re-run the effect
+  // each time.
+  const recheckPostRef = useRef(recheckPost);
+  recheckPostRef.current = recheckPost;
+  // Whether the window's end owes the post a re-check. Not on an account
+  // report, which has no post, nor on a post on screen that the live check
+  // has not called gone. One on screen that it did call gone (the thread read
+  // found it again since) still needs the check, or the gone badge stays
+  // beside it.
+  const postToRecheck = !!targetEventId && (!displayEvent || isEventDeleted === true);
   useEffect(() => {
     const last = lastRestoreWindow.current;
     lastRestoreWindow.current = { key: restoreWindowKey, open: justRestored };
     if (last.key !== restoreWindowKey || !last.open || justRestored) return;
-    recheckRef.current();
-    // Prefix match: every depth and relay hint of this post's thread read.
-    if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
-  }, [restoreWindowKey, justRestored, targetEventId, queryClient]);
+    if (postToRecheck) recheckPostRef.current();
+  }, [restoreWindowKey, justRestored, postToRecheck]);
   // Why a gone post is gone, from what has actually answered (lib/goneCause).
   // The badge (label, icon, tooltip) and the thread panel all read this one answer.
   const goneCause = deriveGoneCause({
@@ -1138,7 +1154,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 goneCause={goneCause}
                 isUserBanChecking={moderationStatus.isUserBanChecking}
                 checkedAt={moderationStatus.checkedAt}
-                onRecheck={moderationStatus.recheck}
+                onRecheck={recheckPost}
                 isRechecking={moderationStatus.isChecking}
                 hideAvatars={hasHighPriorityReports !== false}
                 // The audited viewer, for a post the confirmed suspension

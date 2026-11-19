@@ -76,11 +76,30 @@ export function useRestoreEnvironment(): string | undefined {
   return useContext(AppContext)?.config.relayUrl;
 }
 
+// The report pane's thread reads (useThread, ['thread', eventId, ...]) hold a
+// post the relay withheld as missing for their staleTime. Their keys do not
+// name the post's author, so when a window ends every read with no post is
+// marked stale (one that found none; also one that failed, has not answered,
+// or is the disabled read of an account report, which costs nothing), and a
+// report opened on one reads its post again. Not filtered by environment:
+// the cache holds the selected environment's reads (a switch clears it),
+// whichever environment the window belongs to, and at worst one is read again.
+// Not refetched here: the report on screen then, if it is this account's,
+// reads its post again itself (ReportDetail, recheckPost).
+function markMissingPostReadsStale(queryClient: QueryClient): void {
+  void queryClient.invalidateQueries({
+    predicate: query => query.queryKey[0] === 'thread'
+      && !(query.state.data as { event?: unknown } | undefined)?.event,
+    refetchType: 'none',
+  });
+}
+
 /**
  * After an unsuspend that succeeded (or an age-review clear that lifted a
  * suspension): reset the account's reads
  * now, mark it as just restored so an empty count says why, and reset once more
  * when the window ends, by which time the relay's read filters have caught up.
+ * Missing-post reads are marked stale then too (markMissingPostReadsStale).
  * Another restore starts the window over.
  */
 export async function markRestored(queryClient: QueryClient, pubkey: string, environment: string | undefined): Promise<void> {
@@ -90,6 +109,7 @@ export async function markRestored(queryClient: QueryClient, pubkey: string, env
     restoreWindows.delete(key);
     notify();
     void resetAccountContentReads(queryClient, pubkey);
+    markMissingPostReadsStale(queryClient);
   }, RESTORE_SETTLE_MS));
   notify();
   await resetAccountContentReads(queryClient, pubkey);
