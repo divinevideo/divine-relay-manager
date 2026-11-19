@@ -208,7 +208,7 @@ describe('ReportDetail missing post just after an unsuspend', () => {
   // The thread read cached the post as missing (useThread, staleTime 60s). A
   // post the relay returns again once its filter catches up must be read again,
   // or it never shows despite "can take a few minutes to reappear".
-  it('marks the cached thread read stale when the window closes', async () => {
+  it('asks for the post on screen again when the window closes', async () => {
     const client = qc();
     const threadKey = ['thread', EVENT_ID, 3, undefined, undefined];
     // Nothing observes it here (useReportContext is mocked), and the default
@@ -219,10 +219,17 @@ describe('ReportDetail missing post just after an unsuspend', () => {
     render(tree(client, REPORT));
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(client.getQueryState(threadKey)?.isInvalidated).toBe(false);
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
 
     await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1000); });
 
+    // The window's timer marks this stale on its own (userStatsCache), without
+    // refetching it, so this alone does not show the pane did anything.
     expect(client.getQueryState(threadKey)?.isInvalidated).toBe(true);
+    // The pane's part: an invalidation by the post's own key, which refetches
+    // the read the pane observes (useReportContext is mocked here, so nothing
+    // observes it and no refetch can be counted).
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['thread', EVENT_ID] });
   });
 
   // The relay's filter refreshes on its own schedule, so a Re-check while the

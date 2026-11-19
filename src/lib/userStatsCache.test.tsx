@@ -146,6 +146,31 @@ describe('markRestored', () => {
     expect(result.current).toBe(false);
   });
 
+  // A report on the account opened during the window cached its post as
+  // missing, and the moderator has moved on to another report when the window
+  // ends. Opened again within the thread read's staleTime, it would keep the
+  // post missing though the relay returns it by then.
+  it('marks the cached reads that found no post stale when the window ends', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const client = new QueryClient();
+    // Nothing observes these, and the default five-minute gcTime is shorter
+    // than the window: keep them to inspect.
+    client.setQueryDefaults(['thread'], { gcTime: Infinity });
+    const missing = ['thread', '1'.repeat(64), 3, 'https://api.test', undefined];
+    const found = ['thread', '2'.repeat(64), 3, 'https://api.test', undefined];
+    const thread = (event: { id: string } | null) => ({ ancestors: [], event, replies: [], repostedEvent: null, isRepost: false, fetchSource: null });
+    client.setQueryData(missing, thread(null));
+    client.setQueryData(found, thread({ id: '2'.repeat(64) }));
+
+    await act(async () => { await markRestored(client, 'c'.repeat(64), undefined); });
+    expect(client.getQueryState(missing)?.isInvalidated).toBe(false);
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1000); });
+    expect(client.getQueryState(missing)?.isInvalidated).toBe(true);
+    // A post that was found is not the relay's lag.
+    expect(client.getQueryState(found)?.isInvalidated).toBe(false);
+  });
+
   it('is only for the account that was unsuspended', async () => {
     const client = new QueryClient();
     await markRestored(client, 'f'.repeat(64), undefined);
