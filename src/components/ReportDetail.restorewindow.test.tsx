@@ -6,6 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { endRestoreWindow, markRestored, RESTORE_SETTLE_MS } from '@/lib/userStatsCache';
+import { AppContext, type AppContextType } from '@/contexts/AppContext';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 
@@ -98,13 +99,23 @@ const SAME_ACCOUNT_EVENT_ID = '6'.repeat(64);
 const SAME_ACCOUNT_REPORT: NostrEvent = { ...REPORT, id: '5'.repeat(64), tags: [['e', SAME_ACCOUNT_EVENT_ID], ['p', REPORTED_PUBKEY]] };
 
 const qc = () => new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-const tree = (client: QueryClient, report: NostrEvent) => (
+const pane = (client: QueryClient, report: NostrEvent) => (
   <QueryClientProvider client={client}>
     <TooltipProvider>
       <ReportDetail report={report} />
     </TooltipProvider>
   </QueryClientProvider>
 );
+// With no AppProvider the restore window's environment is undefined
+// (useRestoreEnvironment reads the context itself, not the mocked
+// useAppContext), so only these renders put a relay URL in the window's key.
+const tree = (client: QueryClient, report: NostrEvent, relayUrl?: string) => relayUrl === undefined ? pane(client, report) : (
+  <AppContext.Provider value={{ config: { relayUrl, apiUrl: '', theme: 'light' }, updateConfig: () => {} } as AppContextType}>
+    {pane(client, report)}
+  </AppContext.Provider>
+);
+const PROD_RELAY = 'wss://relay.prod.test';
+const STAGING_RELAY = 'wss://relay.staging.test';
 
 
 const JUST_RESTORED = /The account was just unsuspended, and its posts can take a few minutes to reappear/;
@@ -130,7 +141,9 @@ describe('ReportDetail missing post just after an unsuspend', () => {
     // under a mounted pane would fire its window-close re-check in teardown.
     cleanup();
     // Restore windows are module state; one left open would leak into the next test.
-    for (const pubkey of [REPORTED_PUBKEY, OTHER_PUBKEY]) endRestoreWindow(pubkey, undefined);
+    for (const pubkey of [REPORTED_PUBKEY, OTHER_PUBKEY]) {
+      for (const environment of [undefined, PROD_RELAY, STAGING_RELAY]) endRestoreWindow(pubkey, environment);
+    }
     vi.useRealTimers();
   });
 
@@ -226,5 +239,25 @@ describe('ReportDetail missing post just after an unsuspend', () => {
 
     // Only the check the new report runs on open.
     expect(liveChecksOf(OTHER_EVENT_ID)).toBe(1);
+  });
+
+  // The window belongs to the environment the unsuspend ran in, so switching
+  // environment leaves it open there and the pane stops reading it. That is
+  // not the window closing. In the app the switch also changes the API URL,
+  // which resets the live check and runs one of its own; useApiUrl is mocked
+  // constant here, so this pins only the window key's environment half.
+  it('does not re-check when the moderator switches environment while the window is open', async () => {
+    const client = qc();
+    await act(async () => { await markRestored(client, REPORTED_PUBKEY, PROD_RELAY); });
+    const view = render(tree(client, REPORT, PROD_RELAY));
+    expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
+    const before = liveChecksOf(EVENT_ID);
+
+    view.rerender(tree(client, REPORT, STAGING_RELAY));
+    // Staging has no window for the account: nothing explains the post there.
+    expect(await screen.findByText(NEVER_STORED, {}, { timeout: 4000 })).toBeInTheDocument();
+    await act(async () => { await vi.advanceTimersByTimeAsync(1000); });
+
+    expect(liveChecksOf(EVENT_ID)).toBe(before);
   });
 });
