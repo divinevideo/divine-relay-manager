@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import { render, renderHook, screen, waitFor, act } from '@testing-library/react';
-import { QueryClient, QueryClientProvider, useQuery } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, QueryObserver, useQuery } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { endRestoreWindow, markHidden, markRestored, resetAccountContentReads, RESTORE_SETTLE_MS, runHidingAction, useJustRestored } from './userStatsCache';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
@@ -169,6 +169,27 @@ describe('markRestored', () => {
     expect(client.getQueryState(missing)?.isInvalidated).toBe(true);
     // A post that was found is not the relay's lag.
     expect(client.getQueryState(found)?.isInvalidated).toBe(false);
+  });
+
+  // Marked stale, not read again: a report on screen whose post is gone for
+  // good (another account's, say) would otherwise refetch it for nothing. The
+  // report on screen reads its own post again (ReportDetail, recheckPost).
+  it('does not refetch an observed read that found no post when the window ends', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const client = new QueryClient();
+    const key = ['thread', '3'.repeat(64), 3, 'https://api.test', undefined];
+    const queryFn = vi.fn(async () => ({ ancestors: [], event: null, replies: [], repostedEvent: null, isRepost: false, fetchSource: null }));
+    const unsubscribe = new QueryObserver(client, { queryKey: key, queryFn, staleTime: 60_000 }).subscribe(() => {});
+    await vi.waitFor(() => expect(client.getQueryState(key)?.status).toBe('success'));
+    expect(queryFn).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await markRestored(client, 'c'.repeat(64), undefined); });
+    await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1000); });
+
+    // A refetch would have cleared the mark as well as called queryFn again.
+    expect(client.getQueryState(key)?.isInvalidated).toBe(true);
+    expect(queryFn).toHaveBeenCalledTimes(1);
+    unsubscribe();
   });
 
   it('is only for the account that was unsuspended', async () => {
