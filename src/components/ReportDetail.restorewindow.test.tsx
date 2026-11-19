@@ -1,7 +1,7 @@
 // ABOUTME: Report detail right after this tab unsuspends the reported account: a post the
 // ABOUTME: relay still withholds must not read as "never stored here", and the window's end re-checks.
 
-import { act, render, screen } from '@testing-library/react';
+import { act, cleanup, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -126,6 +126,9 @@ describe('ReportDetail missing post just after an unsuspend', () => {
   });
 
   afterEach(() => {
+    // Unmount first: RTL's own cleanup runs after this hook, and ending a window
+    // under a mounted pane would fire its window-close re-check in teardown.
+    cleanup();
     // Restore windows are module state; one left open would leak into the next test.
     for (const pubkey of [REPORTED_PUBKEY, OTHER_PUBKEY]) endRestoreWindow(pubkey, undefined);
     vi.useRealTimers();
