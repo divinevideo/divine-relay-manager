@@ -84,6 +84,15 @@ function sentences(items: Array<{ state: ReadState; phrase: string }>): string[]
  */
 export const GONE_NO_CAUSE_LINE = 'Not returned by the relay. It may have been self-deleted, held for review, or never stored here.';
 
+/**
+ * A gone post where every status answered and none explains it, but this tab
+ * unsuspended the account moments ago. The suspended list drops the account at
+ * once; the relay's read filter keeps hiding its posts until its next refresh
+ * (lib/userStatsCache, RESTORE_SETTLE_MS), so the post may still exist. Worded
+ * as authoredContentStat words the same window for the account's count.
+ */
+export const GONE_JUST_RESTORED_LINE = 'Not returned by the relay yet. The account was just unsuspended, and its posts can take a few minutes to reappear.';
+
 /** `stale`: the suspension is from a copy of the list that could not be refreshed. */
 export function suspendedMissingPostLine(stale: boolean): string {
   const status = stale ? 'Last known: the reported account is suspended.' : 'The reported account is suspended.';
