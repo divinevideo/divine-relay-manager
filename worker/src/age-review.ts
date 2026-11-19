@@ -44,6 +44,7 @@ import {
   pendingProjectionJobs,
   pendingSubjectClears,
   rearmUnclaimedProjections,
+  resolveByPubkey,
   settleSupersededClear,
   UUID_RE,
 } from './protected-minors';
@@ -845,6 +846,20 @@ export async function handleUpdateAgeReviewCase(
 // Minor onboarding (behind admin auth)
 // ---------------------------------------------------------------------------
 
+/**
+ * A protected subject's source case and how that case was opened. Both can be
+ * null: the schema does not require a source case, and the case row can be
+ * gone (hence the LEFT JOIN).
+ */
+async function findSubjectSourceCase(db: D1Database, subjectId: string): Promise<{
+  source_case_id: string | null; created_via: string | null;
+} | null> {
+  return db.prepare(`SELECT s.source_case_id, c.created_via
+    FROM protected_minor_subjects s LEFT JOIN age_review_cases c ON c.id = s.source_case_id
+    WHERE s.subject_id = ?`).bind(subjectId)
+    .first<{ source_case_id: string | null; created_via: string | null }>();
+}
+
 export async function handleCreateMinorAccount(
   request: Request,
   env: AgeReviewEnv,
@@ -963,11 +978,106 @@ export async function handleCreateMinorAccount(
     if (existingOperation.result_pubkey !== result.pubkey || !existingOperation.subject_id) {
       return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
     }
-    const prior = await env.DB.prepare(`SELECT source_case_id FROM protected_minor_subjects WHERE subject_id = ?`)
-      .bind(existingOperation.subject_id).first<{ source_case_id: string }>();
+    const prior = await findSubjectSourceCase(env.DB, existingOperation.subject_id);
+    // Issue #428. The replay above asked Keycast for the account's claim link
+    // again. Depending on the Keycast version that is the still-valid link or
+    // a new one that replaces it; either way the case should carry the expiry
+    // of the link just handed back, not an earlier one. Same scope as the
+    // reuse branch below: only a case this dialog created, for this pubkey (a
+    // replacement account inherits a subject whose source case is the old
+    // account's), and not once retention has redacted it. The ticket is left
+    // alone, since a replay carries the original request's ticket by
+    // fingerprint. The expiry is bookkeeping and the link is what support
+    // needs, so a failed write is logged and the link is still returned.
+    if (typeof result.claim_url === 'string' && prior?.source_case_id && prior.created_via === 'minor_onboarding') {
+      try {
+        await env.DB.prepare(`UPDATE age_review_cases SET claim_link_expires_at = ?
+          WHERE id = ? AND pubkey = ? AND redacted_at IS NULL`)
+          .bind(result.expires_at ?? null, prior.source_case_id, result.pubkey).run();
+      } catch (err) {
+        console.error('[age-review] Could not refresh the claim link expiry on replay; returning the link anyway', err);
+      }
+    }
     return json({ success: true, pubkey: result.pubkey, claim_url: result.claim_url, expires_at: result.expires_at,
-      account_state: result.account_state, case_id: prior?.source_case_id,
+      account_state: result.account_state, case_id: prior?.source_case_id ?? undefined,
       provisioning_operation_id: provisioningOperationId, replayed: true }, 200, corsHeaders);
+  }
+
+  // Issue #428. A fresh operation for a username Keycast already holds
+  // unclaimed comes back 200 with the same pubkey and a claim link (the
+  // existing one or a replacement, depending on the Keycast version). If that
+  // pubkey is already protected, its subject and binding are the record:
+  // another case, subject and binding would trip the one-active-binding-per-
+  // pubkey index, fail every retry the same way, and leave support with no
+  // link. Complete the operation against the existing subject instead.
+  const bound = await resolveByPubkey(env.DB, result.pubkey);
+  if (bound) {
+    const source = await findSubjectSourceCase(env.DB, bound.subjectRef);
+    // This attempt may complete the operation only while it is still pending
+    // and the subject still protects this pubkey: the subject active, with an
+    // active binding for it. Either can change after resolveByPubkey (another
+    // attempt of the same operation, a clear, an account deletion), and
+    // completing anyway would record the operation against a subject that no
+    // longer protects this account. One predicate, shared by both writes below.
+    // Columns are qualified because the case write nests this inside an
+    // UPDATE of age_review_cases, which has its own `state`.
+    const completable = `protected_minor_provisioning_operations.provisioning_operation_id = ?
+      AND protected_minor_provisioning_operations.kind = 'onboarding'
+      AND protected_minor_provisioning_operations.state = 'pending'
+      AND EXISTS (SELECT 1 FROM protected_minor_subjects s
+        JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
+        WHERE s.subject_id = ? AND s.classification_state = 'active' AND b.pubkey = ? AND b.unbound_at IS NULL)`;
+    const completableBinds = [provisioningOperationId, bound.subjectRef, result.pubkey];
+    const writes: D1PreparedStatement[] = [];
+    // Only a case this dialog created is refreshed, and only when Keycast
+    // returned a link: its expiry now belongs to that link, and a ticket named
+    // here replaces the old one (none named keeps it). Never a case opened some
+    // other way (such as from a report), one for another pubkey (a
+    // replacement account inherits a subject whose source case is the old
+    // account's), or one retention has redacted.
+    //
+    // The case write runs FIRST and checks the same predicate the completion
+    // checks. A batch is one transaction and the case write changes nothing
+    // that predicate reads, so the two land together or not at all. Checking
+    // "complete" after the fact would instead pass when a different attempt
+    // completed the operation, letting this losing attempt rewrite the case
+    // and then report failure.
+    if (typeof result.claim_url === 'string' && source?.source_case_id && source.created_via === 'minor_onboarding') {
+      writes.push(env.DB.prepare(`UPDATE age_review_cases
+        SET claim_link_expires_at = ?, zendesk_ticket_id = COALESCE(?, zendesk_ticket_id)
+        WHERE id = ? AND pubkey = ? AND redacted_at IS NULL
+          AND EXISTS (SELECT 1 FROM protected_minor_provisioning_operations WHERE ${completable})`)
+        .bind(result.expires_at ?? null, body.zendesk_ticket_id ?? null, source.source_case_id, result.pubkey,
+          ...completableBinds));
+    }
+    writes.push(env.DB.prepare(`UPDATE protected_minor_provisioning_operations
+      SET subject_id = ?, state = 'complete', result_pubkey = ?, updated_at = ?
+      WHERE ${completable}`)
+      .bind(bound.subjectRef, result.pubkey, new Date().toISOString(), ...completableBinds));
+    try {
+      const results = await env.DB.batch(writes);
+      if (results[results.length - 1].meta.changes !== 1) {
+        // Nothing was written. If another attempt completed the operation, a
+        // retry answers from it (the completed-operation replay path above).
+        // If the subject stopped protecting this pubkey, the operation is
+        // still pending and a retry starts over from the lookup.
+        console.warn('[age-review] Resubmission could not complete against the existing protected record (operation completed elsewhere, or the subject or binding changed since the lookup); asked for a retry');
+        return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.', provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
+      }
+    } catch (err) {
+      console.error('[age-review] D1 write failed while returning a claim link for an existing record', err);
+      return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.', provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
+    }
+    console.log('[age-review] Resubmission reused the existing protected record');
+    return json({
+      success: true,
+      pubkey: result.pubkey,
+      claim_url: result.claim_url,
+      expires_at: result.expires_at,
+      account_state: result.account_state,
+      case_id: source?.source_case_id ?? undefined,
+      provisioning_operation_id: provisioningOperationId,
+    }, 200, corsHeaders);
   }
 
   const caseId = crypto.randomUUID();
