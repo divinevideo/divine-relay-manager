@@ -250,12 +250,18 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // each time.
   const recheckPostRef = useRef(recheckPost);
   recheckPostRef.current = recheckPost;
+  // Whether the window's end owes the post a re-check. Not on an account
+  // report, which has no post, nor on a post on screen that the live check
+  // has not called gone. One on screen that it did call gone (the thread read
+  // found it again since) still needs the check, or the gone badge stays
+  // beside it.
+  const postToRecheck = !!targetEventId && (!displayEvent || isEventDeleted === true);
   useEffect(() => {
     const last = lastRestoreWindow.current;
     lastRestoreWindow.current = { key: restoreWindowKey, open: justRestored };
     if (last.key !== restoreWindowKey || !last.open || justRestored) return;
-    recheckPostRef.current();
-  }, [restoreWindowKey, justRestored]);
+    if (postToRecheck) recheckPostRef.current();
+  }, [restoreWindowKey, justRestored, postToRecheck]);
   // Why a gone post is gone, from what has actually answered (lib/goneCause).
   // The badge (label, icon, tooltip) and the thread panel all read this one answer.
   const goneCause = deriveGoneCause({
