@@ -58,22 +58,24 @@ vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, 
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useReportContext', () => ({
-  useReportContext: (report: NostrEvent) => ({
+  useReportContext: (report: NostrEvent) => {
     // A report with no e tag is an account report.
-    target: report.tags.some(t => t[0] === 'e')
-      ? { type: 'event', value: report.tags.find(t => t[0] === 'e')![1] }
-      : { type: 'pubkey', value: report.tags.find(t => t[0] === 'p')![1] },
-    // As useThread answers: no thread while its read is out, a null event for
-    // a post it did not find.
-    thread: shown.loading ? undefined : { event: shown.post ?? null, ancestors: [], replies: [] },
-    threadLoading: shown.loading,
-    reportedUser: { profile: undefined, pubkey: report.tags.find(t => t[0] === 'p')![1], isFunnelcakeUser: false },
-    userStats: undefined,
-    isLoading: false,
-    error: null,
-    relayHint: undefined,
-    reportTags: report.tags,
-  }),
+    const postId = report.tags.find(t => t[0] === 'e')?.[1];
+    const pubkey = report.tags.find(t => t[0] === 'p')![1];
+    return {
+      target: postId ? { type: 'event', value: postId } : { type: 'pubkey', value: pubkey },
+      // As useThread answers: no thread for an account report (its read is
+      // disabled) or while the read is out, a null event for a post it did not find.
+      thread: !postId || shown.loading ? undefined : { event: shown.post ?? null, ancestors: [], replies: [] },
+      threadLoading: !!postId && shown.loading,
+      reportedUser: { profile: undefined, pubkey, isFunnelcakeUser: false },
+      userStats: undefined,
+      isLoading: false,
+      error: null,
+      relayHint: undefined,
+      reportTags: report.tags,
+    };
+  },
 }));
 
 vi.mock('@/components/UserProfileCard', () => ({ UserProfileCard: () => null }));
