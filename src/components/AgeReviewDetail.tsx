@@ -332,13 +332,21 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // every decision can change Keycast status. Settled, not success: a conflict
     // or a lost response can follow a write that did commit. Only this case's
     // account can have changed, and only by a state change: a clock or band edit
-    // leaves both statuses alone, unless it lost a version conflict, since the
-    // winning write may have been a decision.
-    onSettled: (data, error, updates, ctx) => {
+    // leaves both statuses and the relay's suspended list alone, unless it lost
+    // a version conflict, since the winning write may have been a decision.
+    onSettled: async (data, error, updates, ctx) => {
       if (!ctx) return;
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
       void invalidateAccountStatus(queryClient, ctx.casePubkey);
+      // The viewer uses the relay's suspended list (#437). Cancel the old read
+      // first because invalidating alone reuses an in-flight read when the
+      // cache has no result yet. Funnelcake deletes an unsuspended account from
+      // the table this list reads; the five-minute lag noted on unsuspendPubkey
+      // is in its content reads (markRestored), not here.
+      const suspendedListKey = ['suspended-pubkeys'];
+      await queryClient.cancelQueries({ queryKey: suspendedListKey, exact: true });
+      void queryClient.invalidateQueries({ queryKey: suspendedListKey, exact: true });
       const subject = ctx.casePubkey.toLowerCase();
       // Restrict suspends the account, clear unsuspends it and deny bans it,
       // so the shared authored-content reads describe the other state
