@@ -677,6 +677,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
+      // The post panel's thread read can predate the action too (a post read
+      // before a suspension, say), and the live check above can now call the
+      // post gone. Read the post again with it, as recheckPost does, or the
+      // header says "Not Found on Relay" while the panel shows the old read.
+      if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
       // The acted-on account's Keycast label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
