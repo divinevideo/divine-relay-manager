@@ -121,11 +121,9 @@ describe('authoredContentStat', () => {
       .toBe('0 events (just restored; posts can take a few minutes to reappear, if still stored)');
   });
 
-  // The suspended list's re-read after this tab's Unsuspend failed and kept
-  // its copy from before it. Inside the window that copy does not count.
-  it('qualifies an empty read just after an unsuspend that only a stale list contradicts', () => {
+  it('still says hidden if a new suspension was confirmed and the next refresh failed', () => {
     expect(authoredContentStat({ ...base, count: 0, suspended: true, suspendedStale: true, justRestored: true }))
-      .toBe('0 events (just restored; posts can take a few minutes to reappear, if still stored)');
+      .toBe('events hidden (last known: suspended)');
   });
 
   it('still says hidden for a stale suspension once the window has closed', () => {

@@ -1,17 +1,22 @@
-// ABOUTME: The suspension to act on just after this tab unsuspended the account, so a stale
-// ABOUTME: copy of the suspended list cannot contradict a confirmed Unsuspend.
+// ABOUTME: Orders suspended-list requests against confirmed Unsuspends in this tab.
+
+let latestReadId = 0;
+
+export function beginSuspendedListRead(): number {
+  return ++latestReadId;
+}
+
+export function latestSuspendedListRead(): number {
+  return latestReadId;
+}
 
 /**
- * This tab's restore window (lib/userStatsCache, markRestored) opens only
- * after a confirmed Unsuspend. A suspension known only from a copy of the
- * suspended list whose re-read failed (most likely the copy from before that
- * Unsuspend) does not contradict it, so while the window is open it counts as
- * not suspended. A suspension the list confirmed since (another moderator
- * suspended the account again) still counts while that read is current, and an
- * unknown suspension stays unknown.
- *
- * `stale` is useModerationStatus's isUserSuspendedStale.
+ * A confirmed Unsuspend supersedes a positive from a request that started
+ * before it. A later positive remains the last known suspension even after
+ * a failed refresh. The ID recorded at Unsuspend expires with the restore window.
  */
-export function suspensionAfterRestore(suspended: boolean | null, stale: boolean, justRestored: boolean): boolean | null {
-  return justRestored && suspended === true && stale ? false : suspended;
+export function suspensionAfterRestore(suspended: boolean | null, readId: number | undefined, restoreReadId: number | undefined): boolean | null {
+  return suspended === true && readId !== undefined && restoreReadId !== undefined && readId <= restoreReadId
+    ? false
+    : suspended;
 }

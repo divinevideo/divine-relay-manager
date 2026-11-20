@@ -1,11 +1,12 @@
 // ABOUTME: Report detail with the real moderation-status hook and thread panel, for a
 // ABOUTME: post the relay won't return: an unknown cause must not read as "deleted".
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ReportDetail } from './ReportDetail';
+import { endRestoreWindow, markRestored } from '@/lib/userStatsCache';
 import type { NostrEvent } from '@nostrify/nostrify';
 
 // The live check that marks a post gone is a public REQ. When the suspended
@@ -76,6 +77,9 @@ vi.mock('@/components/UserActions', () => ({ UserActions: () => null }));
 vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
 vi.mock('@/components/ReporterCard', () => ({ ReporterInline: () => null }));
 vi.mock('@/components/UserIdentifier', () => ({ UserIdentifier: () => null }));
+vi.mock('@/components/suspended/SuspendedContentPanel', () => ({
+  SuspendedPostViewer: () => <button type="button">View hidden post</button>,
+}));
 
 const REPORT: NostrEvent = {
   id: 'f'.repeat(64),
@@ -87,10 +91,9 @@ const REPORT: NostrEvent = {
   sig: 'b'.repeat(128),
 };
 
-function renderDetail() {
-  const qc = new QueryClient({
+function renderDetail(qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
-  });
+  })) {
   return render(
     <QueryClientProvider client={qc}>
       <TooltipProvider>
@@ -136,6 +139,36 @@ describe('ReportDetail missing post, real moderation status', () => {
 
     expect(await screen.findByText(/The reported account is suspended/, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
+  });
+
+  it('uses the order of the suspended-list reads when a refresh fails after Unsuspend', async () => {
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const refetchSuspensions = () => client.refetchQueries({ queryKey: ['suspended-pubkeys'] });
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    renderDetail(client);
+    expect(await screen.findByText(/The reported account is suspended/)).toBeInTheDocument();
+
+    try {
+      api.listSuspendedPubkeys.mockRejectedValue(new Error('relay unreachable'));
+      await act(async () => {
+        await markRestored(client, REPORTED_PUBKEY, undefined);
+        await refetchSuspensions();
+      });
+      expect(await screen.findByText(/The account was just unsuspended/)).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'View hidden post' })).not.toBeInTheDocument();
+
+      // Another moderator suspended the account again. The list confirms that
+      // before a subsequent refresh fails, retaining the newer positive.
+      api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+      await act(refetchSuspensions);
+      expect(await screen.findByText(/The reported account is suspended/)).toBeInTheDocument();
+      api.listSuspendedPubkeys.mockRejectedValue(new Error('relay unreachable'));
+      await act(refetchSuspensions);
+      expect(await screen.findByText(/Last known: the reported account is suspended/)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'View hidden post' })).toBeInTheDocument();
+    } finally {
+      act(() => endRestoreWindow(REPORTED_PUBKEY, undefined));
+    }
   });
 
   // Funnelcake also withholds quarantined posts and deactivated or vanished

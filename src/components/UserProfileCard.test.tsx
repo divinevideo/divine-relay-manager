@@ -222,7 +222,7 @@ describe('UserProfileCard', () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
-      render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={true} isSuspendedStale={true} />);
+      render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={false} isSuspendedStale={true} />);
       expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear, if still stored)')).toBeInTheDocument();
     } finally {
       // End the window so it cannot reach the next test, also when an

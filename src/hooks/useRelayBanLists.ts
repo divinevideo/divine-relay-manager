@@ -4,6 +4,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useAdminApi } from '@/hooks/useAdminApi';
 import { RESOLUTION_READ_TIMEOUT_MS } from '@/lib/constants';
+import { beginSuspendedListRead } from '@/lib/suspensionAfterRestore';
 
 const BAN_LIST_STALE_MS = 30_000;
 
@@ -99,11 +100,13 @@ export function useBannedEvents(opts?: BanListOptions) {
 
 export function useSuspendedPubkeys(opts?: BanListOptions) {
   const { listSuspendedPubkeys } = useAdminApi();
-  return useQuery({
+  const { data, isError, isLoading, fetchStatus, refetch } = useQuery({
     queryKey: ['suspended-pubkeys'],
     queryFn: async () => {
+      const readId = beginSuspendedListRead();
       try {
-        return await listSuspendedPubkeys({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
+        const entries = await listSuspendedPubkeys({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS });
+        return { entries, readId };
       } catch (error) {
         console.warn('NIP-86 listsuspendedpubkeys failed:', error);
         throw error;
@@ -111,6 +114,7 @@ export function useSuspendedPubkeys(opts?: BanListOptions) {
     },
     ...baseOptions(opts),
   });
+  return { data: data?.entries, readId: data?.readId, isError, isLoading, fetchStatus, refetch };
 }
 
 /**

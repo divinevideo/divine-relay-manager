@@ -147,17 +147,14 @@ describe('deriveGoneCause just after an unsuspend', () => {
       .toBe('Not found on the relay. Still checking whether the account is suspended. That would hide it.');
   });
 
-  // Meylis's question B on PR #426: the suspended list's re-read after this
-  // tab's Unsuspend failed, so its copy from before the unsuspend still lists
-  // the account. The window opens only after a confirmed Unsuspend, so that
-  // stale suspension does not outrank it, and no suspended-post viewer follows.
-  it('ranks this tab\'s unsuspend above a suspension only a stale list reports', () => {
+  // The last successful read confirmed a new suspension after the Unsuspend.
+  it('keeps a newer suspension as last known after a failed refresh', () => {
     expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true })).toEqual({
-      kind: 'unknown',
-      line: JUST_RESTORED_LINE,
-      badge: 'Not Found on Relay',
-      tone: 'unknown',
-      suspensionNamed: false,
+      kind: 'suspended',
+      stale: true,
+      line: "Last known: the reported account is suspended. The relay hides a suspended account's posts, so this event may still exist.",
+      badge: 'Suspended (last known)',
+      tone: 'withheld',
     });
   });
 
@@ -172,7 +169,7 @@ describe('deriveGoneCause just after an unsuspend', () => {
   });
 
   it('does not let a stale suspension and the window override a confirmed ban', () => {
-    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true, userBanned: true }))
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: false, suspendedStale: true, userBanned: true }))
       .toMatchObject({ kind: 'explained', by: 'ban' });
   });
 
@@ -181,7 +178,7 @@ describe('deriveGoneCause just after an unsuspend', () => {
   // names only the open checks, the badge does not say suspended, and no
   // suspended-post viewer follows.
   it('names only the open check beside a stale suspension just after an unsuspend', () => {
-    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true, eventBanned: null })).toEqual({
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: false, suspendedStale: true, eventBanned: null })).toEqual({
       kind: 'unknown',
       line: "Not found on the relay. Couldn't check whether the event is banned. That would hide it.",
       badge: 'Not Found on Relay',
@@ -191,12 +188,12 @@ describe('deriveGoneCause just after an unsuspend', () => {
   });
 
   it('headlines a stale ban, not a stale suspension, just after an unsuspend', () => {
-    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true, userBanned: true, userBannedStale: true }))
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: false, suspendedStale: true, userBanned: true, userBannedStale: true }))
       .toMatchObject({ kind: 'unknown', badge: 'Banned (last known)', suspensionNamed: false });
   });
 
   it('names only the unread decision log beside a stale suspension just after an unsuspend', () => {
-    expect(line({ justRestored: true, suspended: true, suspendedStale: true, decisionsUnread: 'checking' }))
+    expect(line({ justRestored: true, suspended: false, suspendedStale: true, decisionsUnread: 'checking' }))
       .toBe('Not found on the relay. Still checking whether a moderator removed it. That would hide it.');
   });
 

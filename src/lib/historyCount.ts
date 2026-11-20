@@ -1,7 +1,5 @@
 // ABOUTME: Renders a history count honestly when the read that produced it stopped early.
 
-import { suspensionAfterRestore } from '@/lib/suspensionAfterRestore';
-
 // A count from a walk that hit its page bound is a floor, not a total. Printing
 // it bare is the silent-cap bug this replaced: the pane said 50 when the answer
 // was 80.
@@ -36,7 +34,8 @@ export function historyStat(
  * ("20+"), the convention reportsFiledLabel uses.
  * `suspendedStale` is useModerationStatus's isUserSuspendedStale: the
  * suspension comes from a copy of the list that could not be refreshed.
- * `suspended` is null while the suspended list has not confirmed either way.
+ * `suspended` is the status after accounting for this tab's Unsuspend.
+ * It is null while the suspension is unknown.
  * An empty read then proves nothing, so it says why (`suspensionChecking`: a
  * read of the suspended list is in flight, otherwise it could not be read).
  * `justRestored`: this tab unsuspended the account moments ago, and the relay's
@@ -56,10 +55,7 @@ export function authoredContentStat(opts: {
   justRestored?: boolean;
   lastKnown?: boolean;
 }): string {
-  const { count, incomplete, suspendedStale, suspensionChecking = false, noun, limit, justRestored = false, lastKnown = false } = opts;
-  // Inside this tab's restore window, a suspension only a stale copy of the
-  // suspended list reports counts as none (lib/suspensionAfterRestore).
-  const suspended = suspensionAfterRestore(opts.suspended, suspendedStale, justRestored);
+  const { count, incomplete, suspended, suspendedStale, suspensionChecking = false, noun, limit, justRestored = false, lastKnown = false } = opts;
   if (suspended === true && !(count !== undefined && count > 0)) {
     return suspendedStale ? `${noun} hidden (last known: suspended)` : `${noun} hidden (account suspended)`;
   }

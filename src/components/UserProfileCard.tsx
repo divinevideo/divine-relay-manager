@@ -23,7 +23,6 @@ import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
 import { authoredContentStat, historyCount, historyStat } from "@/lib/historyCount";
 import { useJustRestored } from "@/lib/userStatsCache";
-import { suspensionAfterRestore } from "@/lib/suspensionAfterRestore";
 import { SuspendedAccountViewer } from "@/components/suspended/SuspendedContentPanel";
 import type { SuspendedViewSurface } from "../../shared/suspended-content";
 
@@ -66,9 +65,8 @@ interface UserProfileCardProps {
    */
   hideMediaByDefault?: boolean | null;
   /**
-   * The account is in the relay's suspended list (useModerationStatus's
-   * isUserSuspended), so the relay hides its content and an empty read is not
-   * an empty account. null or omitted when the list has not confirmed it.
+   * The account's suspension status from useModerationStatus, which accounts
+   * for this tab's Unsuspend. Null or omitted when the status is unknown.
    */
   isSuspended?: boolean | null;
   /** The suspension is from a copy of the list that could not be refreshed. */
@@ -288,10 +286,8 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
         {/* The relay hides a suspended account's posts from the reads above;
             the audited viewer shows them on a click. Report detail's pubkey
-            comes from the report's own p tag, so only a real key is offered.
-            Not for a suspension only a stale copy of the list reports while
-            this tab's restore window is open (lib/suspensionAfterRestore). */}
-        {suspendedViewerSurface && suspensionAfterRestore(isSuspended, isSuspendedStale, justRestored) === true && isHex64(pubkey) && (
+            comes from the report's own p tag, so only a real key is offered. */}
+        {suspendedViewerSurface && isSuspended === true && isHex64(pubkey) && (
           <SuspendedAccountViewer
             key={pubkey}
             pubkey={pubkey}

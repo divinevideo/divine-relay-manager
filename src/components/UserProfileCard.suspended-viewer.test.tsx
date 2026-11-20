@@ -77,7 +77,7 @@ describe('UserProfileCard suspended-content viewer', () => {
   // count, so the card does not offer a suspended account's viewer.
   it('leaves it out for a suspension only a stale list reports just after this tab unsuspended', () => {
     restoreWindow.open = true;
-    renderCard({ isSuspendedStale: true });
+    renderCard({ isSuspended: false, isSuspendedStale: true });
 
     expect(screen.queryByRole('button', { name: 'View hidden posts' })).not.toBeInTheDocument();
   });
@@ -90,7 +90,8 @@ describe('UserProfileCard suspended-content viewer', () => {
     expect(screen.getByRole('button', { name: 'View hidden posts' })).toBeInTheDocument();
   });
 
-  it('offers it for a stale suspension once the restore window has closed', () => {
+  it('offers it when a suspension read after this tab unsuspended later becomes stale', () => {
+    restoreWindow.open = true;
     renderCard({ isSuspendedStale: true });
 
     expect(screen.getByRole('button', { name: 'View hidden posts' })).toBeInTheDocument();

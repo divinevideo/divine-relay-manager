@@ -174,6 +174,7 @@ describe('ReportDetail suspended-content viewer placement', () => {
     threadContextProps.last = null;
     userCardProps.last = null;
     userActionsProps.last = null;
+    bulkDeleteProps.last = null;
     bannedEventRead.value = { data: null, isLoading: false };
     decisionFlags.isDeleted = false;
     decisionFlags.isAutoHidden = false;
@@ -244,6 +245,7 @@ describe('ReportDetail suspended-content viewer placement', () => {
   // and the viewer does not.
   it('gives no viewer for a suspension only a stale list reports just after this tab unsuspended', () => {
     restoreWindow.open = true;
+    status.value.isUserSuspended = false;
     status.value.isUserSuspendedStale = true;
     renderDetail([SPAM_REPORT]);
 
@@ -270,10 +272,17 @@ describe('ReportDetail suspended-content viewer placement', () => {
   // Unsuspend, and still say the status may be out of date.
   it('gives the account actions no suspension for one only a stale list reports just after this tab unsuspended', () => {
     restoreWindow.open = true;
-    status.value.isUserSuspendedStale = true;
+    status.value = moderationStatusMock({
+      isEventGone: true,
+      isUserSuspended: false,
+      isUserSuspendedFromList: true,
+      isUserSuspendedStale: true,
+      checkedAt: CHECKED_AT,
+    });
     renderDetail([SPAM_REPORT]);
 
     expect(userActionsProps.last).toMatchObject({ isSuspended: false, statusStale: true });
+    expect(bulkDeleteProps.last).toMatchObject({ isSuspended: true });
   });
 
   it('gives the account actions a suspension the list confirmed since this tab unsuspended', () => {

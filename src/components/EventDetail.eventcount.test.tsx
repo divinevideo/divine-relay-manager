@@ -238,7 +238,7 @@ describe.each(SITES)('EventDetail events count in the $site', ({ scope }) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       userStatsData.postCount = 0;
-      status.value.isUserSuspended = true;
+      status.value.isUserSuspended = false;
       status.value.isUserSuspendedStale = true;
       await act(async () => { await markRestored(new QueryClient(), REPORTED_PUBKEY, undefined); });
 
