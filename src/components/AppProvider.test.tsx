@@ -106,6 +106,19 @@ describe('AppProvider stale local address reset', () => {
     expect(storedWrites()).toEqual([{ theme: 'light', ...localEnvironment }]);
   });
 
+  // The exemption covers the exact preset pair only: the same Local API with a
+  // different local relay is still reset in Vite dev.
+  it('resets a pair in Vite dev that only half matches the Local preset', () => {
+    vi.stubEnv('DEV', true);
+    vi.spyOn(environments, 'getEnvironmentById').mockReturnValue(localPreset);
+    storeConfig({ theme: 'light', apiUrl: localEnvironment.apiUrl, relayUrl: 'ws://localhost:4444' });
+
+    renderProvider(deployedDefaults);
+
+    expect(screen.getByTestId('relay')).toHaveTextContent(deployedDefaults.relayUrl);
+    expect(screen.getByTestId('api')).toHaveTextContent(deployedDefaults.apiUrl);
+  });
+
   describe('in a local build, where the defaults are themselves local', () => {
     it('settles on the local defaults instead of looping (#433)', () => {
       storeConfig(null);
@@ -177,6 +190,19 @@ describe('AppProvider stale local address reset', () => {
       expect(screen.getByTestId('relay')).toHaveTextContent(localEnvironment.relayUrl);
       expect(screen.getByTestId('api')).toHaveTextContent(localEnvironment.apiUrl);
       expect(localStorage.setItem).not.toHaveBeenCalled();
+    });
+
+    // One stale address beside a remote one: only that field's own empty-default
+    // guard stops the reset (the pair-together return doesn't apply).
+    it.each([
+      ['apiUrl', { relayUrl: 'wss://relay.staging.example.com', apiUrl: 'http://localhost:8787' }],
+      ['relayUrl', { relayUrl: 'ws://localhost:4444', apiUrl: 'https://api-staging.example.com' }],
+    ] as const)('does not wipe a lone stale %s when its default is empty', (field, stored) => {
+      storeConfig({ theme: 'light', ...stored });
+
+      renderProvider({ ...deployedDefaults, [field]: '' });
+
+      expect(storedWrites()).toEqual([]);
     });
 
     it.each(['apiUrl', 'relayUrl'] as const)('keeps both local addresses if the default %s is local', (localDefault) => {
