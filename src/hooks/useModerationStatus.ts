@@ -328,6 +328,14 @@ export function useModerationStatus(
       // Defensive: the gap is only a few microtasks wide, and no test has made
       // the generation change inside it.
       if (!isCurrent()) return;
+      // A check that found the post gone has answered what the auto-check
+      // below asks once the post reads as not found, which the report pane's
+      // re-read of it does right after an account action (while the relay
+      // withholds the post) or when the restore window closes. Count it as
+      // that check, or the same live check runs again as soon as this one
+      // finishes. One that found the post still there leaves the auto-check
+      // to run if the post goes missing later.
+      if (results.eventGone === true) autoCheckedRef.current = `${eventId || ''}:${pubkey || ''}`;
       setWsResult({
         userBanned: results.userBanned,
         eventGone: results.eventGone,

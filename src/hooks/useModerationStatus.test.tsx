@@ -60,6 +60,48 @@ describe('useModerationStatus', () => {
     verifyEventDeleted.mockResolvedValue(null);
   });
 
+  // The report pane re-reads the post right after an account action, and the
+  // relay now withholds it, so the post reads as not found just as the
+  // after-action check answers. That check already found the post gone.
+  it('does not run the live check again when a check that found the post gone is followed by a not-found read', async () => {
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValue(true);
+    const { result, rerender } = renderHook(
+      ({ notFound }: { notFound: boolean }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
+      { wrapper, initialProps: { notFound: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => { result.current.recheckAfterAction(); });
+    await waitFor(() => expect(result.current.checkedAt).not.toBeNull());
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+
+    rerender({ notFound: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    expect(result.current.isChecking).toBe(false);
+    expect(result.current.isEventGone).toBe(true);
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  it('still auto-checks a post that goes missing after a check found it on the relay', async () => {
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValue(false);
+    const { result, rerender } = renderHook(
+      ({ notFound }: { notFound: boolean }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
+      { wrapper, initialProps: { notFound: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => { result.current.recheck(); });
+    await waitFor(() => expect(result.current.checkedAt).not.toBeNull());
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+
+    verifyEventDeleted.mockResolvedValue(true);
+    rerender({ notFound: true });
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+  });
+
   it('uses the ban list before any check has run', async () => {
     listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
     verifyPubkeyBanned.mockResolvedValue(null);

@@ -1,7 +1,7 @@
 // ABOUTME: Report detail after this tab changes the reported account's status: the post panel
 // ABOUTME: reads the post again with the live check, so the header and body agree.
 
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -168,6 +168,10 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     // The body agrees: it read the post again, and says why it is missing.
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+    // One live check: the after-action one already found the post gone, so the
+    // re-read's "not found" does not start the same check again.
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1);
   });
 
   // The action can finish while the report's first read is still out. That
