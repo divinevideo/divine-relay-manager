@@ -83,6 +83,42 @@ function dbWithWriterBeforeRun(marker: string, before: () => Promise<unknown>): 
 }
 
 /**
+ * `base`, except that the `n`th statement whose SQL contains `marker` rejects
+ * its `.first()` with `message`, as a failed D1 read would. Every other
+ * statement, and every earlier one with the marker, passes straight through.
+ */
+function dbWithNthReadThrowing(base: D1Database, marker: string, n: number, message: string): D1Database {
+  let seen = 0;
+  return new Proxy(base, {
+    get(target, prop) {
+      if (prop === 'prepare') {
+        return (sql: string) => {
+          const statement = target.prepare(sql);
+          if (!sql.includes(marker) || ++seen !== n) return statement;
+          return new Proxy(statement, {
+            get(st, p) {
+              if (p === 'bind') {
+                return (...args: unknown[]) => new Proxy(st.bind(...args), {
+                  get(bound, q) {
+                    if (q === 'first') return async () => { throw new Error(message); };
+                    const value = Reflect.get(bound, q, bound);
+                    return typeof value === 'function' ? value.bind(bound) : value;
+                  },
+                });
+              }
+              const value = Reflect.get(st, p, st);
+              return typeof value === 'function' ? value.bind(st) : value;
+            },
+          });
+        };
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+/**
  * DB whose next batch first runs `before`: another writer landing between a
  * handler's reads and its write. Later batches pass straight through.
  */
@@ -410,7 +446,11 @@ describe('protected-minor registry on real D1', () => {
   // account that already existed is refused, with no link and nothing written
   // beyond closing the operation.
   describe('a new operation for a username that already belongs to an account', () => {
-    afterEach(() => { vi.unstubAllGlobals(); });
+    afterEach(async () => {
+      vi.unstubAllGlobals();
+      vi.restoreAllMocks();
+      await DB.prepare('DROP TRIGGER IF EXISTS test_fail_observation_write').run();
+    });
 
     const OP_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
     const OP_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -743,6 +783,173 @@ describe('protected-minor registry on real D1', () => {
       expect(res.status).toBe(500);
       expect(await res.json()).toEqual({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.',
         provisioning_operation_id: OP_A });
+      expect(await registry()).toEqual({ cases: 0, subjects: 0, bindings: 0 });
+    });
+
+    // Issue #436. Keycast created the account, then the write that records its
+    // answer threw. Uncaught, the router hands back a bare 500 without CORS
+    // headers and the dialog can only say "Failed to fetch". A retry can only
+    // end as unfinished setup (the answer was not kept), so it says that now,
+    // readably: no link or pubkey, and the operation left exactly as it was.
+    it('refuses as unfinished setup, with no link, when recording Keycast\'s answer throws', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(201, 'https://claim.test/a', '2026-09-01T00:00:00.000Z')));
+      await DB.prepare(`CREATE TRIGGER test_fail_observation_write
+        BEFORE UPDATE OF result_pubkey ON protected_minor_provisioning_operations
+        BEGIN SELECT RAISE(ABORT, 'simulated observation write failure'); END`).run();
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const cors = { 'Access-Control-Allow-Origin': 'https://admin.test' };
+
+      const res = await handleCreateMinorAccount(submit(OP_A, 101), env(), cors);
+
+      expect(res.status).toBe(409);
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://admin.test');
+      expect(await res.json()).toEqual({ success: false, code: 'account_setup_unfinished', error: UNFINISHED,
+        provisioning_operation_id: OP_A });
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[age-review] Could not record Keycast\'s answer'),
+        expect.objectContaining({ message: expect.stringContaining('simulated observation write failure') }));
+      expect(await operation(OP_A)).toMatchObject({ state: 'pending', subject_id: null, result_pubkey: null });
+      expect(await registry()).toEqual({ cases: 0, subjects: 0, bindings: 0 });
+    });
+
+    // Issue #436. The operation's row already exists, but its first attempt
+    // never reached Keycast, so no result is recorded: still unfinished setup,
+    // not a retry. Keys the branch on a recorded result, not on the row.
+    it('refuses as unfinished setup when an earlier attempt left a row but no recorded result', async () => {
+      vi.stubGlobal('fetch', vi.fn()
+        .mockRejectedValueOnce(new Error('simulated network failure'))
+        .mockResolvedValueOnce(reply(201, 'https://claim.test/a', '2026-09-01T00:00:00.000Z')));
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      expect((await handleCreateMinorAccount(submit(OP_A, 101), env(), {})).status).toBe(502);
+      expect(await operation(OP_A)).toMatchObject({ state: 'pending', result_pubkey: null });
+      await DB.prepare(`CREATE TRIGGER test_fail_observation_write
+        BEFORE UPDATE OF result_pubkey ON protected_minor_provisioning_operations
+        BEGIN SELECT RAISE(ABORT, 'simulated observation write failure'); END`).run();
+
+      const res = await handleCreateMinorAccount(submit(OP_A, 101), env(), {});
+
+      expect(res.status).toBe(409);
+      expect(await res.json()).toEqual({ success: false, code: 'account_setup_unfinished', error: UNFINISHED,
+        provisioning_operation_id: OP_A });
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[age-review] Could not record Keycast\'s answer'),
+        expect.objectContaining({ message: expect.stringContaining('simulated observation write failure') }));
+      expect(await operation(OP_A)).toMatchObject({ state: 'pending', result_pubkey: null });
+    });
+
+    // Issue #436. The answer could not be recorded (the row now holds another
+    // account here, forced) and re-reading the row to find out why threw.
+    // Keycast has answered this request, so the same readable refusal, not a
+    // bare 500.
+    it('refuses as unfinished setup, with no link, when re-reading the operation throws', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(201, 'https://claim.test/a', '2026-09-01T00:00:00.000Z')));
+      const recordLandsNothing = dbWithWriterBeforeRun("SET result_pubkey = ?, state = 'pending'", () => DB.prepare(
+        `UPDATE protected_minor_provisioning_operations SET result_pubkey = ? WHERE provisioning_operation_id = ?`)
+        .bind(PUBKEY_B, OP_A).run());
+      const reReadThrows = dbWithNthReadThrowing(recordLandsNothing,
+        'SELECT kind, request_fingerprint, state, subject_id, result_pubkey', 2, 'simulated re-read failure');
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const cors = { 'Access-Control-Allow-Origin': 'https://admin.test' };
+
+      const res = await handleCreateMinorAccount(submit(OP_A, 101), env(reReadThrows), cors);
+
+      // Prove the forced write landed, so the record changed nothing and the re-read ran.
+      expect(await operation(OP_A)).toMatchObject({ state: 'pending', subject_id: null, result_pubkey: PUBKEY_B });
+      expect(res.status).toBe(409);
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://admin.test');
+      expect(await res.json()).toEqual({ success: false, code: 'account_setup_unfinished', error: UNFINISHED,
+        provisioning_operation_id: OP_A });
+      expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[age-review] Could not re-read an operation'),
+        expect.objectContaining({ message: 'simulated re-read failure' }));
+      expect(await registry()).toEqual({ cases: 0, subjects: 0, bindings: 0 });
+    });
+
+    // Issue #436. Unfinished setup is only true of an operation with no
+    // recorded result. On a retry of this dialog's own operation, whose first
+    // attempt recorded Keycast's answer before the registry write failed, a
+    // passing failure to record or re-read is retryable: a further retry
+    // completes it, so support is not sent to engineering.
+    describe('on a retry whose answer is already recorded', () => {
+      const RETRY = 'Could not persist provisioning result. Retry with the same operation ID.';
+      const cors = { 'Access-Control-Allow-Origin': 'https://admin.test' };
+
+      /** Attempt 1: Keycast creates the account (201), the answer is recorded, the registry write fails. */
+      async function recordThenFailRegistry() {
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(201, 'https://claim.test/a', '2026-09-01T00:00:00.000Z')));
+        const failingDb = dbWithWriterBefore(() => { throw new Error('simulated registry write failure'); });
+        expect((await handleCreateMinorAccount(submit(OP_A, 101), env(failingDb), {})).status).toBe(500);
+        expect(await operation(OP_A)).toMatchObject({ state: 'pending', result_pubkey: PUBKEY_A });
+      }
+
+      it('asks for a retry, with no link, when recording the answer again throws, and the retry completes', async () => {
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        await recordThenFailRegistry();
+        await DB.prepare(`CREATE TRIGGER test_fail_observation_write
+          BEFORE UPDATE OF result_pubkey ON protected_minor_provisioning_operations
+          BEGIN SELECT RAISE(ABORT, 'simulated observation write failure'); END`).run();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(200, 'https://claim.test/a2', '2026-09-02T00:00:00.000Z')));
+
+        const res = await handleCreateMinorAccount(submit(OP_A, 101), env(), cors);
+
+        expect(res.status).toBe(500);
+        expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://admin.test');
+        expect(await res.json()).toEqual({ success: false, error: RETRY, provisioning_operation_id: OP_A });
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[age-review] Could not record Keycast\'s answer'),
+          expect.objectContaining({ message: expect.stringContaining('simulated observation write failure') }));
+        expect(await operation(OP_A)).toMatchObject({ state: 'pending', subject_id: null, result_pubkey: PUBKEY_A });
+        expect(await registry()).toEqual({ cases: 0, subjects: 0, bindings: 0 });
+
+        await DB.prepare('DROP TRIGGER test_fail_observation_write').run();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(200, 'https://claim.test/a3', '2026-09-03T00:00:00.000Z')));
+        const retry = await handleCreateMinorAccount(submit(OP_A, 101), env(), cors);
+        expect(retry.status).toBe(200);
+        expect(await retry.json()).toMatchObject({ success: true, claim_url: 'https://claim.test/a3', pubkey: PUBKEY_A });
+        expect(await operation(OP_A)).toMatchObject({ state: 'complete', result_pubkey: PUBKEY_A });
+      });
+
+      it('asks for a retry, with no link, when re-reading the operation throws', async () => {
+        const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+        await recordThenFailRegistry();
+        vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(200, 'https://claim.test/a2', '2026-09-02T00:00:00.000Z')));
+        // Forced: a concurrent attempt completes the operation first (subject
+        // plus completion, as the registry write does), so the record changes
+        // nothing and the re-read runs.
+        const CONCURRENT_SUBJECT = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
+        const recordLandsNothing = dbWithWriterBeforeRun("SET result_pubkey = ?, state = 'pending'", () => DB.batch([
+          DB.prepare(`INSERT INTO protected_minor_subjects (subject_id, classification_state, classified_at) VALUES (?, 'active', ?)`)
+            .bind(CONCURRENT_SUBJECT, new Date().toISOString()),
+          DB.prepare(`UPDATE protected_minor_provisioning_operations SET state = 'complete', subject_id = ? WHERE provisioning_operation_id = ?`)
+            .bind(CONCURRENT_SUBJECT, OP_A),
+        ]));
+        const reReadThrows = dbWithNthReadThrowing(recordLandsNothing,
+          'SELECT kind, request_fingerprint, state, subject_id, result_pubkey', 2, 'simulated re-read failure');
+
+        const res = await handleCreateMinorAccount(submit(OP_A, 101), env(reReadThrows), cors);
+
+        expect(await operation(OP_A)).toMatchObject({ state: 'complete', subject_id: CONCURRENT_SUBJECT, result_pubkey: PUBKEY_A });
+        expect(res.status).toBe(500);
+        expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://admin.test');
+        expect(await res.json()).toEqual({ success: false, error: RETRY, provisioning_operation_id: OP_A });
+        expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('[age-review] Could not re-read an operation'),
+          expect.objectContaining({ message: 'simulated re-read failure' }));
+        // Only the concurrent completion's subject: this request wrote nothing.
+        expect(await registry()).toEqual({ cases: 0, subjects: 1, bindings: 0 });
+      });
+    });
+
+    // Issue #436. The case id is generated for the registry write, so when that
+    // write fails no case exists under it, and the retry that does record the
+    // account creates a different one. The error must not name it.
+    it('does not name a case id when the registry write fails', async () => {
+      vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce(reply(201, 'https://claim.test/a', '2026-09-01T00:00:00.000Z')));
+      const failingDb = dbWithWriterBefore(() => { throw new Error('simulated registry write failure'); });
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+
+      const res = await handleCreateMinorAccount(submit(OP_A, 101), env(failingDb), { 'Access-Control-Allow-Origin': 'https://admin.test' });
+
+      expect(res.status).toBe(500);
+      expect(res.headers.get('Access-Control-Allow-Origin')).toBe('https://admin.test');
+      expect(await res.json()).toEqual({ success: false,
+        error: `Account created in Keycast but registry persistence failed. Retry with provisioning operation ${OP_A}.`,
+        pubkey: PUBKEY_A, provisioning_operation_id: OP_A });
       expect(await registry()).toEqual({ cases: 0, subjects: 0, bindings: 0 });
     });
 
