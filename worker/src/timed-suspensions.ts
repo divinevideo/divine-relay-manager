@@ -1,7 +1,9 @@
-// ABOUTME: Timed (auto-expiring) suspensions, store section: the per-account record, its
-// ABOUTME: compare-and-swap writes, and the decision-row helper. One row per pubkey.
+// ABOUTME: Timed (auto-expiring) suspensions: the per-account record (one row per pubkey), its
+// ABOUTME: compare-and-swap writes, the decision-row helper, and the I/O seam a lift runs through.
 import type { TimedSuspensionView } from '../../shared/suspension';
 import { markHumanReviewed } from './human-decision';
+import type { KeycastResult } from './keycast-client';
+import type { SuspensionEntry } from './suspended-content';
 
 export type SuspensionRecordStatus = 'active' | 'lifting' | 'keycast_pending' | 'lifted'
   | 'already_lifted' | 'cancelled_unsuspend' | 'cancelled_ban';
@@ -163,4 +165,57 @@ export function toSuspensionView(r: SuspensionRecord): TimedSuspensionView {
     setAt: r.set_at,
     changedAt: r.changed_at,
   };
+}
+
+// ---------------------------------------------------------------------------
+// I/O seam. Built in index.ts (liveSuspensionIo), where notifyModerationService
+// lives, so this module never imports index.ts; tests pass fakes.
+// ---------------------------------------------------------------------------
+
+export type AccountNoticeAction =
+  'ACCOUNT_SUSPENDED' | 'ACCOUNT_BANNED' | 'ACCOUNT_RESTORED' | 'ACCOUNT_SUSPENSION_CHANGED';
+export type KeycastStatusRead = 'active' | 'suspended' | 'banned' | 'none' | 'unknown';
+
+export interface SuspensionIo {
+  readBan(pubkey: string): Promise<boolean | 'unknown'>;
+  readSuspension(pubkey: string): Promise<SuspensionEntry | 'unknown'>;
+  readKeycastStatus(pubkey: string): Promise<KeycastStatusRead>;
+  hasOpenAgeReviewCase(pubkey: string): Promise<boolean>; // throws when it cannot tell
+  relayUnsuspend(pubkey: string): Promise<{ success: boolean; error?: string }>;
+  keycastActivate(pubkey: string, actor?: string): Promise<KeycastResult>;
+  keycastSuspend(pubkey: string, actor?: string): Promise<KeycastResult>;
+  notify(pubkey: string, action: AccountNoticeAction, reason: string, endsAt?: string): Promise<void>;
+  alert(text: string): Promise<boolean>;
+}
+
+export type KeycastLeg = 'ok' | 'not_applicable' | 'failed';
+
+// What follows a relay unsuspend, for both the manual Unsuspend and the timer: the one
+// "restored" notice, then Keycast back to active. Never throws. The notice goes first and
+// its failure does not stop the Keycast call; the Keycast result is returned because the
+// timer retries a failed leg without sending the notice again.
+export async function restoreAfterLift(
+  io: SuspensionIo,
+  pubkey: string,
+  a: { reason: string; moderator?: string },
+): Promise<KeycastLeg> {
+  try {
+    await io.notify(pubkey, 'ACCOUNT_RESTORED', a.reason);
+  } catch (error) {
+    console.error(`[restoreAfterLift] restored notice failed for ${pubkey}:`, error);
+  }
+  try {
+    const res = await io.keycastActivate(pubkey, a.moderator);
+    if (res.success) return 'ok';
+    if (res.notFound) {
+      // Self-custody: no Keycast account, and the relay lift is the whole restore (#269).
+      console.log(`[restoreAfterLift] Keycast activate not applicable for ${pubkey}: no keycast account`);
+      return 'not_applicable';
+    }
+    console.error(`[restoreAfterLift] Keycast activate failed for ${pubkey}: ${res.error}`);
+    return 'failed';
+  } catch (error) {
+    console.error(`[restoreAfterLift] Keycast activate threw for ${pubkey}:`, error);
+    return 'failed';
+  }
 }
