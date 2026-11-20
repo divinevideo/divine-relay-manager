@@ -47,21 +47,29 @@ export function isConsolidatedReportResolved(
   bannedPubkeys: ReadonlySet<string>,
 ): boolean {
   if (resolvedTargets.has(reportTargetKey(report.target))) return true;
-  // Only the report's side is lowercased. authorPubkey comes from a
-  // reporter-authored `p` tag; consolidateReports lowercases it, and this is a
-  // backstop for any other caller. The relay's side is kept
-  // as written on purpose (Reports.tsx `bannedPubkeySet`): funnelcake stores what
-  // `banpubkey` was handed but matches bans exactly, so an uppercase entry never
-  // banned the lowercase account, and the reports on its posts still need a
-  // person. Lowercasing the set would let such a ban clear them.
-  if (
-    report.target.type === 'event' &&
-    report.authorPubkey &&
-    bannedPubkeys.has(report.authorPubkey.toLowerCase())
-  ) {
-    return true;
-  }
-  return false;
+  return bannedAuthor(report, bannedPubkeys) !== undefined;
+}
+
+// The relay-banned author whose ban the queue's author rule applies to a
+// post's report, lowercased; undefined when the rule does not apply (an
+// account report, no agreed author, or an author the relay does not ban).
+// Both rules read it, and so does the report pane's Reopen (Reports.tsx), so
+// the pane offers Reopen by the queue's own answer (#432).
+//
+// Only the report's side is lowercased. authorPubkey comes from a
+// reporter-authored `p` tag; consolidateReports lowercases it, and this is a
+// backstop for any other caller. The relay's side is kept
+// as written on purpose (Reports.tsx `bannedPubkeySet`): funnelcake stores what
+// `banpubkey` was handed but matches bans exactly, so an uppercase entry never
+// banned the lowercase account, and the reports on its posts still need a
+// person. Lowercasing the set would let such a ban clear them.
+export function bannedAuthor(
+  report: ResolvableReport,
+  bannedPubkeys: ReadonlySet<string>,
+): string | undefined {
+  if (report.target.type !== 'event' || !report.authorPubkey) return undefined;
+  const author = report.authorPubkey.toLowerCase();
+  return bannedPubkeys.has(author) ? author : undefined;
 }
 
 // What the dated rule reads. `handling` is handlingByTarget over the worker's
@@ -288,10 +296,8 @@ export function reportHandling(report: DatedReport, ctx: HandlingContext): Handl
       : { status: own, entry, via: 'own' };
   };
 
-  // The author comes from a reporter-authored `p` tag, so only its side is
-  // lowercased; see isConsolidatedReportResolved.
-  const author = report.target.type === 'event' ? report.authorPubkey?.toLowerCase() : undefined;
-  if (!author || !ctx.bannedPubkeys.has(author)) return ownVerdict();
+  const author = bannedAuthor(report, ctx.bannedPubkeys);
+  if (!author) return ownVerdict();
   const authorKey = `pubkey:${author}`;
   const authorEntry = ctx.handling.get(authorKey);
   if (authorEntry) {

@@ -63,6 +63,7 @@ import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
 import {
+  bannedAuthor,
   confirmedAutoHideTargets,
   datedHandling,
   groupResolutionVerdict,
@@ -1498,6 +1499,31 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return target ? resolution.ctx.handling.has(reportTargetKey(target)) : false;
   }, [resolution, selectedReport]);
 
+  // Whether the queue's author rule applies to the open report (#432): its
+  // post's author, as the queue reads it (the group's p tag), is on the
+  // relay's ban list as the relay matches it. The pane then does not offer
+  // Reopen, since the ban, not the post's own handling, keeps the report
+  // handled. Null while the queue has no ban list, when it cannot say: the
+  // list has not loaded or failed cold, which the queue shows past in the
+  // pending-review view (the list does not gate it) or once the moderator
+  // chose to see the queue anyway. Null too for an open report in no group
+  // (one kept open after it left the loaded reports): the queue has no author
+  // for it, which is not the same as its having none.
+  // False for a post with no agreed author, where the rule cannot apply. The
+  // pane reads it only on a post's report. Both rules read the same set
+  // (queueResolution).
+  const selectedAuthorBanned = useMemo<boolean | null>(() => {
+    if (!selectedReport) return false;
+    const target = getReportTarget(selectedReport);
+    if (!target) return false;
+    const key = reportTargetKey(target);
+    if (!authorByTarget.has(key)) return null;
+    const authorPubkey = authorByTarget.get(key);
+    if (!authorPubkey) return false;
+    if (!bannedPubkeys) return null;
+    return bannedAuthor({ target, authorPubkey }, bannedPubkeySet) !== undefined;
+  }, [selectedReport, authorByTarget, bannedPubkeys, bannedPubkeySet]);
+
   // Each listed report's own standing, by `resolution`, for the All tab: its
   // place (main list or section), its tag, and the resolved count read it.
   // Each report by its own time (#324): its arrival by id, else its created_at.
@@ -2263,6 +2289,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         switchState={selectedSwitchKey ? switchMembership.get(selectedSwitchKey) : undefined}
         handledBefore={selectedHandledBefore}
         queueHandled={selectedQueueHandled}
+        authorBanned={selectedAuthorBanned}
       />
     </ErrorBoundary>
   );

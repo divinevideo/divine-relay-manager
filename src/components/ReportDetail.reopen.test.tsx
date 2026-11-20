@@ -155,8 +155,16 @@ const REPORT: NostrEvent = {
   sig: 'b'.repeat(128),
 };
 
+// What the queue hands the pane about the post's author (#432): whether the
+// queue's author rule applies (its author, its exact match on the ban list),
+// or null while the queue's ban list has not been read. Read by every render,
+// so a test can change it and rerender. Known not banned unless a test says
+// otherwise, as the queue says for most posts.
+let authorBanned: boolean | null | undefined;
+
 beforeEach(() => {
   vi.clearAllMocks();
+  authorBanned = false;
   session.token = MOD_TOKEN;
   ctx.targetValue = TARGET_EVENT;
   ctx.targetType = 'event';
@@ -177,7 +185,7 @@ function renderDetail(onDismiss?: () => void) {
   const tree = () => (
     <QueryClientProvider client={qc}>
       <TooltipProvider>
-        <ReportDetail report={REPORT} onDismiss={onDismiss} />
+        <ReportDetail report={REPORT} onDismiss={onDismiss} authorBanned={authorBanned} />
       </TooltipProvider>
     </QueryClientProvider>
   );
@@ -456,6 +464,34 @@ describe('ReportDetail reopen reporting', () => {
     expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
   });
 
+  // The same when the reopen settles after the moderator moved on: onSuccess
+  // runs with the observer's latest options, so a retry built from `context`
+  // there would aim at the report now selected. It re-sends the request.
+  it('retries the target it was raised for when the reopen settles after the moderator moved on', async () => {
+    let release!: () => void;
+    api.deleteDecisions.mockReturnValueOnce(new Promise((resolve) => {
+      release = () => resolve({ deleted: 2, labelCleanupFailed: true });
+    }));
+    const { rerender } = renderDetail();
+    clickReopen();
+    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
+
+    ctx.targetValue = OTHER_EVENT;
+    ctx.reportedPubkey = OTHER_PUBKEY;
+    rerender();
+    await act(async () => { release(); });
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    api.deleteDecisions.mockClear();
+    api.deleteDecisions.mockResolvedValue({ deleted: 0, labelCleanupFailed: false });
+
+    const { container } = render(toast.mock.calls[0][0].action);
+    fireEvent.click(within(container).getByRole('button'));
+
+    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
+    expect(api.deleteDecisions).toHaveBeenCalledTimes(1);
+    expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
+  });
+
   // resolvedTargets is built from the worker-side projections of the labels and
   // decisions (#273), not from the raw reads, so a reopen that does not refresh
   // THOSE keys leaves the target hidden for a poll cycle even when the cleanup
@@ -551,23 +587,141 @@ describe('ReportDetail reopen keeps history', () => {
     expect(api.deleteDecisions.mock.calls.map(([id]) => id)).not.toContain(REPORTED_PUBKEY);
   });
 
-  // The post-only reopen above depends on this. Once the author's relay ban is
-  // known, the ban answers the post's reports filed before it, and the post's
-  // own reopen row cannot bring those back, so Reopen must not be offered.
-  it('does not offer Reopen on a post whose author is known to be banned', () => {
-    modStatus.isUserBanned = true;
+  // The post-only reopen above depends on this. Once the queue applies the
+  // author's relay ban, the ban answers the post's reports filed before it, and
+  // the post's own reopen row cannot bring those back, so Reopen must not be
+  // offered.
+  it("does not offer Reopen on a post whose author the queue knows is banned", () => {
+    authorBanned = true;
     renderDetail();
 
     expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
   });
 
-  // The accepted edge: while the author's ban status is loading or failed to
-  // load, Reopen is still offered (see reopenMutation).
-  it("still offers Reopen while the author's ban status is unknown", () => {
-    modStatus.isUserBanned = null;
+  // #432, whose post: the pane's own ban check reads the thread event's
+  // author, the queue reads the report's p tag. When the p tag names a banned
+  // account that is not the event's author, the queue keeps the report
+  // handled, so a Reopen would "succeed" and bring nothing back.
+  it("follows the queue's author, not the event's, when the queue applies a ban the pane's check does not see (#432)", () => {
+    modStatus.isUserBanned = false;
+    authorBanned = true;
+    renderDetail();
+
+    expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
+  });
+
+  // #432, ban-list case: the pane's check ignores case, the relay and the
+  // queue do not. An uppercase entry never banned the lowercase account, the
+  // queue does not apply it, and a Reopen brings the report back, so Reopen is
+  // offered though the pane's own check calls the author banned.
+  it("offers Reopen when the queue does not apply a ban that the pane's check matched (#432)", () => {
+    modStatus.isUserBanned = true;
+    authorBanned = false;
     renderDetail();
 
     expect(screen.getByRole('button', { name: /reopen/i })).toBeInTheDocument();
+  });
+
+  // The accepted edge: while the queue's ban list has not been read, Reopen is
+  // still offered (see reopenMutation).
+  it("still offers Reopen while the queue has not read the ban list", () => {
+    authorBanned = null;
+    renderDetail();
+
+    expect(screen.getByRole('button', { name: /reopen/i })).toBeInTheDocument();
+  });
+
+  // #432, message: Reopen in that window may run on a banned author's post,
+  // whose earlier reports the ban keeps handled. The toast must not promise
+  // they count as new again.
+  it("does not promise earlier reports count as new again while the author's ban is unknown (#432)", async () => {
+    authorBanned = null;
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    const arg = toast.mock.calls[0][0];
+    expect(arg.variant).not.toBe('destructive');
+    expect(arg.description).toMatch(/history is kept/i);
+    expect(arg.description).toMatch(/unless the post's author is banned/i);
+  });
+
+  it("does not make that promise in the tooltip either while the author's ban is unknown (#432)", async () => {
+    authorBanned = null;
+    renderDetail();
+    fireEvent.focus(screen.getByRole('button', { name: /reopen/i }));
+
+    const tip = await screen.findByRole('tooltip');
+    expect(tip.textContent).toMatch(/unless the post's author is banned/i);
+  });
+
+  // Once the queue knows the author is not banned, the promise holds as it is.
+  it('makes the plain promise once the queue knows the author is not banned', async () => {
+    authorBanned = false;
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].description).toBe(
+      'Its history is kept, and reports filed before now count as new again.');
+  });
+
+  // The author rule is for posts, so an account report's promise never hangs
+  // on it, whatever the queue says about its ban list.
+  it("makes the plain promise on an account report while the queue has no ban list", async () => {
+    ctx.targetType = 'pubkey';
+    ctx.targetValue = REPORTED_PUBKEY;
+    authorBanned = null;
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].description).toBe(
+      'Its history is kept, and reports filed before now count as new again.');
+  });
+
+  // Omitted, the pane assumes nothing about the author's ban.
+  it('qualifies the promise when the queue says nothing about the author', async () => {
+    authorBanned = undefined;
+    renderDetail();
+    clickReopen();
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].description).toMatch(/unless the post's author is banned/i);
+  });
+
+  // The toast reports what was known at the click: a moderator who moves to
+  // another report while the reopen is out must not get that report's copy.
+  it('words the toast by what was known at the click, not after moving to another report (#432)', async () => {
+    let release!: () => void;
+    api.deleteDecisions.mockReturnValue(new Promise((resolve) => {
+      release = () => resolve({ deleted: 1, labelCleanupFailed: false });
+    }));
+    authorBanned = null;
+    const { rerender } = renderDetail();
+    clickReopen();
+    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
+
+    ctx.targetValue = OTHER_EVENT;
+    ctx.reportedPubkey = OTHER_PUBKEY;
+    authorBanned = false;
+    rerender();
+    await act(async () => { release(); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(toast.mock.calls[0][0].description).toMatch(/unless the post's author is banned/i);
+  });
+
+  // The queue's author rule is for posts. An account report still follows the
+  // account's own ban, as before.
+  it("does not offer Reopen on an account report whose account is banned", () => {
+    ctx.targetType = 'pubkey';
+    ctx.targetValue = REPORTED_PUBKEY;
+    modStatus.isUserBanned = true;
+    authorBanned = false;
+    renderDetail();
+
+    expect(screen.queryByRole('button', { name: /reopen/i })).not.toBeInTheDocument();
   });
 
   it("reopens an account report's account, once", async () => {
