@@ -238,8 +238,9 @@ describe.each(SITES)('EventDetail events count in the $site', ({ scope }) => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     try {
       userStatsData.postCount = 0;
-      status.value.isUserSuspended = false;
-      status.value.isUserSuspendedStale = true;
+      // useModerationStatus corrects isUserSuspended; the raw list membership
+      // still lists the account, so the count must not read the raw value.
+      status.value = moderationStatusMock({ isUserSuspended: false, isUserSuspendedFromList: true, isUserSuspendedStale: true });
       await act(async () => { await markRestored(new QueryClient(), REPORTED_PUBKEY, undefined); });
 
       renderDetail();

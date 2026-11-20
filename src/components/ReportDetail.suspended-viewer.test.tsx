@@ -243,14 +243,23 @@ describe('ReportDetail suspended-content viewer placement', () => {
   // Meylis's question B on PR #426: the suspended list's re-read after this
   // tab's Unsuspend failed and kept its old copy. The just-restored line shows,
   // and the viewer does not.
+  // useModerationStatus corrects isUserSuspended; the raw list membership
+  // (isUserSuspendedFromList) still lists the account. Wiring the gone cause or
+  // the user card to the raw value would bring the suspension back.
   it('gives no viewer for a suspension only a stale list reports just after this tab unsuspended', () => {
     restoreWindow.open = true;
-    status.value.isUserSuspended = false;
-    status.value.isUserSuspendedStale = true;
+    status.value = moderationStatusMock({
+      isEventGone: true,
+      isUserSuspended: false,
+      isUserSuspendedFromList: true,
+      isUserSuspendedStale: true,
+      checkedAt: CHECKED_AT,
+    });
     renderDetail([SPAM_REPORT]);
 
     expect(threadContextProps.last?.goneCause).toMatchObject({ kind: 'unknown', suspensionNamed: false });
     expect(viewer()).toBeUndefined();
+    expect(userCardProps.last).toMatchObject({ isSuspended: false });
   });
 
   it('gives the post viewer for a suspension the list confirmed since this tab unsuspended', () => {
