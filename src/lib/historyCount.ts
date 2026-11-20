@@ -34,7 +34,8 @@ export function historyStat(
  * ("20+"), the convention reportsFiledLabel uses.
  * `suspendedStale` is useModerationStatus's isUserSuspendedStale: the
  * suspension comes from a copy of the list that could not be refreshed.
- * `suspended` is null while the suspended list has not confirmed either way.
+ * `suspended` is the status after accounting for this tab's Unsuspend.
+ * It is null while the suspension is unknown.
  * An empty read then proves nothing, so it says why (`suspensionChecking`: a
  * read of the suspended list is in flight, otherwise it could not be read).
  * `justRestored`: this tab unsuspended the account moments ago, and the relay's
@@ -65,7 +66,8 @@ export function authoredContentStat(opts: {
     stat += ' (before suspension)';
   }
   if (justRestored && count === 0) {
-    stat += ' (just restored; posts can take a few minutes to reappear)';
+    // Hedged: a post its author deleted reads the same until the window closes.
+    stat += ' (just restored; posts can take a few minutes to reappear, if still stored)';
   } else if (suspended === null && count === 0) {
     stat += suspensionChecking ? ' (checking suspension)' : " (couldn't check suspension)";
   }

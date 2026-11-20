@@ -5,6 +5,7 @@ import { useContext, useSyncExternalStore } from 'react';
 import { AppContext } from '@/contexts/AppContext';
 import type { Query, QueryClient } from '@tanstack/react-query';
 import { BanNotConfirmedError } from '@/lib/adminApi';
+import { latestSuspendedListRead } from '@/lib/suspensionAfterRestore';
 
 // The relay hides a suspended or banned account's content, so a count read
 // before the action describes the other state. Invalidating is not enough:
@@ -58,7 +59,7 @@ export const RESTORE_SETTLE_MS = 6 * 60_000;
 // restore must not read as "just restored" on staging. Callers capture the
 // environment when the action starts, so one that lands after a switch still
 // marks the environment it ran in.
-const restoreWindows = new Map<string, ReturnType<typeof setTimeout>>();
+const restoreWindows = new Map<string, { timer: ReturnType<typeof setTimeout>; suspendedListReadId: number }>();
 const windowKey = (pubkey: string, environment: string | undefined) => `${environment ?? ''}|${pubkey.toLowerCase()}`;
 const listeners = new Set<() => void>();
 const notify = () => listeners.forEach(listener => listener());
@@ -104,13 +105,16 @@ function markMissingPostReadsStale(queryClient: QueryClient): void {
  */
 export async function markRestored(queryClient: QueryClient, pubkey: string, environment: string | undefined): Promise<void> {
   const key = windowKey(pubkey, environment);
-  clearTimeout(restoreWindows.get(key));
-  restoreWindows.set(key, setTimeout(() => {
-    restoreWindows.delete(key);
-    notify();
-    void resetAccountContentReads(queryClient, pubkey);
-    markMissingPostReadsStale(queryClient);
-  }, RESTORE_SETTLE_MS));
+  clearTimeout(restoreWindows.get(key)?.timer);
+  restoreWindows.set(key, {
+    suspendedListReadId: latestSuspendedListRead(),
+    timer: setTimeout(() => {
+      restoreWindows.delete(key);
+      notify();
+      void resetAccountContentReads(queryClient, pubkey);
+      markMissingPostReadsStale(queryClient);
+    }, RESTORE_SETTLE_MS),
+  });
   notify();
   await resetAccountContentReads(queryClient, pubkey);
 }
@@ -118,8 +122,9 @@ export async function markRestored(queryClient: QueryClient, pubkey: string, env
 /** Ends the account's restore window in that environment, and its scheduled re-read. */
 export function endRestoreWindow(pubkey: string, environment: string | undefined): void {
   const key = windowKey(pubkey, environment);
-  if (!restoreWindows.has(key)) return;
-  clearTimeout(restoreWindows.get(key));
+  const window = restoreWindows.get(key);
+  if (!window) return;
+  clearTimeout(window.timer);
   restoreWindows.delete(key);
   notify();
 }
@@ -170,4 +175,12 @@ export async function runHidingAction<T>(
 export function useJustRestored(pubkey: string | null | undefined): boolean {
   const environment = useRestoreEnvironment();
   return useSyncExternalStore(subscribe, () => !!pubkey && restoreWindows.has(windowKey(pubkey, environment)));
+}
+
+/** Last suspended-list request already started when this account was restored. */
+export function useSuspendedListReadAtRestore(pubkey: string | null | undefined): number | undefined {
+  const environment = useRestoreEnvironment();
+  return useSyncExternalStore(subscribe, () => pubkey
+    ? restoreWindows.get(windowKey(pubkey, environment))?.suspendedListReadId
+    : undefined);
 }

@@ -5,12 +5,21 @@ import { useState, useEffect, useCallback, useRef } from "react";
 import { useQueryClient, type Query, type QueryClient } from "@tanstack/react-query";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents, useSuspendedPubkeys, listMembership } from "@/hooks/useRelayBanLists";
+import { suspensionAfterRestore } from "@/lib/suspensionAfterRestore";
+import { useSuspendedListReadAtRestore } from "@/lib/userStatsCache";
 
 export interface ModerationStatus {
   /** User's pubkey is in the relay's ban list */
   isUserBanned: boolean | null;
-  /** User's pubkey is in the relay's suspended list */
+  /** Suspension for display and account actions, accounting for this tab's Unsuspend. */
   isUserSuspended: boolean | null;
+  /**
+   * Raw list membership, ignoring this tab's Unsuspend. Bulk delete reads it.
+   * It does not cover the restore window: once a current read no longer lists
+   * the account it is false, though the relay can keep hiding the account's
+   * posts for a few more minutes (RESTORE_SETTLE_MS).
+   */
+  isUserSuspendedFromList: boolean | null;
   /**
    * `isUserBanned` is `true` only because a copy of the ban list that is not
    * current said so: the list's latest refresh failed, or it has not answered
@@ -21,7 +30,7 @@ export interface ModerationStatus {
    * -- right after a moderator's own successful Unban it can be exactly wrong.
    */
   isUserBannedStale: boolean;
-  /** As `isUserBannedStale`, for the suspended list. */
+  /** The suspended list carries a last-known positive, even if this tab's Unsuspend superseded it. */
   isUserSuspendedStale: boolean;
   /** Event ID is in the relay's ban list */
   isEventBanned: boolean | null;
@@ -212,6 +221,7 @@ export function useModerationStatus(
   const bannedPubkeys = useBannedPubkeys();
   const bannedEvents = useBannedEvents();
   const suspendedPubkeys = useSuspendedPubkeys();
+  const suspendedListReadAtRestore = useSuspendedListReadAtRestore(pubkey);
 
   // Derive ban/suspend list status. `listMembership` rather than `data` alone:
   // after a failed refresh `data` still holds the previous list, and absence
@@ -416,7 +426,8 @@ export function useModerationStatus(
           : wsResult.userBanned === null && isUserBannedFromList === true
             ? true
             : wsResult.userBanned,
-    isUserSuspended: isUserSuspendedFromList,
+    isUserSuspended: suspensionAfterRestore(isUserSuspendedFromList, suspendedPubkeys.readId, suspendedListReadAtRestore),
+    isUserSuspendedFromList,
     // Only stale when the list is what answered. A live check that returned
     // true is fresh by definition. A live false is fresh only while the list
     // is still current or still re-reading; after that re-read fails, a

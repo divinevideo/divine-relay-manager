@@ -1164,7 +1164,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 // tags, so only a 64-hex id is offered, the worker checks it
                 // again, and the post is checked against the reported account.
                 suspendedViewer={(goneCause.kind === 'suspended'
-                  || (goneCause.kind === 'unknown' && moderationStatus.isUserSuspended === true))
+                  || (goneCause.kind === 'unknown' && goneCause.suspensionNamed))
                   && targetEventId && isHex64(targetEventId) ? (
                   <SuspendedPostViewer
                     key={targetEventId}
@@ -1603,7 +1603,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         reportId={report?.id}
                         getModeratorToken={getModeratorToken}
                         isBanned={isUserBanned}
-                        isSuspended={moderationStatus.isUserSuspended}
+                        isSuspended={moderationStatus.isUserSuspendedFromList}
                         onComplete={handleActionComplete}
                       />
                     </div>

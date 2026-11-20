@@ -8,7 +8,7 @@ import { ThreadContext } from './ThreadContext';
 import type { GoneCause } from '@/lib/goneCause';
 
 const SUSPENDED: GoneCause = { kind: 'suspended', stale: false, line: 'The reported account is suspended.', badge: 'Account Suspended', tone: 'withheld' };
-const UNKNOWN: GoneCause = { kind: 'unknown', line: "The reported account is suspended, which hides its posts. Couldn't check whether the event is also banned.", badge: 'Account Suspended', tone: 'unknown' };
+const UNKNOWN: GoneCause = { kind: 'unknown', line: "The reported account is suspended, which hides its posts. Couldn't check whether the event is also banned.", badge: 'Account Suspended', tone: 'unknown', suspensionNamed: true };
 const NONE_FOUND: GoneCause = { kind: 'none-found', line: 'Not returned by the relay.', badge: 'Not Found on Relay', tone: 'unknown' };
 const DELETED: GoneCause = { kind: 'explained', by: 'delete', line: 'Event has been deleted from the relay', badge: 'Removed by Moderation', tone: 'removal' };
 

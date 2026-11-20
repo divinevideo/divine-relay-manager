@@ -24,9 +24,11 @@ export type GoneCause =
   /**
    * A status that would explain it has not answered, or this tab unsuspended
    * the account moments ago and the relay has not caught up. The post may
-   * still exist.
+   * still exist. `suspensionNamed`: the line and badge state a suspension the
+   * suspended list reports (confirmed or last known), so that suspension may
+   * be what hides the post.
    */
-  | { kind: 'unknown'; line: string; badge: string; tone: GoneTone }
+  | { kind: 'unknown'; line: string; badge: string; tone: GoneTone; suspensionNamed: boolean }
   /** Everything answered and nothing explains it. Not a deletion either. */
   | { kind: 'none-found'; line: string; badge: string; tone: GoneTone };
 
@@ -135,17 +137,17 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
         : eventBanned === true ? 'Event Banned (last known)'
         : 'Not Found on Relay',
       tone: 'unknown',
+      suspensionNamed: suspended === true,
     };
   }
 
   // Everything answered and nothing explains it, but this tab unsuspended the
   // account moments ago: the relay's read filter lags the suspended list, so
   // the post is likely still withheld. Ranked last: a recorded delete,
-  // auto-hide or confirmed ban still explains the post, a suspension the list
-  // still reports is still the headline, and a read that is out or failed is
-  // named for what it is (its line already says the post may still exist).
+  // auto-hide, confirmed ban, known suspension or pending or failed read
+  // still takes precedence.
   if (justRestored) {
-    return { kind: 'unknown', line: GONE_JUST_RESTORED_LINE, badge: 'Not Found on Relay', tone: 'unknown' };
+    return { kind: 'unknown', line: GONE_JUST_RESTORED_LINE, badge: 'Not Found on Relay', tone: 'unknown', suspensionNamed: false };
   }
 
   // Not a removal either: funnelcake withholds things none of these lists

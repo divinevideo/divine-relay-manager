@@ -65,9 +65,8 @@ interface UserProfileCardProps {
    */
   hideMediaByDefault?: boolean | null;
   /**
-   * The account is in the relay's suspended list (useModerationStatus's
-   * isUserSuspended), so the relay hides its content and an empty read is not
-   * an empty account. null or omitted when the list has not confirmed it.
+   * The account's suspension status from useModerationStatus, which accounts
+   * for this tab's Unsuspend. Null or omitted when the status is unknown.
    */
   isSuspended?: boolean | null;
   /** The suspension is from a copy of the list that could not be refreshed. */

@@ -14,6 +14,8 @@ export function moderationStatusMock(overrides: Partial<ModerationStatus> = {}):
   return {
     isUserBanned: false,
     isUserSuspended: false,
+    // Most tests use the same suspension for display and bulk delete.
+    get isUserSuspendedFromList() { return this.isUserSuspended; },
     isUserBannedStale: false,
     isUserSuspendedStale: false,
     isEventBanned: false,

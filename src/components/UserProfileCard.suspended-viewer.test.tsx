@@ -19,6 +19,13 @@ vi.mock('@/hooks/useDivineSession', () => ({
   }),
 }));
 vi.mock('@/hooks/useEventTitles', () => ({ useEventTitles: () => ({ titles: new Map(), isLoading: false }) }));
+// Whether this tab unsuspended the account moments ago (its restore window is
+// open). The store itself has its own tests.
+const restoreWindow = vi.hoisted(() => ({ open: false }));
+vi.mock('@/lib/userStatsCache', async (orig) => ({
+  ...(await orig<typeof import('@/lib/userStatsCache')>()),
+  useJustRestored: () => restoreWindow.open,
+}));
 vi.mock('@/components/MediaPreview', () => ({
   InlineMediaPreview: () => null,
   MediaPreview: (props: { showByDefault?: boolean | null }) => <div data-testid="viewer-media" data-show={String(props.showByDefault)} />,
@@ -26,6 +33,7 @@ vi.mock('@/components/MediaPreview', () => ({
 
 const fetchMock = vi.fn();
 beforeEach(() => {
+  restoreWindow.open = false;
   fetchMock.mockReset();
   fetchMock.mockImplementation(async () => Response.json({
     success: true, pubkey: PUBKEY, profile: null, nextUntil: null, nextUntilId: null,
@@ -62,6 +70,31 @@ describe('UserProfileCard suspended-content viewer', () => {
     renderCard({ isSuspended });
 
     expect(screen.queryByRole('button', { name: 'View hidden posts' })).not.toBeInTheDocument();
+  });
+
+  // The suspended list's re-read after this tab's Unsuspend failed and kept
+  // its copy from before it: inside the restore window that copy does not
+  // count, so the card does not offer a suspended account's viewer.
+  it('leaves it out for a suspension only a stale list reports just after this tab unsuspended', () => {
+    restoreWindow.open = true;
+    renderCard({ isSuspended: false, isSuspendedStale: true });
+
+    expect(screen.queryByRole('button', { name: 'View hidden posts' })).not.toBeInTheDocument();
+  });
+
+  // Another moderator suspended the account again since.
+  it('offers it for a suspension the list confirmed since this tab unsuspended', () => {
+    restoreWindow.open = true;
+    renderCard({ isSuspendedStale: false });
+
+    expect(screen.getByRole('button', { name: 'View hidden posts' })).toBeInTheDocument();
+  });
+
+  it('offers it when a suspension read after this tab unsuspended later becomes stale', () => {
+    restoreWindow.open = true;
+    renderCard({ isSuspendedStale: true });
+
+    expect(screen.getByRole('button', { name: 'View hidden posts' })).toBeInTheDocument();
   });
 
   // Report detail's pubkey comes from the report's own p tag.

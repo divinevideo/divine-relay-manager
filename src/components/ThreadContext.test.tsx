@@ -169,7 +169,7 @@ describe('ThreadContext missing post with a cause from ReportDetail', () => {
   });
 
   it('states an unknown cause, not a deletion', () => {
-    renderThread({ ...base, goneCause: { kind: 'unknown', line: 'cause not checked', badge: 'b', tone: 'unknown' } });
+    renderThread({ ...base, goneCause: { kind: 'unknown', line: 'cause not checked', badge: 'b', tone: 'unknown', suspensionNamed: false } });
 
     expect(screen.getByText('cause not checked')).toBeInTheDocument();
     expect(screen.queryByText(DELETED)).not.toBeInTheDocument();
@@ -180,7 +180,7 @@ describe('ThreadContext missing post with a cause from ReportDetail', () => {
   it('does not say deleted beside a last-known ban when the cause is unknown', () => {
     renderThread({
       ...base, isUserBanned: true, isUserBannedStale: true,
-      goneCause: { kind: 'unknown', line: 'cause not checked', badge: 'b', tone: 'unknown' },
+      goneCause: { kind: 'unknown', line: 'cause not checked', badge: 'b', tone: 'unknown', suspensionNamed: false },
     });
 
     expect(screen.getByText(/Last known: banned/)).toBeInTheDocument();
