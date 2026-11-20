@@ -339,6 +339,15 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
       void invalidateAccountStatus(queryClient, ctx.casePubkey);
+      // The relay's suspended list gates the suspended-content viewer, and
+      // restrict suspends the account and clear lifts that (#437). The list
+      // does not poll, so left alone the viewer stays offered after a clear, or
+      // missing after a restrict, until something else re-reads it.
+      // Invalidating starts a fresh read that supersedes one already in flight,
+      // which started before the decision. Funnelcake deletes an unsuspended
+      // account from the table this list reads; the five-minute lag is in its
+      // content reads (markRestored), not here.
+      void queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
       const subject = ctx.casePubkey.toLowerCase();
       // Restrict suspends the account, clear unsuspends it and deny bans it,
       // so the shared authored-content reads describe the other state

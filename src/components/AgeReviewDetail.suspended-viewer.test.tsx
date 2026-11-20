@@ -1,13 +1,14 @@
 // ABOUTME: Pins that age review gates the suspended-content viewer on the relay's suspended list
 // ABOUTME: (the source report detail uses and the worker serves from), not on keycast's status.
 
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { ReactNode } from 'react';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
 import type { AgeReviewCase } from '../../shared/age-review';
+import { withAsModerator } from '@/test/adminApiMock';
 
 const userStats = vi.fn();
 const accountStatus = vi.fn();
@@ -24,19 +25,25 @@ vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/components/UserActions', () => ({
   UserActions: ({ pubkey }: { pubkey: string }) => <div data-testid="user-actions">{pubkey}</div>,
 }));
-vi.mock('@/hooks/useAdminApi', () => ({
-  useApiUrl: () => 'https://api.test',
-  useAdminApi: () => ({
-    updateAgeReviewCase: vi.fn().mockResolvedValue({ success: true }),
-    getAgeReviewConfig: vi.fn().mockResolvedValue({ auto_delete_on_deny: false }),
-    // No bulk notes kept for any case (#299).
-    getAgeReviewBulkNotesJob: vi.fn().mockResolvedValue({ jobId: null }),
-    getAccountStatus: vi.fn().mockResolvedValue({ success: true, status: 'active' }),
-    listSuspendedPubkeys: () => suspendedList(),
-  }),
-}));
+// The case's own actions (restrict, clear) go through asModerator (#178).
+const updateAgeReviewCase = vi.fn();
 // The relay's suspended list, which useSuspendedPubkeys reads.
 const suspendedList = vi.fn();
+const api = withAsModerator({
+  updateAgeReviewCase: (...args: unknown[]) => updateAgeReviewCase(...args),
+  getAgeReviewConfig: vi.fn().mockResolvedValue({ auto_delete_on_deny: false }),
+  // No bulk notes kept for any case (#299).
+  getAgeReviewBulkNotesJob: vi.fn().mockResolvedValue({ jobId: null }),
+  getAccountStatus: vi.fn().mockResolvedValue({ success: true, status: 'active' }),
+  listSuspendedPubkeys: () => suspendedList(),
+});
+vi.mock('@/hooks/useAdminApi', () => ({
+  useApiUrl: () => 'https://api.test',
+  useAdminApi: () => api,
+}));
+vi.mock('@/hooks/useCurrentUser', () => ({
+  useCurrentUser: () => ({ user: undefined, users: [], getModeratorToken: () => 'moderator-login-token' }),
+}));
 // The panels have their own tests; here they only mark where they mount.
 vi.mock('@/components/suspended/SuspendedContentPanel', () => ({
   SuspendedPostViewer: () => <div data-testid="post-viewer" />,
@@ -98,6 +105,7 @@ beforeEach(() => {
   accountStatus.mockReturnValue({ data: { success: true, status: 'active' }, isError: false, isLoading: false, refetch: vi.fn() });
   reportedEvent.mockReturnValue({ data: undefined, isFetching: false, isError: false, refetch: vi.fn() });
   suspendedList.mockResolvedValue([]);
+  updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
 });
 
 const show = () => render(<AgeReviewDetail caseData={makeCase()} />, { wrapper });
@@ -141,5 +149,42 @@ describe('AgeReviewDetail gates the suspended-content viewer on the relay list',
     await waitFor(() => expect(suspendedList).toHaveBeenCalledTimes(2), { timeout: 3000 });
     await new Promise(r => setTimeout(r, 0));
     expect(screen.queryByTestId('account-viewer')).not.toBeInTheDocument();
+  });
+});
+
+// A case decision changes the relay's suspended list: restrict suspends the
+// account and clear lifts the suspension (#437). The viewer reads that list,
+// so it must follow the decision rather than a copy read before it.
+describe('AgeReviewDetail re-reads the relay list after a case decision', () => {
+  it('withdraws the viewer after a clear lifted the suspension', async () => {
+    keycastSays('suspended');
+    suspendedList.mockResolvedValue([{ pubkey: PUBKEY }]);
+    render(<AgeReviewDetail caseData={makeCase({ state: 'restricted_pending_user_response' })} />, { wrapper });
+    expect(await screen.findByTestId('account-viewer')).toBeInTheDocument();
+
+    // The worker's clear unsuspends the account on the relay.
+    suspendedList.mockResolvedValue([]);
+    fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
+
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
+      'case-1', expect.objectContaining({ state: 'cleared' }),
+    ));
+    await waitFor(() => expect(screen.queryByTestId('account-viewer')).not.toBeInTheDocument());
+  });
+
+  it('offers the viewer after a restrict suspended the account', async () => {
+    suspendedList.mockResolvedValue([]);
+    show();
+    await waitFor(() => expect(suspendedList).toHaveBeenCalled());
+    expect(screen.queryByTestId('account-viewer')).not.toBeInTheDocument();
+
+    // The worker's restrict suspends the account on the relay.
+    suspendedList.mockResolvedValue([{ pubkey: PUBKEY }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
+      'case-1', expect.objectContaining({ state: 'restricted_pending_user_response' }),
+    ));
+    expect(await screen.findByTestId('account-viewer')).toHaveTextContent(PUBKEY);
   });
 });
