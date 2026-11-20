@@ -1,7 +1,7 @@
 // ABOUTME: Pins that age review gates the suspended-content viewer on the relay's suspended list
 // ABOUTME: (the source report detail uses and the worker serves from), not on keycast's status.
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 import type { ReactNode } from 'react';
@@ -105,12 +105,18 @@ beforeEach(() => {
   accountStatus.mockReturnValue({ data: { success: true, status: 'active' }, isError: false, isLoading: false, refetch: vi.fn() });
   reportedEvent.mockReturnValue({ data: undefined, isFetching: false, isError: false, refetch: vi.fn() });
   suspendedList.mockResolvedValue([]);
-  updateAgeReviewCase.mockResolvedValue({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
 });
 
 const show = () => render(<AgeReviewDetail caseData={makeCase()} />, { wrapper });
 const keycastSays = (status: string) =>
   accountStatus.mockReturnValue({ data: { success: true, status }, isError: false, isLoading: false, refetch: vi.fn() });
+
+function updateRelayListOnDecision(entries: { pubkey: string }[]) {
+  updateAgeReviewCase.mockImplementationOnce(async () => {
+    suspendedList.mockResolvedValue(entries);
+    return { success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } };
+  });
+}
 
 describe('AgeReviewDetail gates the suspended-content viewer on the relay list', () => {
   it('offers the viewer when the relay lists the subject, matched however either side spells it', async () => {
@@ -163,7 +169,7 @@ describe('AgeReviewDetail re-reads the relay list after a case decision', () => 
     expect(await screen.findByTestId('account-viewer')).toBeInTheDocument();
 
     // The worker's clear unsuspends the account on the relay.
-    suspendedList.mockResolvedValue([]);
+    updateRelayListOnDecision([]);
     fireEvent.click(await screen.findByRole('button', { name: 'Clear without approval' }));
 
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
@@ -179,12 +185,28 @@ describe('AgeReviewDetail re-reads the relay list after a case decision', () => 
     expect(screen.queryByTestId('account-viewer')).not.toBeInTheDocument();
 
     // The worker's restrict suspends the account on the relay.
-    suspendedList.mockResolvedValue([{ pubkey: PUBKEY }]);
+    updateRelayListOnDecision([{ pubkey: PUBKEY }]);
     fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
 
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalledWith(
       'case-1', expect.objectContaining({ state: 'restricted_pending_user_response' }),
     ));
     expect(await screen.findByTestId('account-viewer')).toHaveTextContent(PUBKEY);
+  });
+
+  it('replaces the first suspended-list read when a restrict settles before it', async () => {
+    let resolveFirstRead!: (entries: { pubkey: string }[]) => void;
+    const firstRead = new Promise<{ pubkey: string }[]>(resolve => { resolveFirstRead = resolve; });
+    suspendedList.mockReturnValueOnce(firstRead);
+    show();
+    await waitFor(() => expect(suspendedList).toHaveBeenCalledTimes(1));
+
+    updateRelayListOnDecision([{ pubkey: PUBKEY }]);
+    fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+
+    expect(await screen.findByTestId('account-viewer')).toHaveTextContent(PUBKEY);
+    await act(async () => { resolveFirstRead([]); });
+    expect(screen.getByTestId('account-viewer')).toHaveTextContent(PUBKEY);
+    expect(suspendedList).toHaveBeenCalledTimes(2);
   });
 });
