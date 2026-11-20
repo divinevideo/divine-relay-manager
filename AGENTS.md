@@ -334,6 +334,7 @@ Schema is created on-demand via `ensureDecisionsTable()` and `ensureZendeskTable
 | `private_report_intake` | One row per private DM report moderation-service handed over; the idempotency record for `POST /api/internal/private-reports` |
 | `suspended_content_views` | Append-only audit of moderator views of suspended content (verified moderator, target account, event or account page, surface). Triggers refuse UPDATE, DELETE and an insert over an existing id. Created on demand by `ensureSuspendedContentViewsTable()` in `worker/src/suspended-content.ts`; never written to `moderation_decisions` |
 | `report_arrivals` | One row per report ReportWatcher first saw live: the report id and its first-seen time. The handled-before rule compares a report by it, falling back to the report's `created_at` when there is no row |
+| `timed_suspensions` | One row per suspended account: optional end time and the auto-lift state machine (`active`, `lifting`, `keycast_pending`, terminal states), versioned for compare-and-swap. Store in `worker/src/timed-suspensions.ts`; end-time compares use `datetime(ends_at)` |
 
 ## Local Development
 
