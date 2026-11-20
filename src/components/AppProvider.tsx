@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useMemo } from 'react';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { AppContext, type AppConfig, type AppContextType, type Theme } from '@/contexts/AppContext';
 import { parseStoredConfig } from '@/lib/appConfig';
+import { getEnvironmentById } from '@/lib/environments';
 
 interface AppProviderProps {
   children: ReactNode;
@@ -49,6 +50,10 @@ export function AppProvider(props: AppProviderProps) {
     const resetRelay = isStaleRelayUrl(config.relayUrl)
       && Boolean(defaultConfig.relayUrl) && !isStaleRelayUrl(defaultConfig.relayUrl);
     if (!resetApi && !resetRelay) return;
+
+    // The dev server's Local preset is configured separately from the defaults.
+    const local = import.meta.env.DEV ? getEnvironmentById('local') : undefined;
+    if (local?.apiUrl === config.apiUrl && local?.relayUrl === config.relayUrl) return;
 
     setConfig((prev) => ({
       ...prev,

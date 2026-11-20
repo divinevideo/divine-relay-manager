@@ -1,12 +1,13 @@
 // ABOUTME: Tests AppProvider's reset of stale local relay/API addresses in the stored config.
 // ABOUTME: Covers the update loop when the defaults are themselves local (#433) and the deployed-build reset it must keep.
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { fireEvent, render, screen } from '@testing-library/react';
 
 import { AppProvider } from '@/components/AppProvider';
 import { useAppContext } from '@/hooks/useAppContext';
 import type { AppConfig } from '@/contexts/AppContext';
+import * as environments from '@/lib/environments';
 
 // A deployed build: the defaults point at real, remote infrastructure.
 const deployedDefaults: AppConfig = {
@@ -28,6 +29,7 @@ const localEnvironment = {
   relayUrl: 'wss://localhost:4443',
   apiUrl: 'https://localhost:8788',
 };
+const localPreset = { id: 'local', name: 'Local', ...localEnvironment };
 
 const STORAGE_KEY = 'nostr:app-config-v2';
 
@@ -42,11 +44,14 @@ function ShowConfig() {
   if (renders > RENDER_LIMIT) {
     throw new Error(`AppProvider re-rendered more than ${RENDER_LIMIT} times: config update loop`);
   }
-  const { config } = useAppContext();
+  const { config, updateConfig } = useAppContext();
   return (
     <div>
       <span data-testid="relay">{config.relayUrl}</span>
       <span data-testid="api">{config.apiUrl}</span>
+      <button onClick={() => updateConfig((current) => ({ ...current, ...localEnvironment }))}>
+        Select Local
+      </button>
     </div>
   );
 }
@@ -75,11 +80,30 @@ function renderProvider(defaultConfig: AppConfig) {
 describe('AppProvider stale local address reset', () => {
   beforeEach(() => {
     renders = 0;
+    vi.stubEnv('DEV', false);
     // The storage mock is the shared one from src/test/setup.ts. Clearing call
     // history is enough: every test installs its own getItem implementation via
     // storeConfig, and setItem's implementation is a no-op worth keeping.
     vi.mocked(localStorage.getItem).mockClear();
     vi.mocked(localStorage.setItem).mockClear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('keeps the selected Local preset in Vite dev even with remote defaults', () => {
+    vi.stubEnv('DEV', true);
+    vi.spyOn(environments, 'getEnvironmentById').mockReturnValue(localPreset);
+    storeConfig(null);
+
+    renderProvider(deployedDefaults);
+    fireEvent.click(screen.getByRole('button', { name: 'Select Local' }));
+
+    expect(screen.getByTestId('relay')).toHaveTextContent(localEnvironment.relayUrl);
+    expect(screen.getByTestId('api')).toHaveTextContent(localEnvironment.apiUrl);
+    expect(storedWrites()).toEqual([{ theme: 'light', ...localEnvironment }]);
   });
 
   describe('in a local build, where the defaults are themselves local', () => {
@@ -122,6 +146,15 @@ describe('AppProvider stale local address reset', () => {
       expect(storedWrites()).toEqual([
         { theme: 'dark', relayUrl: 'wss://relay.example.com', apiUrl: 'https://api.example.com' },
       ]);
+    });
+
+    it('resets saved Local addresses even if the build includes the Local preset', () => {
+      vi.spyOn(environments, 'getEnvironmentById').mockReturnValue(localPreset);
+      storeConfig({ theme: 'light', ...localEnvironment });
+
+      renderProvider(deployedDefaults);
+
+      expect(storedWrites()).toEqual([deployedDefaults]);
     });
 
     it('resets a plain-http API address that is not localhost', () => {
