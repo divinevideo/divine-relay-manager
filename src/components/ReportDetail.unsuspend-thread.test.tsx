@@ -1,7 +1,7 @@
 // ABOUTME: Report detail after this tab changes the reported account's status: the post panel
 // ABOUTME: reads the post again with the live check, so the header and body agree.
 
-import { cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -23,7 +23,13 @@ const EVENT_ID = 'c'.repeat(64);
 
 // What the relay returns for the post right now. The thread read below asks it
 // only when its query runs, so a cached answer outlives a change here.
-const relay = vi.hoisted(() => ({ post: undefined as NostrEvent | undefined }));
+// `firstRead`, when set, holds the next read open until it settles, and that
+// read answers with what it settles to.
+const relay = vi.hoisted(() => ({
+  post: undefined as NostrEvent | undefined,
+  firstRead: undefined as Promise<NostrEvent | undefined> | undefined,
+  reads: 0,
+}));
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
@@ -66,7 +72,13 @@ vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined,
 vi.mock('@/hooks/useThread', () => ({
   useThread: (eventId: string | undefined, depth: number, apiUrl?: string, relayHint?: string) => useQuery({
     queryKey: ['thread', eventId, depth, apiUrl, relayHint],
-    queryFn: async () => ({ event: relay.post ?? null, ancestors: [], replies: [], repostedEvent: null, isRepost: false, fetchSource: null }),
+    queryFn: async () => {
+      relay.reads += 1;
+      const held = relay.firstRead;
+      relay.firstRead = undefined;
+      const post = held ? await held : relay.post;
+      return { event: post ?? null, ancestors: [], replies: [], repostedEvent: null, isRepost: false, fetchSource: null };
+    },
     enabled: !!eventId,
     staleTime: 60_000,
   }),
@@ -115,6 +127,8 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
   beforeEach(() => {
     vi.clearAllMocks();
     relay.post = undefined;
+    relay.firstRead = undefined;
+    relay.reads = 0;
     api.verifyPubkeyBanned.mockResolvedValue(false);
     api.verifyEventDeleted.mockResolvedValue(true);
     api.listBannedPubkeys.mockResolvedValue([]);
@@ -154,6 +168,34 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     // The body agrees: it read the post again, and says why it is missing.
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+  });
+
+  // The action can finish while the report's first read is still out. That
+  // read started before the action, so its answer must not land as the re-read.
+  it('replaces a first read still out when the action finishes', async () => {
+    let answerFirstRead!: (post: NostrEvent | undefined) => void;
+    relay.firstRead = new Promise(resolve => { answerFirstRead = resolve; });
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <ReportDetail report={REPORT} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Unsuspend' }));
+    // The pane has run its after-action handling (the live check starts there).
+    await waitFor(() => expect(api.verifyEventDeleted).toHaveBeenCalled());
+    // The read from before the action answers late, with the post the relay
+    // returned then.
+    answerFirstRead(POST);
+
+    expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
+    // The re-read was a read of its own, not the held one answering for it.
+    expect(relay.reads).toBe(2);
   });
 
   // The re-read finds no post, so the account comes from the report itself

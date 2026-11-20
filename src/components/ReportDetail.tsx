@@ -207,14 +207,25 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     eventNotFound,
   );
 
+  // Read the post again. Prefix match: every depth and relay hint of its
+  // thread read. Cancel first: with no data yet (the report's first read still
+  // out when an account action finishes, or when the restore window closes),
+  // invalidating would join that read, which started before, and its answer
+  // would land as fresh.
+  const rereadPost = () => {
+    if (!targetEventId) return;
+    const queryKey = ['thread', targetEventId];
+    void queryClient.cancelQueries({ queryKey }).then(() => queryClient.invalidateQueries({ queryKey }));
+  };
+
   // Re-check on the post: the live check, and a fresh read of the post itself.
   // The thread read holds a missing post for its staleTime, so without this a
   // post the live check finds again (an unsuspended account's, once the
   // relay's read filter catches up) reads "Event is still on the relay." with
-  // nothing under it. Prefix match: every depth and relay hint of its thread read.
+  // nothing under it.
   const recheckPost = () => {
     moderationStatus.recheck();
-    if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
+    rereadPost();
   };
 
   // Get decision history for this target
@@ -681,7 +692,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // before a suspension, say), and the live check above can now call the
       // post gone. Read the post again with it, as recheckPost does, or the
       // header says "Not Found on Relay" while the panel shows the old read.
-      if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
+      rereadPost();
       // The acted-on account's Keycast label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
