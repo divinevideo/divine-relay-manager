@@ -157,13 +157,15 @@ describe('AppProvider stale local address reset', () => {
       expect(storedWrites()).toEqual([deployedDefaults]);
     });
 
-    it('resets a plain-http API address that is not localhost', () => {
-      storeConfig({ theme: 'light', relayUrl: 'wss://relay.staging.example.com', apiUrl: 'http://127.0.0.1:8787' });
+    it('resets a plain-HTTP API on a remote hostname and keeps the chosen relay', () => {
+      const relayUrl = 'wss://custom-relay.example.com';
+      storeConfig({ theme: 'light', relayUrl, apiUrl: 'http://api.example.com' });
 
       renderProvider(deployedDefaults);
 
       expect(screen.getByTestId('api')).toHaveTextContent('https://api.example.com');
-      expect(screen.getByTestId('relay')).toHaveTextContent('wss://relay.staging.example.com');
+      expect(screen.getByTestId('relay')).toHaveTextContent(relayUrl);
+      expect(storedWrites()).toEqual([{ ...deployedDefaults, relayUrl }]);
     });
 
     it('does not wipe a stored address when the default is empty', () => {
