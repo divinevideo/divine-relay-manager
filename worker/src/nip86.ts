@@ -318,24 +318,39 @@ export async function banPubkey(
 }
 
 /**
+ * Whether the relay's ban list includes the pubkey, or 'unknown' when the list
+ * cannot be read (the call failed or threw, or the result is not a list).
+ * Always a fresh read. Matches exactly: the list holds canonical hex.
+ */
+export async function readPubkeyBan(pubkey: string, env: Nip86Env): Promise<boolean | 'unknown'> {
+  let list: Nip86RpcResult;
+  try {
+    list = await callNip86Rpc('listbannedpubkeys', [], env, BAN_CONFIRM_TIMEOUT_MS);
+  } catch (error) {
+    console.error('[readPubkeyBan] Ban-list read failed:', error);
+    return 'unknown';
+  }
+  // An RPC error carries no result, so this also covers a failed read.
+  if (!Array.isArray(list.result)) return 'unknown';
+  // NIP-86 returns { pubkey, reason? } objects; accept bare strings as well.
+  // An entry with no readable pubkey could be this one, so it answers 'unknown'
+  // (fail closed, like findSuspendedEntry) rather than being skipped.
+  let found = false;
+  for (const entry of list.result) {
+    const listed = typeof entry === 'string' ? entry : (entry as { pubkey?: unknown } | null)?.pubkey;
+    if (typeof listed !== 'string') return 'unknown';
+    if (listed === pubkey) found = true;
+  }
+  return found;
+}
+
+/**
  * Whether the relay's ban list includes the pubkey. Any failure to read it
  * answers false: callers use this only to upgrade a failure to a success, so
  * an unreadable list must leave the failure standing.
  */
 async function isPubkeyOnBanList(pubkey: string, env: Nip86Env): Promise<boolean> {
-  let list: Nip86RpcResult;
-  try {
-    list = await callNip86Rpc('listbannedpubkeys', [], env, BAN_CONFIRM_TIMEOUT_MS);
-  } catch (error) {
-    console.error('[banPubkey] Ban-list read failed:', error);
-    return false;
-  }
-  // An RPC error carries no result, so this also covers a failed read.
-  if (!Array.isArray(list.result)) return false;
-  // NIP-86 returns { pubkey, reason? } objects; accept bare strings as well.
-  return list.result.some(entry =>
-    (typeof entry === 'string' ? entry : (entry as { pubkey?: unknown } | null)?.pubkey) === pubkey,
-  );
+  return (await readPubkeyBan(pubkey, env)) === true;
 }
 
 /**

@@ -1,7 +1,7 @@
 // ABOUTME: Unit tests for the suspended-content relay reads, with the relay's management endpoint stubbed.
 // ABOUTME: Pins the request each read sends, the mapping of funnelcake's errors to codes, and the shape checks.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { readAuthorSuspension, readSuspendedAccountPage, readSuspendedEvent } from './suspended-content';
+import { __clearSuspendedListCache, readAuthorSuspension, readSuspensionEntry, readSuspendedAccountPage, readSuspendedEvent } from './suspended-content';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 const MANAGEMENT_URL = 'https://relay.example.test/management';
@@ -177,5 +177,47 @@ describe('readAuthorSuspension', () => {
   ])("'unknown' on %s", async (_name, body) => {
     answer(body);
     expect(await readAuthorSuspension(AUTHOR, env)).toBe('unknown');
+  });
+});
+
+describe('readSuspensionEntry', () => {
+  it('carries the reason', async () => {
+    answer({ result: [{ pubkey: OTHER }, { pubkey: AUTHOR, reason: 'age_review' }] });
+    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: true, reason: 'age_review' });
+    expect(sentBody()).toEqual({ method: 'listsuspendedpubkeys', params: [] });
+  });
+  it('reason null when the entry has none', async () => {
+    answer({ result: [{ pubkey: AUTHOR }] });
+    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: true, reason: null });
+  });
+  it('not suspended when absent', async () => {
+    answer({ result: [{ pubkey: OTHER }] });
+    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: false });
+  });
+  it('matches an uppercase listed value', async () => {
+    answer({ result: [{ pubkey: AUTHOR.toUpperCase(), reason: 'r' }] });
+    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: true, reason: 'r' });
+  });
+  it.each([
+    ['a failed read', { error: 'boom' }],
+    ['a result that is not a list', { result: {} }],
+    ['an entry without a pubkey before the match', { result: [{}, { pubkey: AUTHOR }] }],
+  ])("'unknown' on %s", async (_name, body) => {
+    answer(body);
+    expect(await readSuspensionEntry(AUTHOR, env)).toBe('unknown');
+  });
+  it("'unknown' when the response body cannot be read (callNip86Rpc throws)", async () => {
+    relay.mockImplementation(async () => ({ ok: true, json: async () => { throw new Error('bad body'); } }));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await readSuspensionEntry(AUTHOR, env)).toBe('unknown');
+  });
+  it('never reads the per-isolate cache', async () => {
+    __clearSuspendedListCache();
+    answer({ result: [{ pubkey: OTHER }] });
+    await readAuthorSuspension(AUTHOR, env, { maxAgeMs: 30_000 });
+    expect(relay).toHaveBeenCalledTimes(1);
+    await readSuspensionEntry(AUTHOR, env);
+    await readSuspensionEntry(AUTHOR, env);
+    expect(relay).toHaveBeenCalledTimes(3);
   });
 });

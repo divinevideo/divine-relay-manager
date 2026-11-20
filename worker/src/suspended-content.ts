@@ -170,18 +170,52 @@ export async function readAuthorSuspension(
     return 'unknown';
   }
 
-  // funnelcake sends SuspendedPubkey objects whose `pubkey` is always a string
-  // (fixed_to_string over a FixedString(64)). An entry without one is unreadable
-  // and could be this author, so it answers 'unknown' rather than being skipped.
-  // A string that is not hex (a legacy row) is still a readable value: it can
-  // never equal an event pubkey, so it is compared, not refused, and cannot
-  // block every view.
+  const found = findSuspendedEntry(list, author);
+  return found === 'unknown' ? 'unknown' : found !== null;
+}
+
+export type SuspensionEntry = { suspended: false } | { suspended: true; reason: string | null };
+
+/**
+ * The relay's suspension entry for a pubkey, with its reason, or 'unknown'
+ * when the list cannot be read or has an unreadable entry before any match.
+ * Always a fresh read, never the per-isolate cache: callers act on the answer
+ * (lifting a suspension), so a stale "suspended" or "not suspended" is unsafe.
+ * Case-insensitive, like readAuthorSuspension.
+ */
+export async function readSuspensionEntry(
+  pubkey: string,
+  env: Nip86Env,
+): Promise<SuspensionEntry | 'unknown'> {
+  let list: unknown[];
+  try {
+    const read = await callNip86Rpc('listsuspendedpubkeys', [], env, SUSPENDED_LIST_TIMEOUT_MS);
+    if (!Array.isArray(read.result)) return 'unknown';
+    list = read.result;
+  } catch (err) {
+    console.error('[suspended-content] suspension list read threw:', err instanceof Error ? err.name : typeof err);
+    return 'unknown';
+  }
+  const found = findSuspendedEntry(list, pubkey.toLowerCase());
+  if (found === 'unknown') return 'unknown';
+  if (found === null) return { suspended: false };
+  const reason = (found as { reason?: unknown }).reason;
+  return { suspended: true, reason: typeof reason === 'string' ? reason : null };
+}
+
+// funnelcake sends SuspendedPubkey objects whose `pubkey` is always a string
+// (fixed_to_string over a FixedString(64)). An entry without one is unreadable
+// and could be this author, so it answers 'unknown' rather than being skipped.
+// A string that is not hex (a legacy row) is still a readable value: it can
+// never equal an event pubkey, so it is compared, not refused, and cannot
+// block every view. `author` must already be lowercased.
+function findSuspendedEntry(list: unknown[], author: string): object | null | 'unknown' {
   for (const entry of list) {
     const listed = (entry as { pubkey?: unknown } | null)?.pubkey;
     if (typeof listed !== 'string') return 'unknown';
-    if (listed.toLowerCase() === author) return true;
+    if (listed.toLowerCase() === author) return entry as object;
   }
-  return false;
+  return null;
 }
 
 /**
