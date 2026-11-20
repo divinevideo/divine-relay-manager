@@ -593,15 +593,16 @@ describe('protected-minor registry on real D1', () => {
       const r2Keycast = deferred<Response>();
       const fetchMock = vi.fn().mockReturnValueOnce(r1Keycast.promise).mockReturnValueOnce(r2Keycast.promise);
       vi.stubGlobal('fetch', fetchMock);
-      let r2: Promise<Response> | undefined;
+      // Set after the hook is built; the hook awaits it once it runs.
+      const late: { r2?: Promise<Response> } = {};
       const r2LandsBeforeR1Writes = dbWithWriterBefore(async () => {
         r2Keycast.resolve(reply(200, 'https://claim.test/a', '2026-09-01T00:00:00.000Z'));
-        const r2Res = await r2!;
+        const r2Res = await late.r2!;
         expect(r2Res.status).toBe(409);
       });
       const r1 = handleCreateMinorAccount(submit(OP_A, 101), env(r2LandsBeforeR1Writes), {});
       await until(() => fetchMock.mock.calls.length === 1);
-      r2 = handleCreateMinorAccount(submit(OP_A, 101), env(), {});
+      late.r2 = handleCreateMinorAccount(submit(OP_A, 101), env(), {});
       await until(() => fetchMock.mock.calls.length === 2);
 
       r1Keycast.resolve(reply(201, 'https://claim.test/a', '2026-09-01T00:00:00.000Z'));
@@ -622,15 +623,16 @@ describe('protected-minor registry on real D1', () => {
       const r2Keycast = deferred<Response>();
       const fetchMock = vi.fn().mockReturnValueOnce(r1Keycast.promise).mockReturnValueOnce(r2Keycast.promise);
       vi.stubGlobal('fetch', fetchMock);
-      let r1: Promise<Response> | undefined;
+      // Set after the hook is built; the hook awaits it once it runs.
+      const late: { r1?: Promise<Response> } = {};
       let r1Body: Record<string, unknown> | undefined;
       const r1ClosesBeforeR2Records = dbWithWriterBeforeRun("SET result_pubkey = ?, state = 'pending'", async () => {
         r1Keycast.resolve(reply(200, 'https://claim.test/a', '2026-09-01T00:00:00.000Z'));
-        const r1Res = await r1!;
+        const r1Res = await late.r1!;
         expect(r1Res.status).toBe(409);
         r1Body = await r1Res.json() as Record<string, unknown>;
       });
-      r1 = handleCreateMinorAccount(submit(OP_A, 101), env(), {});
+      late.r1 = handleCreateMinorAccount(submit(OP_A, 101), env(), {});
       await until(() => fetchMock.mock.calls.length === 1);
       const r2 = handleCreateMinorAccount(submit(OP_A, 101), env(r1ClosesBeforeR2Records), {});
       await until(() => fetchMock.mock.calls.length === 2);
