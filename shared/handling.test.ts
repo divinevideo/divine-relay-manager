@@ -49,6 +49,12 @@ describe('handlingByTarget', () => {
     expect(map.get(KEY)?.history.map(h => h.action)).toEqual(['ban_event']);
   });
 
+  it("omits a pubkey target only the suspension timer touched, but not a person's unsuspend", () => {
+    const pk = (action: string) => row(action, 300, { target_type: 'pubkey', target_id: TARGET, moderator_pubkey: null });
+    expect(handlingByTarget([pk('auto_unsuspend_user')], []).has(`pubkey:${TARGET}`)).toBe(false);
+    expect(handlingByTarget([pk('unsuspend_user')], []).has(`pubkey:${TARGET}`)).toBe(true);
+  });
+
   it('omits a target that only automatic entries touched', () => {
     expect(handlingByTarget([row('auto_hidden', 300)], []).has(KEY)).toBe(false);
   });

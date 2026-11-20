@@ -33,4 +33,10 @@ describe('isAutomatedDecision', () => {
   ])('is false for the auto-hide action %s', (action) => {
     expect(isAutomatedDecision({ action, moderator_pubkey: 'auto' })).toBe(false);
   });
+
+  // The timer's rows carry no marker guarantee, so the action alone decides.
+  it.each(['auto_unsuspend_user', 'cancel_suspension_timer'])('is true for the timer action %s', (action) => {
+    expect(isAutomatedDecision({ action, moderator_pubkey: null })).toBe(true);
+    expect(isAutomatedDecision({ action, moderator_pubkey: MODERATOR })).toBe(true);
+  });
 });
