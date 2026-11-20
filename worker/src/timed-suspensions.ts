@@ -1,6 +1,7 @@
 // ABOUTME: Timed (auto-expiring) suspensions: the per-account record (one row per pubkey), its
 // ABOUTME: compare-and-swap writes, the decision-row helper, and the I/O seam a lift runs through.
-import type { TimedSuspensionView } from '../../shared/suspension';
+import { checkSuspensionDuration, DURATION_ERROR, SUSPENSION_ACTIONS, suspensionEndsAt, type TimedSuspensionView } from '../../shared/suspension';
+import { ageReviewActiveGuard, type AgeReviewEnv } from './age-review';
 import { markHumanReviewed } from './human-decision';
 import type { KeycastResult } from './keycast-client';
 import type { SuspensionEntry } from './suspended-content';
@@ -218,4 +219,95 @@ export async function restoreAfterLift(
     console.error(`[restoreAfterLift] Keycast activate threw for ${pubkey}:`, error);
     return 'failed';
   }
+}
+
+// ---------------------------------------------------------------------------
+// Routes: list timed suspensions, change a suspension's end date.
+// ---------------------------------------------------------------------------
+
+const jsonOut = (data: Record<string, unknown>, status: number, cors: Record<string, string>) =>
+  new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...cors } });
+
+export async function handleListSuspensions(
+  env: { DB?: D1Database },
+  corsHeaders: Record<string, string>,
+): Promise<Response> {
+  if (!env.DB) return jsonOut({ success: false, error: 'Database not configured' }, 503, corsHeaders);
+  try {
+    const rows = await listInForceSuspensions(env.DB);
+    return jsonOut({ success: true, suspensions: rows.map(toSuspensionView) }, 200, corsHeaders);
+  } catch (error) {
+    console.error('[handleListSuspensions] read failed:', error);
+    return jsonOut({ success: false, error: 'Could not read timed suspensions' }, 503, corsHeaders);
+  }
+}
+
+const refuse = (cors: Record<string, string>, status: number, code: string, error: string) =>
+  jsonOut({ success: false, error, code }, status, cors);
+
+// Change (or add) the end date of an account that is suspended on the relay. The relay is
+// the source of truth for "suspended", so it is read fresh and an unreadable list refuses
+// (never "not suspended"). Keycast is left alone: only the end date moves.
+export async function handleChangeSuspensionEnd(
+  request: Request,
+  env: AgeReviewEnv,
+  corsHeaders: Record<string, string>,
+  ctx: ExecutionContext | undefined,
+  moderator: string | undefined,
+  io: SuspensionIo,
+): Promise<Response> {
+  let body: { pubkey?: unknown; duration?: unknown };
+  try {
+    body = await request.json() as typeof body;
+  } catch {
+    return refuse(corsHeaders, 400, 'invalid_pubkey', 'Request body must be JSON with a pubkey and a duration');
+  }
+  if (typeof body.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
+    return refuse(corsHeaders, 400, 'invalid_pubkey', 'pubkey must be 64 lowercase hex characters');
+  }
+  const pubkey = body.pubkey;
+  const checked = checkSuspensionDuration(body.duration);
+  if (!checked.ok) return refuse(corsHeaders, 400, 'invalid_duration', DURATION_ERROR);
+  const db = env.DB;
+  if (!db) return refuse(corsHeaders, 503, 'db_unavailable', 'Database not configured');
+
+  const guarded = await ageReviewActiveGuard(pubkey, env, corsHeaders,
+    'This account is under age review. Its suspension is handled from the Age Review flow.',
+    { failClosed: true });
+  if (guarded) return guarded;
+
+  const [ban, entry, keycast] = await Promise.all([
+    io.readBan(pubkey), io.readSuspension(pubkey), io.readKeycastStatus(pubkey),
+  ]);
+  const banned = refuse(corsHeaders, 409, 'account_banned', 'This account is banned. A ban has no end date to change.');
+  // A known ban wins over an unreadable suspension list. Keycast 'unknown' does not block.
+  if (ban === true || keycast === 'banned') return banned;
+  // 'unknown' is checked before any value is read: an unreadable list is not "not suspended".
+  if (ban === 'unknown' || entry === 'unknown') {
+    return refuse(corsHeaders, 503, 'status_unavailable', 'Could not read the account status from the relay. Try again.');
+  }
+  if (!entry.suspended) {
+    return refuse(corsHeaders, 409, 'not_suspended', 'This account is not suspended, so there is no end date to change.');
+  }
+
+  const endsAt = suspensionEndsAt(checked.duration, new Date());
+  const changed = await changeSuspensionEnd(db, { pubkey, endsAt, moderator: moderator ?? null });
+  if (changed.kind === 'ending') {
+    return refuse(corsHeaders, 409, 'suspension_ending', 'This suspension is ending now. Check again in a few minutes.');
+  }
+  if (changed.kind === 'conflict') {
+    return refuse(corsHeaders, 409, 'conflict', 'The suspension changed while you were editing it. Refresh and try again.');
+  }
+
+  const decisionRecorded = await recordSuspensionDecision(db, {
+    pubkey, action: SUSPENSION_ACTIONS.change,
+    reason: `Ends ${endsAt}; was ${changed.previousEndsAt ?? 'no end date'}`,
+    moderator: moderator ?? null, human: true,
+  });
+  // Best effort, and off the response path: the end date is already saved. An older
+  // moderation-service ignores the unknown action, so a failed or ignored send is harmless.
+  const sent = io.notify(pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension end changed', endsAt)
+    .catch(error => console.error(`[handleChangeSuspensionEnd] notice failed for ${pubkey}:`, error));
+  if (ctx) ctx.waitUntil(sent); else await sent;
+  return jsonOut({ success: true, endsAt, decisionRecorded }, 200, corsHeaders);
 }

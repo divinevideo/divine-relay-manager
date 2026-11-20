@@ -28,6 +28,7 @@ beforeAll(async () => {
 afterAll(async () => { await mf?.dispose(); });
 afterEach(async () => {
   vi.restoreAllMocks();
+  await DB.prepare('DELETE FROM age_review_cases').run();
   await DB.prepare('DELETE FROM timed_suspensions').run();
   await DB.prepare('DELETE FROM moderation_decisions').run();
 });
@@ -321,5 +322,228 @@ describe('unsuspendpubkey and the timer', () => {
     expect(await record()).toMatchObject({ status: 'active' });
     expect(fake.notifies).toHaveLength(0);
     expect(fake.keycastPuts).toHaveLength(0);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// B5: change a suspension's end date, and list timed suspensions.
+// ---------------------------------------------------------------------------
+
+async function call(method: 'GET' | 'POST', path: string, body?: Record<string, unknown>, e: unknown = env()) {
+  const pending: Promise<unknown>[] = [];
+  const ctx = { waitUntil: (p: Promise<unknown>) => { pending.push(p); } } as unknown as ExecutionContext;
+  const res = await worker.fetch(new Request(`https://api.example${path}`, {
+    method,
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Admin-Key': 'k',
+      'X-Divine-Login-Token': 'tok',
+      Origin: 'https://app.example',
+    },
+    ...(body ? { body: JSON.stringify(body) } : {}),
+  }), e as never, ctx);
+  const json = await res.json() as Record<string, unknown>;
+  await Promise.allSettled(pending);
+  return { status: res.status, json };
+}
+const changeEnd = (body: Record<string, unknown>, e?: unknown) => call('POST', '/api/suspensions/end', body, e);
+const THREE_DAYS = { value: 3, unit: 'days' };
+
+async function seedAgeCase() {
+  await DB.prepare(
+    `INSERT INTO age_review_cases (id, pubkey, state, deadline_at, clock_paused, version)
+     VALUES ('c1', ?, 'restricted_pending_user_response', ?, 0, 0)`,
+  ).bind(PK, new Date(Date.now() + 864e5).toISOString()).run();
+}
+
+describe('POST /api/suspensions/end', () => {
+  it('changes an active record\'s end, writes change_suspension_end, and sends ACCOUNT_SUSPENSION_CHANGED with the new end', async () => {
+    const fake = setup({ suspended: new Map([[PK, 'policy']]) });
+    const old = '2030-01-01T00:00:00.000Z';
+    await seedRecord('active', old);
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+
+    expect(res.status).toBe(200);
+    expect(res.json.success).toBe(true);
+    expect(res.json.decisionRecorded).toBe(true);
+    const endsAt = res.json.endsAt as string;
+    expect(endsAt).toMatch(/Z$/);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: endsAt });
+    const rows = await decisions();
+    expect(rows).toEqual([{ action: 'change_suspension_end', reason: `Ends ${endsAt}; was ${old}`, moderator_pubkey: MOD }]);
+    expect(fake.notifies).toHaveLength(1);
+    expect(fake.notifies[0]).toMatchObject({ action: 'ACCOUNT_SUSPENSION_CHANGED', recipientPubkey: PK, endsAt });
+    expect(fake.relayWrites()).toEqual([]);
+    expect(fake.keycastPuts).toEqual([]);
+  });
+
+  it('adds an end date to a suspended account with no record', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+
+    expect(res.status).toBe(200);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: res.json.endsAt, set_by: MOD });
+    expect((await decisions())[0].reason).toBe(`Ends ${res.json.endsAt}; was no end date`);
+    expect(fake.notifies).toHaveLength(1);
+  });
+
+  it('refuses a non-canonical pubkey with 400 invalid_pubkey', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    const res = await changeEnd({ pubkey: PK.toUpperCase(), duration: THREE_DAYS });
+    expect(res.status).toBe(400);
+    expect(res.json.code).toBe('invalid_pubkey');
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it.each([[{ value: 0, unit: 'days' }], [{ value: 1.5, unit: 'hours' }], [null], [undefined]])(
+    'refuses duration %j with 400 invalid_duration', async (duration) => {
+      setup({ suspended: new Map([[PK, null]]) });
+      const res = await changeEnd({ pubkey: PK, duration });
+      expect(res.status).toBe(400);
+      expect(res.json.code).toBe('invalid_duration');
+      expect(res.json.error).toBe(DURATION_ERROR);
+    });
+
+  it('answers 503 without a DB binding', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS }, { ...(env() as object), DB: undefined });
+    expect(res.status).toBe(503);
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('refuses with the age-review 409 while the account has an open case', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    await seedRecord('active', null);
+    await seedAgeCase();
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('age_review_active');
+    expect((await record())?.ends_at).toBeNull();
+    expect(await decisions()).toEqual([]);
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('refuses with 409 account_banned when the relay ban list has the account', async () => {
+    const fake = setup({ banned: new Set([PK]), suspended: new Map([[PK, null]]) });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('account_banned');
+    expect(await record()).toBeNull();
+    expect(await decisions()).toEqual([]);
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('refuses with 409 account_banned when only Keycast has the ban (F17)', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]), keycast: new Map([[PK, 'banned']]) });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('account_banned');
+    expect(await record()).toBeNull();
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('proceeds when the Keycast status cannot be read', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]), fail: { keycast_get: true } });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(200);
+    expect(fake.notifies).toHaveLength(1);
+  });
+
+  it('refuses with 409 not_suspended when the relay does not list the account', async () => {
+    const fake = setup();
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('not_suspended');
+    expect(await record()).toBeNull();
+    expect(await decisions()).toEqual([]);
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('answers 503 status_unavailable, never not_suspended, when the suspension list cannot be read', async () => {
+    const fake = setup({ fail: { listsuspendedpubkeys: true } });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(503);
+    expect(res.json.code).toBe('status_unavailable');
+    expect(await record()).toBeNull();
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('answers 503 status_unavailable when the ban list cannot be read', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]), fail: { listbannedpubkeys: true } });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(503);
+    expect(res.json.code).toBe('status_unavailable');
+    expect(await record()).toBeNull();
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it.each(['lifting', 'keycast_pending'])('refuses while the record is %s and leaves ends_at unchanged', async (status) => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    const old = '2030-01-01T00:00:00.000Z';
+    await seedRecord(status, old);
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('suspension_ending');
+    expect(await record()).toMatchObject({ status, ends_at: old });
+    expect(await decisions()).toEqual([]);
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('refuses with 409 conflict when the record changes under the write', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    await seedRecord('active', null);
+    // A second moderator's change lands between this request's read of the row and its guarded write.
+    const racing = new Proxy(DB, {
+      get(target, key) {
+        if (key !== 'prepare') { const v = Reflect.get(target, key); return typeof v === 'function' ? v.bind(target) : v; }
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!/UPDATE timed_suspensions\s+SET ends_at/.test(sql)) return stmt;
+          return {
+            bind: (...args: unknown[]) => {
+              const bound = stmt.bind(...args);
+              return { run: async () => {
+                await DB.prepare('UPDATE timed_suspensions SET version = version + 1').run();
+                return bound.run();
+              } };
+            },
+          };
+        };
+      },
+    });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS }, { ...(env() as object), DB: racing });
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('conflict');
+    expect((await record())?.ends_at).toBeNull();
+    expect(await decisions()).toEqual([]);
+    expect(fake.notifies).toEqual([]);
+  });
+});
+
+describe('GET /api/suspensions', () => {
+  it('lists active, lifting and cancelled_ban records only, as TimedSuspensionView', async () => {
+    const PK2 = 'e5'.repeat(32); const PK3 = 'f6'.repeat(32); const PK4 = 'a7'.repeat(32); const PK5 = 'b8'.repeat(32);
+    const at = '2031-01-01T00:00:00.000Z';
+    const ins = (pk: string, st: string) => DB.prepare(
+      `INSERT INTO timed_suspensions (pubkey, ends_at, status, set_by, set_at) VALUES (?, ?, ?, ?, ?)`,
+    ).bind(pk, at, st, MOD, '2030-01-01T00:00:00.000Z').run();
+    await ins(PK, 'active'); await ins(PK2, 'cancelled_ban'); await ins(PK3, 'lifting');
+    await ins(PK4, 'lifted'); await ins(PK5, 'cancelled_unsuspend');
+    const res = await call('GET', '/api/suspensions');
+    expect(res.status).toBe(200);
+    expect(res.json.success).toBe(true);
+    const list = res.json.suspensions as Array<Record<string, unknown>>;
+    expect(list.map(v => v.pubkey).sort()).toEqual([PK, PK2, PK3].sort());
+    expect(list.find(v => v.pubkey === PK)).toEqual({
+      pubkey: PK, endsAt: at, status: 'active', setBy: MOD, setAt: '2030-01-01T00:00:00.000Z', changedAt: null,
+    });
+    expect(list.find(v => v.pubkey === PK2)?.status).toBe('cancelled_ban');
+    expect(list.find(v => v.pubkey === PK3)?.status).toBe('active');
+  });
+
+  it('answers 503 without a DB binding', async () => {
+    const res = await call('GET', '/api/suspensions', undefined, { ...(env() as object), DB: undefined });
+    expect(res.status).toBe(503);
   });
 });

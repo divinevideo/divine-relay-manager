@@ -77,6 +77,8 @@ import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, no
 import {
   endSuspensionRecord,
   getSuspensionRecord,
+  handleChangeSuspensionEnd,
+  handleListSuspensions,
   recordSuspensionDecision,
   replaceSuspensionRecord,
   restoreAfterLift,
@@ -726,6 +728,28 @@ export default {
 
       if (path === '/api/relay-rpc' && request.method === 'POST') {
         return handleRelayRpc(request, env, corsHeaders, ctx, moderator);
+      }
+
+      // Timed suspensions: the list, and changing an end date. The POST is gated by the moderator
+      // login like any write, and MOD_RELAY_ADMIN_KEY does not open it. The table may not exist
+      // on an isolate's first request, so the schema is bootstrapped first (F9).
+      if (path === '/api/suspensions' || path === '/api/suspensions/end') {
+        const isList = path === '/api/suspensions' && request.method === 'GET';
+        const isEnd = path === '/api/suspensions/end' && request.method === 'POST';
+        if (isList || isEnd) {
+          if (env.DB) {
+            try {
+              await ensureSchemaOnce(env.DB);
+            } catch (err) {
+              console.error('[suspensions] schema bootstrap failed:', err);
+              return jsonResponse({ success: false, error: 'Database not ready' }, 503, corsHeaders);
+            }
+          }
+          if (isList) return handleListSuspensions(env, corsHeaders);
+          const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
+            notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
+          return handleChangeSuspensionEnd(request, env, corsHeaders, ctx, moderator, io);
+        }
       }
 
       // The audited suspended-content viewer. The two reads need a moderator
