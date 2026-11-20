@@ -36,7 +36,7 @@ vi.mock('./keycast-client', () => ({
   unsuspendUser: vi.fn().mockResolvedValue({ success: true }),
   banUser: vi.fn().mockResolvedValue({ success: true }),
   clearVerifiedMinor: vi.fn().mockResolvedValue({ success: true }),
-  createMinorAccount: vi.fn().mockResolvedValue({ success: true, pubkey: 'a'.repeat(64), claim_url: 'https://login.test/claim/abc' }),
+  createMinorAccount: vi.fn().mockResolvedValue({ success: true, created: true, pubkey: 'a'.repeat(64), claim_url: 'https://login.test/claim/abc' }),
 }));
 
 // Isolate the handler from the relay: these tests exercise state transitions +
@@ -4337,8 +4337,11 @@ describe('handleCreateMinorAccount', () => {
 
   beforeEach(() => {
     mockCreateMinorAccount.mockReset();
+    // A fresh create (Keycast 201). A new operation that Keycast answers for
+    // an account that already existed is refused (PR #430).
     mockCreateMinorAccount.mockResolvedValue({
       success: true,
+      created: true,
       pubkey: 'a'.repeat(64),
       claim_url: 'https://login.test/claim/abc',
       expires_at: '2026-06-15T00:00:00Z',
@@ -4353,7 +4356,7 @@ describe('handleCreateMinorAccount', () => {
     ['missing', undefined],
   ])('opens no case when Keycast reports success with a pubkey that is %s', async (_label, pubkey) => {
     mockCreateMinorAccount.mockResolvedValue({
-      success: true, pubkey, claim_url: 'https://login.test/claim/abc', expires_at: '2026-06-15T00:00:00Z',
+      success: true, created: true, pubkey, claim_url: 'https://login.test/claim/abc', expires_at: '2026-06-15T00:00:00Z',
     });
     const db = makeMinorDb();
     const res = await handleCreateMinorAccount(makeRequest({ username: 'testuser' }), makeEnv(db), corsHeaders);
@@ -4606,6 +4609,7 @@ describe('handleCreateMinorAccount', () => {
   it('persists null claim_link_expires_at when Keycast omits expires_at', async () => {
     mockCreateMinorAccount.mockResolvedValue({
       success: true,
+      created: true,
       pubkey: 'a'.repeat(64),
       claim_url: 'https://login.test/claim/abc',
     });
