@@ -57,29 +57,18 @@ vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, 
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
+vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false, error: null }) }));
 // The thread read as useThread keys and caches it (['thread', eventId, depth,
 // apiUrl, relayHint], staleTime 60s), answering from `relay` when it runs.
-vi.mock('@/hooks/useReportContext', () => ({
-  useReportContext: (report: NostrEvent) => {
-    const postId = report.tags.find(t => t[0] === 'e')![1];
-    const pubkey = report.tags.find(t => t[0] === 'p')![1];
-    const thread = useQuery({
-      queryKey: ['thread', postId, 3, undefined, undefined],
-      queryFn: async () => ({ event: relay.post ?? null, ancestors: [], replies: [], repostedEvent: null, isRepost: false, fetchSource: null }),
-      staleTime: 60_000,
-    });
-    return {
-      target: { type: 'event', value: postId },
-      thread: thread.data,
-      threadLoading: thread.isLoading,
-      reportedUser: { profile: undefined, pubkey, isFunnelcakeUser: false },
-      userStats: undefined,
-      isLoading: false,
-      error: null,
-      relayHint: undefined,
-      reportTags: report.tags,
-    };
-  },
+// useReportContext itself is real: which account the pane acts on comes from
+// this read (its post's author) before the report's p tag.
+vi.mock('@/hooks/useThread', () => ({
+  useThread: (eventId: string | undefined, depth: number, apiUrl?: string, relayHint?: string) => useQuery({
+    queryKey: ['thread', eventId, depth, apiUrl, relayHint],
+    queryFn: async () => ({ event: relay.post ?? null, ancestors: [], replies: [], repostedEvent: null, isRepost: false, fetchSource: null }),
+    enabled: !!eventId,
+    staleTime: 60_000,
+  }),
 }));
 // The account actions, reduced to what each tells the pane when it succeeds,
 // as UserActions does: an Unsuspend opens the restore window first.
