@@ -206,7 +206,14 @@ describe('AgeReviewDetail re-reads the relay list after a case decision', () => 
     fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
 
     expect(await screen.findByTestId('account-viewer')).toHaveTextContent(PUBKEY);
-    await act(async () => { resolveFirstRead([]); });
+    // React Query notifies the screen on a timer. The first tick lets the late
+    // answer reach the cache, which queues that timer; the second lets it run,
+    // so a late answer that did land re-renders before the check below.
+    await act(async () => {
+      resolveFirstRead([]);
+      await new Promise(r => setTimeout(r, 0));
+      await new Promise(r => setTimeout(r, 0));
+    });
     expect(screen.getByTestId('account-viewer')).toHaveTextContent(PUBKEY);
     expect(suspendedList).toHaveBeenCalledTimes(2);
   });
