@@ -2,6 +2,7 @@ import { ReactNode, useEffect, useMemo } from 'react';
 import { useLocalStorage } from '@/hooks/useLocalStorage';
 import { AppContext, type AppConfig, type AppContextType, type Theme } from '@/contexts/AppContext';
 import { parseStoredConfig } from '@/lib/appConfig';
+import { getEnvironmentById } from '@/lib/environments';
 
 interface AppProviderProps {
   children: ReactNode;
@@ -31,14 +32,29 @@ export function AppProvider(props: AppProviderProps) {
 
   const [config, setConfig] = useLocalStorage<AppConfig>(storageKey, defaultConfig, serializer);
 
-  // Fix stale localhost URLs saved from dev sessions
+  // Reset stale addresses only to usable defaults so the effect settles (#433).
   useEffect(() => {
-    if (config.apiUrl?.includes('localhost') || config.apiUrl?.startsWith('http://')) {
-      setConfig((prev) => ({ ...prev, apiUrl: defaultConfig.apiUrl }));
-    }
-    if (config.relayUrl?.includes('localhost') || config.relayUrl?.startsWith('ws://localhost')) {
-      setConfig((prev) => ({ ...prev, relayUrl: defaultConfig.relayUrl }));
-    }
+    const staleApi = isStaleApiUrl(config.apiUrl);
+    const staleRelay = isStaleRelayUrl(config.relayUrl);
+    const resetApi = staleApi
+      && Boolean(defaultConfig.apiUrl) && !isStaleApiUrl(defaultConfig.apiUrl);
+    const resetRelay = staleRelay
+      && Boolean(defaultConfig.relayUrl) && !isStaleRelayUrl(defaultConfig.relayUrl);
+    if (!resetApi && !resetRelay) return;
+
+    // Keep a saved local pair together if only one default can replace it.
+    if (staleApi && staleRelay && (!resetApi || !resetRelay)) return;
+
+    // The dev server's Local preset is configured separately from the defaults.
+    const local = import.meta.env.DEV ? getEnvironmentById('local') : undefined;
+    if (local?.apiUrl === config.apiUrl && local?.relayUrl === config.relayUrl) return;
+
+    // The storage setter builds from the current render's state, so write once.
+    setConfig((prev) => ({
+      ...prev,
+      ...(resetApi && { apiUrl: defaultConfig.apiUrl }),
+      ...(resetRelay && { relayUrl: defaultConfig.relayUrl }),
+    }));
   }, [config.apiUrl, config.relayUrl, defaultConfig.apiUrl, defaultConfig.relayUrl, setConfig]);
 
   // Generic config updater with callback pattern
@@ -60,6 +76,14 @@ export function AppProvider(props: AppProviderProps) {
       {children}
     </AppContext.Provider>
   );
+}
+
+function isStaleApiUrl(url: string | undefined): boolean {
+  return !!url && (url.includes('localhost') || url.startsWith('http://'));
+}
+
+function isStaleRelayUrl(url: string | undefined): boolean {
+  return !!url && url.includes('localhost');
 }
 
 /**
