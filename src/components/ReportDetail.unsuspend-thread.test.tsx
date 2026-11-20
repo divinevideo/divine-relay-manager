@@ -17,6 +17,7 @@ import type { UserActionChange } from './UserActions';
 // showing the post from the earlier read, and never said why it was missing.
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
+const OTHER_PUBKEY = '7'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
 const EVENT_ID = 'c'.repeat(64);
 
@@ -76,7 +77,7 @@ vi.mock('@/components/UserActions', () => ({
   UserActions: ({ pubkey, onActionComplete }: { pubkey: string; onActionComplete: (change: UserActionChange) => void }) => {
     const queryClient = useQueryClient();
     return (
-      <button onClick={async () => {
+      <button data-pubkey={pubkey} onClick={async () => {
         await markRestored(queryClient, pubkey, undefined);
         onActionComplete({ accountStatusChanged: true, pubkey, action: 'unsuspend' });
       }}>
@@ -153,5 +154,33 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     // The body agrees: it read the post again, and says why it is missing.
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+  });
+
+  // The re-read finds no post, so the account comes from the report itself
+  // unless the pane keeps the author it read. Keeping it matters here: the
+  // just-restored line and the account actions follow that account.
+  it.each([
+    ['the p tag names another account', [['e', EVENT_ID], ['p', OTHER_PUBKEY]]],
+    ['the report has no p tag', [['e', EVENT_ID]]],
+  ])('keeps acting on the post\'s author when %s', async (_, tags) => {
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <ReportDetail report={{ ...REPORT, tags }} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+
+    relay.post = undefined;
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Unsuspend' }));
+
+    expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Unsuspend' })).toHaveAttribute('data-pubkey', REPORTED_PUBKEY);
   });
 });

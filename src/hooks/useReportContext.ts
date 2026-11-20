@@ -1,6 +1,7 @@
 // ABOUTME: Aggregates all context needed for moderating a report
 // ABOUTME: Combines thread, user stats, reporter info into single hook
 
+import { useRef } from "react";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useThread } from "@/hooks/useThread";
 import { useUserStats } from "@/hooks/useUserStats";
@@ -42,8 +43,20 @@ export function useReportContext(report: NostrEvent | null) {
   // Get thread context if report is about an event
   const thread = useThread(reportedEventId, 3, apiUrl, relayHint);
 
+  // Each post's author, from the last read of it that found it. A re-read can
+  // come back with no post (after an account action in this tab the relay
+  // withholds it, or a ban purged it), and falling back to the p tag then
+  // would move the pane to whatever account the tag names, or to none. The
+  // post's id fixes its author, so the one already read still holds. Kept per
+  // post: the pane is not keyed per report, and a moderator who opens another
+  // report and comes back must still find the author here.
+  const knownAuthors = useRef(new Map<string, string>());
+  const readAuthor = thread.data?.event?.pubkey;
+  if (readAuthor && reportedEventId) knownAuthors.current.set(reportedEventId, readAuthor);
+  const knownAuthor = reportedEventId ? knownAuthors.current.get(reportedEventId) : undefined;
+
   // Get the pubkey of the reported user (from event author or direct p tag)
-  const targetPubkey = thread.data?.event?.pubkey || reportedPubkey;
+  const targetPubkey = readAuthor || knownAuthor || reportedPubkey;
 
   // Get reported user's profile and stats
   const reportedUser = useAuthor(targetPubkey || undefined, apiUrl);
