@@ -13,7 +13,12 @@ export interface ModerationStatus {
   isUserBanned: boolean | null;
   /** Suspension for display and account actions, accounting for this tab's Unsuspend. */
   isUserSuspended: boolean | null;
-  /** Raw list membership for bulk delete, which needs to know content may still be hidden. */
+  /**
+   * Raw list membership, ignoring this tab's Unsuspend. Bulk delete reads it.
+   * It does not cover the restore window: once a current read no longer lists
+   * the account it is false, though the relay can keep hiding the account's
+   * posts for a few more minutes (RESTORE_SETTLE_MS).
+   */
   isUserSuspendedFromList: boolean | null;
   /**
    * `isUserBanned` is `true` only because a copy of the ban list that is not
