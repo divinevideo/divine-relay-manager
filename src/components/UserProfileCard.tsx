@@ -23,6 +23,7 @@ import { useEventTitles } from "@/hooks/useEventTitles";
 import { CommentParentLink } from "@/components/CommentParentLink";
 import { authoredContentStat, historyCount, historyStat } from "@/lib/historyCount";
 import { useJustRestored } from "@/lib/userStatsCache";
+import { suspensionAfterRestore } from "@/lib/suspensionAfterRestore";
 import { SuspendedAccountViewer } from "@/components/suspended/SuspendedContentPanel";
 import type { SuspendedViewSurface } from "../../shared/suspended-content";
 
@@ -287,8 +288,10 @@ export function UserProfileCard({ profile, pubkey, stats, isLoading, onDeleteEve
 
         {/* The relay hides a suspended account's posts from the reads above;
             the audited viewer shows them on a click. Report detail's pubkey
-            comes from the report's own p tag, so only a real key is offered. */}
-        {suspendedViewerSurface && isSuspended === true && isHex64(pubkey) && (
+            comes from the report's own p tag, so only a real key is offered.
+            Not for a suspension only a stale copy of the list reports while
+            this tab's restore window is open (lib/suspensionAfterRestore). */}
+        {suspendedViewerSurface && suspensionAfterRestore(isSuspended, isSuspendedStale, justRestored) === true && isHex64(pubkey) && (
           <SuspendedAccountViewer
             key={pubkey}
             pubkey={pubkey}

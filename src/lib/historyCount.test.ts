@@ -118,7 +118,19 @@ describe('authoredContentStat', () => {
   // right after an Unsuspend can still come back empty.
   it('qualifies an empty read just after an unsuspend', () => {
     expect(authoredContentStat({ ...base, count: 0, justRestored: true }))
-      .toBe('0 events (just restored; posts can take a few minutes to reappear)');
+      .toBe('0 events (just restored; posts can take a few minutes to reappear, if still stored)');
+  });
+
+  // The suspended list's re-read after this tab's Unsuspend failed and kept
+  // its copy from before it. Inside the window that copy does not count.
+  it('qualifies an empty read just after an unsuspend that only a stale list contradicts', () => {
+    expect(authoredContentStat({ ...base, count: 0, suspended: true, suspendedStale: true, justRestored: true }))
+      .toBe('0 events (just restored; posts can take a few minutes to reappear, if still stored)');
+  });
+
+  it('still says hidden for a stale suspension once the window has closed', () => {
+    expect(authoredContentStat({ ...base, count: 0, suspended: true, suspendedStale: true, justRestored: false }))
+      .toBe('events hidden (last known: suspended)');
   });
 
   // Unban and allow lift a read filter that can lag the same way, and with a

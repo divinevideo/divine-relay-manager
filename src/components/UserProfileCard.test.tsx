@@ -204,11 +204,34 @@ describe('UserProfileCard', () => {
     try {
       await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
       render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={false} />);
-      expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear)')).toBeInTheDocument();
-      // End the window so it cannot reach the next test.
-      await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+      expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear, if still stored)')).toBeInTheDocument();
     } finally {
-      vi.useRealTimers();
+      // End the window so it cannot reach the next test, also when an
+      // assertion above failed, and restore real timers even if that throws.
+      try {
+        await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+  });
+
+  // The suspended list's re-read after this tab's Unsuspend failed and kept its
+  // copy from before it: inside the window that copy does not count.
+  it('qualifies an empty read just after this tab unsuspended the account despite a stale suspended list', async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      await act(async () => { await markRestored(new QueryClient(), PUBKEY, undefined); });
+      render(<UserProfileCard pubkey={PUBKEY} stats={stats([])} isSuspended={true} isSuspendedStale={true} />);
+      expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear, if still stored)')).toBeInTheDocument();
+    } finally {
+      // End the window so it cannot reach the next test, also when an
+      // assertion above failed, and restore real timers even if that throws.
+      try {
+        await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS + 1); });
+      } finally {
+        vi.useRealTimers();
+      }
     }
   });
 

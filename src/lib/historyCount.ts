@@ -1,5 +1,7 @@
 // ABOUTME: Renders a history count honestly when the read that produced it stopped early.
 
+import { suspensionAfterRestore } from '@/lib/suspensionAfterRestore';
+
 // A count from a walk that hit its page bound is a floor, not a total. Printing
 // it bare is the silent-cap bug this replaced: the pane said 50 when the answer
 // was 80.
@@ -54,7 +56,10 @@ export function authoredContentStat(opts: {
   justRestored?: boolean;
   lastKnown?: boolean;
 }): string {
-  const { count, incomplete, suspended, suspendedStale, suspensionChecking = false, noun, limit, justRestored = false, lastKnown = false } = opts;
+  const { count, incomplete, suspendedStale, suspensionChecking = false, noun, limit, justRestored = false, lastKnown = false } = opts;
+  // Inside this tab's restore window, a suspension only a stale copy of the
+  // suspended list reports counts as none (lib/suspensionAfterRestore).
+  const suspended = suspensionAfterRestore(opts.suspended, suspendedStale, justRestored);
   if (suspended === true && !(count !== undefined && count > 0)) {
     return suspendedStale ? `${noun} hidden (last known: suspended)` : `${noun} hidden (account suspended)`;
   }
@@ -65,7 +70,8 @@ export function authoredContentStat(opts: {
     stat += ' (before suspension)';
   }
   if (justRestored && count === 0) {
-    stat += ' (just restored; posts can take a few minutes to reappear)';
+    // Hedged: a post its author deleted reads the same until the window closes.
+    stat += ' (just restored; posts can take a few minutes to reappear, if still stored)';
   } else if (suspended === null && count === 0) {
     stat += suspensionChecking ? ' (checking suspension)' : " (couldn't check suspension)";
   }

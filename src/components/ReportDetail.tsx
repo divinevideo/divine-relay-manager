@@ -32,6 +32,7 @@ import { ThreadContext } from "@/components/ThreadContext";
 import { UserProfileCard } from "@/components/UserProfileCard";
 import { SuspendedPostViewer } from "@/components/suspended/SuspendedContentPanel";
 import { deriveGoneCause } from "@/lib/goneCause";
+import { suspensionAfterRestore } from "@/lib/suspensionAfterRestore";
 import { UserIdentifier } from "@/components/UserIdentifier";
 import { ReporterInline } from "@/components/ReporterCard";
 import { AccountTypeLabel } from "@/components/AccountTypeBadge";
@@ -1160,11 +1161,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 // The audited viewer, for a post the confirmed suspension
                 // explains, or may explain beside a ban nothing could check
                 // (Matt, 2026-11-09: a banned post then reads as hidden for
-                // another reason). The target id comes from the report's own
-                // tags, so only a 64-hex id is offered, the worker checks it
-                // again, and the post is checked against the reported account.
+                // another reason). Not for a suspension goneCause does not
+                // name: one only a stale list reports just after this tab
+                // unsuspended the account. The target id comes from the
+                // report's own tags, so only a 64-hex id is offered, the
+                // worker checks it again, and the post is checked against the
+                // reported account.
                 suspendedViewer={(goneCause.kind === 'suspended'
-                  || (goneCause.kind === 'unknown' && moderationStatus.isUserSuspended === true))
+                  || (goneCause.kind === 'unknown' && goneCause.suspensionNamed))
                   && targetEventId && isHex64(targetEventId) ? (
                   <SuspendedPostViewer
                     key={targetEventId}
@@ -1585,7 +1589,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                 // absent prop, which its default turned into a confirmed
                 // "not banned" / "not suspended".
                 isBanned={isUserBanned}
-                isSuspended={moderationStatus.isUserSuspended}
+                // Right after this tab's Unsuspend, a suspension only a stale
+                // list reports counts as none (lib/suspensionAfterRestore), so
+                // Suspend is offered, not Unsuspend again. The list did fail to
+                // re-read, so the out-of-date note still shows. BulkDeleteByKind
+                // keeps the raw status: the relay really does still hide the
+                // account's posts during the window.
+                isSuspended={suspensionAfterRestore(moderationStatus.isUserSuspended, moderationStatus.isUserSuspendedStale, justRestored)}
                 statusPending={moderationStatus.isAccountStatusLoading}
                 statusStale={moderationStatus.isUserBannedStale || moderationStatus.isUserSuspendedStale}
                 onActionComplete={handleActionComplete}

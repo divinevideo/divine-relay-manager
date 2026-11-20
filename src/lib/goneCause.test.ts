@@ -105,7 +105,7 @@ describe('deriveGoneCause causes', () => {
 // drops it at once but the relay's read filter keeps hiding its posts for a few
 // minutes. "Never stored here" would be wrong for a post that is only withheld.
 describe('deriveGoneCause just after an unsuspend', () => {
-  const JUST_RESTORED_LINE = 'Not returned by the relay yet. The account was just unsuspended, and its posts can take a few minutes to reappear.';
+  const JUST_RESTORED_LINE = 'Not returned by the relay yet. The account was just unsuspended, and its posts can take a few minutes to reappear, if they are still stored.';
 
   it('says the post may still exist rather than none found', () => {
     expect(deriveGoneCause({ ...base, justRestored: true })).toMatchObject({
@@ -113,6 +113,7 @@ describe('deriveGoneCause just after an unsuspend', () => {
       line: JUST_RESTORED_LINE,
       badge: 'Not Found on Relay',
       tone: 'unknown',
+      suspensionNamed: false,
     });
   });
 
@@ -146,10 +147,94 @@ describe('deriveGoneCause just after an unsuspend', () => {
       .toBe('Not found on the relay. Still checking whether the account is suspended. That would hide it.');
   });
 
-  // The suspended list still lists the account (a copy from before the
-  // unsuspend): that is what the badge says, last known.
-  it('leaves a suspension the list still reports to the suspended line', () => {
-    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true }).kind).toBe('suspended');
+  // Meylis's question B on PR #426: the suspended list's re-read after this
+  // tab's Unsuspend failed, so its copy from before the unsuspend still lists
+  // the account. The window opens only after a confirmed Unsuspend, so that
+  // stale suspension does not outrank it, and no suspended-post viewer follows.
+  it('ranks this tab\'s unsuspend above a suspension only a stale list reports', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true })).toEqual({
+      kind: 'unknown',
+      line: JUST_RESTORED_LINE,
+      badge: 'Not Found on Relay',
+      tone: 'unknown',
+      suspensionNamed: false,
+    });
+  });
+
+  // A suspended list read since the unsuspend that lists the account again
+  // (another moderator suspended it) is the headline.
+  it('still names a suspension the list confirmed since the unsuspend', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: false })).toMatchObject({ kind: 'suspended', stale: false });
+  });
+
+  it('still names a stale suspension once the window has closed', () => {
+    expect(deriveGoneCause({ ...base, justRestored: false, suspended: true, suspendedStale: true })).toMatchObject({ kind: 'suspended', stale: true });
+  });
+
+  it('does not let a stale suspension and the window override a confirmed ban', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true, userBanned: true }))
+      .toMatchObject({ kind: 'explained', by: 'ban' });
+  });
+
+  // Inside the window a suspension only a stale copy reports counts as not
+  // suspended everywhere, also beside a read that is out or failed: the line
+  // names only the open checks, the badge does not say suspended, and no
+  // suspended-post viewer follows.
+  it('names only the open check beside a stale suspension just after an unsuspend', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true, eventBanned: null })).toEqual({
+      kind: 'unknown',
+      line: "Not found on the relay. Couldn't check whether the event is banned. That would hide it.",
+      badge: 'Not Found on Relay',
+      tone: 'unknown',
+      suspensionNamed: false,
+    });
+  });
+
+  it('headlines a stale ban, not a stale suspension, just after an unsuspend', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: true, userBanned: true, userBannedStale: true }))
+      .toMatchObject({ kind: 'unknown', badge: 'Banned (last known)', suspensionNamed: false });
+  });
+
+  it('names only the unread decision log beside a stale suspension just after an unsuspend', () => {
+    expect(line({ justRestored: true, suspended: true, suspendedStale: true, decisionsUnread: 'checking' }))
+      .toBe('Not found on the relay. Still checking whether a moderator removed it. That would hide it.');
+  });
+
+  it('still states a suspension the list confirmed since the unsuspend beside an unknown ban', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true, suspended: true, suspendedStale: false, eventBanned: null }))
+      .toMatchObject({ kind: 'unknown', badge: 'Account Suspended', suspensionNamed: true });
+  });
+
+  // useModerationStatus only marks a suspension stale when the list reports
+  // one, but the rule must not turn an unknown suspension into a known absence.
+  it('keeps an unknown suspension unknown just after an unsuspend whatever the stale flag says', () => {
+    expect(line({ justRestored: true, suspended: null, suspendedStale: true }))
+      .toBe("Not found on the relay. Couldn't check whether the account is suspended. That would hide it.");
+  });
+
+  it('still states a stale suspension beside an unknown ban once the window has closed', () => {
+    expect(deriveGoneCause({ ...base, justRestored: false, suspended: true, suspendedStale: true, eventBanned: null }))
+      .toMatchObject({ kind: 'unknown', badge: 'Suspended (last known)', suspensionNamed: true });
+  });
+});
+
+// Report detail offers the suspended-post viewer beside an unknown cause only
+// when that cause names a suspension the list reports.
+describe('deriveGoneCause suspensionNamed', () => {
+  it('names a suspension the list confirmed beside an unknown ban', () => {
+    expect(deriveGoneCause({ ...base, suspended: true, eventBanned: null })).toMatchObject({ kind: 'unknown', suspensionNamed: true });
+  });
+
+  it('names a stale suspension beside an unknown ban', () => {
+    expect(deriveGoneCause({ ...base, suspended: true, suspendedStale: true, eventBanned: null })).toMatchObject({ kind: 'unknown', suspensionNamed: true });
+  });
+
+  it('names no suspension while the suspension is unknown', () => {
+    expect(deriveGoneCause({ ...base, suspended: null })).toMatchObject({ kind: 'unknown', suspensionNamed: false });
+  });
+
+  it('names no suspension just after an unsuspend the list agrees with', () => {
+    expect(deriveGoneCause({ ...base, justRestored: true })).toMatchObject({ kind: 'unknown', suspensionNamed: false });
   });
 });
 

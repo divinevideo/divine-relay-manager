@@ -117,12 +117,12 @@ describe('markRestored', () => {
     expect(await screen.findByText('0 events')).toBeInTheDocument();
 
     await act(async () => { await markRestored(client, pk, undefined); });
-    expect(await screen.findByText('0 events (just restored; posts can take a few minutes to reappear)')).toBeInTheDocument();
+    expect(await screen.findByText('0 events (just restored; posts can take a few minutes to reappear, if still stored)')).toBeInTheDocument();
 
     // The relay's filter catches up; nothing re-reads until the window ends.
     relay.visible = true;
     await act(async () => { await vi.advanceTimersByTimeAsync(RESTORE_SETTLE_MS - 1000); });
-    expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear)')).toBeInTheDocument();
+    expect(screen.getByText('0 events (just restored; posts can take a few minutes to reappear, if still stored)')).toBeInTheDocument();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(2000); });
     expect(await screen.findByText('3 events')).toBeInTheDocument();

@@ -135,7 +135,7 @@ const PROD_RELAY = 'wss://relay.prod.test';
 const STAGING_RELAY = 'wss://relay.staging.test';
 
 
-const JUST_RESTORED = /The account was just unsuspended, and its posts can take a few minutes to reappear/;
+const JUST_RESTORED = /The account was just unsuspended, and its posts can take a few minutes to reappear, if they are still stored\./;
 const NEVER_STORED = /never stored here/;
 const liveChecksOf = (eventId: string) => api.verifyEventDeleted.mock.calls.filter(c => c[0] === eventId).length;
 

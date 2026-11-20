@@ -59,6 +59,13 @@ vi.mock('@/hooks/useDecisionLog', () => ({
 vi.mock('@/hooks/useModerationStatus', () => ({
   useModerationStatus: () => status.value,
 }));
+// Whether this tab unsuspended the reported account moments ago (its restore
+// window is open). The store itself has its own tests.
+const restoreWindow = vi.hoisted(() => ({ open: false }));
+vi.mock('@/lib/userStatsCache', async (orig) => ({
+  ...(await orig<typeof import('@/lib/userStatsCache')>()),
+  useJustRestored: () => restoreWindow.open,
+}));
 // The getbannedevent read. `data` is the banned post when the relay returned it.
 const bannedEventRead = vi.hoisted(() => ({ value: { data: null as NostrEvent | null | undefined, isLoading: false } }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => bannedEventRead.value }));
@@ -166,12 +173,14 @@ describe('ReportDetail suspended-content viewer placement', () => {
     vi.clearAllMocks();
     threadContextProps.last = null;
     userCardProps.last = null;
+    userActionsProps.last = null;
     bannedEventRead.value = { data: null, isLoading: false };
     decisionFlags.isDeleted = false;
     decisionFlags.isAutoHidden = false;
     decisionFlags.isPending = false;
     decisionFlags.error = null;
     reportTarget.value = { type: 'event', value: EVENT_ID };
+    restoreWindow.open = false;
     status.value = moderationStatusMock({ isEventGone: true, isUserSuspended: true, checkedAt: CHECKED_AT });
   });
 
@@ -228,6 +237,57 @@ describe('ReportDetail suspended-content viewer placement', () => {
     renderDetail([SPAM_REPORT]);
 
     expect(viewer()).toBeUndefined();
+  });
+
+  // Meylis's question B on PR #426: the suspended list's re-read after this
+  // tab's Unsuspend failed and kept its old copy. The just-restored line shows,
+  // and the viewer does not.
+  it('gives no viewer for a suspension only a stale list reports just after this tab unsuspended', () => {
+    restoreWindow.open = true;
+    status.value.isUserSuspendedStale = true;
+    renderDetail([SPAM_REPORT]);
+
+    expect(threadContextProps.last?.goneCause).toMatchObject({ kind: 'unknown', suspensionNamed: false });
+    expect(viewer()).toBeUndefined();
+  });
+
+  it('gives the post viewer for a suspension the list confirmed since this tab unsuspended', () => {
+    restoreWindow.open = true;
+    renderDetail([SPAM_REPORT]);
+
+    expect(viewer()?.type).toBe(SuspendedPostViewer);
+  });
+
+  it('gives the post viewer for a stale suspension without a restore window', () => {
+    status.value.isUserSuspendedStale = true;
+    renderDetail([SPAM_REPORT]);
+
+    expect(viewer()?.type).toBe(SuspendedPostViewer);
+  });
+
+  // Right after this tab's Unsuspend with a stale suspended list, the account
+  // actions offer Suspend (UserActions renders it for isSuspended false), not
+  // Unsuspend, and still say the status may be out of date.
+  it('gives the account actions no suspension for one only a stale list reports just after this tab unsuspended', () => {
+    restoreWindow.open = true;
+    status.value.isUserSuspendedStale = true;
+    renderDetail([SPAM_REPORT]);
+
+    expect(userActionsProps.last).toMatchObject({ isSuspended: false, statusStale: true });
+  });
+
+  it('gives the account actions a suspension the list confirmed since this tab unsuspended', () => {
+    restoreWindow.open = true;
+    renderDetail([SPAM_REPORT]);
+
+    expect(userActionsProps.last).toMatchObject({ isSuspended: true, statusStale: false });
+  });
+
+  it('gives the account actions a stale suspension without a restore window', () => {
+    status.value.isUserSuspendedStale = true;
+    renderDetail([SPAM_REPORT]);
+
+    expect(userActionsProps.last).toMatchObject({ isSuspended: true, statusStale: true });
   });
 
   it('gives no viewer for a target id that is not 64 hex', () => {

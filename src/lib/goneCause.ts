@@ -3,6 +3,7 @@
 
 import { GONE_JUST_RESTORED_LINE, GONE_NO_CAUSE_LINE, goneCauseUnknownLine, suspendedBadgeLabel, suspendedMissingPostLine } from '@/lib/suspendedContent';
 import { SWITCH_STATE_LABELS } from '@/lib/sensitiveSwitch';
+import { suspensionAfterRestore } from '@/lib/suspensionAfterRestore';
 
 /** A cause the badge states itself, in the order it is ranked. */
 export type ExplainedBy = 'delete' | 'auto-hide' | 'ban' | 'event-ban';
@@ -24,9 +25,11 @@ export type GoneCause =
   /**
    * A status that would explain it has not answered, or this tab unsuspended
    * the account moments ago and the relay has not caught up. The post may
-   * still exist.
+   * still exist. `suspensionNamed`: the line and badge state a suspension the
+   * suspended list reports (confirmed or last known), so that suspension may
+   * be what hides the post.
    */
-  | { kind: 'unknown'; line: string; badge: string; tone: GoneTone }
+  | { kind: 'unknown'; line: string; badge: string; tone: GoneTone; suspensionNamed: boolean }
   /** Everything answered and nothing explains it. Not a deletion either. */
   | { kind: 'none-found'; line: string; badge: string; tone: GoneTone };
 
@@ -87,9 +90,17 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
   const {
     eventGone, recordedDelete, autoHidden, decisionsUnread,
     userBanned, userBannedStale, eventBanned, eventBannedStale,
-    suspended, suspendedStale, checking, justRestored,
+    suspendedStale, checking, justRestored,
   } = input;
   if (eventGone !== true) return { kind: 'not-gone' };
+
+  // Inside this tab's restore window, a suspension only a stale copy of the
+  // suspended list reports counts as not suspended (lib/suspensionAfterRestore):
+  // never the headline, never named beside a read that is out or failed, and
+  // no suspended-post viewer. One the list confirmed since the Unsuspend
+  // (another moderator suspended the account again) still counts while that
+  // read is current.
+  const suspended = suspensionAfterRestore(input.suspended, suspendedStale, justRestored);
 
   // Only a confirmed ban explains the post. One kept from a list that could not
   // be refreshed may have been lifted, so its status is unknown. The same holds
@@ -135,6 +146,7 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
         : eventBanned === true ? 'Event Banned (last known)'
         : 'Not Found on Relay',
       tone: 'unknown',
+      suspensionNamed: suspended === true,
     };
   }
 
@@ -142,10 +154,12 @@ export function deriveGoneCause(input: GoneCauseInput): GoneCause {
   // account moments ago: the relay's read filter lags the suspended list, so
   // the post is likely still withheld. Ranked last: a recorded delete,
   // auto-hide or confirmed ban still explains the post, a suspension the list
-  // still reports is still the headline, and a read that is out or failed is
-  // named for what it is (its line already says the post may still exist).
+  // confirmed since the unsuspend is still the headline, and a read that is
+  // out or failed is named for what it is (its line already says the post may
+  // still exist). A suspension only a stale copy of the list reports counts as
+  // none (above).
   if (justRestored) {
-    return { kind: 'unknown', line: GONE_JUST_RESTORED_LINE, badge: 'Not Found on Relay', tone: 'unknown' };
+    return { kind: 'unknown', line: GONE_JUST_RESTORED_LINE, badge: 'Not Found on Relay', tone: 'unknown', suspensionNamed: false };
   }
 
   // Not a removal either: funnelcake withholds things none of these lists
