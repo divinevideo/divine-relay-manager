@@ -177,6 +177,16 @@ describe('AppProvider stale local address reset', () => {
       expect(localStorage.setItem).not.toHaveBeenCalled();
     });
 
+    it.each(['apiUrl', 'relayUrl'] as const)('keeps both local addresses if the default %s is local', (localDefault) => {
+      storeConfig({ theme: 'light', ...localEnvironment });
+
+      renderProvider({ ...deployedDefaults, [localDefault]: localDefaults[localDefault] });
+
+      expect(screen.getByTestId('relay')).toHaveTextContent(localEnvironment.relayUrl);
+      expect(screen.getByTestId('api')).toHaveTextContent(localEnvironment.apiUrl);
+      expect(storedWrites()).toEqual([]);
+    });
+
     it('leaves a remote environment the moderator chose alone', () => {
       storeConfig({
         theme: 'light',

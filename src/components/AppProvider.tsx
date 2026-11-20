@@ -32,29 +32,24 @@ export function AppProvider(props: AppProviderProps) {
 
   const [config, setConfig] = useLocalStorage<AppConfig>(storageKey, defaultConfig, serializer);
 
-  // Fix stale localhost URLs saved from dev sessions: a deployed build should
-  // never keep talking to a local stack. Only reset to a default that is set
-  // and not itself local. In a local build (defaults from VITE_WORKER_URL/
-  // VITE_RELAY_URL pointing at localhost) there is nothing to protect, and
-  // resetting one local address to another re-ran on every render, since
-  // setConfig changes identity each render: "Maximum update depth exceeded"
-  // (#433). With this guard the reset leaves a value the check no longer
-  // matches, so it cannot repeat.
-  //
-  // Both fields go in one setConfig call: useLocalStorage's setter builds from
-  // the render's state rather than the latest, so a second call in the same
-  // pass would overwrite the first.
+  // Reset stale addresses only to usable defaults so the effect settles (#433).
   useEffect(() => {
-    const resetApi = isStaleApiUrl(config.apiUrl)
+    const staleApi = isStaleApiUrl(config.apiUrl);
+    const staleRelay = isStaleRelayUrl(config.relayUrl);
+    const resetApi = staleApi
       && Boolean(defaultConfig.apiUrl) && !isStaleApiUrl(defaultConfig.apiUrl);
-    const resetRelay = isStaleRelayUrl(config.relayUrl)
+    const resetRelay = staleRelay
       && Boolean(defaultConfig.relayUrl) && !isStaleRelayUrl(defaultConfig.relayUrl);
     if (!resetApi && !resetRelay) return;
+
+    // Keep a saved local pair together if only one default can replace it.
+    if (staleApi && staleRelay && (!resetApi || !resetRelay)) return;
 
     // The dev server's Local preset is configured separately from the defaults.
     const local = import.meta.env.DEV ? getEnvironmentById('local') : undefined;
     if (local?.apiUrl === config.apiUrl && local?.relayUrl === config.relayUrl) return;
 
+    // The storage setter builds from the current render's state, so write once.
     setConfig((prev) => ({
       ...prev,
       ...(resetApi && { apiUrl: defaultConfig.apiUrl }),
