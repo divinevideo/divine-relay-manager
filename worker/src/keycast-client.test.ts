@@ -542,6 +542,29 @@ describe('keycast-client', () => {
       });
     });
 
+    // PR #430. Keycast's operation path answers 201 with replayed:false only
+    // when it just created the account; every other success is an account
+    // that already existed. Both signals must agree, so anything else (a
+    // contradiction, a missing field) reads as "already existed".
+    describe('created', () => {
+      const body = (replayed?: boolean) => ({
+        pubkey: VALID_PUBKEY, claim_url: 'https://login.test/claim/abc', expires_at: '2026-06-15T00:00:00Z',
+        account_state: 'unclaimed', ...(replayed === undefined ? {} : { replayed }),
+      });
+      it.each([
+        ['201 with replayed false is a fresh create', 201, false, true],
+        ['200 with replayed true already existed', 200, true, false],
+        ['201 contradicted by replayed true already existed', 201, true, false],
+        ['200 contradicted by replayed false already existed', 200, false, false],
+        ['201 without a replayed field already existed', 201, undefined, false],
+      ])('%s', async (_label, status, replayed, created) => {
+        fetchMock.mockResolvedValue({ ok: true, status, json: () => Promise.resolve(body(replayed as boolean | undefined)) });
+        const result = await createMinorAccount('testuser', undefined, makeEnv(), '11111111-1111-4111-8111-111111111111');
+        expect(result.success).toBe(true);
+        expect(result.created).toBe(created);
+      });
+    });
+
     it('returns error on non-OK response', async () => {
       fetchMock.mockResolvedValue({ ok: false, status: 409, text: () => Promise.resolve('Username taken') });
       const result = await createMinorAccount('taken', undefined, makeEnv());

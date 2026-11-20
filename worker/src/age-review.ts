@@ -852,12 +852,59 @@ export async function handleUpdateAgeReviewCase(
  * gone (hence the LEFT JOIN).
  */
 async function findSubjectSourceCase(db: D1Database, subjectId: string): Promise<{
-  source_case_id: string | null; created_via: string | null;
+  source_case_id: string | null; created_via: string | null; zendesk_ticket_id: number | null; redacted_at: string | null;
 } | null> {
-  return db.prepare(`SELECT s.source_case_id, c.created_via
+  return db.prepare(`SELECT s.source_case_id, c.created_via, c.zendesk_ticket_id, c.redacted_at
     FROM protected_minor_subjects s LEFT JOIN age_review_cases c ON c.id = s.source_case_id
     WHERE s.subject_id = ?`).bind(subjectId)
-    .first<{ source_case_id: string | null; created_via: string | null }>();
+    .first<{ source_case_id: string | null; created_via: string | null; zendesk_ticket_id: number | null; redacted_at: string | null }>();
+}
+
+const USERNAME_BELONGS_TO_EXISTING_ACCOUNT = 'username_belongs_to_existing_account';
+const ACCOUNT_SETUP_UNFINISHED = 'account_setup_unfinished';
+const ACCOUNT_SETUP_UNFINISHED_MESSAGE = "Account setup didn't finish. No link issued. Ask engineering to complete it.";
+
+function usernameTakenMessage(ticketId: number | null): string {
+  const ticket = ticketId !== null ? ` (from ticket #${ticketId})` : '';
+  return `Username already taken by an unclaimed account${ticket}. No link was issued. If this request is for the same child, ask engineering for a new link. Otherwise, choose a different username.`;
+}
+
+/**
+ * The ticket of the case this dialog opened for a protected account, so a
+ * refusal can point support at it. Only a minor-onboarding case that
+ * retention has not redacted: a report case's ticket is the reporter's, not
+ * the family's. Never the pubkey or case
+ * id. Best effort: a failed lookup only drops the ticket from the message.
+ */
+async function findOnboardingTicket(db: D1Database, pubkey: string | undefined): Promise<number | null> {
+  if (!pubkey || !isLowerHex64(pubkey)) return null;
+  try {
+    const bound = await resolveByPubkey(db, pubkey);
+    if (!bound) return null;
+    const source = await findSubjectSourceCase(db, bound.subjectRef);
+    // A redacted case keeps no detail to read back.
+    return source?.created_via === 'minor_onboarding' && source.redacted_at === null
+      ? source.zendesk_ticket_id ?? null : null;
+  } catch (err) {
+    console.error('[age-review] Could not look up the existing account\'s ticket for a refusal', err);
+    return null;
+  }
+}
+
+/**
+ * The refusal an operation closed as 'failed' stands for. The close stores
+ * the existing account a new operation collided with in result_pubkey, and
+ * nothing for setup that never finished. PR #430.
+ */
+async function closedOperationRefusal(
+  db: D1Database, resultPubkey: string | null, provisioningOperationId: string, corsHeaders: Record<string, string>,
+): Promise<Response> {
+  return resultPubkey
+    ? json({ success: false, code: USERNAME_BELONGS_TO_EXISTING_ACCOUNT,
+      error: usernameTakenMessage(await findOnboardingTicket(db, resultPubkey)),
+      provisioning_operation_id: provisioningOperationId }, 409, corsHeaders)
+    : json({ success: false, code: ACCOUNT_SETUP_UNFINISHED, error: ACCOUNT_SETUP_UNFINISHED_MESSAGE,
+      provisioning_operation_id: provisioningOperationId }, 409, corsHeaders);
 }
 
 export async function handleCreateMinorAccount(
@@ -920,6 +967,14 @@ export async function handleCreateMinorAccount(
   if (existingOperation && (existingOperation.kind !== 'onboarding' || existingOperation.request_fingerprint !== requestFingerprint)) {
     return json({ success: false, code: 'provisioning_operation_conflict', error: 'Provisioning operation conflicts with its original request' }, 409, corsHeaders);
   }
+  // PR #430. An operation closed by the refusal below stays refused, with the
+  // same answer it got then. Keycast is not asked again: it would answer this
+  // operation id with the existing account's link. The closed row says which
+  // refusal it was: result_pubkey holds the existing account a new operation
+  // collided with, and is NULL for setup that never finished.
+  if (existingOperation?.state === 'failed') {
+    return closedOperationRefusal(env.DB, existingOperation.result_pubkey, provisioningOperationId, corsHeaders);
+  }
   if (!existingOperation) {
     const now = new Date().toISOString();
     try {
@@ -933,6 +988,66 @@ export async function handleCreateMinorAccount(
   }
 
   const result = await createMinorAccount(username, displayName, env, provisioningOperationId);
+  // PR #430. Keycast keys an existing account on the username alone, so a new
+  // operation naming a username that already belongs to any unclaimed minor
+  // gets that account's live claim link back: possibly another family's
+  // child. Only this dialog's own operation may receive an existing account,
+  // and Relay Manager knows an operation is its own only once it has recorded
+  // Keycast's answer for it (result_pubkey, set right after a fresh create).
+  // Without that record (a new operation, or an earlier attempt that never
+  // got or kept an answer) "already existed" cannot be told apart from a
+  // collision, so it is refused: no link, no pubkey, nothing written except
+  // closing the operation so its retries are refused too.
+  //
+  // Two refusals, because support acts on them differently. A new operation
+  // collided with an account that already holds the username: pick another
+  // username, or ask engineering if it is the same child. An earlier attempt
+  // of this operation left no record: setup may have created this very
+  // account and lost the answer, so it is escalated, not renamed. The close
+  // stores the existing account's pubkey for the first and nothing for the
+  // second, which is how a retry tells them apart. It only takes an operation
+  // with no recorded result: a concurrent attempt that already recorded
+  // Keycast's 201 owns the operation.
+  //
+  // In a double submit only the request that inserted the row can tell a
+  // collision from unfinished setup (the other saw a pending row with no
+  // record). So a close also takes a row already closed as unfinished: the
+  // inserter's collision replaces it (an unfinished close over one is a
+  // no-op). A request whose close lands nothing answers from the row, so the
+  // row, its retries and the later answers agree.
+  if (result.success && result.created !== true && !existingOperation?.result_pubkey) {
+    const collided = !existingOperation;
+    const ticketId = collided ? await findOnboardingTicket(env.DB, result.pubkey) : null;
+    const storedPubkey = collided && result.pubkey && isLowerHex64(result.pubkey) ? result.pubkey : null;
+    let closed = false;
+    try {
+      const close = await env.DB.prepare(`UPDATE protected_minor_provisioning_operations SET state = 'failed', result_pubkey = ?, updated_at = ?
+        WHERE provisioning_operation_id = ? AND kind = 'onboarding' AND state IN ('pending', 'failed') AND result_pubkey IS NULL`)
+        .bind(storedPubkey, new Date().toISOString(), provisioningOperationId).run();
+      closed = close.meta.changes === 1;
+    } catch (err) {
+      // Still refused: a retry meets this same check until the close lands.
+      console.error('[age-review] Could not close a refused minor-account operation', err);
+    }
+    if (!closed) {
+      const row = await env.DB.prepare(`SELECT state, result_pubkey FROM protected_minor_provisioning_operations
+        WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
+        .first<{ state: string; result_pubkey: string | null }>().catch(() => null);
+      if (row?.state === 'failed') {
+        return closedOperationRefusal(env.DB, row.result_pubkey, provisioningOperationId, corsHeaders);
+      }
+      // Otherwise the close failed outright, or a concurrent attempt recorded
+      // Keycast's 201 and owns the operation: answer this request's reading.
+    }
+    if (!collided) {
+      console.warn('[age-review] Refused a minor-account operation whose earlier attempt left no record');
+      return json({ success: false, code: ACCOUNT_SETUP_UNFINISHED, error: ACCOUNT_SETUP_UNFINISHED_MESSAGE,
+        provisioning_operation_id: provisioningOperationId }, 409, corsHeaders);
+    }
+    console.warn('[age-review] Refused a new minor-account operation: the username already belongs to an existing account');
+    return json({ success: false, code: USERNAME_BELONGS_TO_EXISTING_ACCOUNT, error: usernameTakenMessage(ticketId),
+      provisioning_operation_id: provisioningOperationId }, 409, corsHeaders);
+  }
   // Lowercase only: cases are looked up that way (#313), and the provisioning
   // tables reject any other form, so check before the result, case, subject or
   // binding is written, as the replacement path does. Keycast did create an
@@ -953,15 +1068,29 @@ export async function handleCreateMinorAccount(
   }
   if (existingOperation?.state !== 'complete') {
     const observedAt = new Date().toISOString();
+    // A request that saw Keycast create the account (201) is authoritative
+    // for this operation id: if a concurrent attempt closed it before this
+    // answer arrived (as unfinished, or as a collision with this very account,
+    // having been served Keycast's replay of it), it is reopened and recorded
+    // here. A row holding a different account stays closed (the last clause).
+    // Only a 201 request can meet a failed row here (others without a record
+    // are refused above, and a close never takes a recorded row), so the
+    // created gate is defense in depth. PR #430.
     const observed = await env.DB.prepare(`UPDATE protected_minor_provisioning_operations
-      SET result_pubkey = ?, updated_at = ?
-      WHERE provisioning_operation_id = ? AND kind = 'onboarding' AND state = 'pending'
+      SET result_pubkey = ?, state = 'pending', updated_at = ?
+      WHERE provisioning_operation_id = ? AND kind = 'onboarding'
+        AND (state = 'pending' OR (? = 1 AND state = 'failed'))
         AND (result_pubkey IS NULL OR result_pubkey = ?)`)
-      .bind(result.pubkey, observedAt, provisioningOperationId, result.pubkey).run();
+      .bind(result.pubkey, observedAt, provisioningOperationId, result.created === true ? 1 : 0, result.pubkey).run();
     if (observed.meta.changes !== 1) {
       const current = await env.DB.prepare(`SELECT kind, request_fingerprint, state, subject_id, result_pubkey
         FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
         .first<{ kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null }>();
+      // Closed under this request (it could not be reopened): its refusal is
+      // the answer, rather than a registry write that could land nothing.
+      if (current?.state === 'failed') {
+        return closedOperationRefusal(env.DB, current.result_pubkey, provisioningOperationId, corsHeaders);
+      }
       if (current?.result_pubkey && current.result_pubkey !== result.pubkey) {
         return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
       }
@@ -982,12 +1111,11 @@ export async function handleCreateMinorAccount(
     // Issue #428. The replay above asked Keycast for the account's claim link
     // again. Depending on the Keycast version that is the still-valid link or
     // a new one that replaces it; either way the case should carry the expiry
-    // of the link just handed back, not an earlier one. Same scope as the
-    // reuse branch below: only a case this dialog created, for this pubkey (a
-    // replacement account inherits a subject whose source case is the old
-    // account's), and not once retention has redacted it. The ticket is left
-    // alone, since a replay carries the original request's ticket by
-    // fingerprint. The expiry is bookkeeping and the link is what support
+    // of the link just handed back, not an earlier one. Only a case this
+    // dialog created, for this pubkey (a replacement account inherits a
+    // subject whose source case is the old account's), and not once retention
+    // has redacted it. The ticket is left alone, since a replay carries the
+    // original request's ticket by fingerprint. The expiry is bookkeeping and the link is what support
     // needs, so a failed write is logged and the link is still returned.
     if (typeof result.claim_url === 'string' && prior?.source_case_id && prior.created_via === 'minor_onboarding') {
       try {
@@ -1003,85 +1131,9 @@ export async function handleCreateMinorAccount(
       provisioning_operation_id: provisioningOperationId, replayed: true }, 200, corsHeaders);
   }
 
-  // Issue #428. A fresh operation for a username Keycast already holds
-  // unclaimed comes back 200 with the same pubkey and a claim link (the
-  // existing one or a replacement, depending on the Keycast version). If that
-  // pubkey is already protected, its subject and binding are the record:
-  // another case, subject and binding would trip the one-active-binding-per-
-  // pubkey index, fail every retry the same way, and leave support with no
-  // link. Complete the operation against the existing subject instead.
-  const bound = await resolveByPubkey(env.DB, result.pubkey);
-  if (bound) {
-    const source = await findSubjectSourceCase(env.DB, bound.subjectRef);
-    // This attempt may complete the operation only while it is still pending
-    // and the subject still protects this pubkey: the subject active, with an
-    // active binding for it. Either can change after resolveByPubkey (another
-    // attempt of the same operation, a clear, an account deletion), and
-    // completing anyway would record the operation against a subject that no
-    // longer protects this account. One predicate, shared by both writes below.
-    // Columns are qualified because the case write nests this inside an
-    // UPDATE of age_review_cases, which has its own `state`.
-    const completable = `protected_minor_provisioning_operations.provisioning_operation_id = ?
-      AND protected_minor_provisioning_operations.kind = 'onboarding'
-      AND protected_minor_provisioning_operations.state = 'pending'
-      AND EXISTS (SELECT 1 FROM protected_minor_subjects s
-        JOIN protected_minor_account_bindings b ON b.subject_id = s.subject_id
-        WHERE s.subject_id = ? AND s.classification_state = 'active' AND b.pubkey = ? AND b.unbound_at IS NULL)`;
-    const completableBinds = [provisioningOperationId, bound.subjectRef, result.pubkey];
-    const writes: D1PreparedStatement[] = [];
-    // Only a case this dialog created is refreshed, and only when Keycast
-    // returned a link: its expiry now belongs to that link, and a ticket named
-    // here replaces the old one (none named keeps it). Never a case opened some
-    // other way (such as from a report), one for another pubkey (a
-    // replacement account inherits a subject whose source case is the old
-    // account's), or one retention has redacted.
-    //
-    // The case write runs FIRST and checks the same predicate the completion
-    // checks. A batch is one transaction and the case write changes nothing
-    // that predicate reads, so the two land together or not at all. Checking
-    // "complete" after the fact would instead pass when a different attempt
-    // completed the operation, letting this losing attempt rewrite the case
-    // and then report failure.
-    if (typeof result.claim_url === 'string' && source?.source_case_id && source.created_via === 'minor_onboarding') {
-      writes.push(env.DB.prepare(`UPDATE age_review_cases
-        SET claim_link_expires_at = ?, zendesk_ticket_id = COALESCE(?, zendesk_ticket_id)
-        WHERE id = ? AND pubkey = ? AND redacted_at IS NULL
-          AND EXISTS (SELECT 1 FROM protected_minor_provisioning_operations WHERE ${completable})`)
-        .bind(result.expires_at ?? null, body.zendesk_ticket_id ?? null, source.source_case_id, result.pubkey,
-          ...completableBinds));
-    }
-    writes.push(env.DB.prepare(`UPDATE protected_minor_provisioning_operations
-      SET subject_id = ?, state = 'complete', result_pubkey = ?, updated_at = ?
-      WHERE ${completable}`)
-      .bind(bound.subjectRef, result.pubkey, new Date().toISOString(), ...completableBinds));
-    try {
-      const results = await env.DB.batch(writes);
-      if (results[results.length - 1].meta.changes !== 1) {
-        // Nothing was written. If another attempt completed the operation, a
-        // retry answers from it (the completed-operation replay path above).
-        // If the subject stopped protecting this pubkey, the operation is
-        // still pending and a retry starts over from the lookup.
-        console.warn('[age-review] Resubmission could not complete against the existing protected record (operation completed elsewhere, or the subject or binding changed since the lookup); asked for a retry');
-        return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.', provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
-      }
-    } catch (err) {
-      console.error('[age-review] D1 write failed while returning a claim link for an existing record', err);
-      return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.', provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
-    }
-    console.log('[age-review] Resubmission reused the existing protected record');
-    return json({
-      success: true,
-      pubkey: result.pubkey,
-      claim_url: result.claim_url,
-      expires_at: result.expires_at,
-      account_state: result.account_state,
-      case_id: source?.source_case_id ?? undefined,
-      provisioning_operation_id: provisioningOperationId,
-    }, 200, corsHeaders);
-  }
-
   const caseId = crypto.randomUUID();
   const subjectId = crypto.randomUUID();
+  let completed = false;
   try {
     // Identity is known up front on this path -- the operator supplied it -- so
     // there is nothing to look up. Storing it keeps this case as identifiable as
@@ -1112,11 +1164,23 @@ export async function handleCreateMinorAccount(
     //    nothing and reads correctly wherever the block is rendered.
     const nip05 = env.NIP05_DOMAIN ? `_@${username}.${env.NIP05_DOMAIN}` : null;
     const now = new Date().toISOString();
-    await env.DB.batch([env.DB.prepare(`
+    // Every write is gated on the operation still being this request's to
+    // complete: pending, with this request's result recorded. The writes
+    // change nothing that condition reads and a batch is one transaction, so
+    // they land together or not at all, and a completion that changes nothing
+    // means nothing else landed either (PR #430).
+    const completable = `protected_minor_provisioning_operations.provisioning_operation_id = ?
+      AND protected_minor_provisioning_operations.kind = 'onboarding'
+      AND protected_minor_provisioning_operations.state = 'pending'
+      AND protected_minor_provisioning_operations.result_pubkey = ?`;
+    const whileCompletable = `WHERE EXISTS (SELECT 1 FROM protected_minor_provisioning_operations WHERE ${completable})`;
+    const completableBinds = [provisioningOperationId, result.pubkey];
+    const written = await env.DB.batch([env.DB.prepare(`
       INSERT INTO age_review_cases
       (id, pubkey, suspected_age_band, state, allowed_resolution, resolution_note, created_via, claim_link_url, claim_link_expires_at, zendesk_ticket_id,
        account_name, account_nip05, account_vine_username, identity_captured_at, closed_at, clear_resolution)
-      VALUES (?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?, 'approved_minor')
+      SELECT ?, ?, 'age_13_15', 'cleared', 'parent_video_or_email', 'Approved via parental consent (minor onboarding)', 'minor_onboarding', NULL, ?, ?, ?, ?, ?, ?, ?, 'approved_minor'
+      ${whileCompletable}
     `).bind(
       caseId,
       result.pubkey,
@@ -1127,16 +1191,18 @@ export async function handleCreateMinorAccount(
       username,
       now,
       now,
+      ...completableBinds,
     ), env.DB.prepare(`INSERT INTO protected_minor_subjects
-      (subject_id, source_case_id, classification_state, classified_at) VALUES (?, ?, 'active', ?)`)
-      .bind(subjectId, caseId, now),
+      (subject_id, source_case_id, classification_state, classified_at) SELECT ?, ?, 'active', ? ${whileCompletable}`)
+      .bind(subjectId, caseId, now, ...completableBinds),
     env.DB.prepare(`INSERT INTO protected_minor_account_bindings
-      (id, subject_id, pubkey, bound_at) VALUES (?, ?, ?, ?)`)
-      .bind(crypto.randomUUID(), subjectId, result.pubkey, now),
+      (id, subject_id, pubkey, bound_at) SELECT ?, ?, ?, ? ${whileCompletable}`)
+      .bind(crypto.randomUUID(), subjectId, result.pubkey, now, ...completableBinds),
     env.DB.prepare(`UPDATE protected_minor_provisioning_operations
       SET subject_id = ?, state = 'complete', result_pubkey = ?, updated_at = ?
-      WHERE provisioning_operation_id = ? AND state = 'pending'`)
-      .bind(subjectId, result.pubkey, now, provisioningOperationId)]);
+      WHERE ${completable}`)
+      .bind(subjectId, result.pubkey, now, ...completableBinds)]);
+    completed = written[written.length - 1].meta.changes === 1;
   } catch (err) {
     console.error('[age-review] D1 audit record failed for minor account', err);
     return json({
@@ -1146,6 +1212,12 @@ export async function handleCreateMinorAccount(
       case_id: caseId,
       provisioning_operation_id: provisioningOperationId,
     }, 500, corsHeaders);
+  }
+
+  if (!completed) {
+    console.warn('[age-review] Minor account registry write landed nothing: the operation was no longer this request\'s to complete');
+    return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.',
+      provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
   }
 
   console.log('[age-review] Minor account created and registry state persisted');

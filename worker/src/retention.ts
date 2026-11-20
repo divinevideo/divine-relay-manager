@@ -240,7 +240,11 @@ export async function runRetentionDisposal(env: RetentionEnv): Promise<Retention
         const requestDigest = await digestProvisioningFingerprint(
           tombstoneKey, operation.request_fingerprint, operation.kind === 'replacement' ? operation.subject_id : null,
         );
-        const resultDigest = operation.result_pubkey
+        // Only a completed operation's result is its own account. A refused
+        // onboarding operation ('failed') can hold the pubkey of the existing
+        // account it collided with, another family's, so its tombstone keeps
+        // no digest of it (PR #430).
+        const resultDigest = operation.state === 'complete' && operation.result_pubkey
           ? await digestProvisioningResult(tombstoneKey, operation.result_pubkey) : null;
         const batch = await db.batch([
           db.prepare(`INSERT INTO protected_minor_provisioning_tombstones

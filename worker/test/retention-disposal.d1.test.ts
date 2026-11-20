@@ -135,6 +135,26 @@ describe('protected-record retention on real D1', () => {
     expect(retry).toMatchObject({ operationsCompacted: 0, bindingsDeleted: 0, subjectsDeleted: 0 });
   });
 
+  // PR #430. A refused onboarding operation ('failed') may hold the pubkey of
+  // the existing account it collided with, which is another family's. Its
+  // tombstone must not keep even a digest of that: only a completed
+  // operation's result is this operation's own.
+  it('keeps no result digest for a terminal operation that did not complete', async () => {
+    const fingerprint = await fingerprintProvisioningRequest({ kind: 'onboarding', username: 'synthetic-user' });
+    await DB.prepare(`INSERT INTO protected_minor_provisioning_operations
+      (provisioning_operation_id, kind, request_fingerprint, state, result_pubkey, created_at, updated_at)
+      VALUES ('op-refused', 'onboarding', ?, 'failed', ?, ?, ?)`)
+      .bind(fingerprint, PUBKEY_B, OLD_30, OLD_30).run();
+
+    const result = await runRetentionDisposal({ DB, PROTECTED_MINOR_TOMBSTONE_KEY: KEY });
+
+    expect(result).toMatchObject({ operationsCompacted: 1 });
+    const tombstone = await DB.prepare(`SELECT result_digest, terminal_outcome
+      FROM protected_minor_provisioning_tombstones WHERE provisioning_operation_id = 'op-refused'`)
+      .first<{ result_digest: string | null; terminal_outcome: string }>();
+    expect(tombstone).toEqual({ result_digest: null, terminal_outcome: 'failed' });
+  });
+
   it('retains eligible operation detail when tombstone key material is unavailable', async () => {
     await DB.prepare(`INSERT INTO protected_minor_provisioning_operations
       (provisioning_operation_id, kind, request_fingerprint, state, created_at, updated_at)

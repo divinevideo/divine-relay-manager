@@ -324,6 +324,17 @@ export interface CreateMinorAccountResult {
   expires_at?: string;
   account_state?: 'unclaimed' | 'claimed';
   replayed?: boolean;
+  /**
+   * Keycast created this account just now. Its provisioning-operation path
+   * answers 201 with replayed:false only for a fresh create (claim_response
+   * derives the status from replayed); a replay, an existing unclaimed
+   * username, a claimed or a deleted account all come back 200 with
+   * replayed:true. Both signals must agree, so a contradiction or a missing
+   * field reads as "already existed": the caller refuses that on a new
+   * operation, the safe side when the alternative is handing out another
+   * account's claim link. PR #430.
+   */
+  created?: boolean;
   error?: string;
 }
 
@@ -366,6 +377,7 @@ export async function createMinorAccount(
       expires_at: typeof data.expires_at === 'string' ? data.expires_at : undefined,
       account_state: data.account_state === 'claimed' ? 'claimed' : data.account_state === 'unclaimed' ? 'unclaimed' : undefined,
       replayed: data.replayed === true,
+      created: res.status === 201 && data.replayed === false,
     };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
