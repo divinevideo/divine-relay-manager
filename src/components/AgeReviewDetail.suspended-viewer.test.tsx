@@ -102,6 +102,9 @@ function wrapper({ children }: { children: ReactNode }) {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // clearAllMocks keeps queued once-implementations: a test that fails before
+  // its click would hand its decision to the next test.
+  updateAgeReviewCase.mockReset();
   userStats.mockReturnValue(emptyStats());
   accountStatus.mockReturnValue({ data: { success: true, status: 'active' }, isError: false, isLoading: false, refetch: vi.fn() });
   reportedEvent.mockReturnValue({ data: undefined, isFetching: false, isError: false, refetch: vi.fn() });
