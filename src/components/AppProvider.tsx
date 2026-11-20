@@ -31,14 +31,30 @@ export function AppProvider(props: AppProviderProps) {
 
   const [config, setConfig] = useLocalStorage<AppConfig>(storageKey, defaultConfig, serializer);
 
-  // Fix stale localhost URLs saved from dev sessions
+  // Fix stale localhost URLs saved from dev sessions: a deployed build should
+  // never keep talking to a local stack. Only reset to a default that is set
+  // and not itself local. In a local build (defaults from VITE_WORKER_URL/
+  // VITE_RELAY_URL pointing at localhost) there is nothing to protect, and
+  // resetting one local address to another re-ran on every render, since
+  // setConfig changes identity each render: "Maximum update depth exceeded"
+  // (#433). With this guard the reset leaves a value the check no longer
+  // matches, so it cannot repeat.
+  //
+  // Both fields go in one setConfig call: useLocalStorage's setter builds from
+  // the render's state rather than the latest, so a second call in the same
+  // pass would overwrite the first.
   useEffect(() => {
-    if (config.apiUrl?.includes('localhost') || config.apiUrl?.startsWith('http://')) {
-      setConfig((prev) => ({ ...prev, apiUrl: defaultConfig.apiUrl }));
-    }
-    if (config.relayUrl?.includes('localhost') || config.relayUrl?.startsWith('ws://localhost')) {
-      setConfig((prev) => ({ ...prev, relayUrl: defaultConfig.relayUrl }));
-    }
+    const resetApi = isStaleApiUrl(config.apiUrl)
+      && Boolean(defaultConfig.apiUrl) && !isStaleApiUrl(defaultConfig.apiUrl);
+    const resetRelay = isStaleRelayUrl(config.relayUrl)
+      && Boolean(defaultConfig.relayUrl) && !isStaleRelayUrl(defaultConfig.relayUrl);
+    if (!resetApi && !resetRelay) return;
+
+    setConfig((prev) => ({
+      ...prev,
+      ...(resetApi && { apiUrl: defaultConfig.apiUrl }),
+      ...(resetRelay && { relayUrl: defaultConfig.relayUrl }),
+    }));
   }, [config.apiUrl, config.relayUrl, defaultConfig.apiUrl, defaultConfig.relayUrl, setConfig]);
 
   // Generic config updater with callback pattern
@@ -60,6 +76,14 @@ export function AppProvider(props: AppProviderProps) {
       {children}
     </AppContext.Provider>
   );
+}
+
+function isStaleApiUrl(url: string | undefined): boolean {
+  return !!url && (url.includes('localhost') || url.startsWith('http://'));
+}
+
+function isStaleRelayUrl(url: string | undefined): boolean {
+  return !!url && url.includes('localhost');
 }
 
 /**
