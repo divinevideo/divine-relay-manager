@@ -1,5 +1,6 @@
 // ABOUTME: Pins that age review gates the suspended-content viewer on the relay's suspended list
-// ABOUTME: (the source report detail uses and the worker serves from), not on keycast's status.
+// ABOUTME: (the source report detail uses and the worker serves from), not on keycast's status,
+// ABOUTME: and that a case decision re-reads that list instead of keeping a copy from before it (#437).
 
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
