@@ -1441,10 +1441,13 @@ describe('UserActions timed suspensions', () => {
       fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
     }
 
-    it('Change end date -> 12 hours sends the new length through asModerator(token)', async () => {
+    it.each([
+      ['a lowercase account ID', PUBKEY],
+      ['an uppercase account link', PUBKEY.toUpperCase()],
+    ])('Change end date sends the new length through asModerator(token) for %s', async (_source, pubkey) => {
       const endsAt = threeDaysOut();
       api.changeSuspensionEnd.mockResolvedValue({ endsAt, decisionRecorded: true });
-      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      renderWithProvider(<UserActions pubkey={pubkey} isSuspended />, client());
       changeTo('12', 'hours');
       await waitFor(() => expect(api.changeSuspensionEnd).toHaveBeenCalledWith(PUBKEY, { value: 12, unit: 'hours' }));
       expect(tokensFor(moderatorApi, 'changeSuspensionEnd')).toEqual([MOD_TOKEN]);

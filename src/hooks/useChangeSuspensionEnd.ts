@@ -32,10 +32,10 @@ export function useChangeSuspensionEnd(): UseMutationResult<
 
   return useMutation({
     // The login is taken at the click, so a sign-out mid-request can't change
-    // who the change is recorded as. Keep the target as shown in the UI:
-    // the route accepts only canonical hex and the relay matches exactly.
+    // who the change is recorded as. Account links can use uppercase hex;
+    // their timers and the worker's edit route use lowercase hex.
     mutationFn: ({ pubkey, duration }) =>
-      api.asModerator(getModeratorToken()).changeSuspensionEnd(pubkey, duration),
+      api.asModerator(getModeratorToken()).changeSuspensionEnd(pubkey.toLowerCase(), duration),
     onSuccess: ({ endsAt, decisionRecorded }) => {
       const changed = `End date changed to ${formatSuspensionEnd(endsAt)}`;
       // The end is saved either way; a missing decision row is the one thing
