@@ -443,7 +443,7 @@ export async function applyUnbanChoice(
   // review, because nobody chose it.
   if (choice === undefined && reactivated && db) {
     await recordSuspensionDecision(db, {
-      pubkey, action: SUSPENSION_ACTIONS.change, reason: `${reason} (no choice sent; the ban had paused the timer)`,
+      pubkey, action: SUSPENSION_ACTIONS.resumeTimer, reason: `${reason} (no choice sent; the ban had paused the timer)`,
       moderator, human: false,
     });
   }

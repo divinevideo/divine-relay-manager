@@ -4,6 +4,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
+import { isHumanHandling } from '../../shared/handling';
 import { DURATION_ERROR, formatSuspensionEnd, suspensionEndsAt } from '../../shared/suspension';
 import { emptyManagementState, managementFake, type ManagementState } from '../src/test-helpers/management-fake';
 
@@ -710,7 +711,7 @@ describe('unbanpubkey and a running suspension', () => {
     expect(fake.notifies).toHaveLength(0);
   });
 
-  it('the default resume of a cancelled_ban record writes a decision row (the timer restarted)', async () => {
+  it('records a default timer restart without counting it as human handling', async () => {
     suspendedSetup();
     await seedRecord('cancelled_ban', FUTURE_END);
     const res = await unban();
@@ -718,9 +719,10 @@ describe('unbanpubkey and a running suspension', () => {
     expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: FUTURE_END });
     const rows = await decisions();
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ action: 'change_suspension_end', moderator_pubkey: MOD });
+    expect(rows[0]).toMatchObject({ action: 'resume_suspension_timer', moderator_pubkey: MOD });
     expect(rows[0].reason).toBe(
       `Unbanned; suspension resumed until ${formatSuspensionEnd(FUTURE_END)} (no choice sent; the ban had paused the timer)`);
+    expect(isHumanHandling(rows[0])).toBe(false);
   });
 
   it('resume with an explicit choice writes a change_suspension_end decision naming the end', async () => {
