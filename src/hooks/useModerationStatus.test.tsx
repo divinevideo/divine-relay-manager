@@ -83,9 +83,9 @@ describe('useModerationStatus', () => {
     expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
   });
 
-  it('still auto-checks a post that goes missing after a check found it on the relay', async () => {
+  it('auto-checks a new miss after a live check overturns an earlier gone result', async () => {
     verifyPubkeyBanned.mockResolvedValue(false);
-    verifyEventDeleted.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValueOnce(true).mockResolvedValueOnce(false).mockResolvedValue(true);
     const { result, rerender } = renderHook(
       ({ notFound }: { notFound: boolean }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
       { wrapper, initialProps: { notFound: false } },
@@ -93,12 +93,15 @@ describe('useModerationStatus', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
 
     await act(async () => { result.current.recheck(); });
-    await waitFor(() => expect(result.current.checkedAt).not.toBeNull());
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
     expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
 
-    verifyEventDeleted.mockResolvedValue(true);
+    await act(async () => { result.current.recheck(); });
+    await waitFor(() => expect(result.current.isEventGone).toBe(false));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(2);
+
     rerender({ notFound: true });
-    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(result.current.isEventGone).toBe(true));
   });
 

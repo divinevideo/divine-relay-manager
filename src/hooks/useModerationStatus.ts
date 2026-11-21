@@ -328,14 +328,6 @@ export function useModerationStatus(
       // Defensive: the gap is only a few microtasks wide, and no test has made
       // the generation change inside it.
       if (!isCurrent()) return;
-      // A check that found the post gone has answered what the auto-check
-      // below asks once the post reads as not found, which the report pane's
-      // re-read of it does right after an account action (while the relay
-      // withholds the post) or when the restore window closes. Count it as
-      // that check, or the same live check runs again as soon as this one
-      // finishes. One that found the post still there leaves the auto-check
-      // to run if the post goes missing later.
-      if (results.eventGone === true) autoCheckedRef.current = `${eventId || ''}:${pubkey || ''}`;
       setWsResult({
         userBanned: results.userBanned,
         eventGone: results.eventGone,
@@ -381,8 +373,9 @@ export function useModerationStatus(
     if (autoCheckedRef.current === checkKey || banListsLoading || wsResult.isChecking) return;
 
     const shouldAutoCheck =
-      // Event not found via normal queries: run WebSocket verification
-      (eventNotFound && eventId) ||
+      // A live check that still says the post is gone already verified this
+      // missing read. If a later check finds the post, a new miss can be checked.
+      (eventNotFound && eventId && wsResult.eventGone !== true) ||
       // User report (no event): check ban status
       (pubkey && !eventId);
 
@@ -390,7 +383,7 @@ export function useModerationStatus(
       autoCheckedRef.current = checkKey;
       runCheck({ afterAction: false });
     }
-  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
+  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.eventGone, wsResult.isChecking, runCheck]);
 
 
   // A later successful list read that contains the pubkey is newer than a
