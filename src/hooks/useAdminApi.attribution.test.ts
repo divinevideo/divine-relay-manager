@@ -225,6 +225,22 @@ describe('timed suspension arguments reach the request', () => {
     }));
   });
 
+  // Ask again if it changed: the timer version the dialog showed must reach the body, or the
+  // worker cannot refuse a choice made against an older read.
+  it.each([[7, 7], [null, null]])('unbanPubkey forwards the shown timer version %j', async (version, sent) => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).unbanPubkey(PK, 'open_ended', version);
+    expect(sentBodies()[0]).toBe(JSON.stringify({
+      method: 'unbanpubkey', params: [PK], suspensionChoice: 'open_ended', suspensionVersion: sent,
+    }));
+  });
+
+  it('unbanPubkey with no shown version sends no suspensionVersion key', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).unbanPubkey(PK, 'resume');
+    expect(JSON.parse(sentBodies()[0])).not.toHaveProperty('suspensionVersion');
+  });
+
   it('unbanPubkey with no choice sends no suspensionChoice key', async () => {
     const { result } = renderHook(() => useAdminApi());
     await result.current.asModerator(TOKEN).unbanPubkey(PK);

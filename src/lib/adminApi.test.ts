@@ -20,6 +20,7 @@ import {
   allowEvent,
   banPubkey,
   unbanPubkey,
+  isSuspensionChanged,
   listBannedPubkeys,
   listBannedEvents,
   listSuspendedPubkeys,
@@ -905,7 +906,7 @@ describe('adminApi', () => {
       expect(await unbanPubkey(API_URL, 'pk')).toEqual({ suspension: { state: 'none' } });
     });
 
-    it.each(['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed'])(
+    it.each(['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed', 'changed'])(
       'unbanPubkey passes state %s through', async (state) => {
         answer({ result: null, suspension: { state, endsAt: state === 'resumed' ? '2026-11-21T00:00:00.000Z' : null } });
         const out = await unbanPubkey(API_URL, 'pk', { suspensionChoice: 'resume' });
@@ -942,6 +943,18 @@ describe('adminApi', () => {
       answer({ result: null, suspensionChoiceSkipped: 'non_canonical_pubkey' });
       expect(await unbanPubkey(API_URL, 'PK', { suspensionChoice: 'end_now' }))
         .toEqual({ suspension: { state: 'none' }, choiceSkipped: 'non_canonical_pubkey' });
+    });
+
+    it('unbanPubkey keeps the code of a suspension_changed refusal, which isSuspensionChanged recognises', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 409, statusText: 'Conflict',
+        json: async () => ({ success: false, error: 'changed', code: 'suspension_changed' }),
+      });
+      const error = await unbanPubkey(API_URL, 'pk', { suspensionChoice: 'resume', suspensionVersion: 2 }).catch(e => e);
+      expect(error).toMatchObject({ code: 'suspension_changed', statusCode: 409 });
+      expect(isSuspensionChanged(error)).toBe(true);
+      expect(isSuspensionChanged(new ApiError('x', 409, 'Conflict', 'suspension_ending'))).toBe(false);
+      expect(isSuspensionChanged(new Error('suspension_changed'))).toBe(false);
     });
 
     it('unbanPubkey keeps the code of a suspension_ending refusal', async () => {

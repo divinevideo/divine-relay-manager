@@ -85,6 +85,13 @@ A "Change end date" action wherever a suspended account is shown with its suspen
 - An end time already in the past means "lift now", through the normal lift path.
 - It writes a decision row and sends the "new end time" message.
 
+### Unban against a changed timer ("ask again if it changed")
+(Matt, 2026-11-21, from PR #444 review.) The unban prompt's options are built from a timer read that can be up to 30 seconds old. A choice is only applied to the timer the moderator saw.
+- The timers list carries each record's version. The prompt sends back the version it showed, or `null` when it showed no timer. It waits for the timers' first read before allowing Confirm. If that read failed, nothing was shown to compare against, so it sends no version and keeps decision 13's unknown-end default (resume as it is).
+- If the record has changed since, the unban is refused before the relay is touched: the account stays banned, and the timer, Keycast and the person's messages are untouched. The prompt re-reads the timers, says the suspension changed, and asks again against the current end. Any version change counts, including the scheduler's own bookkeeping.
+- A change landing during the relay unban itself leaves the unban standing and applies no choice. The timer is left as it was and Keycast stays banned, which is the stricter side. For End now, a change landing during the relay unsuspend, or a record that can't be checked afterwards, sends no restored message, leaves Keycast as it is, and alerts for a hand check.
+- Callers that send no version (moderation-service `allow_pubkey`, Coop) keep decision 13 unchanged.
+
 ### The automatic lift
 On each scheduler tick, for each record whose end time has passed:
 1. **Ban check first** (a ban wins). Check the relay ban list and Keycast's status. If banned, mark the record cancelled by ban and do nothing else.

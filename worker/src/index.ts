@@ -84,6 +84,7 @@ import {
   replaceSuspensionRecord,
   restoreAfterManualUnsuspend,
   runTimedSuspensionTick,
+  suspensionAsShown,
   type AccountNoticeAction,
 } from './timed-suspensions';
 import { liveSuspensionIo } from './timed-suspensions-io';
@@ -1717,6 +1718,9 @@ type RelayRpcBody = {
   // unbanpubkey only: what happens to a running suspension (resume | end_now | open_ended).
   // Absent means resume.
   suspensionChoice?: unknown;
+  // unbanpubkey only: the timer version the unban dialog showed, or null when it showed no
+  // timer. Absent (moderation-service allow_pubkey, Coop, older UIs): not checked.
+  suspensionVersion?: unknown;
 };
 
 type RelayRpcResult = Nip86RpcResult & Partial<BanPubkeyResult>;
@@ -1890,6 +1894,35 @@ async function runRelayRpc(
     suspensionChoice = body.suspensionChoice;
   }
 
+  // Ask again if it changed: a choice made against a timer that has moved since the dialog
+  // read it (another moderator's end date, say, behind a cached read) is refused here, before
+  // the relay is touched, so the account stays banned and the moderator decides again against
+  // the current end. applyUnbanChoice re-checks for a change landing during the relay call.
+  let suspensionVersion: number | null | undefined;
+  if (body.method === 'unbanpubkey' && body.suspensionVersion !== undefined) {
+    const v = body.suspensionVersion;
+    if (v !== null && !(typeof v === 'number' && Number.isInteger(v) && v >= 0)) {
+      return jsonResponse({ success: false, error: 'Invalid suspension version', code: 'invalid_suspension_version' }, 400, corsHeaders);
+    }
+    suspensionVersion = v;
+    // A non-canonical target skips the choice altogether (F8), so it has nothing to check.
+    if (env.DB && /^[0-9a-f]{64}$/.test(target)) {
+      let shown: boolean;
+      try {
+        shown = suspensionAsShown(await getSuspensionRecord(env.DB, target), v);
+      } catch (err) {
+        console.error('[handleRelayRpc] suspension record read failed; unban refused:', err);
+        return jsonResponse({ success: false, error: 'Could not check the suspension. Try again.', code: 'status_unavailable' }, 503, corsHeaders);
+      }
+      if (!shown) {
+        return jsonResponse({
+          success: false, code: 'suspension_changed',
+          error: 'The suspension changed after this was opened. Check the end date and confirm again.',
+        }, 409, corsHeaders);
+      }
+    }
+  }
+
   // Suspend for a set time. The duration is checked before the relay is touched, so a bad
   // value suspends nobody (Review Focus 5). duration null is an explicit "no end date".
   const suspensionField = body.method === 'suspendpubkey' && body.suspension != null ? body.suspension : undefined;
@@ -2005,7 +2038,7 @@ async function runRelayRpc(
           break;
         }
         const applied = await applyUnbanChoice(env.DB, io, pubkey, suspensionChoice, {
-          moderator, now: new Date(), environment: env.ENVIRONMENT,
+          moderator, now: new Date(), environment: env.ENVIRONMENT, shownVersion: suspensionVersion,
         });
         if (ctx) {
           for (const p of applied.waitUntil) ctx.waitUntil(p);

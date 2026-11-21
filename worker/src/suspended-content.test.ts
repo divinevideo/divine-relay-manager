@@ -194,9 +194,19 @@ describe('readSuspensionEntry', () => {
     answer({ result: [{ pubkey: OTHER }] });
     expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: false });
   });
-  it('matches an uppercase listed value', async () => {
+  // Exact, like the relay: funnelcake enforces byte-exact (FixedString), so a legacy
+  // non-lowercase row suspends nobody and must not read as this account's suspension.
+  it('does not match a listed value in another case', async () => {
     answer({ result: [{ pubkey: AUTHOR.toUpperCase(), reason: 'r' }] });
-    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: true, reason: 'r' });
+    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: false });
+  });
+  it('does not fold the pubkey it is asked about', async () => {
+    answer({ result: [{ pubkey: AUTHOR, reason: 'r' }] });
+    expect(await readSuspensionEntry(AUTHOR.toUpperCase(), env)).toEqual({ suspended: false });
+  });
+  it('a legacy row in another case does not hide the enforcing row and its reason', async () => {
+    answer({ result: [{ pubkey: AUTHOR.toUpperCase(), reason: 'legacy' }, { pubkey: AUTHOR, reason: 'age_review' }] });
+    expect(await readSuspensionEntry(AUTHOR, env)).toEqual({ suspended: true, reason: 'age_review' });
   });
   it.each([
     ['a failed read', { error: 'boom' }],

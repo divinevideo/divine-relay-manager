@@ -14,7 +14,7 @@ import { isTerminal, useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { useBulkJobNotes } from '@/hooks/useBulkJobNotes';
 import { countIssues } from '../../shared/bulk-moderation';
 import { formatSuspensionEnd, type SuspensionDuration, type UnbanSuspensionChoice } from '../../shared/suspension';
-import { ApiError, type SuspendOutcome } from '@/lib/adminApi';
+import { ApiError, isSuspensionChanged, type SuspendOutcome } from '@/lib/adminApi';
 import { TIMED_SUSPENSIONS_KEY, useTimedSuspension } from '@/hooks/useTimedSuspensions';
 import { useChangeSuspensionEnd } from '@/hooks/useChangeSuspensionEnd';
 import { ConfirmDialog } from './ConfirmDialog';
@@ -274,11 +274,15 @@ export function UserActions({
   });
 
   // `choice` is what happens to a timed suspension; with none the body carries
-  // no choice and the worker keeps its default (resume).
+  // no choice and the worker keeps its default (resume). `version` is the timer
+  // version the prompt showed, so the worker can refuse a choice made against an
+  // older read (null: no timer shown; undefined: nothing to compare).
   const unbanUserMutation = useMutation({
-    mutationFn: async ({ target, choice }: { target: string; choice?: UnbanSuspensionChoice }) => {
+    mutationFn: async ({ target, choice, version }: { target: string; choice?: UnbanSuspensionChoice; version?: number | null }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      const outcome = choice === undefined ? await act.unbanPubkey(target) : await act.unbanPubkey(target, choice);
+      const outcome = choice === undefined ? await act.unbanPubkey(target)
+        : version === undefined ? await act.unbanPubkey(target, choice)
+          : await act.unbanPubkey(target, choice, version);
       // A ban usually purged the posts, so no restore window: reset only.
       void resetAccountContentReads(queryClient, target);
       const outcomeToast = unbanOutcomeToast(outcome);
@@ -299,8 +303,16 @@ export function UserActions({
       toast(outcomeToast);
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
     },
-    onError: (error: Error, { target }) => {
+    onError: async (error: Error, { target }) => {
       if (redirectIfGuarded(error, target)) return;
+      // The timer moved since the prompt read it and nothing was done: read it again, and
+      // the prompt (still open) says why and asks against the current end.
+      // Awaited: the mutation stays pending (Confirm disabled) until the re-read settles. A
+      // failed re-read shows the end as unavailable, and the next confirm sends no version.
+      if (isSuspensionChanged(error)) {
+        await queryClient.invalidateQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
+        return;
+      }
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
   });
@@ -462,8 +474,9 @@ export function UserActions({
             record={timer.refreshFailed ? undefined : timer.record}
             suspensionConfirmed={isSuspended === true}
             isPending={unbanUserMutation.isPending}
+            timersLoading={timer.isLoading}
             // The account is taken at the click, like every action here.
-            onConfirm={async (choice) => { await unbanUserMutation.mutateAsync({ target: pubkey, choice }); }}
+            onConfirm={async (choice, version) => { await unbanUserMutation.mutateAsync({ target: pubkey, choice, version }); }}
           />
         </>
       ) : (

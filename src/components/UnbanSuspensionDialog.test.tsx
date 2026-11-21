@@ -3,6 +3,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { UnbanSuspensionDialog } from './UnbanSuspensionDialog';
+import { ApiError } from '@/lib/adminApi';
 import { formatSuspensionEnd, type TimedSuspensionView } from '../../shared/suspension';
 
 type Props = Parameters<typeof UnbanSuspensionDialog>[0];
@@ -11,9 +12,11 @@ type Props = Parameters<typeof UnbanSuspensionDialog>[0];
 const NOW = new Date('2026-11-20T12:00:00.000Z');
 const FUTURE = '2026-11-23T12:00:00.000Z';
 const PAST = '2026-11-19T12:00:00.000Z';
-const record = (endsAt: string | null, status: TimedSuspensionView['status'] = 'cancelled_ban'): TimedSuspensionView => ({
-  pubkey: 'a'.repeat(64), endsAt, status, setBy: null, setAt: '2026-11-18T00:00:00.000Z', changedAt: null,
+const VERSION = 3;
+const record = (endsAt: string | null, status: TimedSuspensionView['status'] = 'cancelled_ban', version = VERSION): TimedSuspensionView => ({
+  pubkey: 'a'.repeat(64), endsAt, status, setBy: null, setAt: '2026-11-18T00:00:00.000Z', changedAt: null, version,
 });
+const CHANGED_NOTICE = 'The suspension changed after this was opened. Check the options below and confirm again.';
 
 function renderDialog(over: Partial<Props> = {}) {
   const props: Props = {
@@ -22,6 +25,7 @@ function renderDialog(over: Partial<Props> = {}) {
     record: null,
     suspensionConfirmed: true,
     isPending: false,
+    timersLoading: false,
     now: NOW,
     onConfirm: vi.fn(),
     ...over,
@@ -106,18 +110,20 @@ describe('UnbanSuspensionDialog', () => {
     expect(screen.queryByText('Suspended. End date unavailable')).not.toBeInTheDocument();
   });
 
+  // The timer version shown goes with every choice (ask again if it changed): null when no
+  // timer was shown, and none when the timers are unknown, as nothing was shown to compare.
   it.each([
-    [record(FUTURE), undefined, 'resume'],
-    [record(FUTURE), 'End the suspension now', 'end_now'],
-    [record(FUTURE), 'Keep suspended with no end date', 'open_ended'],
-    [null, undefined, 'open_ended'],
-    [null, 'End the suspension now', 'end_now'],
-    [undefined, undefined, 'resume'],
-  ] as const)('confirm sends the selected choice (%#)', async (rec, pick, choice) => {
+    [record(FUTURE), undefined, 'resume', VERSION],
+    [record(FUTURE), 'End the suspension now', 'end_now', VERSION],
+    [record(FUTURE), 'Keep suspended with no end date', 'open_ended', VERSION],
+    [null, undefined, 'open_ended', null],
+    [null, 'End the suspension now', 'end_now', null],
+    [undefined, undefined, 'resume', undefined],
+  ] as const)('confirm sends the selected choice and the shown version (%#)', async (rec, pick, choice, version) => {
     const { props } = renderDialog({ record: rec });
     if (pick) fireEvent.click(screen.getByLabelText(pick));
     fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
-    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith(choice));
+    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith(choice, version));
     expect(props.onConfirm).toHaveBeenCalledTimes(1);
     await waitFor(() => expect(props.onOpenChange).toHaveBeenCalledWith(false));
   });
@@ -130,7 +136,7 @@ describe('UnbanSuspensionDialog', () => {
     rerender(<UnbanSuspensionDialog {...props} record={null} />);
     expect(checkedLabel()).toBe('Keep suspended with no end date');
     fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
-    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('open_ended'));
+    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('open_ended', null));
   });
 
   // A pick the new options no longer offer would check nothing on screen and
@@ -143,7 +149,7 @@ describe('UnbanSuspensionDialog', () => {
     rerender(<UnbanSuspensionDialog {...props} record={null} />);
     expect(checkedLabel()).toBe('Keep suspended with no end date');
     fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
-    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('open_ended'));
+    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('open_ended', null));
   });
 
   it('keeps a choice the moderator made when the record arrives and still offers it', async () => {
@@ -152,7 +158,14 @@ describe('UnbanSuspensionDialog', () => {
     rerender(<UnbanSuspensionDialog {...props} record={record(FUTURE)} />);
     expect(checkedLabel()).toBe('End the suspension now');
     fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
-    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('end_now'));
+    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('end_now', VERSION));
+  });
+
+  // A worker from before the version was listed sends none, so there is nothing to compare.
+  it('sends no version for a record without one', async () => {
+    const { props } = renderDialog({ record: { ...record(FUTURE), version: undefined } });
+    fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
+    await waitFor(() => expect(props.onConfirm).toHaveBeenCalledWith('resume', undefined));
   });
 
   it('stays open when the unban fails, so the moderator can retry', async () => {
@@ -160,11 +173,53 @@ describe('UnbanSuspensionDialog', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
     await waitFor(() => expect(props.onConfirm).toHaveBeenCalled());
     expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+    expect(screen.queryByText(CHANGED_NOTICE)).not.toBeInTheDocument();
+  });
+
+  // The review's case: a cached read showed no timer while another moderator set an end.
+  // The worker refuses; the prompt stays open, says so, and shows the current end once the
+  // caller's refreshed timer arrives, so the moderator confirms again against it.
+  it('after a suspension_changed refusal, stays open, says why, and confirms again against the current timer', async () => {
+    const onConfirm = vi.fn()
+      .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
+      .mockResolvedValueOnce(undefined);
+    const { props, rerender } = renderDialog({ record: null, onConfirm });
+    fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
+    expect(await screen.findByText(CHANGED_NOTICE)).toBeInTheDocument();
+    expect(onConfirm).toHaveBeenLastCalledWith('open_ended', null);
+    expect(props.onOpenChange).not.toHaveBeenCalledWith(false);
+
+    rerender(<UnbanSuspensionDialog {...props} record={record(FUTURE, 'cancelled_ban', 4)} />);
+    expect(checkedLabel()).toBe(`Resume until ${formatSuspensionEnd(FUTURE)}`);
+    expect(screen.getByText(CHANGED_NOTICE)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenLastCalledWith('resume', 4));
+    await waitFor(() => expect(props.onOpenChange).toHaveBeenCalledWith(false));
   });
 
   it('shows the pending label and blocks a second confirm while the unban runs', () => {
     const { props } = renderDialog({ isPending: true });
     const confirm = screen.getByRole('button', { name: 'Unbanning...' });
+    expect(confirm).toBeDisabled();
+    fireEvent.click(confirm);
+    expect(props.onConfirm).not.toHaveBeenCalled();
+  });
+
+  // Pending also covers the timer re-read after a suspension_changed refusal, which can take
+  // a retry: the moderator can always close the prompt, as Escape already allows.
+  it('keeps Cancel enabled while pending', () => {
+    const { props } = renderDialog({ isPending: true });
+    const cancel = screen.getByRole('button', { name: 'Cancel' });
+    expect(cancel).toBeEnabled();
+    fireEvent.click(cancel);
+    expect(props.onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  // A confirm before the timers' first read answers would carry no version and skip the
+  // check, so it waits. A failed read is not loading: covered by the unknown-end cases above.
+  it('blocks confirm while the timers are first loading', () => {
+    const { props } = renderDialog({ record: undefined, timersLoading: true });
+    const confirm = screen.getByRole('button', { name: 'Unban' });
     expect(confirm).toBeDisabled();
     fireEvent.click(confirm);
     expect(props.onConfirm).not.toHaveBeenCalled();

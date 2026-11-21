@@ -495,6 +495,17 @@ describe('failures and retries', () => {
     ]);
   });
 
+  it('the Keycast retry takes rows that last tried at the same time in pubkey order', async () => {
+    // Seeded out of pubkey order, so only the pubkey tiebreak puts PK first.
+    await seed(PK2, { status: 'keycast_pending', last_attempt_at: at(-5).toISOString() });
+    await seed(PK, { status: 'keycast_pending', last_attempt_at: at(-5).toISOString() });
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(env(), io, NOW);
+
+    expect(io.keycastActivate.mock.calls.map(c => c[0])).toEqual([PK, PK2]);
+  });
+
   it('the Keycast retry does not activate a newly banned account', async () => {
     await seed(PK, { status: 'keycast_pending', attempts: 1 });
     const io = fakeIo({ readBan: async () => true });
@@ -613,6 +624,41 @@ describe('re-check immediately before restoring', () => {
       expect(io.notify).not.toHaveBeenCalled();
       expect((await record())!.status).toBe('lifted');
     });
+    // The age-review flow writes its case row, then suspends on the relay and in Keycast, and
+    // never touches the timer record, so the version re-check cannot see a case that opens
+    // after the tick's first age-review check. Restoring then would undo age review's Keycast
+    // suspend and tell a possible minor they are restored.
+    it.each([
+      ['a case opening', true as const, 'an age-review case opened'],
+      ['a case check with no answer', undefined, 'the age-review case check failed'],
+      ['a case check that throws', async () => { throw new Error('d1 down'); }, 'the age-review case check failed'],
+    ])('%s in the window, after the relay lift: no message, no Keycast activate, an alert to check the relay', async (_label, second, said) => {
+      await seed(PK);
+      const io = fakeIo({ hasOpenAgeReviewCase: inTurn<boolean>(false, second as never, true) });
+
+      await runTimedSuspensionTick(env(), io, NOW);
+
+      expect(io.relayUnsuspend).toHaveBeenCalledTimes(1);
+      expect(io.hasOpenAgeReviewCase).toHaveBeenCalledTimes(2);
+      expect(io.notify).not.toHaveBeenCalled();
+      expect(io.keycastActivate).not.toHaveBeenCalled();
+      const row = (await record())!;
+      expect(row).toMatchObject({ status: 'keycast_pending', attempts: 1 });
+      expect(row.last_error).toMatch(/^age-review (case open|check failed) before the restore/);
+      expect(io.alert).toHaveBeenCalledTimes(1);
+      const lines = (io.alert.mock.calls[0][0] as string).split('\n');
+      expect(lines[0]).toBe(':rotating_light: [test] 1 timed suspension(s) not lifting');
+      expect(lines[1].startsWith(`• ${PK}: keycast step, the relay lift landed but ${said} before the restore`)).toBe(true);
+      expect(lines[1]).toContain('restored message was not sent');
+      expect(lines[1]).toContain('Keycast was left as it is');
+      expect(lines[1]).toContain('relay suspension');
+
+      // While the case stays open, Phase 2 holds: still no Keycast activate and no message.
+      await runTimedSuspensionTick(env(), io, at(5));
+      expect(io.keycastActivate).not.toHaveBeenCalled();
+      expect(io.notify).not.toHaveBeenCalled();
+      expect((await record())).toMatchObject({ status: 'keycast_pending', attempts: 1 });
+    });
   });
 
   describe('Phase 2, before Keycast activate', () => {
@@ -635,6 +681,19 @@ describe('re-check immediately before restoring', () => {
 
       expect(io.keycastActivate).not.toHaveBeenCalled();
       expect((await record())).toMatchObject({ status: 'active', ends_at: '2026-12-01T00:00:00.000Z', attempts: 0 });
+    });
+
+    it('an age-review case opening in the window: no Keycast activate, an attempt counted, no hand-send alert', async () => {
+      await seed(PK, { status: 'keycast_pending', attempts: 1 });
+      const io = fakeIo({ hasOpenAgeReviewCase: inTurn<boolean>(false, true) });
+
+      await runTimedSuspensionTick(env(), io, NOW);
+
+      expect(io.hasOpenAgeReviewCase).toHaveBeenCalledTimes(2);
+      expect(io.keycastActivate).not.toHaveBeenCalled();
+      expect((await record())).toMatchObject({ status: 'keycast_pending', attempts: 2 });
+      // Phase 2 never sends the message and the relay lift is long done, so nothing to hand over.
+      expect(io.alert).not.toHaveBeenCalled();
     });
 
     it('an unreadable ban re-read: no Keycast activate, an attempt counted, no hand-send alert', async () => {

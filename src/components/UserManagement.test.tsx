@@ -575,8 +575,8 @@ describe('UserManagement timed suspensions', () => {
   // A minute-aligned end three days from now. A real-clock literal would turn
   // into "End time passed" once that date went by (F2).
   const threeDaysOut = () => new Date(Math.ceil((Date.now() + 3 * 86_400_000) / 60_000) * 60_000).toISOString();
-  const timer = (pubkey: string, endsAt: string | null, status: 'active' | 'cancelled_ban' = 'active') => ({
-    pubkey, endsAt, status, setBy: null, setAt: '2026-11-20T00:00:00.000Z', changedAt: null,
+  const timer = (pubkey: string, endsAt: string | null, status: 'active' | 'cancelled_ban' = 'active', version = 5) => ({
+    pubkey, endsAt, status, setBy: null, setAt: '2026-11-20T00:00:00.000Z', changedAt: null, version,
   });
   // The timers read sets its own retry (1); keep its delay out of the tests.
   const client = () => new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false } } });
@@ -804,7 +804,8 @@ describe('UserManagement timed suspensions', () => {
       await within(dialog).findByLabelText(/^Resume until /);
       fireEvent.click(within(dialog).getByLabelText('Keep suspended with no end date'));
       confirmUnban();
-      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended'));
+      // With the version of the timer the prompt showed, so a stale choice is refused.
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', 5));
       expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
       await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unbanned. Still suspended, no end date' }));
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
@@ -959,6 +960,66 @@ describe('UserManagement timed suspensions', () => {
         variant: 'destructive',
       }));
       expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' }));
+    });
+
+    // Ask again if it changed: the worker refused a choice made against an older timer.
+    it('a suspension_changed refusal re-reads the timers and asks again against the current end', async () => {
+      const endsAt = threeDaysOut();
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValueOnce([]).mockResolvedValue([timer(PUBKEY, endsAt, 'cancelled_ban', 6)]);
+      api.unbanPubkey
+        .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
+        .mockResolvedValue({ suspension: { state: 'resumed', endsAt, decisionRecorded: true } });
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      const dialog = await screen.findByRole('dialog');
+      expect(await within(dialog).findByLabelText('Keep suspended with no end date')).toBeChecked();
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+
+      expect(await within(dialog).findByText('The suspension changed after this was opened. Check the options below and confirm again.')).toBeInTheDocument();
+      expect(await within(dialog).findByLabelText(/^Resume until /)).toBeChecked();
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' }));
+
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenLastCalledWith(PUBKEY, 'resume', 6));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('blocks confirm while the timers are first loading', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockReturnValue(new Promise(() => {}));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      const dialog = await screen.findByRole('dialog');
+      await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalled());
+      expect(within(dialog).getByRole('button', { name: 'Unban' })).toBeDisabled();
+    });
+
+    it('keeps confirm disabled until the timers re-read after a suspension_changed refusal, and a failed re-read shows the end as unavailable', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      let fail!: (e: Error) => void;
+      api.listTimedSuspensions.mockResolvedValueOnce([])
+        .mockReturnValueOnce(new Promise((_r, rej) => { fail = rej; }))
+        .mockRejectedValue(new Error('worker down'));
+      api.unbanPubkey
+        .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
+        .mockResolvedValue({ suspension: { state: 'resumed', endsAt: null, decisionRecorded: true } });
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      const dialog = await screen.findByRole('dialog');
+      expect(await within(dialog).findByLabelText('Keep suspended with no end date')).toBeChecked();
+      confirmUnban();
+      await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
+      expect(within(dialog).getByRole('button', { name: 'Unbanning...' })).toBeDisabled();
+      await act(async () => { fail(new Error('worker down')); });
+
+      expect(await within(dialog).findByText('Suspended. End date unavailable')).toBeInTheDocument();
+      expect(within(dialog).getByLabelText('Resume the suspension as it is')).toBeChecked();
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' }));
+      await waitFor(() => expect(within(dialog).getByRole('button', { name: 'Unban' })).toBeEnabled());
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenLastCalledWith(PUBKEY, 'resume'));
     });
 
     it('stays open after a failed unban, with the failure toast', async () => {

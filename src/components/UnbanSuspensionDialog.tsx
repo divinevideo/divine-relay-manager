@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog';
 import { Label } from '@/components/ui/label';
 import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
+import { isSuspensionChanged } from '@/lib/adminApi';
 import { SUSPENSION_END_UNAVAILABLE } from '@/lib/suspensionEndText';
 import {
   formatSuspensionEnd,
@@ -31,10 +32,24 @@ interface UnbanSuspensionDialogProps {
    */
   suspensionConfirmed: boolean;
   isPending: boolean;
+  /**
+   * The timers' first read is still running. Confirm waits for it, so a choice is never
+   * sent without the version of what it was made against. A read that failed is not
+   * loading: the prompt then shows the end as unavailable and sends no version (F5).
+   */
+  timersLoading: boolean;
   now?: Date;
-  /** The dialog closes once this resolves, and stays open if it throws. */
-  onConfirm(choice: UnbanSuspensionChoice): void | Promise<void>;
+  /**
+   * The dialog closes once this resolves, and stays open if it throws. `shownVersion` is
+   * the version of the timer the options were built from: null when no timer was shown,
+   * undefined when the timers are unknown (nothing was shown to compare against). The
+   * worker refuses the unban when the timer has moved since (`suspension_changed`); the
+   * caller then refreshes the timers and this asks again against the current one.
+   */
+  onConfirm(choice: UnbanSuspensionChoice, shownVersion: number | null | undefined): void | Promise<void>;
 }
+
+const CHANGED_NOTICE = 'The suspension changed after this was opened. Check the options below and confirm again.';
 
 interface Option { value: UnbanSuspensionChoice; label: string }
 
@@ -71,22 +86,30 @@ export function UnbanSuspensionDialog(p: UnbanSuspensionDialogProps) {
   );
 }
 
-function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, now, onConfirm }: UnbanSuspensionDialogProps) {
+function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, timersLoading, now, onConfirm }: UnbanSuspensionDialogProps) {
   const ids = useId();
   // null until the moderator picks one. The record can arrive while the
   // dialog is open and change the options, so the default is worked out at
   // each render, and a pick the new options no longer offer falls back to it.
   const [picked, setPicked] = useState<UnbanSuspensionChoice | null>(null);
+  // Set once the worker refused a choice made against an older timer. It stays for the rest
+  // of this opening, so the moderator knows why the options may now read differently.
+  const [changed, setChanged] = useState(false);
   const { options, endUnknown } = unbanOptions(record, now ?? new Date());
   const selected = options.find((o) => o.value === picked)?.value ?? options[0].value;
+  // A worker that predates listing the version sends none (undefined): nothing to compare.
+  const shownVersion = record === undefined ? undefined : record === null ? null : record.version;
 
-  // Confirm is disabled while pending, so a second click cannot send twice.
+  // Confirm is disabled while pending, so a second click cannot send twice. After a
+  // suspension_changed refusal the caller re-reads the timers before the mutation settles,
+  // so Confirm stays disabled until the current timer (or the failed read) is on screen.
   const confirm = async () => {
     try {
-      await onConfirm(selected);
+      await onConfirm(selected, shownVersion);
       onOpenChange(false);
-    } catch {
+    } catch (error) {
       // The caller has said what went wrong; stay open so the moderator can retry.
+      if (isSuspensionChanged(error)) setChanged(true);
     }
   };
 
@@ -100,6 +123,8 @@ function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, now, 
             : 'This account may also be suspended; its suspension status is not confirmed. Choose what happens to any suspension when the ban is lifted.'}
         </DialogDescription>
       </DialogHeader>
+
+      {changed && <p role="status" className="text-sm font-medium">{CHANGED_NOTICE}</p>}
 
       {/* Unconfirmed, the description says the account may be suspended, so this line
           must not open with "Suspended." */}
@@ -124,8 +149,10 @@ function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, now, 
       </RadioGroup>
 
       <DialogFooter>
-        <Button variant="outline" onClick={() => onOpenChange(false)} disabled={isPending}>Cancel</Button>
-        <Button onClick={() => void confirm()} disabled={isPending}>{isPending ? 'Unbanning...' : 'Unban'}</Button>
+        {/* Always enabled, like Escape: pending also covers the timer re-read after a
+            suspension_changed refusal. Closing mid-unban leaves it running; its toast still shows. */}
+        <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+        <Button onClick={() => void confirm()} disabled={isPending || timersLoading}>{isPending ? 'Unbanning...' : 'Unban'}</Button>
       </DialogFooter>
     </>
   );

@@ -48,8 +48,10 @@ export function isUnbanSuspensionChoice(v: unknown): v is UnbanSuspensionChoice 
   return v === 'resume' || v === 'end_now' || v === 'open_ended';
 }
 
+// 'changed': the timer moved after the unban dialog read it, during the relay unban, so the
+// choice was not applied and the suspension was left as it was.
 export type UnbanSuspensionState =
-  'not_suspended' | 'unknown' | 'resumed' | 'open_ended' | 'ended' | 'end_failed';
+  'not_suspended' | 'unknown' | 'resumed' | 'open_ended' | 'ended' | 'end_failed' | 'changed';
 
 export const SUSPENSION_ACTIONS = {
   set: 'suspend_user',
@@ -74,4 +76,9 @@ export interface TimedSuspensionView {
   setBy: string | null;
   setAt: string;
   changedAt: string | null;
+  /**
+   * The record's version. The unban dialog sends it back, so a choice made against an older
+   * read is refused. Optional: a worker from before it was listed sends none.
+   */
+  version?: number;
 }

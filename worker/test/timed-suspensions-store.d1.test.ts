@@ -153,11 +153,12 @@ describe('changeSuspensionEnd', () => {
 
   it.each(['active', 'cancelled_ban'])('changes a %s row, resumes it as active, and resets attempts', async (status) => {
     await force(PK, status);
-    await DB.prepare(`UPDATE timed_suspensions SET attempts=5, last_error='boom', last_alerted_at='alerted', set_by=? WHERE pubkey=?`).bind(MOD, PK).run();
+    await DB.prepare(`UPDATE timed_suspensions SET attempts=5, last_error='boom', last_attempt_at='2026-11-20T13:00:00.000Z', last_alerted_at='alerted', set_by=? WHERE pubkey=?`).bind(MOD, PK).run();
     const res = await changeSuspensionEnd(DB, { pubkey: PK, endsAt: END2, moderator: MOD2 });
     expect(res).toEqual({ kind: 'changed', previousEndsAt: END, created: false });
     const r = (await getSuspensionRecord(DB, PK))!;
-    expect(r).toMatchObject({ ends_at: END2, status: 'active', changed_by: MOD2, attempts: 0, last_error: null, last_alerted_at: null, set_by: MOD, version: 4 });
+    // last_attempt_at cleared too: the scheduler orders by it, so a changed end starts its wait afresh.
+    expect(r).toMatchObject({ ends_at: END2, status: 'active', changed_by: MOD2, attempts: 0, last_error: null, last_attempt_at: null, last_alerted_at: null, set_by: MOD, version: 4 });
     expect(r.changed_at).not.toBeNull();
   });
 
@@ -299,7 +300,7 @@ describe('toSuspensionView', () => {
   it('maps a record to the shared view, showing lifting as active', async () => {
     await force(PK, 'lifting');
     const r = (await getSuspensionRecord(DB, PK))!;
-    expect(toSuspensionView(r)).toEqual({ pubkey: PK, endsAt: END, status: 'active', setBy: null, setAt: '2026-01-01T00:00:00.000Z', changedAt: null });
+    expect(toSuspensionView(r)).toEqual({ pubkey: PK, endsAt: END, status: 'active', setBy: null, setAt: '2026-01-01T00:00:00.000Z', changedAt: null, version: 3 });
     await force(PK2, 'cancelled_ban');
     expect(toSuspensionView((await getSuspensionRecord(DB, PK2))!).status).toBe('cancelled_ban');
   });

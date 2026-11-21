@@ -526,6 +526,9 @@ export async function allowEvent(apiUrl: string, eventId: string, opts?: LoginOp
 //
 // `suspensionChoice` says what happens to a running timed suspension. With none,
 // the body carries no such key (an old worker and a no-choice caller look alike).
+// `suspensionVersion` is the timer version the unban dialog showed (null: it showed
+// no timer). The worker refuses the unban with 409 `suspension_changed` when the
+// timer has moved since, so the moderator decides again; undefined sends no key.
 // The outcome is `{ state: 'none' }` when the worker reports no suspension, as an
 // old worker does, or when it skipped the choice for a non-canonical pubkey.
 // Otherwise `state` is the worker's, including 'unknown' and 'end_failed'.
@@ -537,7 +540,12 @@ export interface UnbanOutcome {
   choiceSkipped?: 'non_canonical_pubkey';
 }
 
-const UNBAN_STATES: readonly string[] = ['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed'];
+const UNBAN_STATES: readonly string[] = ['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed', 'changed'];
+
+/** The worker refused an unban because the timer changed after the dialog read it. */
+export function isSuspensionChanged(error: unknown): boolean {
+  return error instanceof ApiError && error.code === 'suspension_changed';
+}
 
 // Stands in for an end the worker sent but that is not a string. Deliberately not a
 // date: every reader treats an end it cannot parse as unknown ("End date unavailable"),
@@ -547,13 +555,14 @@ const UNREADABLE_END = 'unreadable';
 export async function unbanPubkey(
   apiUrl: string,
   pubkey: string,
-  opts?: LoginOpts & { suspensionChoice?: UnbanSuspensionChoice },
+  opts?: LoginOpts & { suspensionChoice?: UnbanSuspensionChoice; suspensionVersion?: number | null },
 ): Promise<UnbanOutcome> {
-  const { suspensionChoice, ...login } = opts ?? {};
+  const { suspensionChoice, suspensionVersion, ...login } = opts ?? {};
   const data = await postRelayRpc(apiUrl, {
     method: 'unbanpubkey',
     params: [pubkey],
     ...(suspensionChoice !== undefined && { suspensionChoice }),
+    ...(suspensionVersion !== undefined && { suspensionVersion }),
   }, login);
   const raw = data.suspension as { state?: unknown; endsAt?: unknown; decisionRecorded?: unknown } | undefined;
   const skipped = data.suspensionChoiceSkipped === 'non_canonical_pubkey'

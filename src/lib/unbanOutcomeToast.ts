@@ -47,6 +47,12 @@ export function unbanOutcomeToast(o: UnbanOutcome, now: Date = new Date()): Unba
       };
     case 'unknown':
       return { title: 'User unbanned, but the suspension status could not be checked', description: CHECK_ACCOUNT };
+    // The timer moved during the unban, so the worker applied no choice (ask again if it changed).
+    case 'changed':
+      return {
+        title: 'User unbanned, but the suspension changed before your choice was saved',
+        description: `The suspension was left as it was. ${CHECK_ACCOUNT}`,
+      };
     case 'not_suspended':
     case 'none':
       return { title: 'User unbanned' };
@@ -72,7 +78,8 @@ const AUDIT_NOTE = 'Audit log not recorded.';
 
 /** What the moderator must see first: a missing audit row never takes its place. */
 function outranksAudit(o: UnbanOutcome): boolean {
-  return !!o.choiceSkipped || o.suspension.state === 'end_failed' || o.suspension.state === 'unknown';
+  return !!o.choiceSkipped || o.suspension.state === 'end_failed' || o.suspension.state === 'unknown'
+    || o.suspension.state === 'changed';
 }
 
 /**

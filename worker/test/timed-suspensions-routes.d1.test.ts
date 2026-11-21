@@ -603,7 +603,7 @@ describe('GET /api/suspensions', () => {
     const list = res.json.suspensions as Array<Record<string, unknown>>;
     expect(list.map(v => v.pubkey).sort()).toEqual([PK, PK2, PK3].sort());
     expect(list.find(v => v.pubkey === PK)).toEqual({
-      pubkey: PK, endsAt: at, status: 'active', setBy: MOD, setAt: '2030-01-01T00:00:00.000Z', changedAt: null,
+      pubkey: PK, endsAt: at, status: 'active', setBy: MOD, setAt: '2030-01-01T00:00:00.000Z', changedAt: null, version: 0,
     });
     expect(list.find(v => v.pubkey === PK2)?.status).toBe('cancelled_ban');
     expect(list.find(v => v.pubkey === PK3)?.status).toBe('active');
@@ -931,5 +931,281 @@ describe('unbanpubkey and a running suspension', () => {
 
     expect(res.status).toBe(409);
     expect(fake.relayWrites()).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ask again if it changed (PR #444 review): the unban dialog sends the version of the timer it
+// showed, or null when it showed none. A record that has moved since refuses the choice.
+// ---------------------------------------------------------------------------
+
+describe('unbanpubkey with the timer version the dialog showed', () => {
+  const OTHER_END = minuteAhead(10 * 864e5);
+  const unbanShown = (suspensionChoice: string, suspensionVersion: unknown, e?: unknown) =>
+    call('POST', '/api/relay-rpc', { method: 'unbanpubkey', params: [PK], suspensionChoice, suspensionVersion }, e);
+  // Another moderator or tab changes the end after the dialog read version 0.
+  const changeAfterDialogRead = () => DB.prepare(
+    `UPDATE timed_suspensions SET ends_at = ?, version = version + 1 WHERE pubkey = ?`,
+  ).bind(OTHER_END, PK).run();
+  const expectNothingChanged = async (fake: ReturnType<typeof setup>, endsAt: string | null) => {
+    expect(await record()).toMatchObject({ status: 'active', ends_at: endsAt });
+    expect(fake.keycastPuts).toHaveLength(0);
+    expect(fake.notifies).toHaveLength(0);
+    expect(await decisions()).toHaveLength(0);
+  };
+
+  it.each(['resume', 'end_now', 'open_ended'])('%s against a changed record is refused with 409 before the relay is called', async (choice) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    await changeAfterDialogRead();
+    const res = await unbanShown(choice, 0);
+
+    expect(res.status).toBe(409);
+    expect(res.json).toMatchObject({ success: false, code: 'suspension_changed' });
+    expect(fake.relayWrites()).toHaveLength(0);
+    expect(fake.state.banned.has(PK)).toBe(true);
+    await expectNothingChanged(fake, OTHER_END);
+  });
+
+  // The review's case: a cached read showed no timer, so the default was "no end date",
+  // while another moderator had since set an end. That end must survive.
+  it('a dialog that showed no timer is refused when a timer now exists, and the end stands', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const res = await unbanShown('open_ended', null);
+
+    expect(res.status).toBe(409);
+    expect(res.json.code).toBe('suspension_changed');
+    expect(fake.relayWrites()).toHaveLength(0);
+    await expectNothingChanged(fake, FUTURE_END);
+  });
+
+  it.each([
+    ['resume', { state: 'resumed', endsAt: FUTURE_END }, { status: 'active', ends_at: FUTURE_END }],
+    ['end_now', { state: 'ended' }, { status: 'cancelled_unsuspend' }],
+    ['open_ended', { state: 'open_ended', endsAt: null }, { status: 'active', ends_at: null }],
+  ])('%s against the record the dialog showed goes ahead', async (choice, outcome, row) => {
+    suspendedSetup();
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unbanShown(choice, 0);
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject(outcome);
+    expect(await record()).toMatchObject(row);
+  });
+
+  it.each([
+    ['no record', null],
+    ['a finished record', 'lifted'],
+  ])('a dialog that showed no timer goes ahead when there is %s', async (_label, status) => {
+    suspendedSetup();
+    if (status) await seedRecord(status, PAST_END);
+    const res = await unbanShown('open_ended', null);
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'open_ended', endsAt: null });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: null });
+  });
+
+  // A DB that throws on the nth read of the record, or on end_now's guarded close.
+  const throwsAt = (what: { read?: number; close?: boolean }) => {
+    let reads = 0;
+    return new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind?.(target) ?? Reflect.get(target, prop);
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (what.close && sql.includes(`UPDATE timed_suspensions SET status = ?, changed_by = NULL`)) {
+            return { bind: () => ({ run: async () => { throw new Error('D1 down'); } }) };
+          }
+          if (!sql.startsWith('SELECT * FROM timed_suspensions WHERE pubkey = ?')) return stmt;
+          return {
+            bind: (...args: unknown[]) => ({
+              first: async () => {
+                if (++reads === what.read) throw new Error('D1 down');
+                return stmt.bind(...args).first();
+              },
+            }),
+          };
+        };
+      },
+    });
+  };
+
+  // After end_now's relay unsuspend the record must be verified before anything restores the
+  // account. A D1 error there leaves it unverified: fail closed, as for a moved record.
+  it.each([
+    ['the re-read', { read: 3 }],
+    ['the guarded close', { close: true }],
+  ])('end_now when %s after the relay unsuspend throws: no restore, state unknown, an alert', async (_label, what) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await unbanShown('end_now', 0, { ...(env() as object), DB: throwsAt(what) });
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey', 'unsuspendpubkey']);
+    await expectNothingChanged(fake, FUTURE_END);
+    expect(fake.alerts).toHaveLength(1);
+    expect(fake.alerts[0]).toContain(PK);
+    expect(fake.alerts[0]).toContain('could not be checked');
+  });
+
+  // Legacy callers keep today's behaviour: the close is best effort, and the restore runs.
+  it('end_now with no version whose close throws still restores, as before', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await call('POST', '/api/relay-rpc', { method: 'unbanpubkey', params: [PK], suspensionChoice: 'end_now' },
+      { ...(env() as object), DB: throwsAt({ close: true }) });
+
+    expect(res.json.suspension).toMatchObject({ state: 'ended' });
+    expect(fake.notifies.map(n => n.action)).toEqual(['ACCOUNT_RESTORED']);
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'active', actor: MOD }]);
+    expect(fake.alerts).toEqual([]);
+  });
+
+  it('end_now from a dialog that showed no timer, over a finished record, ends with the restore and no alert', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('lifted', PAST_END);
+    const res = await unbanShown('end_now', null);
+
+    expect(res.json.suspension).toMatchObject({ state: 'ended' });
+    expect(fake.notifies.map(n => n.action)).toEqual(['ACCOUNT_RESTORED']);
+    expect(fake.alerts).toEqual([]);
+  });
+
+  it.each([['a string', '0'], ['a negative number', -1], ['a fraction', 1.5], ['an object', {}]])(
+    'a version that is %s is refused with 400 before the relay is called', async (_label, version) => {
+      const fake = suspendedSetup();
+      await seedRecord('active', FUTURE_END);
+      const res = await unbanShown('resume', version);
+
+      expect(res.status).toBe(400);
+      expect(res.json.code).toBe('invalid_suspension_version');
+      expect(fake.rpcCalls).toHaveLength(0);
+    });
+
+  it('an unreadable record refuses with 503 before the relay is called', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const failingDb = new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind?.(target) ?? Reflect.get(target, prop);
+        return (sql: string) => (sql.startsWith('SELECT * FROM timed_suspensions WHERE pubkey = ?')
+          ? { bind: () => ({ first: async () => { throw new Error('D1 down'); } }) }
+          : target.prepare(sql));
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await unbanShown('resume', 0, { ...(env() as object), DB: failingDb });
+
+    expect(res.status).toBe(503);
+    expect(res.json.code).toBe('status_unavailable');
+    expect(fake.relayWrites()).toHaveLength(0);
+  });
+
+  // The record moves during the relay unban itself, after the first check passed: the unban
+  // has landed, but the choice is not applied and nothing about the suspension changes.
+  it.each(['resume', 'end_now', 'open_ended'])('%s whose record changes during the relay unban: state changed, timer untouched, no message', async (choice) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    let reads = 0;
+    const racingDb = new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind?.(target) ?? Reflect.get(target, prop);
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!sql.startsWith('SELECT * FROM timed_suspensions WHERE pubkey = ?')) return stmt;
+          return {
+            bind: (...args: unknown[]) => ({
+              first: async () => {
+                const row = await stmt.bind(...args).first();
+                if (reads++ === 0) await changeAfterDialogRead();
+                return row;
+              },
+            }),
+          };
+        };
+      },
+    });
+    const res = await unbanShown(choice, 0, { ...(env() as object), DB: racingDb });
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'changed' });
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
+    await expectNothingChanged(fake, OTHER_END);
+  });
+
+  // A DB whose record moves right after the nth read of it: read 1 is the pre-relay check,
+  // read 2 applyUnbanChoice's first read, read 3 end_now's read after the relay unsuspend.
+  const movesAfterRead = (n: number, move: () => Promise<unknown>) => {
+    let reads = 0;
+    return new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind?.(target) ?? Reflect.get(target, prop);
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (!sql.startsWith('SELECT * FROM timed_suspensions WHERE pubkey = ?')) return stmt;
+          return {
+            bind: (...args: unknown[]) => ({
+              first: async () => {
+                const row = await stmt.bind(...args).first();
+                if (++reads === n) await move();
+                return row;
+              },
+            }),
+          };
+        };
+      },
+    });
+  };
+
+  // The tick claims the row during the relay unban. Every choice must say 'changed', not fall
+  // to 'unknown' through the lift-in-flight check.
+  it.each(['open_ended', 'end_now', 'resume'])('%s whose row the tick claims during the relay unban: state changed, nothing else', async (choice) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const claim = () => DB.prepare(`UPDATE timed_suspensions SET status = 'lifting', version = version + 1 WHERE pubkey = ?`).bind(PK).run();
+    const res = await unbanShown(choice, 0, { ...(env() as object), DB: movesAfterRead(1, claim) });
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'changed' });
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
+    expect(await record()).toMatchObject({ status: 'lifting', ends_at: FUTURE_END });
+    expect(fake.keycastPuts).toHaveLength(0);
+    expect(fake.notifies).toHaveLength(0);
+  });
+
+  // end_now's relay unsuspend cannot be taken back. A change landing during it (a re-suspend
+  // whose relay call may land after ours, say) must not be overwritten, nor followed by a
+  // restored message or Keycast activate; the account's state is then unknown, so a person checks.
+  it.each([
+    ['during the relay unsuspend', 2],
+    ['between the re-read after it and the guarded write', 3],
+  ])('end_now whose record changes %s: record kept, no restore, state unknown, an alert', async (_label, n) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await unbanShown('end_now', 0, { ...(env() as object), DB: movesAfterRead(n, changeAfterDialogRead) });
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey', 'unsuspendpubkey']);
+    await expectNothingChanged(fake, OTHER_END);
+    expect(fake.alerts).toHaveLength(1);
+    expect(fake.alerts[0]).toContain(PK);
+    expect(fake.alerts[0]).toContain('[test]');
+  });
+
+  it('a caller that sends no version keeps today\'s behaviour against a changed record', async () => {
+    suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    await changeAfterDialogRead();
+    const res = await unban('open_ended');
+
+    expect(res.json.suspension).toMatchObject({ state: 'open_ended', endsAt: null });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: null });
   });
 });

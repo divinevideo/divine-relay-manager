@@ -117,10 +117,11 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
       adminApi.banEvent(apiUrl, eventId, reason, login),
     allowEvent: (eventId: string) =>
       adminApi.allowEvent(apiUrl, eventId, login),
-    // The choice and the duration are forwarded as given: undefined sends no field,
-    // and suspendPubkey's null is an explicit open end.
-    unbanPubkey: (pubkey: string, suspensionChoice?: UnbanSuspensionChoice) =>
-      adminApi.unbanPubkey(apiUrl, pubkey, { ...login, suspensionChoice }),
+    // The choice, the shown timer version and the duration are forwarded as given:
+    // undefined sends no field; the version's null (no timer shown) and
+    // suspendPubkey's null (an explicit open end) are sent.
+    unbanPubkey: (pubkey: string, suspensionChoice?: UnbanSuspensionChoice, suspensionVersion?: number | null) =>
+      adminApi.unbanPubkey(apiUrl, pubkey, { ...login, suspensionChoice, suspensionVersion }),
     suspendPubkey: (pubkey: string, reason?: string, duration?: SuspensionDuration | null) =>
       adminApi.suspendPubkey(apiUrl, pubkey, reason, { ...login, duration }),
     changeSuspensionEnd: (pubkey: string, duration: SuspensionDuration) =>

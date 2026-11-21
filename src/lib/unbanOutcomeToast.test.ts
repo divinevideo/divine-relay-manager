@@ -57,6 +57,22 @@ describe('unbanOutcomeToast', () => {
     });
   });
 
+  // The timer moved during the unban (ask again if it changed): the unban landed but the
+  // choice was not applied, so the toast must not read as any outcome of that choice.
+  it('changed says the choice was not applied and the suspension was left as it was', () => {
+    expect(unbanOutcomeToast({ suspension: { state: 'changed' } }, NOW)).toEqual({
+      title: 'User unbanned, but the suspension changed before your choice was saved',
+      description: 'The suspension was left as it was. Check the account before acting again.',
+    });
+  });
+
+  it('changed outranks a failed audit write', () => {
+    expect(unbanAuditFailedToast({ suspension: { state: 'changed' } }, NOW)).toEqual({
+      title: 'User unbanned, but the suspension changed before your choice was saved',
+      description: 'The suspension was left as it was. Check the account before acting again. Audit log not recorded.',
+    });
+  });
+
   it.each(['not_suspended', 'none'] as const)('%s is a plain unban', (state) => {
     expect(unbanOutcomeToast({ suspension: { state } }, NOW)).toEqual({ title: 'User unbanned' });
   });
