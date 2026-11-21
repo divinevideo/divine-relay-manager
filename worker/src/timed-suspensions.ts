@@ -485,12 +485,11 @@ export async function handleChangeSuspensionEnd(
   moderator: string | undefined,
   io: SuspensionIo,
 ): Promise<Response> {
-  let body: { pubkey?: unknown; duration?: unknown };
-  try {
-    body = await request.json() as typeof body;
-  } catch {
-    return refuse(corsHeaders, 400, 'invalid_body', 'Request body must be JSON with a pubkey and a duration');
+  const input: unknown = await request.json().catch(() => null);
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return refuse(corsHeaders, 400, 'invalid_body', 'Request body must be a JSON object with a pubkey and a duration');
   }
+  const body = input as { pubkey?: unknown; duration?: unknown };
   if (typeof body.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
     return refuse(corsHeaders, 400, 'invalid_pubkey', 'pubkey must be 64 lowercase hex characters');
   }

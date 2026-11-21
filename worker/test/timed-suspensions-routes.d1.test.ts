@@ -427,17 +427,20 @@ describe('POST /api/suspensions/end', () => {
     expect(fake.notifies).toEqual([]);
   });
 
-  it('refuses a body that is not JSON with 400 invalid_body, not a pubkey complaint', async () => {
-    const fake = setup({ suspended: new Map([[PK, null]]) });
-    const res = await worker.fetch(new Request('https://api.example/api/suspensions/end', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'k', 'X-Divine-Login-Token': 'tok', Origin: 'https://app.example' },
-      body: 'not json',
-    }), env(), { waitUntil: () => {} } as unknown as ExecutionContext);
-    expect(res.status).toBe(400);
-    expect((await res.json() as { code: string }).code).toBe('invalid_body');
-    expect(fake.notifies).toEqual([]);
-  });
+  it.each(['not json', 'null', '[]', '"text"', '3', 'false'])(
+    'refuses a non-object request body (%s) with 400 invalid_body', async (body) => {
+      const fake = setup({ suspended: new Map([[PK, null]]) });
+      const res = await worker.fetch(new Request('https://api.example/api/suspensions/end', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': 'k', 'X-Divine-Login-Token': 'tok', Origin: 'https://app.example' },
+        body,
+      }), env(), { waitUntil: () => {} } as unknown as ExecutionContext);
+      expect(res.status).toBe(400);
+      expect((await res.json() as { code: string }).code).toBe('invalid_body');
+      expect(fake.relayWrites()).toEqual([]);
+      expect(fake.notifies).toEqual([]);
+    },
+  );
 
   it.each([[{ value: 0, unit: 'days' }], [{ value: 1.5, unit: 'hours' }], [null], [undefined]])(
     'refuses duration %j with 400 invalid_duration', async (duration) => {
