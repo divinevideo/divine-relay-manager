@@ -101,7 +101,13 @@ function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, now, 
         </DialogDescription>
       </DialogHeader>
 
-      {endUnknown && <p className="text-sm text-muted-foreground">{SUSPENSION_END_UNAVAILABLE}</p>}
+      {/* Unconfirmed, the description says the account may be suspended, so this line
+          must not open with "Suspended." */}
+      {endUnknown && (
+        <p className="text-sm text-muted-foreground">
+          {suspensionConfirmed ? SUSPENSION_END_UNAVAILABLE : 'End date unavailable'}
+        </p>
+      )}
 
       <RadioGroup
         aria-label="Suspension"

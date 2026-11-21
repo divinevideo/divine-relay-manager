@@ -2,6 +2,8 @@
 // ABOUTME: Covers signing, publishing, moderation actions, post-action verification, and NIP-86 RPC
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { unbanOutcomeToast } from './unbanOutcomeToast';
+import { SUSPENSION_END_UNAVAILABLE } from './suspensionEndText';
 import {
   fetchResolutionState,
   fetchResolutionLabelTargets,
@@ -919,6 +921,21 @@ describe('adminApi', () => {
     ])('unbanPubkey maps %s to unknown, not none', async (_n, suspension) => {
       answer({ result: null, suspension });
       expect(await unbanPubkey(API_URL, 'pk')).toEqual({ suspension: { state: 'unknown', endsAt: undefined } });
+    });
+
+    // A present end that is not a string is unreadable, not "no end date": the toast must
+    // say the end is unavailable rather than tell the moderator it is open-ended.
+    it.each([[12345], [{}], [true]])('unbanPubkey maps a non-string endsAt %j to an unreadable end, not null', async (endsAt) => {
+      answer({ result: null, suspension: { state: 'resumed', endsAt } });
+      const out = await unbanPubkey(API_URL, 'pk');
+      expect(typeof out.suspension.endsAt).toBe('string');
+      expect(Number.isNaN(Date.parse(out.suspension.endsAt as string))).toBe(true);
+      expect(unbanOutcomeToast(out)).toEqual({ title: 'User unbanned', description: SUSPENSION_END_UNAVAILABLE });
+    });
+
+    it('unbanPubkey keeps a null endsAt as no end date', async () => {
+      answer({ result: null, suspension: { state: 'resumed', endsAt: null } });
+      expect((await unbanPubkey(API_URL, 'pk')).suspension.endsAt).toBeNull();
     });
 
     it('unbanPubkey reports a skipped choice for a non-canonical pubkey', async () => {

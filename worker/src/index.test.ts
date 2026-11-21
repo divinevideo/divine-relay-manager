@@ -395,11 +395,12 @@ describe('relay-rpc account-state side effects', () => {
       if (url.includes('/api/admin/users/')) {
         return new Response('', { status: 200 });
       }
-      // NIP-86 relay RPC management endpoint. The suspended list answers empty: an unban now
-      // reads it (B7), and a bare {result:true} is not a list, which reads as 'unknown' and
-      // would stop the unban's Keycast restore these tests assert.
+      // NIP-86 relay RPC management endpoint. The suspended and banned lists answer empty: an
+      // unban reads the suspended list (B7) and a manual unsuspend reads the ban list, and a
+      // bare {result:true} is not a list, which reads as 'unknown' and would stop the Keycast
+      // restore these tests assert.
       const rpcBody = typeof init?.body === 'string' ? init.body : '';
-      if (rpcBody.includes('"method":"listsuspendedpubkeys"')) {
+      if (rpcBody.includes('"method":"listsuspendedpubkeys"') || rpcBody.includes('"method":"listbannedpubkeys"')) {
         return new Response(JSON.stringify({ result: [] }), { status: 200 });
       }
       return new Response(JSON.stringify({ result: true }), { status: 200 });
@@ -1678,6 +1679,31 @@ describe('relay-rpc account-state side effects', () => {
         expect((await pending).status).toBe(200);
       },
     );
+
+    // Suspend and unban now await D1 writes, list reads (and, for unban end_now,
+    // a second relay call) before their Keycast and notice legs are registered.
+    // A client that gives up in that window must not cancel the rest: a relay
+    // unsuspend that landed with no Keycast step or notice is a silent half-restore.
+    it.each([
+      ['suspendpubkey', () => makeAccountStateEnv()],
+      ['unbanpubkey', () => makeAccountStateEnvWithDb(null)],
+    ] as const)('relay-rpc keeps a %s alive past a client disconnect while the relay is still answering', async (method, makeEnv) => {
+      let releaseRelay!: () => void;
+      const relayAnswered = new Promise<void>(resolve => { releaseRelay = resolve; });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        await relayAnswered;
+        return new Response(JSON.stringify({ result: true }), { status: 200 });
+      });
+      const waitUntil = vi.fn();
+      const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+      const pending = callRelayRpc(method, [VALID_PUBKEY, 'policy'], makeEnv(), testCtx);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(waitUntil).toHaveBeenCalled();
+      releaseRelay();
+      expect((await pending).status).toBe(200);
+    });
 
     // The relay call's own keep-alive settles once the relay answers, so the
     // moderate route must keep its later follow-ups (here the human-review

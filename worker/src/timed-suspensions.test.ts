@@ -47,6 +47,19 @@ describe('restoreAfterLift', () => {
     await expect(restoreAfterLift(io, PK, { reason: 'r' })).resolves.toBe('failed');
   });
 
+  // The notice has no timeout and waitUntil work is cut off ~30s after the
+  // response, so a slow moderation-service must not hold the Keycast step back.
+  it('starts Keycast without waiting for the notice to finish', async () => {
+    let releaseNotify!: () => void;
+    const notifyHeld = new Promise<void>(resolve => { releaseNotify = resolve; });
+    const { io } = fakeIo(async () => ({ success: true }), () => notifyHeld);
+    const done = restoreAfterLift(io, PK, { reason: 'r', moderator: MOD });
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(io.keycastActivate).toHaveBeenCalledWith(PK, MOD);
+    releaseNotify();
+    expect(await done).toBe('ok');
+  });
+
   it('still activates Keycast when the notice throws', async () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const { io, order } = fakeIo(async () => ({ success: true }), async () => { throw new Error('notify down'); });

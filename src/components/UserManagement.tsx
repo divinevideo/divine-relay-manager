@@ -26,7 +26,7 @@ import { CopyableId } from "@/components/CopyableId";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { ApiError, type BannedPubkeyEntry } from "@/lib/adminApi";
-import { unbanOutcomeNote, unbanOutcomeToast } from "@/lib/unbanOutcomeToast";
+import { unbanAuditFailedToast, unbanOutcomeToast } from "@/lib/unbanOutcomeToast";
 import { TIMED_SUSPENSIONS_KEY, useTimedSuspension, useTimedSuspensions } from "@/hooks/useTimedSuspensions";
 import { useChangeSuspensionEnd } from "@/hooks/useChangeSuspensionEnd";
 import { SuspensionEndLine } from "@/components/SuspensionEndLine";
@@ -266,11 +266,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     onSuccess: async ({ pubkey, outcome, auditRecorded }) => {
       invalidateUserQueries();
       // One toast (the app shows one at a time): a missing audit row carries
-      // the outcome as its description, so neither is lost.
-      const outcomeToast = unbanOutcomeToast(outcome);
-      toast(auditRecorded
-        ? outcomeToast
-        : { title: 'Action applied; audit log not recorded', description: unbanOutcomeNote(outcomeToast) });
+      // the outcome, so neither is lost, and a failure keeps its title and
+      // severity (G4).
+      toast(auditRecorded ? unbanOutcomeToast(outcome) : unbanAuditFailedToast(outcome));
 
       // Background verification
       verifyPubkeyUnbanned(pubkey).then(verified => {
@@ -334,6 +332,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // An answer is a list that loaded and whose latest read did not fail: a
   // failed refresh keeps an older copy that may predate a suspend.
   const suspendedListAnswered = suspendedUsers !== undefined && !suspendedError;
+  const bannedListAnswered = bannedUsers !== undefined && !bannedError;
   const suspendedListAnsweredWithout = (pubkey: string) =>
     suspendedListAnswered && !listHas(suspendedUsers, pubkey);
   // Read the timers ahead whenever a banned account may be suspended, so the
@@ -478,12 +477,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
             <UserActions
               pubkey={selectedPubkey}
               context="users"
-              isBanned={bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ?? false}
-              // null while the suspended list has not answered (loading, failed,
+              // Each is null while its list has not answered (loading, failed,
               // or a failed refresh over an older copy), never a guessed false:
               // UserActions then says so, and its unban asks (F6).
+              isBanned={bannedListAnswered ? listHas(bannedUsers, selectedPubkey) : null}
               isSuspended={suspendedListAnswered ? listHas(suspendedUsers, selectedPubkey) : null}
-              statusPending={loadingSuspended}
+              statusPending={loadingSuspended || loadingBanned}
               onActionComplete={invalidateUserQueries}
             />
           </CardContent>
@@ -695,7 +694,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       <UnbanSuspensionDialog
         open={!!unbanDialog?.open}
         onOpenChange={(open) => { if (!open) setUnbanDialog((d) => d && { ...d, open: false }); }}
-        record={unbanTimer.record}
+        // A failed refresh over an older copy is unknown here: that copy may
+        // predate a suspend, and its "no timer" would default to no end date.
+        record={unbanTimer.refreshFailed ? undefined : unbanTimer.record}
         // The prompt opens only when the list has not answered without the
         // account, so it is either listed (confirmed) or not yet known.
         suspensionConfirmed={!!unbanDialog && suspendedListAnswered && listHas(suspendedUsers, unbanDialog.pubkey)}

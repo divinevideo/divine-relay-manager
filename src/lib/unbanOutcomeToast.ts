@@ -67,3 +67,24 @@ export function unbanOutcomeToast(o: UnbanOutcome, now: Date = new Date()): Unba
 export function unbanOutcomeNote(t: Pick<UnbanToast, 'title' | 'description'>): string {
   return t.description ? `${t.title}. ${t.description}` : t.title;
 }
+
+const AUDIT_NOTE = 'Audit log not recorded.';
+
+/** What the moderator must see first: a missing audit row never takes its place. */
+function outranksAudit(o: UnbanOutcome): boolean {
+  return !!o.choiceSkipped || o.suspension.state === 'end_failed' || o.suspension.state === 'unknown';
+}
+
+/**
+ * The toast when the browser's own audit write failed after the unban landed. It
+ * replaces the outcome's toast (one shows at a time), so it follows the same ranking
+ * as unbanOutcomeToast: a failure or an unknown keeps its title and its destructive
+ * variant, with the audit note added; anything else leads with the warning and
+ * carries the outcome, saying the warning once when the outcome already does.
+ */
+export function unbanAuditFailedToast(o: UnbanOutcome, now: Date = new Date()): UnbanToast {
+  const t = unbanOutcomeToast(o, now);
+  if (outranksAudit(o)) return { ...t, description: t.description ? `${t.description} ${AUDIT_NOTE}` : AUDIT_NOTE };
+  if (t.title === AUDIT_NOT_RECORDED) return t;
+  return { title: AUDIT_NOT_RECORDED, description: unbanOutcomeNote(t), ...(t.variant && { variant: t.variant }) };
+}

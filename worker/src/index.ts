@@ -82,7 +82,7 @@ import {
   handleListSuspensions,
   recordSuspensionDecision,
   replaceSuspensionRecord,
-  restoreAfterLift,
+  restoreAfterManualUnsuspend,
   runTimedSuspensionTick,
   type AccountNoticeAction,
 } from './timed-suspensions';
@@ -1705,6 +1705,8 @@ function surviveDisconnect<T>(work: Promise<T>, ctx?: ExecutionContext): Promise
   return work;
 }
 
+const KEEP_ALIVE_RPC_METHODS: ReadonlySet<string> = new Set(['banpubkey', 'suspendpubkey', 'unbanpubkey']);
+
 type RelayRpcBody = {
   method: string;
   params?: (string | number | undefined)[];
@@ -1753,7 +1755,10 @@ async function handleRelayRpc(
   const response = runRelayRpc(body, env, corsHeaders, ctx, moderator);
   // A slow banpubkey now usually ends in success, so its Keycast mirror and DM
   // are registered late; keep the whole ban alive if the caller gives up first.
-  return body.method === 'banpubkey' ? surviveDisconnect(response, ctx) : response;
+  // Suspend and unban likewise await D1 writes and relay reads (unban end_now, a
+  // second relay call) before their Keycast and notice legs start: a disconnect
+  // there would leave the relay changed with nothing after it.
+  return KEEP_ALIVE_RPC_METHODS.has(body.method) ? surviveDisconnect(response, ctx) : response;
 }
 
 async function runRelayRpc(
@@ -2002,7 +2007,9 @@ async function runRelayRpc(
           if (suspensionChoice !== undefined) skippedChoice = 'non_canonical_pubkey';
           break;
         }
-        const applied = await applyUnbanChoice(env.DB, io, pubkey, suspensionChoice, { moderator, now: new Date() });
+        const applied = await applyUnbanChoice(env.DB, io, pubkey, suspensionChoice, {
+          moderator, now: new Date(), environment: env.ENVIRONMENT,
+        });
         if (ctx) {
           for (const p of applied.waitUntil) ctx.waitUntil(p);
         } else {
@@ -2072,11 +2079,14 @@ async function runRelayRpc(
         break;
       }
       case 'unsuspendpubkey':
-        // The same restore the timer runs: the one "restored" notice, then Keycast active.
-        // F13, accepted: an Unsuspend just after a timed lift can send a second "restored"
-        // notice, because manual Unsuspend stays unconditional (spec decision 14).
+        // The same restore the timer runs: the one "restored" notice and Keycast active, but
+        // only once the relay confirms the account is not banned (an unreadable ban list
+        // restores nothing and alerts). F13, accepted: an Unsuspend just after a timed lift can
+        // send a second "restored" notice (spec decision 14).
         if (ctx) {
-          ctx.waitUntil(restoreAfterLift(io, pubkey, { reason: reason || 'Account restored by moderator', moderator }));
+          ctx.waitUntil(restoreAfterManualUnsuspend(io, pubkey, {
+            reason: reason || 'Account restored by moderator', moderator, environment: env.ENVIRONMENT,
+          }));
         } else {
           console.warn(`[handleRelayRpc] No ExecutionContext; skipping restore notice and Keycast unsuspend for ${pubkey}`);
         }

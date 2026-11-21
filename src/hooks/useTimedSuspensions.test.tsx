@@ -67,6 +67,15 @@ describe('useTimedSuspension', () => {
     await waitFor(() => expect(client.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.example'])?.fetchStatus).toBe('idle'));
     expect(result.current.isError).toBe(false);
     expect(result.current.record).toEqual(record);
+    // Quiet for the end line, but flagged: a decision must not rest on that older copy.
+    expect(result.current.refreshFailed).toBe(true);
+  });
+
+  it('does not flag refreshFailed for a read that answered', async () => {
+    listTimedSuspensions.mockResolvedValue([record]);
+    const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
+    await waitFor(() => expect(result.current.record).toEqual(record));
+    expect(result.current.refreshFailed).toBe(false);
   });
 
   // The app's default retry is higher; a dead list should surface its error after one retry.

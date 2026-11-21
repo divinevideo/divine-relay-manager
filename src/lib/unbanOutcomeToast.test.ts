@@ -1,7 +1,7 @@
 // ABOUTME: Pins the toast for every way an unban can leave a timed suspension, so a
 // ABOUTME: toast never says the suspension ended or resumed when the worker said otherwise.
 import { describe, expect, it } from 'vitest';
-import { unbanOutcomeNote, unbanOutcomeToast } from './unbanOutcomeToast';
+import { unbanAuditFailedToast, unbanOutcomeNote, unbanOutcomeToast } from './unbanOutcomeToast';
 import { SUSPENSION_END_UNAVAILABLE } from './suspensionEndText';
 import { formatSuspensionEnd } from '../../shared/suspension';
 
@@ -104,5 +104,41 @@ describe('unbanOutcomeNote', () => {
   it('joins the title and the description', () => {
     expect(unbanOutcomeNote({ title: 'User unbanned, but the suspension could not be lifted', description: 'It is still suspended. Try Unsuspend.' }))
       .toBe('User unbanned, but the suspension could not be lifted. It is still suspended. Try Unsuspend.');
+  });
+});
+
+// The browser's own audit write failed after the unban landed. One toast shows at a
+// time, so this toast replaces the outcome's and must follow the same ranking: a failure
+// or an unknown keeps its title and severity; anything else leads with the warning.
+describe('unbanAuditFailedToast', () => {
+  it.each([
+    [{ suspension: { state: 'end_failed' } }, {
+      title: 'User unbanned, but the suspension could not be lifted',
+      description: 'It is still suspended. Try Unsuspend. Audit log not recorded.',
+      variant: 'destructive',
+    }],
+    [{ suspension: { state: 'unknown' } }, {
+      title: 'User unbanned, but the suspension status could not be checked',
+      description: 'Check the account before acting again. Audit log not recorded.',
+    }],
+    [{ suspension: { state: 'none' }, choiceSkipped: 'non_canonical_pubkey' }, {
+      title: 'User unbanned, but the suspension choice was not applied',
+      description: 'Check the account before acting again. Audit log not recorded.',
+    }],
+  ] as const)('keeps an outcome that outranks the audit warning (%#)', (outcome, expected) => {
+    expect(unbanAuditFailedToast(outcome, NOW)).toEqual(expected);
+  });
+
+  it.each([
+    [{ suspension: { state: 'ended', endsAt: null } }, 'User unbanned and unsuspended'],
+    [{ suspension: { state: 'not_suspended' } }, 'User unbanned'],
+  ] as const)('leads with the warning and carries the outcome otherwise (%#)', (outcome, done) => {
+    expect(unbanAuditFailedToast(outcome, NOW)).toEqual({ title: 'Action applied; audit log not recorded', description: done });
+  });
+
+  // The worker's decision row is missing too: the toast already says so, once.
+  it('does not repeat the warning when the outcome already carries it', () => {
+    expect(unbanAuditFailedToast({ suspension: { state: 'ended', endsAt: null, decisionRecorded: false } }, NOW))
+      .toEqual({ title: 'Action applied; audit log not recorded', description: 'User unbanned and unsuspended' });
   });
 });

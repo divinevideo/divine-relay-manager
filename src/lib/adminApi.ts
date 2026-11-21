@@ -539,6 +539,11 @@ export interface UnbanOutcome {
 
 const UNBAN_STATES: readonly string[] = ['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed'];
 
+// Stands in for an end the worker sent but that is not a string. Deliberately not a
+// date: every reader treats an end it cannot parse as unknown ("End date unavailable"),
+// where null would read as "no end date" and tell the moderator it is open-ended.
+const UNREADABLE_END = 'unreadable';
+
 export async function unbanPubkey(
   apiUrl: string,
   pubkey: string,
@@ -562,7 +567,7 @@ export async function unbanPubkey(
   return {
     suspension: {
       state: raw.state as UnbanSuspensionState,
-      endsAt: typeof raw.endsAt === 'string' ? raw.endsAt : null,
+      endsAt: typeof raw.endsAt === 'string' ? raw.endsAt : raw.endsAt == null ? null : UNREADABLE_END,
       ...(typeof raw.decisionRecorded === 'boolean' && { decisionRecorded: raw.decisionRecorded }),
     },
     ...skipped,

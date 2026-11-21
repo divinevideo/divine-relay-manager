@@ -194,33 +194,80 @@ export interface SuspensionIo {
 
 export type KeycastLeg = 'ok' | 'not_applicable' | 'failed';
 
+// A synchronous throw becomes a rejection, so allSettled sees it like any other failure.
+function started<T>(fn: () => Promise<T>): Promise<T> {
+  try {
+    return fn();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+}
+
 // What follows a relay unsuspend, for both the manual Unsuspend and the timer: the one
-// "restored" notice, then Keycast back to active. Never throws. The notice goes first and
-// its failure does not stop the Keycast call; the Keycast result is returned because the
-// timer retries a failed leg without sending the notice again.
+// "restored" notice and Keycast back to active, started together. Never throws. The notice
+// has no timeout and waitUntil work is cut off about 30s after the response, so a slow
+// moderation-service must not hold the Keycast step back, and neither leg's failure stops
+// the other. Send-once does not depend on the ordering: Phase 2 never notifies. The Keycast
+// result is returned because the timer retries a failed leg without sending the notice again.
 export async function restoreAfterLift(
   io: SuspensionIo,
   pubkey: string,
   a: { reason: string; moderator?: string },
 ): Promise<KeycastLeg> {
-  try {
-    await io.notify(pubkey, 'ACCOUNT_RESTORED', a.reason);
-  } catch (error) {
-    console.error(`[restoreAfterLift] restored notice failed for ${pubkey}:`, error);
+  const [notice, keycast] = await Promise.allSettled([
+    started(() => io.notify(pubkey, 'ACCOUNT_RESTORED', a.reason)),
+    started(() => io.keycastActivate(pubkey, a.moderator)),
+  ]);
+  if (notice.status === 'rejected') {
+    console.error(`[restoreAfterLift] restored notice failed for ${pubkey}:`, notice.reason);
   }
+  if (keycast.status === 'rejected') {
+    console.error(`[restoreAfterLift] Keycast activate threw for ${pubkey}:`, keycast.reason);
+    return 'failed';
+  }
+  const res = keycast.value;
+  if (res.success) return 'ok';
+  if (res.notFound) {
+    // Self-custody: no Keycast account, and the relay lift is the whole restore (#269).
+    console.log(`[restoreAfterLift] Keycast activate not applicable for ${pubkey}: no keycast account`);
+    return 'not_applicable';
+  }
+  console.error(`[restoreAfterLift] Keycast activate failed for ${pubkey}: ${res.error}`);
+  return 'failed';
+}
+
+// After a manual Unsuspend. The relay suspension is gone, but a ban may still stand: the
+// Suspended tab offers Unsuspend on a banned row, and keycastActivate also lifts a Keycast
+// ban. So the restore runs only on a confirmed "not banned"; a ban gets neither the notice
+// nor Keycast, and an unreadable ban list gets neither plus an alert, so a person checks.
+// Never throws.
+export async function restoreAfterManualUnsuspend(
+  io: SuspensionIo,
+  pubkey: string,
+  a: { reason: string; moderator?: string; environment?: string },
+): Promise<void> {
+  let ban: boolean | 'unknown';
   try {
-    const res = await io.keycastActivate(pubkey, a.moderator);
-    if (res.success) return 'ok';
-    if (res.notFound) {
-      // Self-custody: no Keycast account, and the relay lift is the whole restore (#269).
-      console.log(`[restoreAfterLift] Keycast activate not applicable for ${pubkey}: no keycast account`);
-      return 'not_applicable';
-    }
-    console.error(`[restoreAfterLift] Keycast activate failed for ${pubkey}: ${res.error}`);
-    return 'failed';
+    ban = await io.readBan(pubkey);
   } catch (error) {
-    console.error(`[restoreAfterLift] Keycast activate threw for ${pubkey}:`, error);
-    return 'failed';
+    console.error(`[restoreAfterManualUnsuspend] ban read threw for ${pubkey}:`, error);
+    ban = 'unknown';
+  }
+  if (ban === false) {
+    await restoreAfterLift(io, pubkey, { reason: a.reason, moderator: a.moderator });
+    return;
+  }
+  if (ban === true) {
+    console.log(`[restoreAfterManualUnsuspend] ${pubkey} is banned: no restored notice and no Keycast change`);
+    return;
+  }
+  console.error(`[restoreAfterManualUnsuspend] ban list unreadable for ${pubkey}: no restored notice and no Keycast change`);
+  try {
+    await io.alert(`:warning: [${a.environment ?? 'unknown'}] An Unsuspend of ${pubkey} could not read the relay ban list, `
+      + 'so no restored message was sent and Keycast was left as it is. If the account is not banned, '
+      + 'set Keycast active and send the restored message by hand.');
+  } catch (error) {
+    console.error(`[restoreAfterManualUnsuspend] alert threw for ${pubkey}:`, error);
   }
 }
 
@@ -263,7 +310,7 @@ export async function applyUnbanChoice(
   io: SuspensionIo,
   pubkey: string,
   choice: UnbanSuspensionChoice | undefined,
-  a: { moderator?: string; now: Date },
+  a: { moderator?: string; now: Date; environment?: string },
 ): Promise<UnbanChoiceResult> {
   const waitUntil: Promise<unknown>[] = [];
   const moderator = a.moderator ?? null;
@@ -273,15 +320,31 @@ export async function applyUnbanChoice(
       ? recordSuspensionDecision(db, { pubkey, action, reason, moderator, human: true })
       : Promise.resolve<boolean | undefined>(undefined);
   const unknown = (): UnbanChoiceResult => ({ state: 'unknown', waitUntil });
+  // Keycast is left as it is (still banned, after a ban), which is the safe side but changes
+  // what every unban used to do. Callers that never show the outcome (moderation-service
+  // allow_pubkey, EventDetail, DebugPanel) would leave no other trace, so a person is told.
+  const listUnreadable = async (): Promise<UnbanChoiceResult> => {
+    try {
+      await io.alert(`:warning: [${a.environment ?? 'unknown'}] An unban of ${pubkey} could not read the relay `
+        + 'suspended list, so Keycast was left as it is and any suspension choice was not applied. '
+        + 'Check its relay suspension and Keycast status.');
+    } catch (error) {
+      console.error(`[applyUnbanChoice] alert threw for ${pubkey}:`, error);
+    }
+    return unknown();
+  };
 
   let entry: Awaited<ReturnType<SuspensionIo['readSuspension']>>;
   try {
     entry = await io.readSuspension(pubkey);
   } catch (error) {
     console.error(`[applyUnbanChoice] suspension read threw for ${pubkey}:`, error);
-    return unknown();
+    return listUnreadable();
   }
-  if (entry === 'unknown') return unknown();
+  if (entry === 'unknown') {
+    console.error(`[applyUnbanChoice] suspended list unreadable for ${pubkey}; Keycast left as it is`);
+    return listUnreadable();
+  }
 
   if (!entry.suspended) {
     // Today's behavior: the unban restores the Keycast account.
@@ -338,17 +401,28 @@ export async function applyUnbanChoice(
     return { state: 'open_ended', endsAt: null, decisionRecorded, waitUntil };
   }
 
-  // resume, and the default when no choice was sent.
+  // resume, and the default when no choice was sent. The end stays as it is, so it is never
+  // rewritten (nor changed_by): only a cancelled_ban row needs its status back to active.
+  // Every write compares against the version read here, so a moderator's change or a timer
+  // claim landing since wins (F7) rather than being overwritten with this read's end.
   let endsAt: string | null = null;
+  let reactivated = false;
   if (db) {
     try {
       const row = await getSuspensionRecord(db, pubkey);
       if (row && IN_FORCE.includes(row.status)) {
+        // A lift in flight wins (F7).
+        if (row.status === 'lifting' || row.status === 'keycast_pending') return unknown();
         endsAt = row.ends_at;
         if (endsAt !== null || row.status === 'cancelled_ban') {
-          // Same end, status back to active. A lift in flight or a concurrent edit wins (F7).
-          const changed = await changeSuspensionEnd(db, { pubkey, endsAt, moderator });
-          if (changed.kind !== 'changed') return unknown();
+          // An active row changes nothing but its version: a tick that read it before this
+          // unban then loses its claim and re-reads next time, after this unban's Keycast
+          // suspend, rather than racing it.
+          const won = await casSuspensionRecord(db, pubkey, row.version, row.status === 'cancelled_ban'
+            ? { status: 'active', attempts: 0, last_error: null, last_alerted_at: null }
+            : {});
+          if (!won) return unknown();
+          reactivated = row.status === 'cancelled_ban';
         }
       }
     } catch (error) {
@@ -362,10 +436,17 @@ export async function applyUnbanChoice(
   if (endsAt !== null && new Date(endsAt).getTime() > a.now.getTime()) {
     waitUntil.push(noticeLeg(io, pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension resumed', endsAt));
   }
-  const decisionRecorded = await decide(
-    SUSPENSION_ACTIONS.change,
-    `Unbanned; suspension resumed ${endsAt ? `until ${formatSuspensionEnd(endsAt)}` : 'with no end date'}`,
-  );
+  const reason = `Unbanned; suspension resumed ${endsAt ? `until ${formatSuspensionEnd(endsAt)}` : 'with no end date'}`;
+  const decisionRecorded = await decide(SUSPENSION_ACTIONS.change, reason);
+  // The default writes no row of its own, but restarting a timer the ban had paused is a
+  // change to the record, so it is recorded. Attributed to whoever unbanned; not a human
+  // review, because nobody chose it.
+  if (choice === undefined && reactivated && db) {
+    await recordSuspensionDecision(db, {
+      pubkey, action: SUSPENSION_ACTIONS.change, reason: `${reason} (no choice sent; the ban had paused the timer)`,
+      moderator, human: false,
+    });
+  }
   return { state: 'resumed', endsAt, decisionRecorded, waitUntil };
 }
 
@@ -408,7 +489,7 @@ export async function handleChangeSuspensionEnd(
   try {
     body = await request.json() as typeof body;
   } catch {
-    return refuse(corsHeaders, 400, 'invalid_pubkey', 'Request body must be JSON with a pubkey and a duration');
+    return refuse(corsHeaders, 400, 'invalid_body', 'Request body must be JSON with a pubkey and a duration');
   }
   if (typeof body.pubkey !== 'string' || !/^[0-9a-f]{64}$/.test(body.pubkey)) {
     return refuse(corsHeaders, 400, 'invalid_pubkey', 'pubkey must be 64 lowercase hex characters');
@@ -740,8 +821,8 @@ export async function runTimedSuspensionTick(
 
       // Losing this CAS means a manual Unsuspend ended the record during the relay call and
       // sent its own restored message, so stop with none. The opposite ordering, a manual
-      // Unsuspend just after this CAS, sends a second restored message: accepted (F13; spec
-      // decision 14 keeps manual Unsuspend unchanged).
+      // Unsuspend just after this CAS, sends a second restored message: accepted (F13; manual
+      // Unsuspend does not consult the timer record, only the ban list).
       if (!(await cas(cur, { status: 'keycast_pending', attempts: 0, last_error: null, claimed_at: null }))) {
         console.log(`[timedSuspensionTick] ${pubkey} was ended by a moderator during the lift; no message sent`);
         return;

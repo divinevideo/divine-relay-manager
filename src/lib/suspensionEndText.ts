@@ -7,6 +7,7 @@ import { formatSuspensionEnd, type TimedSuspensionView } from '../../shared/susp
 /** The end is unknown (unreadable list or unreadable end). Shared with the dialog's Currently line. */
 export const SUSPENSION_END_UNAVAILABLE = 'Suspended. End date unavailable';
 const UNAVAILABLE = SUSPENSION_END_UNAVAILABLE;
+const PAUSED_BY_BAN = 'Timer paused by a ban, so it will not lift on its own. Use Change end date to restart it';
 
 /**
  * First match wins. `record` follows useTimedSuspension: undefined while the
@@ -27,6 +28,10 @@ export function suspensionEndText(a: {
   if (isError) return UNAVAILABLE;
   const endsAt = record?.endsAt;
   if (banned && endsAt) return 'Banned. The timed suspension will not lift while the ban stands';
+  // The tick lifts only active rows, so a timer a ban paused never lifts on its own, even
+  // when this screen does not see the ban (list loading or failed, a record an unban left
+  // behind, a Keycast-only ban). Change end date makes it active again.
+  if (record?.status === 'cancelled_ban') return PAUSED_BY_BAN;
   if (endsAt) {
     const end = new Date(endsAt);
     // An end the UI cannot read is not one it can show.

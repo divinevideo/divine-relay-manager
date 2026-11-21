@@ -98,6 +98,14 @@ describe('UnbanSuspensionDialog', () => {
     expect(screen.getByText('Suspended. End date unavailable')).toBeInTheDocument();
   });
 
+  // Under "may also be suspended", a line starting "Suspended." would state the very
+  // thing the description says is not confirmed.
+  it('says only that the end date is unavailable when the suspension is not confirmed', () => {
+    renderDialog({ record: undefined, suspensionConfirmed: false });
+    expect(screen.getByText('End date unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Suspended. End date unavailable')).not.toBeInTheDocument();
+  });
+
   it.each([
     [record(FUTURE), undefined, 'resume'],
     [record(FUTURE), 'End the suspension now', 'end_now'],

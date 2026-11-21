@@ -22,7 +22,7 @@ import { BulkNotesPanel } from './BulkNotesPanel';
 import { SuspensionDurationDialog } from './SuspensionDurationDialog';
 import { SuspensionEndLine } from './SuspensionEndLine';
 import { UnbanSuspensionDialog } from './UnbanSuspensionDialog';
-import { unbanOutcomeNote, unbanOutcomeToast } from '@/lib/unbanOutcomeToast';
+import { unbanAuditFailedToast, unbanOutcomeToast } from '@/lib/unbanOutcomeToast';
 import { useNavigate } from 'react-router-dom';
 import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight, CalendarClock } from 'lucide-react';
 
@@ -32,12 +32,18 @@ const LOST_TRACK_BODY = 'It may still be running on the server. Wait a minute an
 const AUDIT_NOT_RECORDED = 'Action applied; audit log not recorded';
 
 // One toast for a suspend (the app shows one at a time), most important first:
-// an end date asked for but not saved (nothing will lift the suspension), then
-// a missing decision row, then plain success. An open-ended suspend writes no
-// timer record by design, so its `recorded: false` is not a lost end date.
+// a timer record that was not written, then a missing decision row, then plain
+// success. Every suspend replaces the record, open-ended ones included, so
+// `recorded: false` always matters: with a length, nothing will lift the
+// suspension; with no end date, an earlier timer stays and may still lift it.
 function suspendToast(outcome: SuspendOutcome, duration: SuspensionDuration | null): { title: string; description?: string } {
-  if (duration !== null && !outcome.recorded) {
-    return { title: 'User suspended, but the end date was not saved', description: 'Use Change end date to set it.' };
+  if (!outcome.recorded) {
+    return duration !== null
+      ? { title: 'User suspended, but the end date was not saved', description: 'Use Change end date to set it.' }
+      : {
+        title: 'User suspended, but the end date could not be cleared',
+        description: 'An earlier end date may still lift this suspension. Check its end date.',
+      };
   }
   const done = outcome.endsAt ? `User suspended until ${formatSuspensionEnd(outcome.endsAt)}` : 'User suspended, no end date';
   return outcome.decisionRecorded ? { title: done } : { title: AUDIT_NOT_RECORDED, description: done };
@@ -171,12 +177,13 @@ export function UserActions({
   // Detached audit write. `act` is the api bound to the moderator's login when
   // the action started, so a logout or switch mid-request can't retarget it.
   // Never blocks the action.
-  // `note` rides on the audit warning because the app shows one toast at a
-  // time: the warning would otherwise replace a note the action just showed.
+  // `failToast` is the warning shown on failure. The app shows one toast at a
+  // time, so it carries what the action just showed (a ban's note, an unban's
+  // outcome) rather than replacing it.
   const logAudit = (
     act: ModeratorApi,
     params: Parameters<ModeratorApi['logDecision']>[0],
-    note?: string,
+    failToast: { title: string; description?: string; variant?: 'destructive' } = { title: AUDIT_NOT_RECORDED },
   ) =>
     // Started from a resolved promise so that even a synchronous throw lands in
     // the catch below rather than failing the action.
@@ -187,7 +194,7 @@ export function UserActions({
       })
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);
-        toast({ title: AUDIT_NOT_RECORDED, description: note });
+        toast(failToast);
       });
 
   // The worker writes the suspend's decision row itself (with the end date it
@@ -231,8 +238,9 @@ export function UserActions({
       });
     },
     onSuccess: (_data, target) => {
-      // A manual unsuspend also cancels the account's timer.
-      queryClient.invalidateQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
+      // A manual unsuspend also cancels the account's timer. Reset, not
+      // invalidate: if the re-read fails, the old end must not stay on screen.
+      void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast({ title: 'User unsuspended' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
     },
@@ -252,7 +260,7 @@ export function UserActions({
         targetId: target,
         action: 'ban_user',
         reason: 'Banned by moderator',
-      }, banSuccessNote(outcome));
+      }, { title: AUDIT_NOT_RECORDED, description: banSuccessNote(outcome) });
       return outcome;
     },
     onSuccess: (outcome, target) => {
@@ -274,13 +282,14 @@ export function UserActions({
       // A ban usually purged the posts, so no restore window: reset only.
       void resetAccountContentReads(queryClient, target);
       const outcomeToast = unbanOutcomeToast(outcome);
-      // The audit warning replaces the outcome toast, so it carries the outcome.
+      // The audit warning replaces the outcome toast, so it carries the outcome,
+      // and a failure keeps its title and severity (G4).
       logAudit(act, {
         targetType: 'pubkey',
         targetId: target,
         action: 'unban_user',
         reason: 'Unbanned by moderator',
-      }, unbanOutcomeNote(outcomeToast));
+      }, unbanAuditFailedToast(outcome));
       return outcomeToast;
     },
     onSuccess: (outcomeToast, { target }) => {
@@ -381,6 +390,16 @@ export function UserActions({
   const timer = useTimedSuspension(confirmedSuspended || (isBanned && unbanAsks) ? pubkey : null);
   // Open for one account, like the duration dialog above.
   const [unbanDialogPubkey, setUnbanDialogPubkey] = useState<string | null>(null);
+  // A prop-driven close fires no onOpenChange, so an account switch also drops
+  // both targets: otherwise going back to the first account would reopen the
+  // dialog it abandoned. Set during render, React's pattern for state that
+  // follows a prop.
+  const [targetsFor, setTargetsFor] = useState(pubkey);
+  if (targetsFor !== pubkey) {
+    setTargetsFor(pubkey);
+    setDialogPubkey(null);
+    setUnbanDialogPubkey(null);
+  }
 
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
     banUserMutation.isPending || unbanUserMutation.isPending || changeEnd.isPending || bulkJob.isRunning;
@@ -438,7 +457,9 @@ export function UserActions({
           <UnbanSuspensionDialog
             open={unbanDialogPubkey === pubkey}
             onOpenChange={(open) => { if (!open) setUnbanDialogPubkey(null); }}
-            record={timer.record}
+            // A failed refresh over an older copy is unknown here: that copy may
+            // predate a suspend, and its "no timer" would default to no end date.
+            record={timer.refreshFailed ? undefined : timer.record}
             suspensionConfirmed={isSuspended === true}
             isPending={unbanUserMutation.isPending}
             // The account is taken at the click, like every action here.

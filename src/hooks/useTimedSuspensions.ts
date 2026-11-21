@@ -27,17 +27,25 @@ export function useTimedSuspensions(opts?: { enabled?: boolean }) {
  * - `null`: the list answered and this account has no timer
  * - a record: its timer
  * `isError` is true only when the read failed and there is no data to show, so a
- * failed background refetch over earlier data stays quiet.
+ * failed background refetch over earlier data stays quiet. `refreshFailed` says
+ * that case happened: the record is from an older copy that may predate a
+ * suspend, fine to show but not to choose a default from (the unban prompt).
  */
 export function useTimedSuspension(pubkey: string | null | undefined): {
   record: TimedSuspensionView | null | undefined;
   isError: boolean;
   isLoading: boolean;
+  refreshFailed: boolean;
 } {
   const query = useTimedSuspensions({ enabled: !!pubkey });
   const target = pubkey?.toLowerCase();
   const record = !target || !query.data
     ? undefined
     : query.data.find(entry => typeof entry.pubkey === 'string' && entry.pubkey.toLowerCase() === target) ?? null;
-  return { record, isError: !!pubkey && query.isError && !query.data, isLoading: !!pubkey && query.isLoading };
+  return {
+    record,
+    isError: !!pubkey && query.isError && !query.data,
+    isLoading: !!pubkey && query.isLoading,
+    refreshFailed: !!pubkey && query.isError && !!query.data,
+  };
 }

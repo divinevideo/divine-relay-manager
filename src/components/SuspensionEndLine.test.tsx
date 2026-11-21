@@ -73,6 +73,24 @@ describe('suspensionEndText', () => {
       .toBe('Suspended, no end date');
   });
 
+  // The tick lifts only active rows. A cancelled_ban row the screen does not see as banned
+  // (the ban list is loading or failed, an unban left the record behind, or only Keycast
+  // holds the ban) will not lift, so "Lifts at the next check" would be untrue.
+  it.each([
+    ['a passed end', '2026-11-20T23:00:00.000Z'],
+    ['a future end', '2026-11-24T14:00:00.000Z'],
+    ['no end', null],
+  ])('says a timer paused by a ban will not lift on its own, for %s', (_label, endsAt) => {
+    const text = suspensionEndText({ record: rec(endsAt, { status: 'cancelled_ban' }), isError: false, banned: false, now: NOW });
+    expect(text).toBe('Timer paused by a ban, so it will not lift on its own. Use Change end date to restart it');
+  });
+
+  it('keeps the ban line for a paused timer while the ban is seen', () => {
+    expect(suspensionEndText({
+      record: rec('2026-11-20T23:00:00.000Z', { status: 'cancelled_ban' }), isError: false, banned: true, now: NOW,
+    })).toBe('Banned. The timed suspension will not lift while the ban stands');
+  });
+
   // An end the UI cannot read is not an end it can show.
   it('says the end date is unavailable for an end it cannot parse', () => {
     expect(suspensionEndText({ record: rec('not-a-date'), isError: false, banned: false, now: NOW }))

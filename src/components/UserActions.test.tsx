@@ -754,13 +754,15 @@ describe('UserActions', () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
   });
 
-  it('refreshes the timers after an unsuspend', async () => {
+  // Reset, not invalidate, like every other timer-changing action: if the re-read
+  // fails, the old end must not stay on screen as if current.
+  it('resets the timers after an unsuspend', async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    const resetSpy = vi.spyOn(qc, 'resetQueries');
     renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, qc);
     fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
     await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unsuspended' }));
-    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY });
+    expect(resetSpy).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY });
   });
 
   it('closes the ban dialog on success (the alertdialog is removed)', async () => {
@@ -1298,7 +1300,7 @@ describe('UserActions timed suspensions', () => {
     });
 
     it('No end date sends an explicit open end', async () => {
-      api.suspendPubkey.mockResolvedValue({ endsAt: null, recorded: false, decisionRecorded: true });
+      api.suspendPubkey.mockResolvedValue({ endsAt: null, recorded: true, decisionRecorded: true });
       renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
       suspendThroughDialog(null);
       await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalledWith(PUBKEY, 'Suspended by moderator', null));
@@ -1317,14 +1319,17 @@ describe('UserActions timed suspensions', () => {
       expect(toast).toHaveBeenCalledTimes(1);
     });
 
-    // An open-ended suspend writes no timer record by design: recorded false is
-    // not "the end date was not saved" there.
-    it('does not say the end date was not saved for an open-ended suspend', async () => {
+    // An open-ended suspend also replaces the timer record. When that write fails, an
+    // earlier timer stays active and can still lift the suspension at its old end (G7).
+    it('warns that an earlier end may still lift it when an open-ended suspend was not recorded', async () => {
       api.suspendPubkey.mockResolvedValue({ endsAt: null, recorded: false, decisionRecorded: true });
       renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
       suspendThroughDialog(null);
-      await waitFor(() => expect(toast).toHaveBeenCalled());
-      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'User suspended, but the end date was not saved' }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'User suspended, but the end date could not be cleared',
+        description: 'An earlier end date may still lift this suspension. Check its end date.',
+      }));
+      expect(toast).toHaveBeenCalledTimes(1);
     });
 
     it('says the audit log was not recorded when the worker could not write the decision row', async () => {
@@ -1349,6 +1354,9 @@ describe('UserActions timed suspensions', () => {
       fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
       expect(screen.getByRole('dialog')).toBeInTheDocument();
       rerender(tree('b'.repeat(64)));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      // Back to the first account: the abandoned dialog stays closed (G6).
+      rerender(tree(PUBKEY));
       expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
       expect(api.suspendPubkey).not.toHaveBeenCalled();
     });
@@ -1627,6 +1635,22 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'resume'));
   });
 
+  // An older "no timer" copy whose refresh failed may predate a timed suspend: defaulting
+  // to "no end date" from it could erase a real end, so the prompt treats it as unknown.
+  it('defaults to resume as it is when a timer refresh failed over an older copy', async () => {
+    api.listTimedSuspensions.mockResolvedValueOnce([]);
+    const qc = client();
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, qc);
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(qc.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.test'])?.status).toBe('success'));
+    api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+    await act(async () => { await qc.refetchQueries({ queryKey: TIMED_SUSPENSIONS_KEY }); });
+    await waitFor(() => expect(qc.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.test'])?.status).toBe('error'));
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByLabelText('Resume the suspension as it is')).toBeChecked();
+  });
+
   it('cancelling the prompt unbans nothing', () => {
     renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
     clickUnban();
@@ -1646,6 +1670,9 @@ describe('UserActions unban prompt', () => {
     clickUnban();
     expect(screen.getByRole('dialog')).toBeInTheDocument();
     rerender(tree('b'.repeat(64)));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    // Back to the first account: the abandoned prompt stays closed (G6).
+    rerender(tree(PUBKEY));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(api.unbanPubkey).not.toHaveBeenCalled();
   });
@@ -1676,18 +1703,30 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban' }));
   });
 
-  // The audit warning replaces the outcome toast (one shows at a time), so it
-  // carries the outcome: an end_failed must not vanish behind it.
-  it('carries the outcome on a failed audit write', async () => {
+  // The audit warning replaces the outcome toast (one shows at a time): an end_failed
+  // must not vanish behind it or lose its severity (G4).
+  it('keeps a destructive outcome on a failed audit write', async () => {
     api.unbanPubkey.mockResolvedValue({ suspension: { state: 'end_failed' } });
     api.logDecision.mockRejectedValue(new Error('audit down'));
     renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
     clickUnban();
     confirmUnban();
-    await waitFor(() => expect(toast).toHaveBeenCalledWith({
-      title: 'Action applied; audit log not recorded',
-      description: 'User unbanned, but the suspension could not be lifted. It is still suspended. Try Unsuspend.',
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith({
+      title: 'User unbanned, but the suspension could not be lifted',
+      description: 'It is still suspended. Try Unsuspend. Audit log not recorded.',
+      variant: 'destructive',
     }));
+  });
+
+  it('carries a plain outcome on a failed audit write, saying the warning once', async () => {
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'ended', endsAt: null, decisionRecorded: false } });
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    confirmUnban();
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+    expect(toast).toHaveBeenLastCalledWith({ title: 'Action applied; audit log not recorded', description: 'User unbanned and unsuspended' });
   });
 
   // Reset, not invalidate: the unban may have ended or changed the timer, and a

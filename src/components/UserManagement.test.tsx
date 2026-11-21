@@ -76,6 +76,17 @@ const PUBKEY = 'a'.repeat(64);
 
 const guardRefusal = () => new ApiError('under age review', 409, 'Conflict', 'age_review_active');
 
+// The Banned tab unbans with no prompt only once the suspended list has answered
+// without the account (F6); clicked before then, the prompt opens and no unban is
+// sent. Waiting for that answer states the precondition instead of relying on both
+// lists settling in the same batch.
+async function clickUnbanWithNoPrompt() {
+  const button = await screen.findByRole('button', { name: /^Unban$/i });
+  await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('listsuspendedpubkeys'));
+  await act(async () => {});
+  fireEvent.click(button);
+}
+
 function renderWithProvider(client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } })) {
   return render(
     <QueryClientProvider client={client}>
@@ -124,7 +135,7 @@ describe('UserManagement age-review guard wiring', () => {
     api.unbanPubkey.mockRejectedValue(guardRefusal());
 
     renderWithProvider();
-    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+    await clickUnbanWithNoPrompt();
 
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
@@ -325,7 +336,7 @@ describe('UserManagement drops cached authored-content reads after an account ac
     const client = clientWithStats();
 
     renderWithProvider(client);
-    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+    await clickUnbanWithNoPrompt();
 
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
     // The unban and its audit write go through asModerator(token) (#178).
@@ -422,7 +433,7 @@ describe('UserManagement drops cached authored-content reads after an account ac
     const client = clientWithStats();
 
     renderWithProvider(client);
-    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+    await clickUnbanWithNoPrompt();
 
     await waitFor(() => expect(client.getQueryData(STATS_KEY)).toBeUndefined());
   });
@@ -448,7 +459,7 @@ describe('UserManagement drops cached authored-content reads after an account ac
     const client = clientWithStats();
     client.setQueryData(['user-stats', 'wss://relay.test', UNBANNED], { postCount: 0 });
     renderWithProvider(client);
-    fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+    await clickUnbanWithNoPrompt();
 
     await waitFor(() => expect(client.getQueryData(['user-stats', 'wss://relay.test', UNBANNED])).toBeUndefined());
     expect(result.current).toBe(false);
@@ -638,6 +649,19 @@ describe('UserManagement timed suspensions', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     });
 
+    // The worker's change route takes canonical lowercase hex only, and the relay's list
+    // may spell a pubkey in either case (F14), so the page lowercases before sending.
+    it('sends a lowercase pubkey to Change end date when the list spells it in uppercase', async () => {
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY.toUpperCase() }] }));
+      renderPage();
+      await openSuspendedTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Change end date' }));
+      const dialog = screen.getByRole('dialog');
+      fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: '2' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
+      await waitFor(() => expect(api.changeSuspensionEnd).toHaveBeenCalledWith(PUBKEY, expect.anything()));
+    });
+
     // The Change end date dialog states the end it is changing.
     it('the Change end date dialog names the current end', async () => {
       const endsAt = threeDaysOut();
@@ -716,6 +740,45 @@ describe('UserManagement timed suspensions', () => {
       await waitFor(() => expect(lastProps()?.isSuspended).toBe(false));
       await act(async () => { await qc.refetchQueries({ queryKey: ['suspended-users'] }); });
       await waitFor(() => expect(lastProps().isSuspended).toBeNull());
+    });
+
+    // isBanned follows the same rule as isSuspended: null until the banned list has
+    // answered, never a guessed false.
+    it.each([
+      ['still loading', never, true],
+      ['failed', () => Promise.reject(new Error('relay down')), false],
+    ] as const)('passes the ban as unknown while the banned list is %s', async (_name, banned, pending) => {
+      api.callRelayRpc.mockImplementation(lists({ banned, suspended: [] }));
+      renderWithProvider(client());
+      await waitFor(() => expect(lastProps()?.isSuspended).toBe(false));
+      if (!pending) await waitFor(() => expect(lastProps().statusPending).toBe(false));
+      expect(lastProps().isBanned).toBeNull();
+      expect(lastProps().statusPending).toBe(pending);
+    });
+
+    it('passes the ban as unknown when a refresh of the banned list failed over an older copy', async () => {
+      let bannedReads = 0;
+      api.callRelayRpc.mockImplementation((method: string) => {
+        if (method === 'listbannedpubkeys') {
+          bannedReads += 1;
+          return bannedReads === 1 ? Promise.resolve([{ pubkey: PUBKEY }]) : Promise.reject(new Error('relay down'));
+        }
+        return Promise.resolve([]);
+      });
+      const qc = client();
+      renderWithProvider(qc);
+      await waitFor(() => expect(lastProps()?.isBanned).toBe(true));
+      await act(async () => { await qc.refetchQueries({ queryKey: ['banned-users'] }); });
+      await waitFor(() => expect(lastProps().isBanned).toBeNull());
+    });
+
+    it.each([
+      ['listed in uppercase', [{ pubkey: PUBKEY.toUpperCase() }], true],
+      ['not listed', [{ pubkey: OTHER }], false],
+    ] as const)('passes the answered ban when the account is %s', async (_name, banned, expected) => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [...banned] }));
+      renderWithProvider(client());
+      await waitFor(() => expect(lastProps()?.isBanned).toBe(expected));
     });
 
     it.each([
@@ -889,9 +952,11 @@ describe('UserManagement timed suspensions', () => {
       fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
       await screen.findByRole('dialog');
       confirmUnban();
+      // A destructive outcome keeps its title and severity over the audit warning (G4).
       await waitFor(() => expect(toast).toHaveBeenCalledWith({
-        title: 'Action applied; audit log not recorded',
-        description: 'User unbanned, but the suspension could not be lifted. It is still suspended. Try Unsuspend.',
+        title: 'User unbanned, but the suspension could not be lifted',
+        description: 'It is still suspended. Try Unsuspend. Audit log not recorded.',
+        variant: 'destructive',
       }));
       expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' }));
     });
@@ -905,6 +970,22 @@ describe('UserManagement timed suspensions', () => {
       confirmUnban();
       await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' })));
       expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+
+    // An older "no timer" copy whose refresh failed may predate a timed suspend, so
+    // the prompt treats the end as unknown rather than default to "no end date".
+    it('defaults to resume as it is when a timer refresh failed over an older copy', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValueOnce([]);
+      const qc = client();
+      renderPage(qc);
+      await waitFor(() => expect(qc.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.test'])?.status).toBe('success'));
+      api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+      await act(async () => { await qc.refetchQueries({ queryKey: TIMED_SUSPENSIONS_KEY }); });
+      await waitFor(() => expect(qc.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.test'])?.status).toBe('error'));
+      fireEvent.click(screen.getByRole('button', { name: /^Unban$/i }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByLabelText('Resume the suspension as it is')).toBeChecked();
     });
 
     // The unban may have ended or changed the timer: a failed re-read must not
