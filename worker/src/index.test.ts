@@ -4,6 +4,8 @@ import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
 import * as accountStatus from './account-status';
+import * as retention from './retention';
+import * as timedSuspensions from './timed-suspensions';
 import { __clearModeratorLoginCache } from './moderator-identity';
 import { relayFake } from './test-helpers/relay-fake';
 
@@ -2679,6 +2681,100 @@ describe('scheduled cron — DB-unavailable alert', () => {
     await worker.scheduled(scheduledEvent, cronEnv, ctx);
 
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// -- scheduled() timed-suspension tick (#263) ----------------------------------
+
+describe('scheduled cron — timed-suspension tick', () => {
+  const zeroSummary = {
+    lifted: 0, alreadyLifted: 0, cancelledByBan: 0, waiting: 0, failed: 0, keycastSettled: 0, recovered: 0,
+  };
+
+  function recordingDb() {
+    const sqls: string[] = [];
+    const statement = (sql: string): unknown => ({
+      bind: () => statement(sql),
+      run: async () => ({ success: true, meta: { changes: 0 } }),
+      first: async () => null,
+      all: async () => ({ results: [] }),
+    });
+    return { sqls, db: { prepare: (sql: string) => { sqls.push(sql); return statement(sql); } } };
+  }
+
+  function cronEnv(db: unknown) {
+    return {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ENVIRONMENT: 'test',
+      DB: db,
+    } as never;
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('runs the tick even when the age-review deadline check throws', async () => {
+    vi.spyOn(ageReview, 'checkAgeReviewDeadlines').mockRejectedValue(new Error('deadline check down'));
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent, cronEnv(recordingDb().db), ctx);
+
+    expect(tick).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs the tick last, after the retention scan has finished', async () => {
+    const order: string[] = [];
+    vi.spyOn(retention, 'runRetentionDisposal').mockImplementation(async () => {
+      order.push('retention');
+      return {
+        claimLinksCleared: 0, casesRedacted: 0, casesDeleted: 0, projectionsDeleted: 0, bindingsDeleted: 0,
+        operationsCompacted: 0, subjectsDeleted: 0, privateReportsRedacted: 0,
+      } as never;
+    });
+    vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockImplementation(async () => {
+      order.push('tick');
+      return zeroSummary;
+    });
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 0) } as ScheduledEvent, cronEnv(recordingDb().db), ctx);
+
+    expect(order).toEqual(['retention', 'tick']);
+  });
+
+  it('a failing tick does not stop the retention scan', async () => {
+    vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockRejectedValue(new Error('tick down'));
+    const disposal = vi.spyOn(retention, 'runRetentionDisposal').mockResolvedValue({
+      claimLinksCleared: 0, casesRedacted: 0, casesDeleted: 0, projectionsDeleted: 0, bindingsDeleted: 0,
+      operationsCompacted: 0, subjectsDeleted: 0, privateReportsRedacted: 0,
+    } as never);
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 0) } as ScheduledEvent, cronEnv(recordingDb().db), ctx);
+
+    expect(disposal).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(console.error).mock.calls.some(call =>
+      String(call[0]).includes('[scheduled] Timed suspension tick failed'))).toBe(true);
+  });
+
+  it('logs the summary only when something changed', async () => {
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+    const event = { scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent;
+    const tickLogs = () => vi.mocked(console.log).mock.calls.filter(call =>
+      String(call[0]).includes('[scheduled] Timed suspension tick'));
+
+    await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
+    expect(tick).toHaveBeenCalledTimes(1);
+    expect(tickLogs()).toHaveLength(0);
+
+    tick.mockResolvedValue({ ...zeroSummary, lifted: 1 });
+    await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
+    expect(tickLogs()).toHaveLength(1);
+    expect(String(tickLogs()[0][0])).toContain('"lifted":1');
   });
 });
 

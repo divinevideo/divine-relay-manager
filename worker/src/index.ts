@@ -82,6 +82,7 @@ import {
   recordSuspensionDecision,
   replaceSuspensionRecord,
   restoreAfterLift,
+  runTimedSuspensionTick,
   type AccountNoticeAction,
 } from './timed-suspensions';
 import { liveSuspensionIo } from './timed-suspensions-io';
@@ -1129,6 +1130,21 @@ export default {
         } catch (error) {
           console.error('[scheduled] Protected-record retention failed:', error);
         }
+      }
+
+      // Lift timed suspensions whose end has passed. Last, so no other job waits on its relay,
+      // notify and Keycast calls; its own try/catch, so a failure here stops nothing else.
+      try {
+        await ensureSchemaOnce(env.DB);
+        const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
+          notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
+        const summary = await runTimedSuspensionTick({ DB: env.DB, ENVIRONMENT: env.ENVIRONMENT }, io);
+        if (summary.lifted + summary.alreadyLifted + summary.cancelledByBan + summary.failed
+          + summary.keycastSettled + summary.recovered > 0) {
+          console.log(`[scheduled] Timed suspension tick: ${JSON.stringify(summary)}`);
+        }
+      } catch (error) {
+        console.error('[scheduled] Timed suspension tick failed:', error);
       }
     } else if (env.SLACK_WEBHOOK_URL) {
       // #197: D1 binding unavailable — moderation-status is failing open (returning
