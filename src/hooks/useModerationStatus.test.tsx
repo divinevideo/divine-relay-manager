@@ -105,6 +105,78 @@ describe('useModerationStatus', () => {
     await waitFor(() => expect(result.current.isEventGone).toBe(true));
   });
 
+  // A Re-check runs the live check and reads the post again at once. When the
+  // check answers first, the post still reads as missing (the miss that began
+  // with the re-read after an account action), and that check has just looked
+  // at it. It must not count as a new miss. Once the post reads as found
+  // again, a later miss gets its auto-check.
+  it('does not run the live check again when a check answers during a miss that began before it', async () => {
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValueOnce(true).mockResolvedValue(false);
+    const { result, rerender } = renderHook(
+      ({ notFound }: { notFound: boolean }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
+      { wrapper, initialProps: { notFound: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await act(async () => { result.current.recheckAfterAction(); });
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+    rerender({ notFound: true });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+    await act(async () => { result.current.recheck(); });
+    await waitFor(() => expect(result.current.isEventGone).toBe(false));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    expect(result.current.isChecking).toBe(false);
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(2);
+
+    rerender({ notFound: false });
+    rerender({ notFound: true });
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(3));
+  });
+
+  // A check that could not answer (null: the relay did not reply in time) has
+  // not looked at the miss, so the auto-check still tries once.
+  it('still auto-checks a miss when the check that answered during it could not answer', async () => {
+    verifyPubkeyBanned.mockResolvedValue(false);
+    let answer!: (value: boolean | null) => void;
+    verifyEventDeleted
+      .mockImplementationOnce(() => new Promise(resolve => { answer = resolve; }))
+      .mockResolvedValue(true);
+    const { result, rerender } = renderHook(
+      ({ notFound }: { notFound: boolean }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
+      { wrapper, initialProps: { notFound: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await act(async () => { result.current.recheckAfterAction(); });
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(1));
+    rerender({ notFound: true });
+    await act(async () => { answer(null); });
+
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+  });
+
+  // The next report's post can read as missing at once (a cached read). What
+  // the last report's check answered during its own miss says nothing about
+  // this one.
+  it('auto-checks the next report when its post reads as missing at once', async () => {
+    const NEXT_EVENT_ID = 'c'.repeat(64);
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const { result, rerender } = renderHook(
+      ({ eventId, notFound }: { eventId: string; notFound: boolean }) => useModerationStatus(PUBKEY, eventId, notFound),
+      { wrapper, initialProps: { eventId: EVENT_ID, notFound: true } },
+    );
+    // The last report's post read as missing, and its auto-check found it.
+    await waitFor(() => expect(result.current.isEventGone).toBe(false));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+
+    rerender({ eventId: NEXT_EVENT_ID, notFound: true });
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledWith(NEXT_EVENT_ID));
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(2);
+  });
+
   it('uses the ban list before any check has run', async () => {
     listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
     verifyPubkeyBanned.mockResolvedValue(null);

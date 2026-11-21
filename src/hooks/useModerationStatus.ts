@@ -213,6 +213,11 @@ export function useModerationStatus(
 
   // Track which report we've auto-checked to avoid re-running on every render
   const autoCheckedRef = useRef<string | null>(null);
+  // Whether the latest live check answer the auto-check below has seen found
+  // the post on the relay while the post read as missing, and that answer's
+  // checkedAt, so that only a new answer changes the flag.
+  const foundDuringMissRef = useRef(false);
+  const seenAnswerRef = useRef<Date | null>(null);
 
   // Defined once in useRelayBanLists. These keys are shared with the reports
   // queue, and React Query runs the queryFn of whichever observer triggers the
@@ -369,13 +374,30 @@ export function useModerationStatus(
 
   // Auto-check: for events when not found, for users always (just a ban list refresh)
   useEffect(() => {
+    // A Re-check (or the restore window closing) runs the live check and reads
+    // the post again at once. The check can answer first, while the post still
+    // reads as missing, and the auto-check would then ask what it just
+    // answered. Set from a new answer only. Right after the report changes,
+    // this runs once more with the previous report's answer, and the reset's
+    // own render (checkedAt null) then clears the flag. A null answer (the
+    // check could not answer) is not a find and clears it too, so the
+    // auto-check can still try, as before. Cleared while the post does not
+    // read as missing, which includes while the pane is still reading it.
+    // That can only let a check through.
+    if (wsResult.checkedAt !== seenAnswerRef.current) {
+      seenAnswerRef.current = wsResult.checkedAt;
+      foundDuringMissRef.current = !!eventNotFound && wsResult.eventGone === false;
+    }
+    if (!eventNotFound) foundDuringMissRef.current = false;
     const checkKey = `${eventId || ''}:${pubkey || ''}`;
     if (autoCheckedRef.current === checkKey || banListsLoading || wsResult.isChecking) return;
 
     const shouldAutoCheck =
-      // A live check that still says the post is gone already verified this
-      // missing read. If a later check finds the post, a new miss can be checked.
-      (eventNotFound && eventId && wsResult.eventGone !== true) ||
+      // A missing read that no live check has answered yet. A latest answer
+      // that calls the post gone answers it, and so does a check that found the
+      // post during this miss. After a check finds the post, the next miss
+      // gets its auto-check.
+      (eventNotFound && eventId && wsResult.eventGone !== true && !foundDuringMissRef.current) ||
       // User report (no event): check ban status
       (pubkey && !eventId);
 
@@ -383,7 +405,7 @@ export function useModerationStatus(
       autoCheckedRef.current = checkKey;
       runCheck({ afterAction: false });
     }
-  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.eventGone, wsResult.isChecking, runCheck]);
+  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.eventGone, wsResult.checkedAt, wsResult.isChecking, runCheck]);
 
 
   // A later successful list read that contains the pubkey is newer than a
