@@ -74,6 +74,24 @@ import { handlePrivateReport, type PrivateReportEnv } from './private-reports';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
 import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, noteClaimedModerator, requireVerifiedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
+import {
+  applyUnbanChoice,
+  endSuspensionRecord,
+  getSuspensionRecord,
+  handleChangeSuspensionEnd,
+  handleListSuspensions,
+  recordSuspensionDecision,
+  replaceSuspensionRecord,
+  restoreAfterManualUnsuspend,
+  runTimedSuspensionTick,
+  suspensionAsShown,
+  type AccountNoticeAction,
+} from './timed-suspensions';
+import { liveSuspensionIo } from './timed-suspensions-io';
+import {
+  checkSuspensionDuration, DURATION_ERROR, isUnbanSuspensionChoice, SUSPENSION_ACTIONS, suspensionEndsAt,
+  type SuspensionDuration, type UnbanSuspensionChoice, type UnbanSuspensionState,
+} from '../../shared/suspension';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -222,7 +240,10 @@ async function notifyModerationService(
   action: string,
   reason: string,
   sha256?: string,
-  eventId?: string
+  eventId?: string,
+  // ISO instant with Z. Only a moderation-service that knows the field states it; an
+  // older one ignores it and sends today's wording, so no capability check is needed.
+  endsAt?: string
 ): Promise<void> {
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -253,6 +274,7 @@ async function notifyModerationService(
       reason,
       ...(sha256 && { sha256 }),
       ...(eventId && { eventId }),
+      ...(endsAt && { endsAt }),
     }),
   });
 
@@ -280,15 +302,16 @@ async function notifyModerationService(
 function notifyAccountState(
   env: Env,
   pubkey: string,
-  action: 'ACCOUNT_SUSPENDED' | 'ACCOUNT_BANNED' | 'ACCOUNT_RESTORED',
+  action: AccountNoticeAction,
   reason: string,
-  ctx?: ExecutionContext
+  ctx?: ExecutionContext,
+  endsAt?: string
 ): void {
   if (!ctx) {
     console.warn(`[notifyAccountState] No ExecutionContext; skipping ${action} DM for ${pubkey}`);
     return;
   }
-  const dmPromise = notifyModerationService(env, pubkey, action, reason)
+  const dmPromise = notifyModerationService(env, pubkey, action, reason, undefined, undefined, endsAt)
     .catch(err => console.error('[notifyAccountState] DM notification error:', err));
   ctx.waitUntil(dmPromise);
 }
@@ -713,6 +736,28 @@ export default {
         return handleRelayRpc(request, env, corsHeaders, ctx, moderator);
       }
 
+      // Timed suspensions: the list, and changing an end date. The POST is gated by the moderator
+      // login like any write, and MOD_RELAY_ADMIN_KEY does not open it. The table may not exist
+      // on an isolate's first request, so the schema is bootstrapped first (F9).
+      if (path === '/api/suspensions' || path === '/api/suspensions/end') {
+        const isList = path === '/api/suspensions' && request.method === 'GET';
+        const isEnd = path === '/api/suspensions/end' && request.method === 'POST';
+        if (isList || isEnd) {
+          if (env.DB) {
+            try {
+              await ensureSchemaOnce(env.DB);
+            } catch (err) {
+              console.error('[suspensions] schema bootstrap failed:', err);
+              return jsonResponse({ success: false, error: 'Database not ready' }, 503, corsHeaders);
+            }
+          }
+          if (isList) return handleListSuspensions(env, corsHeaders);
+          const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
+            notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
+          return handleChangeSuspensionEnd(request, env, corsHeaders, ctx, moderator, io);
+        }
+      }
+
       // The audited suspended-content viewer. The two reads need a moderator
       // login verified fresh (needsFreshModeratorLogin) and write an audit row
       // before answering; the audit read needs only the access gate.
@@ -1090,6 +1135,21 @@ export default {
         } catch (error) {
           console.error('[scheduled] Protected-record retention failed:', error);
         }
+      }
+
+      // Lift timed suspensions whose end has passed. Last, so no other job waits on its relay,
+      // notify and Keycast calls; its own try/catch, so a failure here stops nothing else.
+      try {
+        await ensureSchemaOnce(env.DB);
+        const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
+          notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
+        const summary = await runTimedSuspensionTick({ DB: env.DB, ENVIRONMENT: env.ENVIRONMENT }, io);
+        if (summary.lifted + summary.alreadyLifted + summary.cancelledByBan + summary.failed
+          + summary.keycastSettled + summary.recovered > 0) {
+          console.log(`[scheduled] Timed suspension tick: ${JSON.stringify(summary)}`);
+        }
+      } catch (error) {
+        console.error('[scheduled] Timed suspension tick failed:', error);
       }
     } else if (env.SLACK_WEBHOOK_URL) {
       // #197: D1 binding unavailable — moderation-status is failing open (returning
@@ -1646,12 +1706,26 @@ function surviveDisconnect<T>(work: Promise<T>, ctx?: ExecutionContext): Promise
   return work;
 }
 
+const KEEP_ALIVE_RPC_METHODS: ReadonlySet<string> = new Set(['banpubkey', 'suspendpubkey', 'unbanpubkey']);
+
 type RelayRpcBody = {
   method: string;
   params?: (string | number | undefined)[];
+  // suspendpubkey only. Present (from the suspend dialog): `duration` is a
+  // SuspensionDuration, or null for no end date. Absent: a legacy suspend, which
+  // still replaces the record, open-ended, but writes no decision row.
+  suspension?: { duration: unknown };
+  // unbanpubkey only: what happens to a running suspension (resume | end_now | open_ended).
+  // Absent means resume.
+  suspensionChoice?: unknown;
+  // unbanpubkey only: the timer version the unban dialog showed, or null when it showed no
+  // timer. Absent (moderation-service allow_pubkey, Coop, older UIs): not checked.
+  suspensionVersion?: unknown;
 };
 
 type RelayRpcResult = Nip86RpcResult & Partial<BanPubkeyResult>;
+
+const SUSPENSION_ENDING_ERROR = 'This suspension is ending now. Check again in a few minutes.';
 
 // "Banned, but content removal unconfirmed", copied from a ban result onto a
 // response. Empty for a clean ban.
@@ -1685,7 +1759,10 @@ async function handleRelayRpc(
   const response = runRelayRpc(body, env, corsHeaders, ctx, moderator);
   // A slow banpubkey now usually ends in success, so its Keycast mirror and DM
   // are registered late; keep the whole ban alive if the caller gives up first.
-  return body.method === 'banpubkey' ? surviveDisconnect(response, ctx) : response;
+  // Suspend and unban likewise await D1 writes and relay reads (unban end_now, a
+  // second relay call) before their Keycast and notice legs start: a disconnect
+  // there would leave the relay changed with nothing after it.
+  return KEEP_ALIVE_RPC_METHODS.has(body.method) ? surviveDisconnect(response, ctx) : response;
 }
 
 async function runRelayRpc(
@@ -1807,6 +1884,78 @@ async function runRelayRpc(
     if (guarded) return guarded;
   }
 
+  // The unban's suspension choice is checked before the relay is touched, so a bad value
+  // unbans nobody.
+  let suspensionChoice: UnbanSuspensionChoice | undefined;
+  if (body.method === 'unbanpubkey' && body.suspensionChoice !== undefined) {
+    if (!isUnbanSuspensionChoice(body.suspensionChoice)) {
+      return jsonResponse({ success: false, error: 'Invalid suspension choice', code: 'invalid_suspension_choice' }, 400, corsHeaders);
+    }
+    suspensionChoice = body.suspensionChoice;
+  }
+
+  // Ask again if it changed: a choice made against a timer that has moved since the dialog
+  // read it (another moderator's end date, say, behind a cached read) is refused here, before
+  // the relay is touched, so the account stays banned and the moderator decides again against
+  // the current end. applyUnbanChoice re-checks for a change landing during the relay call.
+  let suspensionVersion: number | null | undefined;
+  if (body.method === 'unbanpubkey' && body.suspensionVersion !== undefined) {
+    const v = body.suspensionVersion;
+    if (v !== null && !(typeof v === 'number' && Number.isInteger(v) && v >= 0)) {
+      return jsonResponse({ success: false, error: 'Invalid suspension version', code: 'invalid_suspension_version' }, 400, corsHeaders);
+    }
+    suspensionVersion = v;
+    // A non-canonical target skips the choice altogether (F8), so it has nothing to check.
+    if (env.DB && /^[0-9a-f]{64}$/.test(target)) {
+      let shown: boolean;
+      try {
+        shown = suspensionAsShown(await getSuspensionRecord(env.DB, target), v);
+      } catch (err) {
+        console.error('[handleRelayRpc] suspension record read failed; unban refused:', err);
+        return jsonResponse({ success: false, error: 'Could not check the suspension. Try again.', code: 'status_unavailable' }, 503, corsHeaders);
+      }
+      if (!shown) {
+        return jsonResponse({
+          success: false, code: 'suspension_changed',
+          error: 'The suspension changed after this was opened. Check the end date and confirm again.',
+        }, 409, corsHeaders);
+      }
+    }
+  }
+
+  // Suspend for a set time. The duration is checked before the relay is touched, so a bad
+  // value suspends nobody (Review Focus 5). duration null is an explicit "no end date".
+  const suspensionField = body.method === 'suspendpubkey' && body.suspension != null ? body.suspension : undefined;
+  let suspensionDuration: SuspensionDuration | null = null;
+  if (suspensionField !== undefined) {
+    const duration = (suspensionField as { duration?: unknown }).duration;
+    if (duration !== null) {
+      const checked = checkSuspensionDuration(duration);
+      if (!checked.ok) {
+        return jsonResponse({ success: false, error: DURATION_ERROR, code: 'invalid_duration' }, 400, corsHeaders);
+      }
+      suspensionDuration = checked.duration;
+    }
+  }
+
+  // A re-suspend while the timer is mid-lift is refused (F12): the timer's relay unsuspend
+  // could land after this suspend and silently undo it. replaceSuspensionRecord re-checks in
+  // its own statement for a claim that lands during the relay call. A failed read lets the
+  // suspend go ahead: suspends keep working through a D1 outage, like the age-review guard's
+  // suspend direction, and the guarded write still never overwrites a claim.
+  let suspensionRecordUnchecked = false;
+  if (body.method === 'suspendpubkey' && env.DB) {
+    try {
+      const existing = await getSuspensionRecord(env.DB, target);
+      if (existing?.status === 'lifting') {
+        return jsonResponse({ success: false, error: SUSPENSION_ENDING_ERROR, code: 'suspension_ending' }, 409, corsHeaders);
+      }
+    } catch (err) {
+      suspensionRecordUnchecked = true;
+      console.error('[handleRelayRpc] suspension record read failed; suspending anyway:', err);
+    }
+  }
+
   const eventVisibilityAction = body.method === 'banevent'
     ? 'hide'
     : body.method === 'allowevent'
@@ -1856,34 +2005,130 @@ async function runRelayRpc(
     }
   }
 
-  // Account-state side effects (all non-critical, off the response path).
+  // Only set for a suspend that came with the `suspension` field; legacy responses are unchanged.
+  let suspensionResponse: { endsAt: string | null; recorded: boolean; decisionRecorded: boolean } | undefined;
+  // Only set for an unban: what became of a running suspension.
+  let unbanSuspension: { state: UnbanSuspensionState; endsAt: string | null; decisionRecorded?: boolean } | undefined;
+  let skippedChoice: 'non_canonical_pubkey' | undefined;
+
+  // Account-state bookkeeping and best-effort side effects.
   // Direct RPC callers enter here, and handleModerate delegates here before
   // running its own post-action bookkeeping such as linked-ticket sync.
   // params[0] = pubkey, params[1] = reason.
   if (body.params?.[0]) {
     const pubkey = String(body.params[0]);
     const reason = body.params[1] ? String(body.params[1]) : undefined;
+    const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
+      notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
 
-    // Mirror each account-state relay action into Keycast (non-critical) and DM
-    // the user. unbanpubkey lifts the Keycast ban (status -> active), restoring
-    // encryption, decryption, sign_canonical and ActivityPub keys (a banned account
-    // could already log in and sign), but sends no DM here -- restore-on-unban DM
-    // is tracked in #96.
+    // Mirror the resulting relay state into Keycast and send any applicable notice.
+    // For unban, a remaining suspension determines the Keycast state and notice.
     switch (body.method) {
       case 'banpubkey':
         enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env, moderator), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
         break;
-      case 'unbanpubkey':
-        enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
+      case 'unbanpubkey': {
+        // A canonical target only (F8): record keys and relay writes are byte-exact, so a
+        // differently-cased target could report "ended" while the account stays suspended.
+        // The unban itself still forwards any spelling (see above), with today's Keycast call.
+        if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+          enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
+          if (suspensionChoice !== undefined) skippedChoice = 'non_canonical_pubkey';
+          break;
+        }
+        const applied = await applyUnbanChoice(env.DB, io, pubkey, suspensionChoice, {
+          moderator, now: new Date(), environment: env.ENVIRONMENT, shownVersion: suspensionVersion,
+        });
+        if (ctx) {
+          for (const p of applied.waitUntil) ctx.waitUntil(p);
+        } else {
+          // Nothing keeps these alive past the response, so finish them first.
+          await Promise.allSettled(applied.waitUntil);
+        }
+        unbanSuspension = { state: applied.state, endsAt: applied.endsAt ?? null,
+          ...(applied.decisionRecorded !== undefined && { decisionRecorded: applied.decisionRecorded }) };
         break;
-      case 'suspendpubkey':
+      }
+      case 'suspendpubkey': {
+        // Every suspend replaces the record, open-ended when no end was asked for, so a
+        // re-suspend always supersedes an earlier timer (plan decision 1).
+        const endsAt = suspensionDuration ? suspensionEndsAt(suspensionDuration, new Date()) : null;
+        let recorded = false;
+        let racedLift = false;
+        let writeFailed = false;
+        if (env.DB) {
+          try {
+            recorded = await replaceSuspensionRecord(env.DB, { pubkey, endsAt, moderator: moderator ?? null });
+            racedLift = !recorded;
+          } catch (err) {
+            writeFailed = true;
+            console.error(`[handleRelayRpc] suspension record write failed for ${pubkey}:`, err);
+          }
+        }
+        const checkAccount = 'Check its relay suspension and Keycast status, and suspend again if needed.';
+        if (racedLift) {
+          // The timer claimed the row during the relay call, so its lift may undo this suspend:
+          // its relay unsuspend can land after ours, and its CAS still succeeds. Its claim is left
+          // alone. The moderator gets the pre-check's refusal; the person and Keycast are told
+          // nothing, so neither is told "suspended" just before the lift says "restored"; the
+          // history records the relay suspend that did happen; and a person checks the account.
+          console.error(`[handleRelayRpc] suspend of ${pubkey} raced a timed lift (record is lifting); refused with 409`);
+          await io.alert(`:warning: [${env.ENVIRONMENT ?? 'unknown'}] A suspend raced a timed lift for ${pubkey}. ${checkAccount}`);
+          if (env.DB) {
+            await recordSuspensionDecision(env.DB, {
+              pubkey, action: SUSPENSION_ACTIONS.set,
+              reason: 'Suspended by moderator while a timed lift was in progress; the lift may undo this suspension'
+                + (endsAt ? ` (end date ${endsAt} not saved)` : ''),
+              moderator: moderator ?? null, human: true,
+            });
+          }
+          return jsonResponse({ success: false, error: SUSPENSION_ENDING_ERROR, code: 'suspension_ending' }, 409, corsHeaders);
+        }
+        if (writeFailed && suspensionRecordUnchecked) {
+          // Neither the pre-check nor the guarded write could see the record, so nothing ruled
+          // out a lift in flight. The suspend still goes ahead (a D1 outage must not block it).
+          await io.alert(`:warning: [${env.ENVIRONMENT ?? 'unknown'}] A suspend of ${pubkey} could not read or write `
+            + `its timed suspension record, so a timed lift may have been in progress. ${checkAccount}`);
+        }
+        let decisionRecorded = false;
+        if (suspensionField !== undefined && env.DB) {
+          const until = endsAt ? ` until ${endsAt}${recorded ? '' : ' (end date not saved)'}` : ', no end date';
+          decisionRecorded = await recordSuspensionDecision(env.DB, {
+            pubkey, action: SUSPENSION_ACTIONS.set, reason: `Suspended by moderator${until}`,
+            moderator: moderator ?? null, human: true,
+          });
+        }
         enforceKeycastState('suspend', pubkey, () => suspendUser(pubkey, 'moderation', env, moderator), ctx);
-        notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx);
+        // Only a recorded end is stated: an end nothing will act on would be untrue.
+        notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx,
+          recorded && endsAt ? endsAt : undefined);
+        if (suspensionField !== undefined) {
+          suspensionResponse = { endsAt: recorded ? endsAt : null, recorded, decisionRecorded };
+        }
         break;
+      }
       case 'unsuspendpubkey':
-        enforceKeycastState('unsuspend', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
-        notifyAccountState(env, pubkey, 'ACCOUNT_RESTORED', reason || 'Account restored by moderator', ctx);
+        // The same restore the timer runs: the one "restored" notice and Keycast active, but
+        // only once the relay confirms the account is not banned (an unreadable ban list
+        // restores nothing and alerts). F13, accepted: an Unsuspend just after a timed lift can
+        // send a second "restored" notice (spec decision 14).
+        if (ctx) {
+          ctx.waitUntil(restoreAfterManualUnsuspend(io, pubkey, {
+            reason: reason || 'Account restored by moderator', moderator, environment: env.ENVIRONMENT,
+          }));
+        } else {
+          console.warn(`[handleRelayRpc] No ExecutionContext; skipping restore notice and Keycast unsuspend for ${pubkey}`);
+        }
+        // A lost cancel is harmless: the timer later finds the account unsuspended and marks
+        // the record already_lifted, with no message and no Keycast change.
+        if (env.DB) {
+          try {
+            await endSuspensionRecord(env.DB, pubkey, 'cancelled_unsuspend');
+          } catch (err) {
+            console.error(`[handleRelayRpc] cancelling the suspension timer failed for ${pubkey}:`, err);
+          }
+        }
         break;
     }
   }
@@ -1892,6 +2137,9 @@ async function runRelayRpc(
     success: true,
     result: 'result' in result ? result.result : true,
     ...unconfirmedRemovalFields(result),
+    ...(suspensionResponse && { suspension: suspensionResponse }),
+    ...(unbanSuspension && { suspension: unbanSuspension }),
+    ...(skippedChoice && { suspensionChoiceSkipped: skippedChoice }),
   }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },

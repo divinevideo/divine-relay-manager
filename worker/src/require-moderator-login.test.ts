@@ -117,6 +117,11 @@ describe('REQUIRE_MODERATOR_LOGIN on', () => {
     expect(res.status).not.toBe(401);
   });
 
+  it('refuses a change of suspension end date with no login', async () => {
+    expect(await call({ url: 'https://api.test/api/suspensions/end', body: { pubkey: 'c'.repeat(64), duration: { value: 3, unit: 'days' } }, headers: await browser() }))
+      .toEqual(REFUSED);
+  });
+
   it('refuses before a real write route runs, not only on unmatched paths', async () => {
     expect(await call({ url: 'https://api.test/api/moderate', body: { action: 'delete_event', eventId: 'e'.repeat(64) }, headers: await browser() }))
       .toEqual(REFUSED);

@@ -41,9 +41,11 @@ interface BannedUserCardProps {
    * account.
    */
   suspended?: boolean;
+  /** A line about the account's status, rendered under the reason (the Suspended tab's end date). */
+  statusLine?: React.ReactNode;
 }
 
-export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton, suspended = false }: BannedUserCardProps) {
+export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButton, suspended = false, statusLine }: BannedUserCardProps) {
   const { nostr } = useNostr();
   const { config } = useAppContext();
   const [isOpen, setIsOpen] = useState(false);
@@ -223,6 +225,8 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
                   <span className="text-red-600 dark:text-red-300">{reason}</span>
                 </div>
               )}
+
+              {statusLine && <div className="mt-2">{statusLine}</div>}
             </div>
 
             {/* Actions */}

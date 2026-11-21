@@ -275,6 +275,16 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 - Health check: cron trigger every 5 minutes, internal heartbeat every 30 seconds
 - Known limitation: same-second concurrent reports can bypass dedup (idempotent, no user impact)
 
+### Timed suspensions
+
+Store, routes and scheduler tick live in `worker/src/timed-suspensions.ts`; the record is the `timed_suspensions` table.
+
+- The relay suspend is critical. Writing the `timed_suspensions` record after it is best-effort, but a failed write is reported, not hidden: the response carries `recorded: false`, the moderator is told the end date was not saved, and the decision row says "(end date not saved)". When the write fails and the pre-check could not read the record either, Slack also gets an alert.
+- The scheduler lifts an ended suspension through `restoreAfterLift()`, the same restored message and Keycast activate a manual unsuspend uses. It fails closed: an unreadable ban or suspension list, or an unknown Keycast status, means no lift this tick.
+- Unban applies the moderator's `suspensionChoice` (`resume`, `end_now`, `open_ended`) to any suspension. A caller that sends none, such as moderation-service `allow_pubkey` or Coop, gets `resume`: the suspension and its timer carry on.
+- A manual unsuspend sends the restored message and activates Keycast only when the relay ban list confirms the account is not banned; an unreadable ban list does neither and alerts Slack. An unban that cannot read the suspended list leaves Keycast as it is and alerts Slack.
+- `auto_unsuspend_user`, `cancel_suspension_timer`, and `resume_suspension_timer` are automated decision rows. `isAutomatedDecision()` excludes them from human handling even when the row attributes the unban that restarted a timer to a moderator.
+
 ## Frontend Data Flow
 
 The frontend connects directly to the relay via WebSocket for reading events. It calls the worker API for moderation actions.
@@ -334,6 +344,7 @@ Schema is created on-demand via `ensureDecisionsTable()` and `ensureZendeskTable
 | `private_report_intake` | One row per private DM report moderation-service handed over; the idempotency record for `POST /api/internal/private-reports` |
 | `suspended_content_views` | Append-only audit of moderator views of suspended content (verified moderator, target account, event or account page, surface). Triggers refuse UPDATE, DELETE and an insert over an existing id. Created on demand by `ensureSuspendedContentViewsTable()` in `worker/src/suspended-content.ts`; never written to `moderation_decisions` |
 | `report_arrivals` | One row per report ReportWatcher first saw live: the report id and its first-seen time. The handled-before rule compares a report by it, falling back to the report's `created_at` when there is no row |
+| `timed_suspensions` | One row per suspended account: optional end time and the auto-lift state machine (`active`, `lifting`, `keycast_pending`, terminal states), versioned for compare-and-swap. Store in `worker/src/timed-suspensions.ts`; end-time compares use `datetime(ends_at)` |
 
 ## Local Development
 

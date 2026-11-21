@@ -2,6 +2,8 @@
 // ABOUTME: Covers signing, publishing, moderation actions, post-action verification, and NIP-86 RPC
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { unbanOutcomeToast } from './unbanOutcomeToast';
+import { SUSPENSION_END_UNAVAILABLE } from './suspensionEndText';
 import {
   fetchResolutionState,
   fetchResolutionLabelTargets,
@@ -18,6 +20,7 @@ import {
   allowEvent,
   banPubkey,
   unbanPubkey,
+  isSuspensionChanged,
   listBannedPubkeys,
   listBannedEvents,
   listSuspendedPubkeys,
@@ -880,6 +883,86 @@ describe('adminApi', () => {
           body: JSON.stringify({ method: 'unbanpubkey', params: ['pubkey123'] }),
         })
       );
+    });
+  });
+
+  describe('timed suspension outcomes', () => {
+    const answer = (body: object) => mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, ...body }) });
+
+    it('suspendPubkey maps a worker that predates timed suspensions to an unrecorded open end', async () => {
+      answer({ result: null });
+      expect(await suspendPubkey(API_URL, 'pk', 'r', { duration: { value: 1, unit: 'days' } }))
+        .toEqual({ endsAt: null, recorded: false, decisionRecorded: false });
+    });
+
+    it('suspendPubkey returns what the worker recorded', async () => {
+      answer({ result: null, suspension: { endsAt: '2026-11-21T00:00:00.000Z', recorded: true, decisionRecorded: false } });
+      expect(await suspendPubkey(API_URL, 'pk', 'r', { duration: { value: 1, unit: 'days' } }))
+        .toEqual({ endsAt: '2026-11-21T00:00:00.000Z', recorded: true, decisionRecorded: false });
+    });
+
+    it('unbanPubkey maps a worker with no suspension key to state none', async () => {
+      answer({ result: null });
+      expect(await unbanPubkey(API_URL, 'pk')).toEqual({ suspension: { state: 'none' } });
+    });
+
+    it.each(['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed', 'changed'])(
+      'unbanPubkey passes state %s through', async (state) => {
+        answer({ result: null, suspension: { state, endsAt: state === 'resumed' ? '2026-11-21T00:00:00.000Z' : null } });
+        const out = await unbanPubkey(API_URL, 'pk', { suspensionChoice: 'resume' });
+        expect(out.suspension.state).toBe(state);
+        expect(out.suspension.endsAt).toBe(state === 'resumed' ? '2026-11-21T00:00:00.000Z' : null);
+      });
+
+    it.each([
+      ['an unrecognised state', { state: 'from_the_future' }],
+      ['a missing state', {}],
+      ['a non-string state', { state: 3 }],
+      ['a non-object suspension', 'resumed'],
+    ])('unbanPubkey maps %s to unknown, not none', async (_n, suspension) => {
+      answer({ result: null, suspension });
+      expect(await unbanPubkey(API_URL, 'pk')).toEqual({ suspension: { state: 'unknown', endsAt: undefined } });
+    });
+
+    // A present end that is not a string is unreadable, not "no end date": the toast must
+    // say the end is unavailable rather than tell the moderator it is open-ended.
+    it.each([[12345], [{}], [true]])('unbanPubkey maps a non-string endsAt %j to an unreadable end, not null', async (endsAt) => {
+      answer({ result: null, suspension: { state: 'resumed', endsAt } });
+      const out = await unbanPubkey(API_URL, 'pk');
+      expect(typeof out.suspension.endsAt).toBe('string');
+      expect(Number.isNaN(Date.parse(out.suspension.endsAt as string))).toBe(true);
+      expect(unbanOutcomeToast(out)).toEqual({ title: 'User unbanned', description: SUSPENSION_END_UNAVAILABLE });
+    });
+
+    it('unbanPubkey keeps a null endsAt as no end date', async () => {
+      answer({ result: null, suspension: { state: 'resumed', endsAt: null } });
+      expect((await unbanPubkey(API_URL, 'pk')).suspension.endsAt).toBeNull();
+    });
+
+    it('unbanPubkey reports a skipped choice for a non-canonical pubkey', async () => {
+      answer({ result: null, suspensionChoiceSkipped: 'non_canonical_pubkey' });
+      expect(await unbanPubkey(API_URL, 'PK', { suspensionChoice: 'end_now' }))
+        .toEqual({ suspension: { state: 'none' }, choiceSkipped: 'non_canonical_pubkey' });
+    });
+
+    it('unbanPubkey keeps the code of a suspension_changed refusal, which isSuspensionChanged recognises', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 409, statusText: 'Conflict',
+        json: async () => ({ success: false, error: 'changed', code: 'suspension_changed' }),
+      });
+      const error = await unbanPubkey(API_URL, 'pk', { suspensionChoice: 'resume', suspensionVersion: 2 }).catch(e => e);
+      expect(error).toMatchObject({ code: 'suspension_changed', statusCode: 409 });
+      expect(isSuspensionChanged(error)).toBe(true);
+      expect(isSuspensionChanged(new ApiError('x', 409, 'Conflict', 'suspension_ending'))).toBe(false);
+      expect(isSuspensionChanged(new Error('suspension_changed'))).toBe(false);
+    });
+
+    it('unbanPubkey keeps the code of a suspension_ending refusal', async () => {
+      mockFetch.mockResolvedValueOnce({
+        ok: false, status: 409, statusText: 'Conflict',
+        json: async () => ({ success: false, error: 'ending', code: 'suspension_ending' }),
+      });
+      await expect(unbanPubkey(API_URL, 'pk')).rejects.toMatchObject({ code: 'suspension_ending', statusCode: 409 });
     });
   });
 

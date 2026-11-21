@@ -8,6 +8,8 @@ import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
+import { TIMED_SUSPENSIONS_KEY } from '@/hooks/useTimedSuspensions';
+import { formatSuspensionEnd } from '../../shared/suspension';
 
 // Stable mocks so async-flow tests can control enqueue + status polling and
 // assert on the same fn instances.
@@ -20,6 +22,8 @@ const api = vi.hoisted(() => ({
   unbanPubkey: vi.fn(),
   suspendPubkey: vi.fn(),
   unsuspendPubkey: vi.fn(),
+  changeSuspensionEnd: vi.fn(),
+  listTimedSuspensions: vi.fn(),
   getActiveAgeReviewCase: vi.fn(),
   logDecision: vi.fn(),
 }));
@@ -32,7 +36,8 @@ vi.mock('react-router-dom', async (orig) => ({
 }));
 
 const moderatorApi = withAsModerator(api);
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
+// useApiUrl: the timed-suspensions read keys its cache by environment.
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi, useApiUrl: () => 'https://api.test' }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 // Logged-in moderator, so actions carry attribution (#178). The live token is
 // read at call time, so a test can switch accounts mid-action.
@@ -44,6 +49,29 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 }));
 
 const PUBKEY = 'a'.repeat(64);
+
+// A minute-aligned end three days from now. A real-clock literal would turn
+// into "End time passed" once that date went by (F2).
+function threeDaysOut(): string {
+  return new Date(Math.ceil((Date.now() + 3 * 86_400_000) / 60_000) * 60_000).toISOString();
+}
+
+// Suspend opens a dialog for the length; these fill it in and confirm. The
+// dialog is open while the action runs, so the page behind it is aria-hidden.
+function confirmSuspendDialog(length: string | null = '3', unit: 'days' | 'hours' = 'days') {
+  const dialog = screen.getByRole('dialog');
+  if (length === null) {
+    fireEvent.click(within(dialog).getByRole('checkbox', { name: 'No end date' }));
+  } else {
+    fireEvent.change(within(dialog).getByRole('combobox', { name: 'Unit' }), { target: { value: unit } });
+    fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: length } });
+  }
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Suspend' }));
+}
+function suspendThroughDialog(length: string | null = '3', unit: 'days' | 'hours' = 'days') {
+  fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
+  confirmSuspendDialog(length, unit);
+}
 
 function doneJob(action: 'age-gate-all' | 'delete-all', over: Partial<Record<string, unknown>> = {}) {
   return {
@@ -60,9 +88,13 @@ beforeEach(() => {
   api.getBulkJobNotes.mockResolvedValue({ notes: [], next: null });
   api.moderateMedia.mockResolvedValue({ success: true });
   api.banPubkey.mockResolvedValue({ unconfirmed: null });
-  api.unbanPubkey.mockResolvedValue({ success: true });
-  api.suspendPubkey.mockResolvedValue({ success: true });
+  // An unban answers with what became of a timed suspension; 'none' is a worker
+  // that reported none (the account had no timer, or the worker predates them).
+  api.unbanPubkey.mockResolvedValue({ suspension: { state: 'none' } });
+  api.suspendPubkey.mockResolvedValue({ endsAt: threeDaysOut(), recorded: true, decisionRecorded: true });
   api.unsuspendPubkey.mockResolvedValue({ success: true });
+  api.changeSuspensionEnd.mockResolvedValue({ endsAt: threeDaysOut(), decisionRecorded: true });
+  api.listTimedSuspensions.mockResolvedValue([]);
   api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: null });
   api.logDecision.mockResolvedValue(undefined);
 });
@@ -179,7 +211,7 @@ describe('UserActions', () => {
   it('routes to Age Review when a bare suspend is guard-blocked (age_review_active)', async () => {
     api.suspendPubkey.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
     renderWithProvider(<UserActions pubkey={PUBKEY} />);
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    suspendThroughDialog();
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 
@@ -204,7 +236,6 @@ describe('UserActions', () => {
   });
 
   it.each([
-    { action: 'suspend_user', call: 'suspendPubkey', props: {}, button: /Suspend User/i, confirm: false },
     { action: 'unsuspend_user', call: 'unsuspendPubkey', props: { isSuspended: true }, button: /Unsuspend User/i, confirm: false },
     { action: 'ban_user', call: 'banPubkey', props: {}, button: /Ban User/i, confirm: true },
     { action: 'unban_user', call: 'unbanPubkey', props: { isBanned: true }, button: /Unban User/i, confirm: false },
@@ -218,6 +249,16 @@ describe('UserActions', () => {
     );
     expect(tokensFor(moderatorApi, call)).toEqual([MOD_TOKEN]);
     expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
+  });
+
+  // The worker writes the suspend's decision row itself now (it knows the end
+  // date), so the browser writes none: a second row would double the history.
+  it('sends suspendPubkey through asModerator(token) and writes no suspend_user row of its own (#178)', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} />);
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+    expect(tokensFor(moderatorApi, 'suspendPubkey')).toEqual([MOD_TOKEN]);
+    expect(api.logDecision).not.toHaveBeenCalled();
   });
 
   it('a bulk job and its completion audit carry the token taken at the click, not one switched in mid-job (#178)', async () => {
@@ -261,15 +302,28 @@ describe('UserActions', () => {
       const dialog = await screen.findByRole('alertdialog');
       fireEvent.click(within(dialog).getByRole('button', { name: 'Ban User' }));
     }
-    await waitFor(() => expect(call).toHaveBeenCalledWith(PUBKEY, ...(action === 'suspend' || action === 'ban' ? [expect.any(String)] : [])));
+    if (action === 'suspend') confirmSuspendDialog();
+    const args = {
+      suspend: [expect.any(String), { value: 3, unit: 'days' }],
+      ban: [expect.any(String)],
+      unsuspend: [],
+      unban: [],
+    }[action];
+    await waitFor(() => expect(call).toHaveBeenCalledWith(PUBKEY, ...args));
 
     rerender(ui(OTHER));
-    finish(action === 'ban' ? { unconfirmed: null } : { success: true });
+    finish(action === 'ban' ? { unconfirmed: null }
+      : action === 'suspend' ? { endsAt: threeDaysOut(), recorded: true, decisionRecorded: true }
+      : action === 'unban' ? { suspension: { state: 'none' } }
+      : { success: true });
 
     await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
     expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action });
-    // The decision log names the acted-on account too.
-    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ targetId: PUBKEY })));
+    // The decision log names the acted-on account too. A suspend writes no
+    // row from the browser: the worker records it for the account it was sent.
+    if (action !== 'suspend') {
+      await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ targetId: PUBKEY })));
+    }
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ targetId: OTHER }));
   });
 
@@ -292,6 +346,7 @@ describe('UserActions', () => {
     const { rerender } = render(ui(PUBKEY));
 
     fireEvent.click(screen.getByRole('button', { name: button }));
+    if (call === api.suspendPubkey) confirmSuspendDialog();
     await waitFor(() => expect(call).toHaveBeenCalled());
 
     rerender(ui(OTHER));
@@ -508,7 +563,7 @@ describe('UserActions', () => {
   // in flight keeps the bulk buttons off too, not only a lost job.
   it.each([
     ['Suspend', false, () => api.suspendPubkey, (): void => {
-      fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
+      suspendThroughDialog();
     }],
     ['Unban', true, () => api.unbanPubkey, (): void => {
       fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
@@ -652,9 +707,10 @@ describe('UserActions', () => {
   });
 
   it('invalidates the decision log after the detached audit write lands (report converges without manual refresh)', async () => {
-    // Suspend/age-restrict resolution comes only from the D1 decision row, and the
-    // onSuccess refetch races the fire-and-forget write. The invalidation must fire
+    // Resolution that comes only from the D1 decision row races the
+    // fire-and-forget write in the onSuccess refetch. The invalidation must fire
     // AFTER the write resolves (not before), so the report converges on its own.
+    // Unsuspend: suspend no longer writes from the browser (see the next test).
     let resolveWrite!: () => void;
     api.logDecision.mockReturnValue(new Promise<void>((r) => { resolveWrite = () => r(undefined); }));
 
@@ -666,11 +722,11 @@ describe('UserActions', () => {
 
     render(
       <QueryClientProvider client={qc}>
-        <TooltipProvider><UserActions pubkey={'a'.repeat(64)} /></TooltipProvider>
+        <TooltipProvider><UserActions pubkey={'a'.repeat(64)} isSuspended /></TooltipProvider>
       </QueryClientProvider>,
     );
 
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
 
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledTimes(1));
     expect(decisionsInvalidations()).toBe(0); // write hasn't landed yet — report stays unresolved
@@ -680,10 +736,33 @@ describe('UserActions', () => {
     await waitFor(() => expect(decisionsInvalidations()).toBe(1));
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
     // The queue subtracts the ['resolution-state'] projection, not the decision
-    // log, so without this key the suspended account stays listed until the
+    // log, so without this key the account's reports stay misplaced until the
     // next poll (#273).
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
+  });
+
+  // The worker wrote the suspend's decision row before answering, so the
+  // refresh runs on success: suspend resolution comes only from that row.
+  it('refreshes the decision log and resolved state after a suspend', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+    renderWithProvider(<UserActions pubkey={PUBKEY} />, qc);
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+  });
+
+  // Reset, not invalidate, like every other timer-changing action: if the re-read
+  // fails, the old end must not stay on screen as if current.
+  it('resets the timers after an unsuspend', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const resetSpy = vi.spyOn(qc, 'resetQueries');
+    renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, qc);
+    fireEvent.click(screen.getByRole('button', { name: /Unsuspend User/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unsuspended' }));
+    expect(resetSpy).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY });
   });
 
   it('closes the ban dialog on success (the alertdialog is removed)', async () => {
@@ -863,7 +942,7 @@ describe('UserActions', () => {
     it('after a suspend', async () => {
       const onActionComplete = vi.fn();
       renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
-      fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+      suspendThroughDialog();
       await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'suspend' }));
     });
 
@@ -1007,7 +1086,7 @@ describe('UserActions drops cached authored-content reads after its account acti
   it('after a suspend', async () => {
     const qc = clientWithStats(PUBKEY);
     renderWithProvider(<UserActions pubkey={PUBKEY} />, qc);
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    suspendThroughDialog();
     await waitFor(() => expect(qc.getQueryData(statsKey(PUBKEY))).toBeUndefined());
   });
 
@@ -1041,11 +1120,11 @@ describe('UserActions drops cached authored-content reads after its account acti
       </QueryClientProvider>
     );
     const { rerender } = render(tree(PUBKEY));
-    fireEvent.click(screen.getByRole('button', { name: /Suspend User/i }));
+    suspendThroughDialog();
     await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
 
     rerender(tree(OTHER));
-    await act(async () => { land({ success: true }); });
+    await act(async () => { land({ endsAt: threeDaysOut(), recorded: true, decisionRecorded: true }); });
 
     await waitFor(() => expect(qc.getQueryData(statsKey(PUBKEY))).toBeUndefined());
     expect(qc.getQueryData(statsKey(OTHER))).toEqual({ postCount: 0 });
@@ -1138,6 +1217,7 @@ describe('UserActions ends the restore window when it hides the account', () => 
     renderWithProvider(<UserActions pubkey={pk} />);
     fireEvent.click(screen.getByRole('button', { name: button }));
     if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+    else confirmSuspendDialog();
 
     await waitFor(() => expect(result.current).toBe(false));
   });
@@ -1157,6 +1237,7 @@ describe('UserActions ends the restore window when it hides the account', () => 
     renderWithProvider(<UserActions pubkey={pk} />, qc);
     fireEvent.click(screen.getByRole('button', { name: button }));
     if (confirm) fireEvent.click(within(screen.getByRole('alertdialog')).getByRole('button', { name: 'Ban User' }));
+    else confirmSuspendDialog();
 
     await waitFor(() => expect(qc.getQueryData(['user-stats', 'wss://relay.test', pk])).toBeUndefined());
     expect(result.current).toBe(true);
@@ -1193,5 +1274,624 @@ describe('UserActions restore window per environment', () => {
     const prod = inEnv('wss://relay.prod.test');
     await waitFor(() => expect(prod.current).toBe(true));
     expect(inEnv('wss://relay.staging.test').current).toBe(false);
+  });
+});
+
+// Timed suspensions: Suspend asks for a length, a suspended account shows when
+// its suspension ends, and Change end date moves that end.
+describe('UserActions timed suspensions', () => {
+  // The timer read sets its own retry (1); keep its delay out of the tests.
+  const client = () => new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false } } });
+  const timer = (endsAt: string | null) => ({
+    pubkey: PUBKEY, endsAt, status: 'active' as const, setBy: null, setAt: '2026-11-20T00:00:00.000Z', changedAt: null,
+  });
+
+  describe('Suspend', () => {
+    it('Suspend -> 3 days -> Suspend sends the length, and the browser writes no suspend_user row', async () => {
+      const endsAt = threeDaysOut();
+      api.suspendPubkey.mockResolvedValue({ endsAt, recorded: true, decisionRecorded: true });
+      renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
+      suspendThroughDialog('3', 'days');
+      await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalledWith(PUBKEY, 'Suspended by moderator', { value: 3, unit: 'days' }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: `User suspended until ${formatSuspensionEnd(endsAt)}` }));
+      expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'suspend_user' }));
+      // The dialog closes once the suspend lands.
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('No end date sends an explicit open end', async () => {
+      api.suspendPubkey.mockResolvedValue({ endsAt: null, recorded: true, decisionRecorded: true });
+      renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
+      suspendThroughDialog(null);
+      await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalledWith(PUBKEY, 'Suspended by moderator', null));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User suspended, no end date' }));
+    });
+
+    it('says the end date was not saved when the timer record was not written', async () => {
+      // decisionRecorded false as well: the not-saved toast outranks the audit one.
+      api.suspendPubkey.mockResolvedValue({ endsAt: null, recorded: false, decisionRecorded: false });
+      renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
+      suspendThroughDialog('3', 'days');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'User suspended, but the end date was not saved',
+        description: 'Use Change end date to set it.',
+      }));
+      expect(toast).toHaveBeenCalledTimes(1);
+    });
+
+    // An open-ended suspend also replaces the timer record. When that write fails, an
+    // earlier timer stays active and can still lift the suspension at its old end (G7).
+    it('warns that an earlier end may still lift it when an open-ended suspend was not recorded', async () => {
+      api.suspendPubkey.mockResolvedValue({ endsAt: null, recorded: false, decisionRecorded: true });
+      renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
+      suspendThroughDialog(null);
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'User suspended, but the end date could not be cleared',
+        description: 'An earlier end date may still lift this suspension. Check its end date.',
+      }));
+      expect(toast).toHaveBeenCalledTimes(1);
+    });
+
+    it('says the audit log was not recorded when the worker could not write the decision row', async () => {
+      const endsAt = threeDaysOut();
+      api.suspendPubkey.mockResolvedValue({ endsAt, recorded: true, decisionRecorded: false });
+      renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
+      suspendThroughDialog('3', 'days');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'Action applied; audit log not recorded',
+        description: `User suspended until ${formatSuspensionEnd(endsAt)}`,
+      }));
+    });
+
+    // ReportDetail keeps UserActions mounted across reports: a dialog opened
+    // for one account must not confirm against the next one shown.
+    it('closes the dialog when another account is shown', () => {
+      const qc = client();
+      const tree = (pk: string) => (
+        <QueryClientProvider client={qc}><TooltipProvider><UserActions pubkey={pk} /></TooltipProvider></QueryClientProvider>
+      );
+      const { rerender } = render(tree(PUBKEY));
+      fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      rerender(tree('b'.repeat(64)));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      // Back to the first account: the abandoned dialog stays closed (G6).
+      rerender(tree(PUBKEY));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(api.suspendPubkey).not.toHaveBeenCalled();
+    });
+
+    // Reset, not invalidate: a cached "no timer" answer from before the suspend
+    // must not stand in for the new end when the re-read fails.
+    it('shows the end as unavailable, not a stale answer, when the re-read after a suspend fails', async () => {
+      const qc = client();
+      qc.setQueryData([...TIMED_SUSPENSIONS_KEY, 'https://api.test'], []);
+      api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+      const tree = (isSuspended: boolean) => (
+        <QueryClientProvider client={qc}><TooltipProvider><UserActions pubkey={PUBKEY} isSuspended={isSuspended} /></TooltipProvider></QueryClientProvider>
+      );
+      const { rerender } = render(tree(false));
+      suspendThroughDialog('3', 'days');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+      rerender(tree(true)); // the host's status re-read lands
+      expect(await screen.findByText('Suspended. End date unavailable')).toBeInTheDocument();
+      expect(screen.queryByText('Suspended, no end date')).not.toBeInTheDocument();
+    });
+
+    it('cancelling the dialog suspends nothing', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} />, client());
+      fireEvent.click(screen.getByRole('button', { name: /^Suspend User/i }));
+      fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      expect(api.suspendPubkey).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('end-time line', () => {
+    it('shows when a suspended account\'s suspension ends', async () => {
+      const endsAt = threeDaysOut();
+      api.listTimedSuspensions.mockResolvedValue([timer(endsAt)]);
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      expect(await screen.findByText(`Suspended until ${formatSuspensionEnd(endsAt)}`)).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /Unsuspend User/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Change end date' })).toBeInTheDocument();
+    });
+
+    it('says the end date is unavailable when the timers could not be read', async () => {
+      api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      expect(await screen.findByText('Suspended. End date unavailable')).toBeInTheDocument();
+      expect(screen.queryByText(/no end date/i)).not.toBeInTheDocument();
+    });
+
+    // F18: an underage report hands off to Age Review, which owns the
+    // suspension; the end line and Change end date stay out of it.
+    it('keeps the Age Review hand-off ahead of the end line for an underage report', async () => {
+      api.listTimedSuspensions.mockResolvedValue([timer(threeDaysOut())]);
+      renderWithProvider(
+        <UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" isSuspended />, client());
+      expect(screen.getByRole('button', { name: /Handle in Age Review/i })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Change end date' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: /Unsuspend User/i })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Suspended until|Checking suspension end date/)).not.toBeInTheDocument();
+    });
+
+    // St7: only a confirmed suspension shows an end. An unconfirmed status
+    // (null) shows neither an end nor Change end date.
+    it.each([[null], [false]] as const)('shows no end line or Change end date when isSuspended is %s', async (isSuspended) => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended={isSuspended} />, client());
+      expect(screen.queryByRole('button', { name: 'Change end date' })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Checking suspension end date|Suspended until|no end date/)).not.toBeInTheDocument();
+      expect(api.listTimedSuspensions).not.toHaveBeenCalled();
+    });
+
+    it('shows no end line for a banned account', () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+      expect(screen.queryByRole('button', { name: 'Change end date' })).not.toBeInTheDocument();
+      expect(screen.queryByText(/Checking suspension end date/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Change end date', () => {
+    function changeTo(length: string, unit: 'days' | 'hours') {
+      fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
+      const dialog = screen.getByRole('dialog');
+      fireEvent.change(within(dialog).getByRole('combobox', { name: 'Unit' }), { target: { value: unit } });
+      fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: length } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
+    }
+
+    it.each([
+      ['a lowercase account ID', PUBKEY],
+      ['an uppercase account link', PUBKEY.toUpperCase()],
+    ])('Change end date sends the new length through asModerator(token) for %s', async (_source, pubkey) => {
+      const endsAt = threeDaysOut();
+      api.changeSuspensionEnd.mockResolvedValue({ endsAt, decisionRecorded: true });
+      renderWithProvider(<UserActions pubkey={pubkey} isSuspended />, client());
+      changeTo('12', 'hours');
+      await waitFor(() => expect(api.changeSuspensionEnd).toHaveBeenCalledWith(PUBKEY, { value: 12, unit: 'hours' }));
+      expect(tokensFor(moderatorApi, 'changeSuspensionEnd')).toEqual([MOD_TOKEN]);
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: `End date changed to ${formatSuspensionEnd(endsAt)}` }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    it('shows the current end in the dialog', async () => {
+      const endsAt = threeDaysOut();
+      api.listTimedSuspensions.mockResolvedValue([timer(endsAt)]);
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      await screen.findByText(`Suspended until ${formatSuspensionEnd(endsAt)}`);
+      fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
+      expect(within(screen.getByRole('dialog')).getByText(`Currently: ${formatSuspensionEnd(endsAt)}`)).toBeInTheDocument();
+    });
+
+    it('says "no end date" in the dialog for a suspension without a timer', async () => {
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      await screen.findByText('Suspended, no end date');
+      fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
+      expect(within(screen.getByRole('dialog')).getByText('Currently: no end date')).toBeInTheDocument();
+    });
+
+    it('does not claim "no end date" in the dialog when the timers could not be read', async () => {
+      api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      await screen.findByText('Suspended. End date unavailable');
+      fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
+      expect(within(screen.getByRole('dialog')).queryByText(/^Currently:/)).not.toBeInTheDocument();
+    });
+
+    it('refreshes the timers, decision log and report queue after a change', async () => {
+      const qc = client();
+      const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+      const resetSpy = vi.spyOn(qc, 'resetQueries');
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, qc);
+      changeTo('12', 'hours');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^End date changed to/) })));
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['reports'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
+      expect(resetSpy).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY });
+    });
+
+    // Reset, not invalidate: a failed re-read after the change must show the
+    // end as unavailable, not keep the old end on screen.
+    it('shows the end as unavailable, not the old end, when the re-read after a change fails', async () => {
+      const oldEnd = threeDaysOut();
+      api.listTimedSuspensions.mockResolvedValueOnce([timer(oldEnd)]).mockRejectedValue(new Error('worker down'));
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      await screen.findByText(`Suspended until ${formatSuspensionEnd(oldEnd)}`);
+      changeTo('12', 'hours');
+      expect(await screen.findByText('Suspended. End date unavailable')).toBeInTheDocument();
+      expect(screen.queryByText(`Suspended until ${formatSuspensionEnd(oldEnd)}`)).not.toBeInTheDocument();
+    });
+
+    // The refusal says the panel's status is out of date; the host re-reads it
+    // through the same onActionComplete it runs after any action here.
+    it.each(['not_suspended', 'account_banned'] as const)('re-reads the account status after a %s refusal', async (code) => {
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('server words', 409, 'Conflict', code));
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended onActionComplete={onActionComplete} />, client());
+      changeTo('12', 'hours');
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: false }));
+      expect(onActionComplete).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not re-read the account status for a refusal that says nothing about it', async () => {
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('server words', 409, 'Conflict', 'conflict'));
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended onActionComplete={onActionComplete} />, client());
+      changeTo('12', 'hours');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' })));
+      expect(onActionComplete).not.toHaveBeenCalled();
+    });
+
+    it('says the audit log was not recorded when the change saved without its decision row', async () => {
+      const endsAt = threeDaysOut();
+      api.changeSuspensionEnd.mockResolvedValue({ endsAt, decisionRecorded: false });
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      changeTo('2', 'days');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'Action applied; audit log not recorded',
+        description: `End date changed to ${formatSuspensionEnd(endsAt)}`,
+      }));
+    });
+
+    it.each([
+      ['account_banned', 409, 'This account is banned. Unban it first.'],
+      ['not_suspended', 409, 'This account is no longer suspended.'],
+      ['suspension_ending', 409, 'This suspension is ending now. Check again in a few minutes.'],
+      ['conflict', 409, 'Someone changed this suspension at the same time. Try again.'],
+      ['status_unavailable', 503, 'Could not check the account\'s status. Try again.'],
+    ] as const)('a refusal with code %s toasts its own copy and keeps the dialog open', async (code, status, title) => {
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('server words', status, 'x', code));
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      changeTo('12', 'hours');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title, variant: 'destructive' }));
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+      expect(navigate).not.toHaveBeenCalled();
+    });
+
+    it('routes an age-review refusal to the case', async () => {
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      changeTo('12', 'hours');
+      await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' }));
+    });
+
+    it('shows the server message for any other failure', async () => {
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('Database not configured', 503, 'x', 'db_unavailable'));
+      renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
+      changeTo('12', 'hours');
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'Failed to change end date', description: 'Database not configured', variant: 'destructive',
+      }));
+    });
+  });
+});
+
+// Unban of a banned account that is also suspended (or may be) asks what
+// happens to the suspension; a confirmed not-suspended account unbans as before.
+describe('UserActions unban prompt', () => {
+  const client = () => new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false } } });
+  const timer = (endsAt: string | null, version = 5) => ({
+    pubkey: PUBKEY, endsAt, status: 'cancelled_ban' as const, setBy: null, setAt: '2026-11-20T00:00:00.000Z', changedAt: null, version,
+  });
+  const clickUnban = () => fireEvent.click(screen.getByRole('button', { name: /Unban User/i }));
+  // Confirm waits for the timers' first read (it sends the version shown), so wait for it.
+  const confirmUnban = async () => {
+    const button = within(screen.getByRole('dialog')).getByRole('button', { name: 'Unban' });
+    await waitFor(() => expect(button).toBeEnabled());
+    fireEvent.click(button);
+  };
+
+  it('banned and suspended: Unban opens the prompt, and End the suspension now sends end_now', async () => {
+    const endsAt = threeDaysOut();
+    api.listTimedSuspensions.mockResolvedValue([timer(endsAt)]);
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'ended', endsAt: null, decisionRecorded: true } });
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByRole('heading', { name: 'Unban account' })).toBeInTheDocument();
+    expect(api.unbanPubkey).not.toHaveBeenCalled();
+    // The timer is read for a banned account that may be suspended, so the prompt names its end.
+    expect(await within(dialog).findByLabelText(`Resume until ${formatSuspensionEnd(endsAt)}`)).toBeChecked();
+    fireEvent.click(within(dialog).getByLabelText('End the suspension now'));
+    await confirmUnban();
+    // With the version of the timer the prompt showed, so a stale choice is refused.
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'end_now', 5));
+    expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unbanned and unsuspended' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    // The browser's unban_user row stays.
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'unban_user', targetId: PUBKEY })));
+  });
+
+  it('banned and confirmed not suspended: unbans with no prompt and no choice', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended={false} />, client());
+    clickUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unbanned' }));
+    // No timer read for an account confirmed not suspended.
+    expect(api.listTimedSuspensions).not.toHaveBeenCalled();
+  });
+
+  // St7: an unconfirmed suspension (null) asks, failing toward asking.
+  it('banned with the suspension unconfirmed: the prompt is shown', async () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended={null} />, client());
+    clickUnban();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    expect(api.unbanPubkey).not.toHaveBeenCalled();
+    // Unconfirmed, so the prompt does not state the suspension as fact.
+    expect(screen.getByText('This account may also be suspended; its suspension status is not confirmed. Choose what happens to any suspension when the ban is lifted.')).toBeInTheDocument();
+    expect(screen.queryByText('This account is also suspended. Choose what happens to the suspension when the ban is lifted.')).not.toBeInTheDocument();
+  });
+
+  it('banned and confirmed suspended: the prompt says it is suspended', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    expect(screen.getByText('This account is also suspended. Choose what happens to the suspension when the ban is lifted.')).toBeInTheDocument();
+    expect(screen.queryByText('This account may also be suspended; its suspension status is not confirmed. Choose what happens to any suspension when the ban is lifted.')).not.toBeInTheDocument();
+  });
+
+  // F5: the timers could not be read, so the prompt defaults to resume, which
+  // keeps whatever end the server has, and says the end is unavailable.
+  it('defaults to resume as it is when the timers cannot be read', async () => {
+    api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalled());
+    expect(within(dialog).getByLabelText('Resume the suspension as it is')).toBeChecked();
+    expect(within(dialog).getByText('Suspended. End date unavailable')).toBeInTheDocument();
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'resume'));
+  });
+
+  // An older "no timer" copy whose refresh failed may predate a timed suspend: defaulting
+  // to "no end date" from it could erase a real end, so the prompt treats it as unknown.
+  it('defaults to resume as it is when a timer refresh failed over an older copy', async () => {
+    api.listTimedSuspensions.mockResolvedValueOnce([]);
+    const qc = client();
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, qc);
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(qc.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.test'])?.status).toBe('success'));
+    api.listTimedSuspensions.mockRejectedValue(new Error('worker down'));
+    await act(async () => { await qc.refetchQueries({ queryKey: TIMED_SUSPENSIONS_KEY }); });
+    await waitFor(() => expect(qc.getQueryState([...TIMED_SUSPENSIONS_KEY, 'https://api.test'])?.status).toBe('error'));
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    expect(within(dialog).getByLabelText('Resume the suspension as it is')).toBeChecked();
+  });
+
+  it('cancelling the prompt unbans nothing', () => {
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(api.unbanPubkey).not.toHaveBeenCalled();
+  });
+
+  // ReportDetail keeps UserActions mounted across reports: a prompt opened for
+  // one account must not unban the next one shown.
+  it('closes the prompt when another account is shown', () => {
+    const qc = client();
+    const tree = (pk: string) => (
+      <QueryClientProvider client={qc}><TooltipProvider><UserActions pubkey={pk} isBanned isSuspended /></TooltipProvider></QueryClientProvider>
+    );
+    const { rerender } = render(tree(PUBKEY));
+    clickUnban();
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+    rerender(tree('b'.repeat(64)));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    // Back to the first account: the abandoned prompt stays closed (G6).
+    rerender(tree(PUBKEY));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(api.unbanPubkey).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ suspension: { state: 'end_failed' } }, {
+      title: 'User unbanned, but the suspension could not be lifted',
+      description: 'It is still suspended. Try Unsuspend.', variant: 'destructive',
+    }],
+    [{ suspension: { state: 'unknown' } }, {
+      title: 'User unbanned, but the suspension status could not be checked',
+      description: 'Check the account before acting again.',
+    }],
+    [{ suspension: { state: 'none' }, choiceSkipped: 'non_canonical_pubkey' }, {
+      title: 'User unbanned, but the suspension choice was not applied',
+      description: 'Check the account before acting again.',
+    }],
+  ] as const)('toasts the outcome honestly (%#)', async (outcome, expected) => {
+    api.unbanPubkey.mockResolvedValue(outcome);
+    const onActionComplete = vi.fn();
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended onActionComplete={onActionComplete} />, client());
+    clickUnban();
+    fireEvent.click(within(screen.getByRole('dialog')).getByLabelText('End the suspension now'));
+    await confirmUnban();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expected));
+    expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'User unbanned and unsuspended' }));
+    // The ban was lifted whatever became of the suspension, so the host re-reads.
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban' }));
+  });
+
+  // The audit warning replaces the outcome toast (one shows at a time): an end_failed
+  // must not vanish behind it or lose its severity (G4).
+  it('keeps a destructive outcome on a failed audit write', async () => {
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'end_failed' } });
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await confirmUnban();
+    await waitFor(() => expect(toast).toHaveBeenLastCalledWith({
+      title: 'User unbanned, but the suspension could not be lifted',
+      description: 'It is still suspended. Try Unsuspend. Audit log not recorded.',
+      variant: 'destructive',
+    }));
+  });
+
+  it('carries a plain outcome on a failed audit write, saying the warning once', async () => {
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'ended', endsAt: null, decisionRecorded: false } });
+    api.logDecision.mockRejectedValue(new Error('audit down'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await confirmUnban();
+    await waitFor(() => expect(api.logDecision).toHaveBeenCalled());
+    await waitFor(() => expect(toast).toHaveBeenCalledTimes(2));
+    expect(toast).toHaveBeenLastCalledWith({ title: 'Action applied; audit log not recorded', description: 'User unbanned and unsuspended' });
+  });
+
+  // Reset, not invalidate: the unban may have ended or changed the timer, and a
+  // failed re-read must not leave the old end on screen as current.
+  it('resets the timers after an unban', async () => {
+    const qc = client();
+    const reset = vi.spyOn(qc, 'resetQueries');
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, qc);
+    clickUnban();
+    await confirmUnban();
+    await waitFor(() => expect(reset).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY }));
+  });
+
+  it('stays open after a failed unban so the moderator can retry', async () => {
+    api.unbanPubkey.mockRejectedValue(new ApiError('relay down', 502, 'Bad Gateway'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await confirmUnban();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'Failed to unban user', description: 'relay down', variant: 'destructive' }));
+    expect(screen.getByRole('dialog')).toBeInTheDocument();
+  });
+
+  // Ask again if it changed: the prompt showed no timer from a cached read while another
+  // moderator set an end. The worker refuses; the timers are read again and the prompt asks
+  // against the current end, with no "Failed to unban" toast, and the retry carries it.
+  it('a suspension_changed refusal re-reads the timers and asks again against the current end', async () => {
+    const endsAt = threeDaysOut();
+    api.listTimedSuspensions.mockResolvedValueOnce([]).mockResolvedValue([timer(endsAt, 6)]);
+    api.unbanPubkey
+      .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
+      .mockResolvedValue({ suspension: { state: 'resumed', endsAt, decisionRecorded: true } });
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    expect(await within(dialog).findByLabelText('Keep suspended with no end date')).toBeChecked();
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+
+    expect(await within(dialog).findByText('The suspension changed after this was opened. Check the options below and confirm again.')).toBeInTheDocument();
+    expect(await within(dialog).findByLabelText(`Resume until ${formatSuspensionEnd(endsAt)}`)).toBeChecked();
+    expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2);
+    expect(toast).not.toHaveBeenCalled();
+
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenLastCalledWith(PUBKEY, 'resume', 6));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+  });
+
+  // Cancel stays enabled during the unban, and a closed prompt is unmounted, so it can't say
+  // why nothing happened: the refusal is a toast instead, and the account is still banned.
+  it('a suspension_changed refusal after the prompt was closed says so in a toast, once the timers are re-read', async () => {
+    const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
+    const refusedToast = expect.objectContaining({ title: 'Failed to unban user', description: REFUSED });
+    let reread!: (v: unknown) => void;
+    api.listTimedSuspensions.mockResolvedValue([]).mockResolvedValueOnce([])
+      .mockReturnValueOnce(new Promise(r => { reread = r; }));
+    let refuse!: (e: unknown) => void;
+    api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Keep suspended with no end date');
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
+    expect(toast).not.toHaveBeenCalledWith(refusedToast);
+
+    await act(async () => { reread([]); });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(refusedToast));
+  });
+
+  // Leaving the page with the prompt open unmounts it without a close: the refusal still
+  // arrives (a mutation-level callback), and nothing on screen can say it but the toast.
+  it('a suspension_changed refusal after the page unmounted with the prompt open is a toast', async () => {
+    const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
+    api.listTimedSuspensions.mockResolvedValue([]);
+    let refuse!: (e: unknown) => void;
+    api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+    const { unmount } = renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await within(screen.getByRole('dialog')).findByLabelText('Keep suspended with no end date');
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+    unmount();
+
+    await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Failed to unban user', description: REFUSED,
+    })));
+  });
+
+  // A confirm before the timers' first read answers would carry no version and skip the check.
+  it('blocks confirm while the timers are first loading', async () => {
+    api.listTimedSuspensions.mockReturnValue(new Promise(() => {}));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalled());
+    expect(within(screen.getByRole('dialog')).getByRole('button', { name: 'Unban' })).toBeDisabled();
+  });
+
+  // After a refusal the mutation stays pending until the timers are read again, so a confirm
+  // cannot go out carrying the version that was just refused.
+  it('keeps confirm disabled until the timers re-read after a suspension_changed refusal', async () => {
+    const endsAt = threeDaysOut();
+    let answer!: (v: unknown) => void;
+    api.listTimedSuspensions.mockResolvedValueOnce([]).mockReturnValueOnce(new Promise(r => { answer = r; }));
+    api.unbanPubkey.mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Keep suspended with no end date');
+    await confirmUnban();
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
+    expect(within(dialog).getByRole('button', { name: 'Unbanning...' })).toBeDisabled();
+    expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeEnabled();
+    await act(async () => { answer([timer(endsAt, 6)]); });
+    expect(await within(dialog).findByLabelText(`Resume until ${formatSuspensionEnd(endsAt)}`)).toBeChecked();
+    expect(within(dialog).getByRole('button', { name: 'Unban' })).toBeEnabled();
+  });
+
+  // The re-read failed: the prompt says the end is unavailable (F5), defaults to resume, and
+  // the next confirm sends no version, since no timer is shown to compare against.
+  it('a failed re-read after a suspension_changed refusal shows the end as unavailable and sends no version', async () => {
+    api.listTimedSuspensions.mockResolvedValueOnce([]).mockRejectedValue(new Error('worker down'));
+    api.unbanPubkey
+      .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
+      .mockResolvedValue({ suspension: { state: 'resumed', endsAt: null, decisionRecorded: true } });
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Keep suspended with no end date');
+    await confirmUnban();
+
+    expect(await within(dialog).findByText('Suspended. End date unavailable')).toBeInTheDocument();
+    expect(within(dialog).getByText('The suspension changed after this was opened. Check the options below and confirm again.')).toBeInTheDocument();
+    expect(within(dialog).getByLabelText('Resume the suspension as it is')).toBeChecked();
+    expect(toast).not.toHaveBeenCalled();
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenLastCalledWith(PUBKEY, 'resume'));
+  });
+
+  it('routes an age-review refusal from the prompt to the case', async () => {
+    api.unbanPubkey.mockRejectedValue(new ApiError('under age review', 409, 'Conflict', 'age_review_active'));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await confirmUnban();
+    await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
   });
 });

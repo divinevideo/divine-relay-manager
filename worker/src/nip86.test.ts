@@ -11,6 +11,7 @@ import {
   banEvent,
   allowEvent,
   banPubkey,
+  readPubkeyBan,
   unbanPubkey,
   suspendPubkey,
   unsuspendPubkey,
@@ -540,5 +541,67 @@ describe('banPubkey confirm-before-failing', () => {
     await banPubkey(TARGET, 'abuse', mockEnv);
 
     expect(timeoutSpy.mock.calls.map(([ms]) => ms)).toEqual([15_000, 5_000]);
+  });
+});
+
+describe('readPubkeyBan', () => {
+  const env: Nip86Env = { NOSTR_NSEC: TEST_NSEC, RELAY_URL: 'wss://relay.test.com', MANAGEMENT_PATH: '/' };
+  const TARGET = 'ab'.repeat(32);
+  const OTHER = 'cd'.repeat(32);
+  const answer = (body: unknown) =>
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => body })));
+
+  it('true when listed as an object', async () => {
+    answer({ result: [{ pubkey: OTHER }, { pubkey: TARGET, reason: 'x' }] });
+    expect(await readPubkeyBan(TARGET, env)).toBe(true);
+  });
+  it('true when listed as a bare string', async () => {
+    answer({ result: [TARGET] });
+    expect(await readPubkeyBan(TARGET, env)).toBe(true);
+  });
+  it('false when absent', async () => {
+    answer({ result: [{ pubkey: OTHER }] });
+    expect(await readPubkeyBan(TARGET, env)).toBe(false);
+  });
+  it("'unknown' on an RPC error", async () => {
+    answer({ error: 'boom' });
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it("'unknown' on a thrown fetch", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => { throw new Error('down'); }));
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it("'unknown' when the response body cannot be read (callNip86Rpc throws)", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => { throw new Error('bad body'); } })));
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it("'unknown' on a result that is not a list", async () => {
+    answer({ result: {} });
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it.each([
+    ['null', null],
+    ['an empty object', {}],
+    ['a number', 7],
+  ])("'unknown' when the list holds a malformed entry (%s), even beside a match", async (_n, bad) => {
+    answer({ result: [bad, { pubkey: OTHER }] });
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+    answer({ result: [{ pubkey: TARGET }, bad] });
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it("'unknown' on a non-2xx HTTP response", async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: false, status: 502, statusText: 'Bad Gateway', json: async () => ({ result: [{ pubkey: TARGET }] }) })));
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it("'unknown' on an {error, result: []} body", async () => {
+    answer({ error: 'boom', result: [] });
+    expect(await readPubkeyBan(TARGET, env)).toBe('unknown');
+  });
+  it('reads with the confirm timeout', async () => {
+    answer({ result: [] });
+    const spy = vi.spyOn(AbortSignal, 'timeout');
+    await readPubkeyBan(TARGET, env);
+    expect(spy.mock.calls.map(([ms]) => ms)).toEqual([5_000]);
   });
 });
