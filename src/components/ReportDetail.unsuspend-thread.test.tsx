@@ -240,6 +240,38 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
   });
 
+  // The report on screen when the action finishes is on another post by the
+  // account acted on. Its read predates the action too.
+  it('refreshes a post by the same account on screen when the action finishes after switching reports', async () => {
+    let finish!: () => void;
+    relay.finishAction = new Promise(resolve => { finish = resolve; });
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const pane = (report: NostrEvent) => (
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={report} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(pane(REPORT));
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unsuspend' }));
+
+    const samePost = { ...POST, id: '8'.repeat(64), content: 'another post by the account' };
+    relay.post = samePost;
+    rerender(pane({ ...REPORT, id: '9'.repeat(64), tags: [['e', samePost.id], ['p', REPORTED_PUBKEY]] }));
+    expect(await screen.findByText('another post by the account')).toBeInTheDocument();
+    // The relay withholds it now, until its read filter catches up.
+    relay.post = undefined;
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    finish();
+
+    expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText('another post by the account')).not.toBeInTheDocument();
+    // The first post's read, the second's, and the second's re-read.
+    expect(relay.reads).toBe(3);
+  });
+
   // The re-read finds no post, so the account comes from the report itself
   // unless the pane keeps the author it read. Keeping it matters here: the
   // just-restored line and the account actions follow that account.
