@@ -1476,13 +1476,18 @@ describe('UserActions timed suspensions', () => {
       expect(within(screen.getByRole('dialog')).queryByText(/^Currently:/)).not.toBeInTheDocument();
     });
 
-    it('refreshes the timers and the decision log after a change', async () => {
+    it('refreshes the timers, decision log and report queue after a change', async () => {
       const qc = client();
       const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
+      const resetSpy = vi.spyOn(qc, 'resetQueries');
       renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, qc);
       changeTo('12', 'hours');
       await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^End date changed to/) })));
       expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['decisions'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['reports'] });
+      expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['reports-resolved'] });
+      expect(resetSpy).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY });
     });
 
     // Reset, not invalidate: a failed re-read after the change must show the

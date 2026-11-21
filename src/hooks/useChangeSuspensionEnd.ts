@@ -7,6 +7,7 @@ import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { useToast } from '@/hooks/useToast';
 import { TIMED_SUSPENSIONS_KEY } from '@/hooks/useTimedSuspensions';
 import { ApiError } from '@/lib/adminApi';
+import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { formatSuspensionEnd, type SuspensionDuration } from '../../shared/suspension';
 
 // The worker's refusal codes (POST /api/suspensions/end), in the moderator's words.
@@ -42,8 +43,9 @@ export function useChangeSuspensionEnd(): UseMutationResult<
       toast(decisionRecorded
         ? { title: changed }
         : { title: 'Action applied; audit log not recorded', description: changed });
-      // The worker wrote the decision row before answering.
+      // The worker's decision can change which reports count as handled.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      invalidateResolutionState(queryClient);
     },
     onError: (error, { pubkey }) => {
       if (redirectIfGuarded(error, pubkey)) return;
