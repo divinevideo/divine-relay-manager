@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryFilters } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -212,10 +212,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // out when an account action finishes, or when the restore window closes),
   // invalidating would join that read, which started before, and its answer
   // would land as fresh.
-  const rereadPost = () => {
-    if (!targetEventId) return;
-    const queryKey = ['thread', targetEventId];
-    void queryClient.cancelQueries({ queryKey }).then(() => queryClient.invalidateQueries({ queryKey }));
+  const rereadPost = (eventId: string | undefined, apiUrl: string) => {
+    if (!eventId) return;
+    const filters: QueryFilters = {
+      queryKey: ['thread', eventId],
+      predicate: query => query.queryKey[3] === apiUrl,
+    };
+    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
   };
 
   // Re-check on the post: the live check, and a fresh read of the post itself.
@@ -225,7 +228,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // nothing under it.
   const recheckPost = () => {
     moderationStatus.recheck();
-    rereadPost();
+    rereadPost(targetEventId, config.apiUrl);
   };
 
   // Get decision history for this target
@@ -688,11 +691,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
-      // The post panel's thread read can predate the action too (a post read
-      // before a suspension, say), and the live check above can now call the
-      // post gone. Read the post again with it, as recheckPost does, or the
-      // header says "Not Found on Relay" while the panel shows the old read.
-      rereadPost();
+      // Refresh the report the action started from, even after navigating away.
+      // Also refresh a different post on screen if it belongs to that account.
+      const origin = change.reportTarget;
+      if (origin) rereadPost(origin.eventId, origin.apiUrl);
+      if ((!origin || origin.apiUrl === config.apiUrl && origin.eventId !== targetEventId)
+        && reportedPubkey?.toLowerCase() === change.pubkey.toLowerCase()) {
+        rereadPost(targetEventId, config.apiUrl);
+      }
       // The acted-on account's Keycast label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
@@ -1596,6 +1602,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
+                reportTarget={{ eventId: targetEventId, apiUrl: config.apiUrl }}
                 reportCategory={ageReviewCategory(report)}
                 // Pass null through. `?? undefined` handed UserActions an
                 // absent prop, which its default turned into a confirmed

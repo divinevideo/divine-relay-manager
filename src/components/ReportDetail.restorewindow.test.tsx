@@ -248,7 +248,7 @@ describe('ReportDetail missing post just after an unsuspend', () => {
     // The pane's part: an invalidation by the post's own key, which refetches
     // the read the pane observes (useReportContext is mocked here, so nothing
     // observes it and no refetch can be counted).
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['thread', EVENT_ID] });
+    expect(invalidate).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['thread', EVENT_ID] }));
   });
 
   // The window-close check reads the post again. An account report has no post,

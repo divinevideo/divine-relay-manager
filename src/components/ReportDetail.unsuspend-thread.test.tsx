@@ -2,13 +2,14 @@
 // ABOUTME: reads the post again with the live check, so the header and body agree.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from '@tanstack/react-query';
+import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { endRestoreWindow, markRestored } from '@/lib/userStatsCache';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
-import type { UserActionChange } from './UserActions';
+import type { ComponentProps } from 'react';
+import type { UserActions } from './UserActions';
 
 // Issue #434. The thread read found the post before the account was
 // suspended and still holds it. After an Unsuspend in this tab the live check
@@ -20,6 +21,7 @@ const REPORTED_PUBKEY = 'd'.repeat(64);
 const OTHER_PUBKEY = '7'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
 const EVENT_ID = 'c'.repeat(64);
+const API_URL = 'https://api.a.example';
 
 // What the relay returns for the post right now. The thread read below asks it
 // only when its query runs, so a cached answer outlives a change here.
@@ -28,6 +30,7 @@ const EVENT_ID = 'c'.repeat(64);
 const relay = vi.hoisted(() => ({
   post: undefined as NostrEvent | undefined,
   firstRead: undefined as Promise<NostrEvent | undefined> | undefined,
+  finishAction: undefined as Promise<void> | undefined,
   reads: 0,
 }));
 
@@ -51,14 +54,14 @@ vi.mock('react-router-dom', async (orig) => ({
 }));
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => api,
-  useApiUrl: () => 'https://api.a.example',
+  useApiUrl: () => API_URL,
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({
-  useAppContext: () => ({ config: { relayUrl: 'wss://relay.example' } }),
+  useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: API_URL } }),
 }));
 vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
@@ -76,7 +79,7 @@ vi.mock('@/hooks/useThread', () => ({
       relay.reads += 1;
       const held = relay.firstRead;
       relay.firstRead = undefined;
-      const post = held ? await held : relay.post;
+      const post = held ? await held : relay.post?.id === eventId ? relay.post : undefined;
       return { event: post ?? null, ancestors: [], replies: [], repostedEvent: null, isRepost: false, fetchSource: null };
     },
     enabled: !!eventId,
@@ -86,13 +89,17 @@ vi.mock('@/hooks/useThread', () => ({
 // The account actions, reduced to what each tells the pane when it succeeds,
 // as UserActions does: an Unsuspend opens the restore window first.
 vi.mock('@/components/UserActions', () => ({
-  UserActions: ({ pubkey, onActionComplete }: { pubkey: string; onActionComplete: (change: UserActionChange) => void }) => {
+  UserActions: ({ pubkey, reportTarget, onActionComplete }: ComponentProps<typeof UserActions>) => {
     const queryClient = useQueryClient();
+    const action = useMutation({
+      mutationFn: async ({ pubkey: target }: { pubkey: string; reportTarget: typeof reportTarget }) => {
+        await relay.finishAction;
+        await markRestored(queryClient, target, undefined);
+      },
+      onSuccess: (_, target) => onActionComplete?.({ ...target, accountStatusChanged: true, action: 'unsuspend' }),
+    });
     return (
-      <button data-pubkey={pubkey} onClick={async () => {
-        await markRestored(queryClient, pubkey, undefined);
-        onActionComplete({ accountStatusChanged: true, pubkey, action: 'unsuspend' });
-      }}>
+      <button data-pubkey={pubkey} onClick={() => action.mutate({ pubkey, reportTarget })}>
         Unsuspend
       </button>
     );
@@ -128,6 +135,7 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     vi.clearAllMocks();
     relay.post = undefined;
     relay.firstRead = undefined;
+    relay.finishAction = undefined;
     relay.reads = 0;
     api.verifyPubkeyBanned.mockResolvedValue(false);
     api.verifyEventDeleted.mockResolvedValue(true);
@@ -200,6 +208,36 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     // The re-read was a read of its own, not the held one answering for it.
     expect(relay.reads).toBe(2);
+  });
+
+  it('refreshes the original post if the moderator switches to a different account during an Unsuspend', async () => {
+    let finish!: () => void;
+    relay.finishAction = new Promise(resolve => { finish = resolve; });
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const pane = (report: NostrEvent) => (
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={report} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(pane(REPORT));
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unsuspend' }));
+
+    const otherPost = { ...POST, id: '8'.repeat(64), pubkey: OTHER_PUBKEY, content: 'the other post' };
+    relay.post = otherPost;
+    rerender(pane({ ...REPORT, id: '9'.repeat(64), tags: [['e', otherPost.id], ['p', OTHER_PUBKEY]] }));
+    expect(await screen.findByText('the other post')).toBeInTheDocument();
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    api.verifyEventDeleted.mockImplementation(async (eventId: string) => eventId === EVENT_ID);
+    finish();
+
+    await waitFor(() => expect(client.getQueryState(['thread', EVENT_ID, 3, API_URL, undefined])?.isInvalidated).toBe(true));
+    expect(relay.reads).toBe(2);
+    rerender(pane(REPORT));
+    expect(await screen.findByText(JUST_RESTORED)).toBeInTheDocument();
+    expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
   });
 
   // The re-read finds no post, so the account comes from the report itself
