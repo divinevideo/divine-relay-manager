@@ -13,14 +13,33 @@ import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { isTerminal, useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { useBulkJobNotes } from '@/hooks/useBulkJobNotes';
 import { countIssues } from '../../shared/bulk-moderation';
+import { formatSuspensionEnd, type SuspensionDuration } from '../../shared/suspension';
+import { ApiError, type SuspendOutcome } from '@/lib/adminApi';
+import { TIMED_SUSPENSIONS_KEY, useTimedSuspension } from '@/hooks/useTimedSuspensions';
+import { useChangeSuspensionEnd } from '@/hooks/useChangeSuspensionEnd';
 import { ConfirmDialog } from './ConfirmDialog';
 import { BulkNotesPanel } from './BulkNotesPanel';
+import { SuspensionDurationDialog } from './SuspensionDurationDialog';
+import { SuspensionEndLine } from './SuspensionEndLine';
 import { useNavigate } from 'react-router-dom';
-import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight } from 'lucide-react';
+import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight, CalendarClock } from 'lucide-react';
 
 // Approved wording; BulkDeleteByKind keeps its own dialog-specific variant on purpose.
 const LOST_TRACK_TITLE = 'Lost track of the bulk action';
 const LOST_TRACK_BODY = 'It may still be running on the server. Wait a minute and check again before running it again.';
+const AUDIT_NOT_RECORDED = 'Action applied; audit log not recorded';
+
+// One toast for a suspend (the app shows one at a time), most important first:
+// an end date asked for but not saved (nothing will lift the suspension), then
+// a missing decision row, then plain success. An open-ended suspend writes no
+// timer record by design, so its `recorded: false` is not a lost end date.
+function suspendToast(outcome: SuspendOutcome, duration: SuspensionDuration | null): { title: string; description?: string } {
+  if (duration !== null && !outcome.recorded) {
+    return { title: 'User suspended, but the end date was not saved', description: 'Use Change end date to set it.' };
+  }
+  const done = outcome.endsAt ? `User suspended until ${formatSuspensionEnd(outcome.endsAt)}` : 'User suspended, no end date';
+  return outcome.decisionRecorded ? { title: done } : { title: AUDIT_NOT_RECORDED, description: done };
+}
 
 interface UserActionsProps {
   pubkey: string;
@@ -58,7 +77,9 @@ interface UserActionsProps {
 /**
  * What a finished action changed. `accountStatusChanged`: the action was a ban,
  * unban, suspend or unsuspend; the bulk content actions leave the account's
- * status as it was. `pubkey` is the account the action was taken on, captured
+ * status as it was, and so does a Change end date the worker refused because
+ * the account is banned or no longer suspended (sent so the host re-reads the
+ * status it shows). `pubkey` is the account the action was taken on, captured
  * when it started: TanStack hands a pending mutation the latest render's
  * callbacks, so a pubkey read at completion is whichever account is on screen
  * by then, not the one acted on.
@@ -133,9 +154,10 @@ export function UserActions({
   // on failure we surface a non-blocking toast so the moderator knows the decision
   // log lagged, without blocking the action or the dialog close.
   //
-  // When the write SUCCEEDS, re-invalidate the decision log. Suspend and bulk
-  // age-restrict derive resolved-state ONLY from the D1 decision row (unlike
-  // ban/delete, which read live relay state), and onActionComplete refetches
+  // When the write SUCCEEDS, re-invalidate the decision log. Some actions derive
+  // resolved-state ONLY from the D1 decision row (unlike ban/delete, which read
+  // live relay state; suspend's row is now written by the worker, before it
+  // answers, so suspend refreshes in its own onSuccess), and onActionComplete refetches
   // decisions synchronously in onSuccess — racing this detached write. Without a
   // post-write invalidation the report reads back before the row exists and stays
   // "pending" until a manual refresh. The ['decisions'] prefix covers
@@ -163,26 +185,31 @@ export function UserActions({
       })
       .catch((e) => {
         console.warn('[UserActions] audit log failed', e);
-        toast({ title: 'Action applied; audit log not recorded', description: note });
+        toast({ title: AUDIT_NOT_RECORDED, description: note });
       });
 
+  // The worker writes the suspend's decision row itself (with the end date it
+  // saved) and reports whether it did, so there is no browser audit write here.
+  // A worker that predates timed suspensions writes none; the deploy order
+  // (worker before frontend) covers that (F15).
   const suspendUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ target, duration }: { target: string; duration: SuspensionDuration | null }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
-      await runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator'));
-      logAudit(act, {
-        targetType: 'pubkey',
-        targetId: target,
-        action: 'suspend_user',
-        reason: 'Suspended by moderator',
-      });
+      return runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator', duration));
     },
-    onSuccess: (_data, target) => {
-      toast({ title: 'User suspended' });
+    onSuccess: (outcome, { target, duration }) => {
+      // Suspend resolution comes only from the decision row, already written.
+      queryClient.invalidateQueries({ queryKey: ['decisions'] });
+      invalidateResolutionState(queryClient);
+      // Reset, not invalidate: a cached answer from before the suspend (no
+      // timer, or an old end) must not stand in for the new end if the re-read
+      // fails; the line then says the end is unavailable.
+      void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
+      toast(suspendToast(outcome, duration));
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'suspend' });
     },
-    onError: (error: Error, target) => {
+    onError: (error: Error, { target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
@@ -202,6 +229,8 @@ export function UserActions({
       });
     },
     onSuccess: (_data, target) => {
+      // A manual unsuspend also cancels the account's timer.
+      queryClient.invalidateQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast({ title: 'User unsuspended' });
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
     },
@@ -324,8 +353,20 @@ export function UserActions({
     },
   });
 
+  const changeEnd = useChangeSuspensionEnd();
+  // The dialog is open for one account: if another is shown (ReportDetail keeps
+  // this mounted across reports) it closes rather than act on the new one. The
+  // mode outlives the close so the title doesn't change while it animates out.
+  const [dialogMode, setDialogMode] = useState<'suspend' | 'change'>('suspend');
+  const [dialogPubkey, setDialogPubkey] = useState<string | null>(null);
+  const openDurationDialog = (mode: 'suspend' | 'change') => { setDialogMode(mode); setDialogPubkey(pubkey); };
+  // The end-time line and Change end date show only for a confirmed suspension
+  // (St7), and the timer read runs only then: null (unconfirmed) shows neither.
+  const confirmedSuspended = isSuspended === true && !isBanned && !isUnderageReport;
+  const timer = useTimedSuspension(confirmedSuspended ? pubkey : null);
+
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
-    banUserMutation.isPending || unbanUserMutation.isPending || bulkJob.isRunning;
+    banUserMutation.isPending || unbanUserMutation.isPending || changeEnd.isPending || bulkJob.isRunning;
   // Lost tracking keeps only the bulk buttons (and Delete All Content's confirm,
   // which their disabled trigger can't open) off: a second bulk job could start
   // under one that is still going. Ban, Suspend and Unban stay on their usual
@@ -377,6 +418,9 @@ export function UserActions({
         </Tooltip>
       ) : (
         <>
+          {/* The underage hand-off comes first (F18): Age Review owns that
+              account's suspension, so it gets no end line or Change end date
+              here even when it is suspended. */}
           {isUnderageReport ? (
             <Tooltip>
               <TooltipTrigger asChild>
@@ -388,22 +432,29 @@ export function UserActions({
               </TooltipTrigger>
               <TooltipContent><p>This account was reported as under 16. Account and content enforcement run through the Age Review flow so the case, content age-restriction, and deadline stay in sync.</p></TooltipContent>
             </Tooltip>
-          ) : isSuspended ? (
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                  onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
-                  <Play className="h-4 w-4 mr-1" />
-                  {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent><p>Unsuspend this user. Their content will be visible again.</p></TooltipContent>
-            </Tooltip>
+          ) : isSuspended === true ? (
+            <>
+              <SuspensionEndLine pubkey={pubkey} />
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
+                    onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
+                    <Play className="h-4 w-4 mr-1" />
+                    {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent><p>Unsuspend this user. Their content will be visible again.</p></TooltipContent>
+              </Tooltip>
+              <Button variant="outline" onClick={() => openDurationDialog('change')} disabled={anyPending}>
+                <CalendarClock className="h-4 w-4 mr-1" />
+                Change end date
+              </Button>
+            </>
           ) : (
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-amber-500 text-amber-600 hover:bg-amber-50"
-                  onClick={() => suspendUserMutation.mutate(pubkey)} disabled={anyPending}>
+                  onClick={() => openDurationDialog('suspend')} disabled={anyPending}>
                   <Pause className="h-4 w-4 mr-1" />
                   {suspendUserMutation.isPending ? 'Suspending...' : 'Suspend User'}
                 </Button>
@@ -411,6 +462,33 @@ export function UserActions({
               <TooltipContent><p>Suspend this user. Hides their content without deleting it. Can be reversed.</p></TooltipContent>
             </Tooltip>
           )}
+
+          <SuspensionDurationDialog
+            open={dialogPubkey === pubkey}
+            onOpenChange={(open) => { if (!open) setDialogPubkey(null); }}
+            mode={dialogMode}
+            // undefined while the timer is unknown, so the dialog states no end it doesn't have.
+            currentEndsAt={timer.record === undefined ? undefined : timer.record?.endsAt ?? null}
+            isPending={dialogMode === 'change' ? changeEnd.isPending : suspendUserMutation.isPending}
+            onConfirm={async (duration) => {
+              // The account is taken at the click, like every action here.
+              const target = pubkey;
+              if (dialogMode === 'change') {
+                if (duration === null) return; // change mode has no "No end date"
+                await changeEnd.mutateAsync({ pubkey: target, duration }).catch((error: unknown) => {
+                  // The worker found the account banned or no longer suspended,
+                  // so the status on screen is out of date: have the host re-read
+                  // it, as after any action here. Nothing changed, hence false.
+                  if (error instanceof ApiError && (error.code === 'not_suspended' || error.code === 'account_banned')) {
+                    onActionComplete?.({ accountStatusChanged: false });
+                  }
+                  throw error;
+                });
+              } else {
+                await suspendUserMutation.mutateAsync({ target, duration });
+              }
+            }}
+          />
 
           <ConfirmDialog
             trigger={
