@@ -320,7 +320,12 @@ export async function banPubkey(
 /**
  * Whether the relay's ban list includes the pubkey, or 'unknown' when the list
  * cannot be read (the call failed or threw, or the result is not a list).
- * Always a fresh read. Matches exactly: the list holds canonical hex.
+ * Always a fresh read. Matches exactly, as funnelcake enforces a ban: older
+ * rows on the list can be uppercase, and such a row matches only that exact
+ * spelling, not the account as clients publish it, so it must not read as this
+ * account's ban (see readSuspensionEntry). Some moderator UI ban checks fold
+ * case (useModerationStatus, isListedPubkey, UserManagement's listHas) and can
+ * show such an account as banned; the Reports queue matches exactly.
  */
 export async function readPubkeyBan(pubkey: string, env: Nip86Env): Promise<boolean | 'unknown'> {
   let list: Nip86RpcResult;
