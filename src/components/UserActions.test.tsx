@@ -744,7 +744,7 @@ describe('UserActions', () => {
 
   // The worker wrote the suspend's decision row before answering, so the
   // refresh runs on success: suspend resolution comes only from that row.
-  it('refreshes the decision log, the resolved state and the timers after a suspend', async () => {
+  it('refreshes the decision log and resolved state after a suspend', async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const invalidateSpy = vi.spyOn(qc, 'invalidateQueries');
     renderWithProvider(<UserActions pubkey={PUBKEY} />, qc);

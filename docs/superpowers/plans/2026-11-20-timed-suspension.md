@@ -1,5 +1,7 @@
 # Timed Suspensions Implementation Plan
 
+The implementation and the design's dated decisions reflect the review changes made after this plan was written. In particular, enforcement reads use exact relay pubkeys, timer expiry writes `auto_unsuspend_user`, and the unban prompt checks the version of the timer it showed.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development to implement this plan task-by-task (execution method chosen by Matt, 2026-11-20). Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Moderators can suspend an account for N hours or N days (or with no end date) and change that end date later. The account comes back on its own within one scheduler tick of the end time, through the same path as a manual Unsuspend.

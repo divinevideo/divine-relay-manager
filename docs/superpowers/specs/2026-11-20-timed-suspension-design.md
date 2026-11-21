@@ -100,7 +100,7 @@ On each scheduler tick, for each record whose end time has passed:
    - relay unsuspend;
    - Keycast active;
    - the ACCOUNT_RESTORED message;
-   - a decision row (`unsuspend_user`, reason "Timed suspension ended", no moderator recorded, never the `auto` marker). Whether that row should count as human handling for the queue is for the builder to check and justify.
+   - an automated decision row (`auto_unsuspend_user`, reason "Timed suspension ended", no moderator recorded). It leaves the reports' human-review status as it was.
 4. Use a compare-and-swap on the record, so a moderator's concurrent edit or unsuspend wins and the tick doesn't double-lift.
 5. **On failure:** leave the account suspended and the record due, count the attempt, and alert Slack after repeated failures (deduplicated, following the age-review or retention pattern).
 
