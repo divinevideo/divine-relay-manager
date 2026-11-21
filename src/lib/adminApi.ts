@@ -23,6 +23,9 @@ import {
 import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import { REOPENED_ACTION, type HandlingRow } from "../../shared/handling";
 import type { SexualCase } from "../../shared/sexual-quarantine";
+import type {
+  SuspensionDuration, TimedSuspensionView, UnbanSuspensionChoice, UnbanSuspensionState,
+} from "../../shared/suspension";
 import { handleLoginRefusal, isModeratorLoginRequired } from "./moderatorLoginRequired";
 import type {
   SuspendedAccountRequest,
@@ -125,6 +128,10 @@ export interface ApiResponse<T = unknown> {
   contentRemovalUnconfirmed?: boolean;
   /** ban_pubkey, with contentRemovalUnconfirmed: the relay had not answered when the worker stopped waiting. */
   relayTimedOut?: boolean;
+  /** suspendpubkey / unbanpubkey over /api/relay-rpc: what became of a timed suspension. Absent from a worker that predates them. */
+  suspension?: unknown;
+  /** unbanpubkey: the suspension choice was not applied because the pubkey is not in canonical form. */
+  suspensionChoiceSkipped?: string;
 }
 
 interface InfoResponse {
@@ -353,23 +360,27 @@ export async function allowPubkey(apiUrl: string, pubkey: string, opts?: LoginOp
   return moderateAction(apiUrl, { action: 'allow_pubkey', pubkey }, opts);
 }
 
-// NIP-86 Relay RPC endpoint - for direct relay management
-export async function callRelayRpc<T = unknown>(
+// The fetch-and-parse half of the relay RPC call. Returns the whole response so a
+// caller can read fields beside `result` (the suspension outcome); callRelayRpc
+// returns just `.result`. A refusal keeps its structured `ApiError` with `code`.
+// `body` is serialized as given, so a caller controls key order and adds no key it
+// has no value for.
+async function postRelayRpc<T = unknown>(
   apiUrl: string,
-  method: string,
-  params: (string | number | undefined)[] = [],
+  body: { method: string } & Record<string, unknown>,
   opts?: { timeoutMs?: number } & LoginOpts
-): Promise<T> {
+): Promise<ApiResponse<T>> {
   if (!apiUrl) {
     throw new ApiError('No relay selected. Go to Settings to choose an environment.');
   }
+  const method = body.method;
   const label = `Relay RPC '${method}'`;
   const mutates = !READ_RPC_METHODS.has(method);
   const timeoutMs = opts?.timeoutMs ?? API_TIMEOUT_MS;
   const response = await fetchWithTimeout(`${apiUrl}/api/relay-rpc`, {
     method: 'POST',
     headers: { ...getApiHeaders(), ...loginHeader(opts?.loginToken) },
-    body: JSON.stringify({ method, params }),
+    body: JSON.stringify(body),
   }, label, { mutates, timeoutMs });
 
   if (!response.ok) {
@@ -396,6 +407,17 @@ export async function callRelayRpc<T = unknown>(
     throw new ApiError(data.error || 'RPC call failed');
   }
 
+  return data;
+}
+
+// NIP-86 Relay RPC endpoint - for direct relay management
+export async function callRelayRpc<T = unknown>(
+  apiUrl: string,
+  method: string,
+  params: (string | number | undefined)[] = [],
+  opts?: { timeoutMs?: number } & LoginOpts
+): Promise<T> {
+  const data = await postRelayRpc<T>(apiUrl, { method, params }, opts);
   return data.result as T;
 }
 
@@ -501,8 +523,50 @@ export async function allowEvent(apiUrl: string, eventId: string, opts?: LoginOp
 // Convenience function for unbanning pubkey
 // Note: 'unbanpubkey' is not in NIP-86 spec but is a necessary extension
 // This will fail on relays that don't support it until they add the method
-export async function unbanPubkey(apiUrl: string, pubkey: string, opts?: LoginOpts): Promise<void> {
-  await callRelayRpc(apiUrl, 'unbanpubkey', [pubkey], opts);
+//
+// `suspensionChoice` says what happens to a running timed suspension. With none,
+// the body carries no such key (an old worker and a no-choice caller look alike).
+// The outcome is `{ state: 'none' }` when the worker reports no suspension, as an
+// old worker does, or when it skipped the choice for a non-canonical pubkey.
+// Otherwise `state` is the worker's, including 'unknown' and 'end_failed'.
+export type UnbanOutcomeState = UnbanSuspensionState | 'none';
+
+export interface UnbanOutcome {
+  suspension: { state: UnbanOutcomeState; endsAt?: string | null; decisionRecorded?: boolean };
+  /** Set when the choice was not applied because the pubkey is not canonical lowercase hex. */
+  choiceSkipped?: 'non_canonical_pubkey';
+}
+
+const UNBAN_STATES: readonly string[] = ['not_suspended', 'unknown', 'resumed', 'open_ended', 'ended', 'end_failed'];
+
+export async function unbanPubkey(
+  apiUrl: string,
+  pubkey: string,
+  opts?: LoginOpts & { suspensionChoice?: UnbanSuspensionChoice },
+): Promise<UnbanOutcome> {
+  const { suspensionChoice, ...login } = opts ?? {};
+  const data = await postRelayRpc(apiUrl, {
+    method: 'unbanpubkey',
+    params: [pubkey],
+    ...(suspensionChoice !== undefined && { suspensionChoice }),
+  }, login);
+  const raw = data.suspension as { state?: unknown; endsAt?: unknown; decisionRecorded?: unknown } | undefined;
+  const skipped = data.suspensionChoiceSkipped === 'non_canonical_pubkey'
+    ? { choiceSkipped: 'non_canonical_pubkey' as const } : {};
+  // No suspension key: an old worker, or a skipped choice. Present but unreadable or
+  // unrecognised: fail toward 'unknown', as the rest of the feature does.
+  if (raw === undefined || raw === null) return { suspension: { state: 'none' }, ...skipped };
+  if (typeof raw !== 'object' || typeof raw.state !== 'string' || !UNBAN_STATES.includes(raw.state)) {
+    return { suspension: { state: 'unknown' }, ...skipped };
+  }
+  return {
+    suspension: {
+      state: raw.state as UnbanSuspensionState,
+      endsAt: typeof raw.endsAt === 'string' ? raw.endsAt : null,
+      ...(typeof raw.decisionRecorded === 'boolean' && { decisionRecorded: raw.decisionRecorded }),
+    },
+    ...skipped,
+  };
 }
 
 // Banned pubkey can be a string or an object with pubkey and reason
@@ -535,8 +599,63 @@ export async function listBannedEvents(
   return callRelayRpc<Array<{ id: string; reason?: string }>>(apiUrl, 'listbannedevents', [], opts);
 }
 
-export async function suspendPubkey(apiUrl: string, pubkey: string, reason?: string, opts?: LoginOpts): Promise<void> {
-  await callRelayRpc(apiUrl, 'suspendpubkey', [pubkey, reason || 'Suspended via admin'], opts);
+export interface SuspendOutcome {
+  endsAt: string | null;
+  /** The timer record was written. False for an open-ended suspend and for an old worker. */
+  recorded: boolean;
+  decisionRecorded: boolean;
+}
+
+// `duration` undefined sends no `suspension` field (today's suspend); null sends
+// `{ duration: null }`, an explicit open end; a duration sets a timed suspension.
+// A response without `suspension` (a worker that predates timed suspensions)
+// maps to an open-ended, unrecorded outcome.
+export async function suspendPubkey(
+  apiUrl: string,
+  pubkey: string,
+  reason?: string,
+  opts?: LoginOpts & { duration?: SuspensionDuration | null },
+): Promise<SuspendOutcome> {
+  const { duration, ...login } = opts ?? {};
+  const data = await postRelayRpc(apiUrl, {
+    method: 'suspendpubkey',
+    params: [pubkey, reason || 'Suspended via admin'],
+    ...(duration !== undefined && { suspension: { duration } }),
+  }, login);
+  const raw = data.suspension as { endsAt?: unknown; recorded?: unknown; decisionRecorded?: unknown } | undefined;
+  if (!raw || typeof raw !== 'object') return { endsAt: null, recorded: false, decisionRecorded: false };
+  return {
+    endsAt: typeof raw.endsAt === 'string' ? raw.endsAt : null,
+    recorded: raw.recorded === true,
+    decisionRecorded: raw.decisionRecorded === true,
+  };
+}
+
+// Change (or add) the end date of a suspended account. A refusal rejects with an
+// ApiError carrying the body's `code` (account_banned, not_suspended,
+// suspension_ending, status_unavailable, age_review_active, ...), which
+// useAgeReviewGuardRedirect and the screens read.
+export async function changeSuspensionEnd(
+  apiUrl: string,
+  pubkey: string,
+  duration: SuspensionDuration,
+  opts?: LoginOpts,
+): Promise<{ endsAt: string; decisionRecorded: boolean }> {
+  const data = await apiRequest<{ success: boolean; endsAt?: string; decisionRecorded?: boolean; error?: string }>(
+    apiUrl, '/api/suspensions/end', 'POST', { pubkey, duration }, opts);
+  if (!data.success || typeof data.endsAt !== 'string') {
+    throw new ApiError(data.error || 'Could not change the suspension end');
+  }
+  return { endsAt: data.endsAt, decisionRecorded: data.decisionRecorded === true };
+}
+
+export async function listTimedSuspensions(apiUrl: string): Promise<TimedSuspensionView[]> {
+  const data = await apiRequest<{ success: boolean; suspensions?: TimedSuspensionView[]; error?: string }>(
+    apiUrl, '/api/suspensions', 'GET');
+  if (!data.success || !Array.isArray(data.suspensions)) {
+    throw new ApiError(data.error || 'Could not read timed suspensions');
+  }
+  return data.suspensions;
 }
 
 export async function unsuspendPubkey(apiUrl: string, pubkey: string, opts?: LoginOpts): Promise<void> {

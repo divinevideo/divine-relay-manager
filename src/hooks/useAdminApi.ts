@@ -4,6 +4,7 @@
 import { useMemo } from 'react';
 import { useAppContext } from '@/hooks/useAppContext';
 import * as adminApi from '@/lib/adminApi';
+import type { SuspensionDuration, UnbanSuspensionChoice } from '../../shared/suspension';
 
 /**
  * Hook that provides admin API functions pre-bound to the current environment's apiUrl.
@@ -116,10 +117,14 @@ function buildAttributionApi(apiUrl: string, loginToken?: string) {
       adminApi.banEvent(apiUrl, eventId, reason, login),
     allowEvent: (eventId: string) =>
       adminApi.allowEvent(apiUrl, eventId, login),
-    unbanPubkey: (pubkey: string) =>
-      adminApi.unbanPubkey(apiUrl, pubkey, login),
-    suspendPubkey: (pubkey: string, reason?: string) =>
-      adminApi.suspendPubkey(apiUrl, pubkey, reason, login),
+    // The choice and the duration are forwarded as given: undefined sends no field,
+    // and suspendPubkey's null is an explicit open end.
+    unbanPubkey: (pubkey: string, suspensionChoice?: UnbanSuspensionChoice) =>
+      adminApi.unbanPubkey(apiUrl, pubkey, { ...login, suspensionChoice }),
+    suspendPubkey: (pubkey: string, reason?: string, duration?: SuspensionDuration | null) =>
+      adminApi.suspendPubkey(apiUrl, pubkey, reason, { ...login, duration }),
+    changeSuspensionEnd: (pubkey: string, duration: SuspensionDuration) =>
+      adminApi.changeSuspensionEnd(apiUrl, pubkey, duration, login),
     unsuspendPubkey: (pubkey: string) =>
       adminApi.unsuspendPubkey(apiUrl, pubkey, login),
 
@@ -193,6 +198,9 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
       adminApi.listBannedEvents(apiUrl, opts),
     listSuspendedPubkeys: (opts?: { timeoutMs?: number }) =>
       adminApi.listSuspendedPubkeys(apiUrl, opts),
+
+    // Timed (auto-expiring) suspensions still in force.
+    listTimedSuspensions: () => adminApi.listTimedSuspensions(apiUrl),
 
     // Server-side relay queries (replaces browser WebSocket for freshness)
     fetchReportsByTarget: (target: { event: string } | { pubkey: string }) =>
