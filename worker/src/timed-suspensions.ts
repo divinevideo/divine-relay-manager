@@ -519,7 +519,13 @@ export async function handleChangeSuspensionEnd(
   }
 
   const endsAt = suspensionEndsAt(checked.duration, new Date());
-  const changed = await changeSuspensionEnd(db, { pubkey, endsAt, moderator: moderator ?? null });
+  let changed: ChangeEndResult;
+  try {
+    changed = await changeSuspensionEnd(db, { pubkey, endsAt, moderator: moderator ?? null });
+  } catch (error) {
+    console.error('[handleChangeSuspensionEnd] save failed:', error);
+    return refuse(corsHeaders, 503, 'db_unavailable', 'Could not save the suspension end date. Try again.');
+  }
   if (changed.kind === 'ending') {
     return refuse(corsHeaders, 409, 'suspension_ending', 'This suspension is ending now. Check again in a few minutes.');
   }

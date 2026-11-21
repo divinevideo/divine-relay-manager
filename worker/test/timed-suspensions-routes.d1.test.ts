@@ -459,6 +459,26 @@ describe('POST /api/suspensions/end', () => {
     expect(fake.notifies).toEqual([]);
   });
 
+  it('returns a retryable error without sending a notice when saving the end date fails', async () => {
+    const fake = setup({ suspended: new Map([[PK, null]]) });
+    await seedRecord('active', null);
+    const unavailable = new Proxy(DB, {
+      get(target, key) {
+        if (key !== 'prepare') return Reflect.get(target, key);
+        return (sql: string) => {
+          if (/UPDATE timed_suspensions\s+SET ends_at/.test(sql)) throw new Error('D1 unavailable');
+          return target.prepare(sql);
+        };
+      },
+    });
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS }, { ...(env() as object), DB: unavailable });
+    expect(res.status).toBe(503);
+    expect(res.json.code).toBe('db_unavailable');
+    expect((await record())?.ends_at).toBeNull();
+    expect(await decisions()).toEqual([]);
+    expect(fake.notifies).toEqual([]);
+  });
+
   it('refuses with the age-review 409 while the account has an open case', async () => {
     const fake = setup({ suspended: new Map([[PK, null]]) });
     await seedRecord('active', null);
