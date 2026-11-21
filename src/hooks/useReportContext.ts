@@ -44,8 +44,8 @@ export function useReportContext(report: NostrEvent | null) {
   const thread = useThread(reportedEventId, 3, apiUrl, relayHint);
 
   // Each post's author, from the last read of it that found it. A re-read can
-  // come back with no post (after an account action in this tab the relay
-  // withholds it, or a ban purged it), and falling back to the p tag then
+  // come back with no post (the relay can still withhold it after an
+  // Unsuspend, or an earlier ban may have purged it). Falling back to the p tag
   // would move the pane to whatever account the tag names, or to none. The
   // post's id fixes its author, so the one already read still holds. Kept per
   // post: the pane is not keyed per report, and a moderator who opens another

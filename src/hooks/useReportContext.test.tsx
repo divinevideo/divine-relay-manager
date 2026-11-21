@@ -99,8 +99,8 @@ describe('useReportContext isLoading', () => {
 });
 
 describe('useReportContext reported account after a re-read finds no post', () => {
-  // Right after this tab suspends, bans or unsuspends the post's author, the
-  // report pane reads the post again and the relay withholds it. The pane must
+  // After this tab unsuspends or unbans the post's author, the pane re-reads
+  // the post and the relay can still return nothing. The pane must
   // keep acting on the author it already read, not switch to the p tag.
   const POST_ID = '2'.repeat(64);
   const AUTHOR = '3'.repeat(64);
