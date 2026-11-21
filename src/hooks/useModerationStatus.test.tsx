@@ -158,6 +158,23 @@ describe('useModerationStatus', () => {
     await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(3));
   });
 
+  // One auto-check per miss, not per report: the first miss was auto-checked,
+  // the post then read as found, and a later miss gets its own.
+  it('auto-checks a later miss after the auto-checked one ends with the post found', async () => {
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValue(true);
+    const { result, rerender } = renderHook(
+      ({ notFound }: { notFound: boolean }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
+      { wrapper, initialProps: { notFound: true } },
+    );
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+
+    rerender({ notFound: false });
+    rerender({ notFound: true });
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledTimes(2));
+  });
+
   // A check that could not answer (null: the relay did not reply in time) has
   // not looked at the miss, so the auto-check still tries once.
   it('still auto-checks a miss when the check that answered during it could not answer', async () => {
