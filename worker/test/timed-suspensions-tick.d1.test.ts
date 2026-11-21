@@ -4,7 +4,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import {
-  endSuspensionRecord, replaceSuspensionRecord, runTimedSuspensionTick, type SuspensionIo, type SuspensionRecord,
+  endSuspensionRecord, replaceSuspensionRecord, runTimedSuspensionTick, TICK_BATCH, type SuspensionIo, type SuspensionRecord,
 } from '../src/timed-suspensions';
 
 const PK = 'e5'.repeat(32);
@@ -46,15 +46,15 @@ afterEach(async () => {
 const env = () => ({ DB, ENVIRONMENT: 'test' });
 
 type Seed = Partial<Pick<SuspensionRecord,
-  'status' | 'ends_at' | 'attempts' | 'last_error' | 'last_alerted_at' | 'claimed_at' | 'version'>>;
+  'status' | 'ends_at' | 'attempts' | 'last_error' | 'last_attempt_at' | 'last_alerted_at' | 'claimed_at' | 'version'>>;
 async function seed(pubkey: string, s: Seed = {}) {
   await DB.prepare(`
     INSERT INTO timed_suspensions
-      (pubkey, ends_at, status, set_by, set_at, version, attempts, last_error, last_alerted_at, claimed_at)
-    VALUES (?, ?, ?, NULL, '2026-11-01T00:00:00.000Z', ?, ?, ?, ?, ?)
+      (pubkey, ends_at, status, set_by, set_at, version, attempts, last_error, last_attempt_at, last_alerted_at, claimed_at)
+    VALUES (?, ?, ?, NULL, '2026-11-01T00:00:00.000Z', ?, ?, ?, ?, ?, ?)
   `).bind(
     pubkey, s.ends_at === undefined ? ONE_MIN_AGO : s.ends_at, s.status ?? 'active', s.version ?? 1,
-    s.attempts ?? 0, s.last_error ?? null, s.last_alerted_at ?? null, s.claimed_at ?? null,
+    s.attempts ?? 0, s.last_error ?? null, s.last_attempt_at ?? null, s.last_alerted_at ?? null, s.claimed_at ?? null,
   ).run();
 }
 const record = (pubkey = PK) =>
@@ -103,6 +103,47 @@ function expectNoLift(io: FakeIo) {
   expect(io.notify).not.toHaveBeenCalled();
   expect(io.keycastActivate).not.toHaveBeenCalled();
 }
+
+describe('scheduler batch fairness', () => {
+  const earlierPubkeys = Array.from({ length: TICK_BATCH }, (_, i) => i.toString(16).padStart(64, '0'));
+
+  it('reaches due rows beyond a full batch of age-review holds', async () => {
+    await Promise.all(earlierPubkeys.map(pubkey => seed(pubkey, { ends_at: at(-2).toISOString() })));
+    await seed(PK2);
+    const io = fakeIo({ hasOpenAgeReviewCase: async pubkey => pubkey !== PK2 });
+
+    expect((await runTimedSuspensionTick(env(), io, NOW)).waiting).toBe(TICK_BATCH);
+    await runTimedSuspensionTick(env(), io, at(5));
+
+    expect(io.relayUnsuspend.mock.calls).toEqual([[PK2]]);
+    expect(await record(PK2)).toMatchObject({ status: 'lifted' });
+    expect(await record(earlierPubkeys[0])).toMatchObject({ status: 'active', attempts: 0 });
+  });
+
+  it('reaches a Keycast retry beyond a full batch of age-review holds', async () => {
+    await Promise.all(earlierPubkeys.map(pubkey => seed(pubkey, { status: 'keycast_pending' })));
+    await seed(PK2, { status: 'keycast_pending' });
+    const io = fakeIo({ hasOpenAgeReviewCase: async pubkey => pubkey !== PK2 });
+
+    await runTimedSuspensionTick(env(), io, NOW);
+    expect(io.keycastActivate).not.toHaveBeenCalled();
+    await runTimedSuspensionTick(env(), io, at(5));
+
+    expect(io.keycastActivate.mock.calls).toEqual([[PK2]]);
+    expect(await record(PK2)).toMatchObject({ status: 'lifted' });
+  });
+
+  it('reaches a stale claim beyond a full batch of failed recoveries', async () => {
+    const oldest = { status: 'lifting', claimed_at: at(-20).toISOString() } as const;
+    await Promise.all(earlierPubkeys.map(pubkey => seed(pubkey, oldest)));
+    await seed(PK2, { status: 'lifting', claimed_at: at(-16).toISOString() });
+    const io = fakeIo({ readSuspension: async pubkey => pubkey === PK2 ? { suspended: false } : 'unknown' });
+
+    expect((await runTimedSuspensionTick(env(), io, NOW)).recovered).toBe(0);
+    expect((await runTimedSuspensionTick(env(), io, at(5))).recovered).toBe(1);
+    expect(await record(PK2)).toMatchObject({ status: 'lifted' });
+  });
+});
 
 describe('due lifts', () => {
   it('lifts a record that ended one minute ago today', async () => {
@@ -234,7 +275,7 @@ describe('holds and already-lifted', () => {
 
     expectNoLift(io);
     expect(io.readSuspension).not.toHaveBeenCalled();
-    expect((await record())).toMatchObject({ status: 'active', attempts: 0, last_error: null, version: 1 });
+    expect((await record())).toMatchObject({ status: 'active', attempts: 0, last_error: null, last_attempt_at: NOW.toISOString() });
     expect(io.alert).not.toHaveBeenCalled();
     expect(summary.waiting).toBe(1);
   });
@@ -418,9 +459,9 @@ describe('failures and retries', () => {
     expect(io.alert.mock.calls[0][0]).toContain('restored message may not have gone out');
   });
 
-  it('tries rows with fewer failed attempts first', async () => {
-    await seed(PK, { ends_at: '2026-11-20T12:00:00.000Z', attempts: 2 });
-    await seed(PK2, { ends_at: ONE_MIN_AGO, attempts: 0 });
+  it('checks a newly due row before a row that failed more recently', async () => {
+    await seed(PK, { ends_at: '2026-11-20T12:00:00.000Z', attempts: 2, last_attempt_at: at(-1).toISOString() });
+    await seed(PK2, { ends_at: at(-2).toISOString(), attempts: 0 });
     const io = fakeIo();
 
     await runTimedSuspensionTick(env(), io, NOW);

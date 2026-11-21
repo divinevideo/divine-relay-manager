@@ -88,7 +88,7 @@ export async function changeSuspensionEnd(
     const res = await db.prepare(`
       UPDATE timed_suspensions
       SET ends_at = ?, changed_by = ?, changed_at = ?, status = 'active', attempts = 0, last_error = NULL,
-          last_alerted_at = NULL, version = version + 1
+          last_attempt_at = NULL, last_alerted_at = NULL, version = version + 1
       WHERE pubkey = ? AND version = ?
     `).bind(a.endsAt, a.moderator, now, a.pubkey, row.version).run();
     return res.meta.changes > 0
@@ -632,7 +632,11 @@ export async function runTimedSuspensionTick(
       await fail(cur, `age-review check failed: ${errorText(error)}`);
       return 'failed';
     }
-    if (open === true) return 'hold';
+    if (open === true) {
+      // Record when we checked so held rows yield batch slots to rows we have not checked.
+      await cas(cur, { last_attempt_at: nowIso });
+      return 'hold';
+    }
     if (open === false) return 'clear';
     await fail(cur, 'age-review check gave no answer');
     return 'failed';
@@ -683,7 +687,7 @@ export async function runTimedSuspensionTick(
     const { results: stale } = await db.prepare(`
       SELECT * FROM timed_suspensions
       WHERE status = 'lifting' AND (datetime(claimed_at) IS NULL OR datetime(claimed_at) < datetime(?, ?))
-      ORDER BY claimed_at LIMIT ?
+      ORDER BY COALESCE(datetime(last_attempt_at), datetime(claimed_at)), pubkey LIMIT ?
     `).bind(nowIso, `-${STALE_CLAIM_MINUTES} minutes`, TICK_BATCH).all<SuspensionRecord>();
     await eachRow(stale, async (row, cur) => {
       const entry = await io.readSuspension(row.pubkey);
@@ -715,15 +719,13 @@ export async function runTimedSuspensionTick(
   }
 
   // Phase 1: due lifts. datetime(ends_at), never a plain text compare (see the note at the top).
-  // Fewest failed attempts first, so rows that keep failing cannot starve newer due rows out of
-  // the batch. Waiting on an open age-review case adds no attempt, so a waiting row keeps the
-  // attempts it had and its place in that order; such rows are bounded by the number of open
-  // age-review cases.
+  // Prioritize rows waiting the longest since they became due or were last checked. Rows
+  // blocked by a hold or an error give other due rows a turn on the next tick.
   try {
     const { results: due } = await db.prepare(`
       SELECT * FROM timed_suspensions
       WHERE status = 'active' AND ends_at IS NOT NULL AND datetime(ends_at) <= datetime(?)
-      ORDER BY attempts, ends_at LIMIT ?
+      ORDER BY COALESCE(datetime(last_attempt_at), datetime(ends_at)), attempts, ends_at, pubkey LIMIT ?
     `).bind(nowIso, TICK_BATCH).all<SuspensionRecord>();
     await eachRow(due, async (row, cur) => {
       const pubkey = row.pubkey;
@@ -846,7 +848,7 @@ export async function runTimedSuspensionTick(
   // (spec decision 14). Oldest attempt first, so one stuck row cannot starve the rest.
   try {
     const { results: pending } = await db.prepare(`
-      SELECT * FROM timed_suspensions WHERE status = 'keycast_pending' ORDER BY last_attempt_at LIMIT ?
+      SELECT * FROM timed_suspensions WHERE status = 'keycast_pending' ORDER BY last_attempt_at, pubkey LIMIT ?
     `).bind(TICK_BATCH).all<SuspensionRecord>();
     await eachRow(pending.filter(row => !handledInPhase1.has(row.pubkey)), async (row, cur) => {
       const pubkey = row.pubkey;
