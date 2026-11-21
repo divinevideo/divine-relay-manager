@@ -26,10 +26,12 @@ const API_URL = 'https://api.a.example';
 // What the relay returns for the post right now. The thread read below asks it
 // only when its query runs, so a cached answer outlives a change here.
 // `firstRead`, when set, holds the next read open until it settles, and that
-// read answers with what it settles to.
+// read answers with what it settles to. `bannedLookup`, when set, holds the
+// banned-event fallback open the same way.
 const relay = vi.hoisted(() => ({
   post: undefined as NostrEvent | undefined,
   firstRead: undefined as Promise<NostrEvent | undefined> | undefined,
+  bannedLookup: undefined as Promise<void> | undefined,
   finishAction: undefined as Promise<void> | undefined,
   reads: 0,
 }));
@@ -63,7 +65,20 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: API_URL } }),
 }));
-vi.mock('@/hooks/useBannedEvent', () => ({ useBannedEvent: () => ({ data: null, isLoading: false }) }));
+// The banned-event fallback the pane reads once the thread finds no post: not
+// banned one at a time, so null, at once. While `relay.bannedLookup` is set it
+// is a query of its own that answers null when that settles.
+vi.mock('@/hooks/useBannedEvent', () => ({
+  useBannedEvent: (eventId: string | undefined, enabled: boolean) => {
+    const held = relay.bannedLookup;
+    const lookup = useQuery({
+      queryKey: ['banned-event', eventId],
+      queryFn: async () => { await held; return null; },
+      enabled: !!held && enabled && !!eventId,
+    });
+    return held ? lookup : { data: null, isLoading: false };
+  },
+}));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
 vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] }) }));
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
@@ -135,6 +150,7 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     vi.clearAllMocks();
     relay.post = undefined;
     relay.firstRead = undefined;
+    relay.bannedLookup = undefined;
     relay.finishAction = undefined;
     relay.reads = 0;
     api.verifyPubkeyBanned.mockResolvedValue(false);
@@ -208,6 +224,43 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     // The re-read was a read of its own, not the held one answering for it.
     expect(relay.reads).toBe(2);
+  });
+
+  // The re-read after the action finds no post, and the banned-event fallback
+  // is still out, so the pane does not know yet whether the post is missing.
+  // A live check that answers then has looked at the miss that follows.
+  it('does not run the live check again when it answered while the banned-event fallback was loading', async () => {
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider>
+          <ReportDetail report={REPORT} />
+        </TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+
+    let answerLookup!: () => void;
+    relay.bannedLookup = new Promise(resolve => { answerLookup = resolve; });
+    let answerCheck!: (gone: boolean) => void;
+    api.verifyEventDeleted.mockImplementationOnce(() => new Promise(resolve => { answerCheck = resolve; }));
+    relay.post = undefined;
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    fireEvent.click(screen.getByRole('button', { name: 'Unsuspend' }));
+
+    // The re-read has landed with no post; the fallback is out.
+    await waitFor(() => expect(relay.reads).toBe(2));
+    await waitFor(() => expect(screen.queryByText('the reported post')).not.toBeInTheDocument());
+    await waitFor(() => expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1));
+    // The live check finds the post on the relay before the fallback answers.
+    await act(async () => { answerCheck(false); });
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    await act(async () => { answerLookup(); });
+
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1);
   });
 
   it('refreshes the original post if the moderator switches to a different account during an Unsuspend', async () => {
