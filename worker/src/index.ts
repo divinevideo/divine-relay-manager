@@ -1978,7 +1978,7 @@ async function runRelayRpc(
   let unbanSuspension: { state: UnbanSuspensionState; endsAt: string | null; decisionRecorded?: boolean } | undefined;
   let skippedChoice: 'non_canonical_pubkey' | undefined;
 
-  // Account-state side effects (all non-critical, off the response path).
+  // Account-state bookkeeping and best-effort side effects.
   // Direct RPC callers enter here, and handleModerate delegates here before
   // running its own post-action bookkeeping such as linked-ticket sync.
   // params[0] = pubkey, params[1] = reason.
@@ -1988,11 +1988,8 @@ async function runRelayRpc(
     const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
       notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
 
-    // Mirror each account-state relay action into Keycast (non-critical) and DM
-    // the user. unbanpubkey lifts the Keycast ban (status -> active), restoring
-    // encryption, decryption, sign_canonical and ActivityPub keys (a banned account
-    // could already log in and sign), but sends no DM here -- restore-on-unban DM
-    // is tracked in #96.
+    // Mirror the resulting relay state into Keycast and send any applicable notice.
+    // For unban, a remaining suspension determines the Keycast state and notice.
     switch (body.method) {
       case 'banpubkey':
         enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env, moderator), ctx);

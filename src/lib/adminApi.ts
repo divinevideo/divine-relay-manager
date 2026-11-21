@@ -606,7 +606,7 @@ export async function listBannedEvents(
 
 export interface SuspendOutcome {
   endsAt: string | null;
-  /** The timer record was written. False for an open-ended suspend and for an old worker. */
+  /** The suspension record was written, including when the suspension has no end date. */
   recorded: boolean;
   decisionRecorded: boolean;
 }

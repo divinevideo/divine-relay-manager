@@ -21,7 +21,7 @@ function fakeIo(keycast: () => Promise<KeycastResult>, notify: SuspensionIo['not
 afterEach(() => { vi.restoreAllMocks(); });
 
 describe('restoreAfterLift', () => {
-  it('sends ACCOUNT_RESTORED, then activates Keycast with the moderator, and answers ok', async () => {
+  it('starts the restored notice and Keycast activation with the moderator, and answers ok', async () => {
     const { io, order } = fakeIo(async () => ({ success: true }));
     expect(await restoreAfterLift(io, PK, { reason: 'Account restored by moderator', moderator: MOD })).toBe('ok');
     expect(order).toEqual(['notify', 'keycast']);

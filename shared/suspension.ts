@@ -60,7 +60,7 @@ export const SUSPENSION_ACTIONS = {
   resumeTimer: 'resume_suspension_timer',
 } as const;
 
-// Decision rows the timer writes itself, whatever the moderator field holds.
+// Automated suspension rows, regardless of the moderator attributed to the action.
 export const TIMER_DECISION_ACTIONS: readonly string[] = [
   SUSPENSION_ACTIONS.autoUnsuspend,
   SUSPENSION_ACTIONS.cancelTimer,

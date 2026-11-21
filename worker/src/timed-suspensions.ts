@@ -833,7 +833,7 @@ export async function runTimedSuspensionTick(
       // A ban or a moderator change since the first reads: no message, no Keycast. The row
       // stays keycast_pending; Phase 2 settles a ban without a call on a later tick.
       if (!(await clearToRestore(cur, { messageWithheld: true }))) return;
-      // The one restored message (no end time), then Keycast back to active.
+      // Start the restored notice and Keycast activation together.
       const leg = await restoreAfterLift(io, pubkey, { reason: TIMER_REASON });
       if (leg === 'failed') return fail(cur, 'Keycast activate failed');
       await cas(cur, { status: 'lifted' });
