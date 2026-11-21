@@ -1067,23 +1067,13 @@ export async function handleCreateMinorAccount(
     return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
   }
   if (existingOperation?.state !== 'complete') {
-    // Issue #436. A throw while recording Keycast's answer, or while re-reading
-    // the row after recording changed nothing, is answered here, because the
-    // router does not catch a rejected handler, which reaches the dialog as a
-    // bare 500 without CORS headers. Never a link or pubkey, and the row is not
-    // touched again. With no result recorded before this request, it cannot
-    // show the operation is its own, and refuses as unfinished setup, the
-    // answer a retry would get above. With one recorded (an earlier attempt
-    // recorded it, then its registry write failed), a retry can complete the
-    // operation, so it asks for one.
-    const answerAlreadyRecorded = !!existingOperation?.result_pubkey;
+    // A failed write acknowledgment or re-read does not establish the current
+    // operation state. Retry with the same ID so the ownership checks use a
+    // fresh read. Do not return the link or pubkey on either error.
     const failedToRecord = (step: string, err: unknown): Response => {
       console.error(`[age-review] ${step} for a minor-account operation; no link returned`, err);
-      return answerAlreadyRecorded
-        ? json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.',
-          provisioning_operation_id: provisioningOperationId }, 500, corsHeaders)
-        : json({ success: false, code: ACCOUNT_SETUP_UNFINISHED, error: ACCOUNT_SETUP_UNFINISHED_MESSAGE,
-          provisioning_operation_id: provisioningOperationId }, 409, corsHeaders);
+      return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.',
+        provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
     };
     const observedAt = new Date().toISOString();
     // A request that saw Keycast create the account (201) is authoritative
