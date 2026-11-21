@@ -383,7 +383,7 @@ describe('relay-rpc account-state side effects', () => {
 
   // Routes a mocked fetch by URL so each backend can be asserted independently.
   function makeFetchSpy() {
-    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes('/api/v1/notify')) {
         return new Response(JSON.stringify({ dm_sent: true }), { status: 200 });
@@ -395,7 +395,13 @@ describe('relay-rpc account-state side effects', () => {
       if (url.includes('/api/admin/users/')) {
         return new Response('', { status: 200 });
       }
-      // NIP-86 relay RPC management endpoint
+      // NIP-86 relay RPC management endpoint. The suspended list answers empty: an unban now
+      // reads it (B7), and a bare {result:true} is not a list, which reads as 'unknown' and
+      // would stop the unban's Keycast restore these tests assert.
+      const rpcBody = typeof init?.body === 'string' ? init.body : '';
+      if (rpcBody.includes('"method":"listsuspendedpubkeys"')) {
+        return new Response(JSON.stringify({ result: [] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ result: true }), { status: 200 });
     });
   }

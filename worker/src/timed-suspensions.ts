@@ -1,6 +1,9 @@
 // ABOUTME: Timed (auto-expiring) suspensions: the per-account record (one row per pubkey), its
 // ABOUTME: compare-and-swap writes, the decision-row helper, and the I/O seam a lift runs through.
-import { checkSuspensionDuration, DURATION_ERROR, SUSPENSION_ACTIONS, suspensionEndsAt, type TimedSuspensionView } from '../../shared/suspension';
+import {
+  checkSuspensionDuration, DURATION_ERROR, formatSuspensionEnd, SUSPENSION_ACTIONS, suspensionEndsAt,
+  type TimedSuspensionView, type UnbanSuspensionChoice, type UnbanSuspensionState,
+} from '../../shared/suspension';
 import { ageReviewActiveGuard, type AgeReviewEnv } from './age-review';
 import { markHumanReviewed } from './human-decision';
 import type { KeycastResult } from './keycast-client';
@@ -219,6 +222,151 @@ export async function restoreAfterLift(
     console.error(`[restoreAfterLift] Keycast activate threw for ${pubkey}:`, error);
     return 'failed';
   }
+}
+
+// ---------------------------------------------------------------------------
+// Unban: what happens to a running suspension.
+// ---------------------------------------------------------------------------
+
+// Never rejects: every Keycast result is logged and swallowed, like enforceKeycastState.
+function keycastLeg(op: string, pubkey: string, fn: () => Promise<KeycastResult>): Promise<void> {
+  return fn().then(res => {
+    if (res.notFound) console.log(`[applyUnbanChoice] Keycast ${op} not applicable for ${pubkey}: no keycast account`);
+    else if (!res.success) console.error(`[applyUnbanChoice] Keycast ${op} failed for ${pubkey}: ${res.error}`);
+  }).catch(error => console.error(`[applyUnbanChoice] Keycast ${op} threw for ${pubkey}:`, error));
+}
+
+function noticeLeg(
+  io: SuspensionIo, pubkey: string, action: AccountNoticeAction, reason: string, endsAt?: string,
+): Promise<void> {
+  return io.notify(pubkey, action, reason, endsAt)
+    .catch(error => console.error(`[applyUnbanChoice] ${action} notice failed for ${pubkey}:`, error));
+}
+
+const IN_FORCE: readonly SuspensionRecordStatus[] = ['active', 'lifting', 'keycast_pending', 'cancelled_ban'];
+
+export interface UnbanChoiceResult {
+  state: UnbanSuspensionState;
+  endsAt?: string | null;
+  decisionRecorded?: boolean;
+  // Best-effort legs (Keycast, notices) already started; the caller keeps them alive.
+  waitUntil: Promise<unknown>[];
+}
+
+// Runs after the relay unban succeeded. The relay's suspended list is read fresh and is the
+// source of truth: 'unknown' never reads as "not suspended", so an unreadable list touches
+// nothing. Only for a canonical lowercase pubkey: record keys and relay writes are byte-exact,
+// so a differently-cased target could report "ended" while the account stays suspended (F8);
+// the caller enforces that. Never throws.
+export async function applyUnbanChoice(
+  db: D1Database | undefined,
+  io: SuspensionIo,
+  pubkey: string,
+  choice: UnbanSuspensionChoice | undefined,
+  a: { moderator?: string; now: Date },
+): Promise<UnbanChoiceResult> {
+  const waitUntil: Promise<unknown>[] = [];
+  const moderator = a.moderator ?? null;
+  // Only an explicit choice is a decision worth a row; the default is not.
+  const decide = (action: string, reason: string) =>
+    choice !== undefined && db
+      ? recordSuspensionDecision(db, { pubkey, action, reason, moderator, human: true })
+      : Promise.resolve<boolean | undefined>(undefined);
+  const unknown = (): UnbanChoiceResult => ({ state: 'unknown', waitUntil });
+
+  let entry: Awaited<ReturnType<SuspensionIo['readSuspension']>>;
+  try {
+    entry = await io.readSuspension(pubkey);
+  } catch (error) {
+    console.error(`[applyUnbanChoice] suspension read threw for ${pubkey}:`, error);
+    return unknown();
+  }
+  if (entry === 'unknown') return unknown();
+
+  if (!entry.suspended) {
+    // Today's behavior: the unban restores the Keycast account.
+    waitUntil.push(keycastLeg('unban', pubkey, () => io.keycastActivate(pubkey, a.moderator)));
+    if (db) {
+      try {
+        await endSuspensionRecord(db, pubkey, 'already_lifted');
+      } catch (error) {
+        console.error(`[applyUnbanChoice] closing the record failed for ${pubkey}:`, error);
+      }
+    }
+    return { state: 'not_suspended', waitUntil };
+  }
+
+  const resuspend = () => waitUntil.push(keycastLeg('suspend', pubkey, () => io.keycastSuspend(pubkey, a.moderator)));
+
+  if (choice === 'end_now') {
+    const lifted = await io.relayUnsuspend(pubkey).catch(error => ({
+      success: false, error: error instanceof Error ? error.message : String(error),
+    }));
+    if (!lifted.success) {
+      // The unban happened; the suspension did not end. Keycast follows the relay: suspended.
+      console.error(`[applyUnbanChoice] relay unsuspend failed for ${pubkey}: ${lifted.error}`);
+      resuspend();
+      return { state: 'end_failed', waitUntil };
+    }
+    if (db) {
+      try {
+        await endSuspensionRecord(db, pubkey, 'cancelled_unsuspend');
+      } catch (error) {
+        // Harmless: the timer later finds the account unsuspended and closes the record.
+        console.error(`[applyUnbanChoice] cancelling the timer failed for ${pubkey}:`, error);
+      }
+    }
+    waitUntil.push(restoreAfterLift(io, pubkey, { reason: 'Account restored by moderator', moderator: a.moderator }));
+    const decisionRecorded = await decide(SUSPENSION_ACTIONS.unsuspend, 'Unbanned; suspension ended');
+    return { state: 'ended', decisionRecorded, waitUntil };
+  }
+
+  if (choice === 'open_ended') {
+    if (db) {
+      try {
+        const changed = await changeSuspensionEnd(db, { pubkey, endsAt: null, moderator });
+        // F7: a lift in flight or a concurrent edit wins; change nothing further.
+        if (changed.kind !== 'changed') return unknown();
+      } catch (error) {
+        console.error(`[applyUnbanChoice] record write failed for ${pubkey}:`, error);
+        return unknown();
+      }
+    }
+    resuspend();
+    waitUntil.push(noticeLeg(io, pubkey, 'ACCOUNT_SUSPENDED', 'Suspension continues with no end date'));
+    const decisionRecorded = await decide(SUSPENSION_ACTIONS.change, 'Unbanned; suspended with no end date');
+    return { state: 'open_ended', endsAt: null, decisionRecorded, waitUntil };
+  }
+
+  // resume, and the default when no choice was sent.
+  let endsAt: string | null = null;
+  if (db) {
+    try {
+      const row = await getSuspensionRecord(db, pubkey);
+      if (row && IN_FORCE.includes(row.status)) {
+        endsAt = row.ends_at;
+        if (endsAt !== null || row.status === 'cancelled_ban') {
+          // Same end, status back to active. A lift in flight or a concurrent edit wins (F7).
+          const changed = await changeSuspensionEnd(db, { pubkey, endsAt, moderator });
+          if (changed.kind !== 'changed') return unknown();
+        }
+      }
+    } catch (error) {
+      console.error(`[applyUnbanChoice] record read or write failed for ${pubkey}:`, error);
+      return unknown();
+    }
+  }
+  resuspend();
+  // Only a still-future end is told to the person: a past one is lifted by the next tick,
+  // which sends the one "restored" notice.
+  if (endsAt !== null && new Date(endsAt).getTime() > a.now.getTime()) {
+    waitUntil.push(noticeLeg(io, pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension resumed', endsAt));
+  }
+  const decisionRecorded = await decide(
+    SUSPENSION_ACTIONS.change,
+    `Unbanned; suspension resumed ${endsAt ? `until ${formatSuspensionEnd(endsAt)}` : 'with no end date'}`,
+  );
+  return { state: 'resumed', endsAt, decisionRecorded, waitUntil };
 }
 
 // ---------------------------------------------------------------------------

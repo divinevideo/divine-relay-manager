@@ -4,7 +4,7 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, afterEach, vi } from 'vitest';
 import worker from '../src/index';
 import { ensureSchema } from '../src/db';
-import { DURATION_ERROR, suspensionEndsAt } from '../../shared/suspension';
+import { DURATION_ERROR, formatSuspensionEnd, suspensionEndsAt } from '../../shared/suspension';
 import { emptyManagementState, managementFake, type ManagementState } from '../src/test-helpers/management-fake';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -545,5 +545,250 @@ describe('GET /api/suspensions', () => {
   it('answers 503 without a DB binding', async () => {
     const res = await call('GET', '/api/suspensions', undefined, { ...(env() as object), DB: undefined });
     expect(res.status).toBe(503);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// B7: an unban asks what happens to a running suspension.
+// ---------------------------------------------------------------------------
+
+// Minute-aligned, relative to now (F2): never a real-clock literal that can go stale.
+const minuteAhead = (ms: number) => new Date(Math.ceil((Date.now() + ms) / 60_000) * 60_000).toISOString();
+const FUTURE_END = minuteAhead(3 * 864e5);
+const PAST_END = minuteAhead(-864e5);
+const unban = (suspensionChoice?: unknown) =>
+  rpc({ method: 'unbanpubkey', params: [PK], ...(suspensionChoice !== undefined && { suspensionChoice }) });
+const bannedSetup = (overrides: Partial<ManagementState> = {}) => setup({
+  banned: new Set([PK]), keycast: new Map([[PK, 'banned']]), ...overrides,
+});
+const suspendedSetup = (overrides: Partial<ManagementState> = {}) => bannedSetup({
+  suspended: new Map([[PK, 'policy']]), ...overrides,
+});
+
+describe('unbanpubkey and a running suspension', () => {
+  it('not suspended: Keycast active, state not_suspended, and an in-force record goes already_lifted', async () => {
+    const fake = bannedSetup();
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unban();
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'not_suspended' });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'active', actor: MOD }]);
+    expect(await record()).toMatchObject({ status: 'already_lifted' });
+    expect(fake.notifies).toHaveLength(0);
+    expect(await decisions()).toHaveLength(0);
+  });
+
+  it('an unreadable suspended list: Keycast untouched, record untouched, state unknown', async () => {
+    const fake = bannedSetup({ fail: { listsuspendedpubkeys: true } });
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unban('end_now');
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(fake.keycastPuts).toHaveLength(0);
+    expect(fake.notifies).toHaveLength(0);
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
+    expect(await record()).toMatchObject({ status: 'cancelled_ban' });
+  });
+
+  it('default (no choice) resumes: Keycast suspended, record active, CHANGED with the original end, no decision row', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const res = await unban();
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: FUTURE_END });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: FUTURE_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toHaveLength(1);
+    expect(fake.notifies[0]).toMatchObject({ action: 'ACCOUNT_SUSPENSION_CHANGED', recipientPubkey: PK, endsAt: FUTURE_END });
+    expect(await decisions()).toHaveLength(0);
+  });
+
+  it('resume with an explicit choice writes a change_suspension_end decision naming the end', async () => {
+    suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const res = await unban('resume');
+
+    expect((res.json.suspension as { decisionRecorded?: boolean }).decisionRecorded).toBe(true);
+    const rows = await decisions();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'change_suspension_end', moderator_pubkey: MOD });
+    expect(rows[0].reason).toBe(`Unbanned; suspension resumed until ${formatSuspensionEnd(FUTURE_END)}`);
+  });
+
+  it('resuming a cancelled_ban record makes it active with the same end', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unban('resume');
+
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: FUTURE_END });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: FUTURE_END });
+    expect(fake.notifies.map(n => n.action)).toEqual(['ACCOUNT_SUSPENSION_CHANGED']);
+  });
+
+  it('resuming a cancelled_ban record whose end is already past sends no message', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('cancelled_ban', PAST_END);
+    const res = await unban('resume');
+
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: PAST_END });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: PAST_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toHaveLength(0);
+  });
+
+  it('resuming a cancelled_ban record with no end makes it active, with no message', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('cancelled_ban', null);
+    const res = await unban('resume');
+
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: null });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: null });
+    expect(fake.notifies).toHaveLength(0);
+  });
+
+  it('resume with no record suspends in Keycast only and writes no record', async () => {
+    const fake = suspendedSetup();
+    const res = await unban();
+
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: null });
+    expect(await record()).toBeNull();
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toHaveLength(0);
+  });
+
+  it('open_ended clears the end, suspends in Keycast, sends ACCOUNT_SUSPENDED with no endsAt, and records the decision', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unban('open_ended');
+
+    expect(res.json.suspension).toMatchObject({ state: 'open_ended', endsAt: null });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: null });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toHaveLength(1);
+    expect(fake.notifies[0]).toMatchObject({ action: 'ACCOUNT_SUSPENDED', recipientPubkey: PK });
+    expect('endsAt' in fake.notifies[0]).toBe(false);
+    const rows = await decisions();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'change_suspension_end', reason: 'Unbanned; suspended with no end date' });
+  });
+
+  it('open_ended with no record creates an open-ended one', async () => {
+    suspendedSetup();
+    await unban('open_ended');
+    expect(await record()).toMatchObject({ status: 'active', ends_at: null });
+  });
+
+  it('end_now lifts the suspension: relay unsuspend, record cancelled_unsuspend, one RESTORED, Keycast active, decision row', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unban('end_now');
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'ended' });
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey', 'unsuspendpubkey']);
+    expect(await record()).toMatchObject({ status: 'cancelled_unsuspend' });
+    expect(fake.notifies.map(n => n.action)).toEqual(['ACCOUNT_RESTORED']);
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'active', actor: MOD }]);
+    const rows = await decisions();
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ action: 'unsuspend_user', reason: 'Unbanned; suspension ended' });
+  });
+
+  it('end_now where the relay unsuspend fails: 200, end_failed, Keycast suspended, record still in force', async () => {
+    const fake = suspendedSetup({ fail: { unsuspendpubkey: true } });
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unban('end_now');
+
+    expect(res.status).toBe(200);
+    expect(res.json.success).toBe(true);
+    expect(res.json.suspension).toMatchObject({ state: 'end_failed' });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(await record()).toMatchObject({ status: 'cancelled_ban' });
+    expect(fake.notifies).toHaveLength(0);
+    expect(await decisions()).toHaveLength(0);
+  });
+
+  it.each(['resume', 'open_ended'])('%s while the timer is lifting (F7): nothing changes, no message, state unknown', async (choice) => {
+    const fake = suspendedSetup();
+    await seedRecord('lifting', FUTURE_END);
+    const res = await unban(choice);
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(await record()).toMatchObject({ status: 'lifting', ends_at: FUTURE_END });
+    expect(fake.keycastPuts).toHaveLength(0);
+    expect(fake.notifies).toHaveLength(0);
+    expect(await decisions()).toHaveLength(0);
+  });
+
+  it('open_ended losing a version race (F7 conflict): nothing further, state unknown', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    // A concurrent edit lands between changeSuspensionEnd's read and its guarded write.
+    let bumped = false;
+    const racingDb = new Proxy(DB, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop).bind?.(target) ?? Reflect.get(target, prop);
+        return (sql: string) => {
+          const stmt = target.prepare(sql);
+          if (bumped || !sql.includes('UPDATE timed_suspensions') || !sql.includes('AND version = ?')) return stmt;
+          return {
+            bind: (...args: unknown[]) => ({
+              run: async () => {
+                bumped = true;
+                await target.prepare('UPDATE timed_suspensions SET version = version + 1 WHERE pubkey = ?').bind(PK).run();
+                return stmt.bind(...args).run();
+              },
+            }),
+          };
+        };
+      },
+    });
+    const res = await call('POST', '/api/relay-rpc',
+      { method: 'unbanpubkey', params: [PK], suspensionChoice: 'open_ended' }, { ...(env() as object), DB: racingDb });
+    expect(bumped).toBe(true);
+
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(fake.keycastPuts).toHaveLength(0);
+    expect(fake.notifies).toHaveLength(0);
+  });
+
+  it('a non-canonical target skips the choice (F8): only the unban runs, and the response says so', async () => {
+    const UPPER = PK.toUpperCase();
+    const fake = setup({
+      banned: new Set([UPPER]), suspended: new Map([[PK, 'policy']]), keycast: new Map([[UPPER, 'banned']]),
+    });
+    const res = await rpc({ method: 'unbanpubkey', params: [UPPER], suspensionChoice: 'end_now' });
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toBeUndefined();
+    expect(res.json.suspensionChoiceSkipped).toBe('non_canonical_pubkey');
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
+    // Keycast refuses a non-canonical pubkey outright, so today's call changes nothing either.
+    expect(fake.keycastPuts.every(p => p.status !== 'suspended')).toBe(true);
+    expect(fake.notifies).toHaveLength(0);
+    expect(fake.state.suspended.has(PK)).toBe(true);
+  });
+
+  it('an invalid suspensionChoice is refused with 400 before the relay is called', async () => {
+    const fake = bannedSetup();
+    const res = await unban('bogus');
+
+    expect(res.status).toBe(400);
+    expect(res.json.code).toBe('invalid_suspension_choice');
+    expect(fake.rpcCalls).toHaveLength(0);
+    expect(fake.keycastPuts).toHaveLength(0);
+  });
+
+  it('the age-review guard still refuses an unban with an open case', async () => {
+    const fake = suspendedSetup();
+    await seedAgeCase();
+    const res = await unban('end_now');
+
+    expect(res.status).toBe(409);
+    expect(fake.relayWrites()).toHaveLength(0);
   });
 });

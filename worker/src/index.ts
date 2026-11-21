@@ -75,6 +75,7 @@ import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
 import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, noteClaimedModerator, requireVerifiedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 import {
+  applyUnbanChoice,
   endSuspensionRecord,
   getSuspensionRecord,
   handleChangeSuspensionEnd,
@@ -86,7 +87,10 @@ import {
   type AccountNoticeAction,
 } from './timed-suspensions';
 import { liveSuspensionIo } from './timed-suspensions-io';
-import { checkSuspensionDuration, DURATION_ERROR, SUSPENSION_ACTIONS, suspensionEndsAt, type SuspensionDuration } from '../../shared/suspension';
+import {
+  checkSuspensionDuration, DURATION_ERROR, isUnbanSuspensionChoice, SUSPENSION_ACTIONS, suspensionEndsAt,
+  type SuspensionDuration, type UnbanSuspensionChoice, type UnbanSuspensionState,
+} from '../../shared/suspension';
 
 const COORDINATED_AUTO_HIDE_ACTIONS = new Set<string>(AUTO_HIDE_STATE_ACTIONS);
 
@@ -1708,7 +1712,8 @@ type RelayRpcBody = {
   // SuspensionDuration, or null for no end date. Absent: a legacy suspend, which
   // still replaces the record, open-ended, but writes no decision row.
   suspension?: { duration: unknown };
-  // unbanpubkey only (Task B7).
+  // unbanpubkey only: what happens to a running suspension (resume | end_now | open_ended).
+  // Absent means resume.
   suspensionChoice?: unknown;
 };
 
@@ -1870,6 +1875,16 @@ async function runRelayRpc(
     if (guarded) return guarded;
   }
 
+  // The unban's suspension choice is checked before the relay is touched, so a bad value
+  // unbans nobody.
+  let suspensionChoice: UnbanSuspensionChoice | undefined;
+  if (body.method === 'unbanpubkey' && body.suspensionChoice !== undefined) {
+    if (!isUnbanSuspensionChoice(body.suspensionChoice)) {
+      return jsonResponse({ success: false, error: 'Invalid suspension choice', code: 'invalid_suspension_choice' }, 400, corsHeaders);
+    }
+    suspensionChoice = body.suspensionChoice;
+  }
+
   // Suspend for a set time. The duration is checked before the relay is touched, so a bad
   // value suspends nobody (Review Focus 5). duration null is an explicit "no end date".
   const suspensionField = body.method === 'suspendpubkey' && body.suspension != null ? body.suspension : undefined;
@@ -1954,6 +1969,9 @@ async function runRelayRpc(
 
   // Only set for a suspend that came with the `suspension` field; legacy responses are unchanged.
   let suspensionResponse: { endsAt: string | null; recorded: boolean; decisionRecorded: boolean } | undefined;
+  // Only set for an unban: what became of a running suspension.
+  let unbanSuspension: { state: UnbanSuspensionState; endsAt: string | null; decisionRecorded?: boolean } | undefined;
+  let skippedChoice: 'non_canonical_pubkey' | undefined;
 
   // Account-state side effects (all non-critical, off the response path).
   // Direct RPC callers enter here, and handleModerate delegates here before
@@ -1975,9 +1993,26 @@ async function runRelayRpc(
         enforceKeycastState('ban', pubkey, () => banUser(pubkey, 'moderation', env, moderator), ctx);
         notifyAccountState(env, pubkey, 'ACCOUNT_BANNED', reason || 'Account banned by moderator', ctx);
         break;
-      case 'unbanpubkey':
-        enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
+      case 'unbanpubkey': {
+        // A canonical target only (F8): record keys and relay writes are byte-exact, so a
+        // differently-cased target could report "ended" while the account stays suspended.
+        // The unban itself still forwards any spelling (see above), with today's Keycast call.
+        if (!/^[0-9a-f]{64}$/.test(pubkey)) {
+          enforceKeycastState('unban', pubkey, () => unsuspendUser(pubkey, env, moderator), ctx);
+          if (suspensionChoice !== undefined) skippedChoice = 'non_canonical_pubkey';
+          break;
+        }
+        const applied = await applyUnbanChoice(env.DB, io, pubkey, suspensionChoice, { moderator, now: new Date() });
+        if (ctx) {
+          for (const p of applied.waitUntil) ctx.waitUntil(p);
+        } else {
+          // Nothing keeps these alive past the response, so finish them first.
+          await Promise.allSettled(applied.waitUntil);
+        }
+        unbanSuspension = { state: applied.state, endsAt: applied.endsAt ?? null,
+          ...(applied.decisionRecorded !== undefined && { decisionRecorded: applied.decisionRecorded }) };
         break;
+      }
       case 'suspendpubkey': {
         // Every suspend replaces the record, open-ended when no end was asked for, so a
         // re-suspend always supersedes an earlier timer (plan decision 1).
@@ -2063,6 +2098,8 @@ async function runRelayRpc(
     result: 'result' in result ? result.result : true,
     ...unconfirmedRemovalFields(result),
     ...(suspensionResponse && { suspension: suspensionResponse }),
+    ...(unbanSuspension && { suspension: unbanSuspension }),
+    ...(skippedChoice && { suspensionChoiceSkipped: skippedChoice }),
   }), {
     status: 200,
     headers: { 'Content-Type': 'application/json', ...corsHeaders },
