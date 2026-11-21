@@ -109,7 +109,10 @@ function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, timer
       onOpenChange(false);
     } catch (error) {
       // The caller has said what went wrong; stay open so the moderator can retry.
-      if (isSuspensionChanged(error)) setChanged(true);
+      if (isSuspensionChanged(error)) {
+        setPicked(null);
+        setChanged(true);
+      }
     }
   };
 

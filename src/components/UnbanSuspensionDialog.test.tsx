@@ -205,6 +205,22 @@ describe('UnbanSuspensionDialog', () => {
     expect(props.onConfirm).not.toHaveBeenCalled();
   });
 
+  it('asks for a new choice after a conflict even if the refresh could not load the timer', async () => {
+    const onConfirm = vi.fn()
+      .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
+      .mockResolvedValueOnce(undefined);
+    const { props, rerender } = renderDialog({ record: record(FUTURE), onConfirm });
+    fireEvent.click(screen.getByLabelText('End the suspension now'));
+    fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
+    expect(await screen.findByText(CHANGED_NOTICE)).toBeInTheDocument();
+    expect(onConfirm).toHaveBeenLastCalledWith('end_now', VERSION);
+
+    rerender(<UnbanSuspensionDialog {...props} record={undefined} />);
+    expect(checkedLabel()).toBe('Resume the suspension as it is');
+    fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
+    await waitFor(() => expect(onConfirm).toHaveBeenLastCalledWith('resume', undefined));
+  });
+
   // Pending also covers the timer re-read after a suspension_changed refusal, which can take
   // a retry: the moderator can always close the prompt, as Escape already allows.
   it('keeps Cancel enabled while pending', () => {
