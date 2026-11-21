@@ -200,7 +200,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   // Unified moderation status: ban lists + WebSocket verification.
   // Auto-runs WebSocket check when event is not found via normal queries or banned event lookup.
-  const eventNotFound = !context.threadLoading && !isBannedEventLoading && !displayEvent && !!targetEventId;
+  const eventNotFound = context.threadLoading || isBannedEventLoading
+    ? undefined
+    : !displayEvent && !!targetEventId;
   const moderationStatus = useModerationStatus(
     context.reportedUser.pubkey,
     context.target?.type === 'event' ? context.target.value : null,

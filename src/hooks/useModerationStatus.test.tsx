@@ -105,12 +105,7 @@ describe('useModerationStatus', () => {
     await waitFor(() => expect(result.current.isEventGone).toBe(true));
   });
 
-  // A Re-check runs the live check and reads the post again at once. When the
-  // check answers first, the post still reads as missing (the miss that began
-  // with the re-read after an account action), and that check has just looked
-  // at it. It must not count as a new miss. Once the post reads as found
-  // again, a later miss gets its auto-check.
-  it('does not run the live check again when a check answers during a miss that began before it', async () => {
+  it('checks a new miss after the thread finds the post that the live check called gone', async () => {
     verifyPubkeyBanned.mockResolvedValue(false);
     verifyEventDeleted.mockResolvedValueOnce(true).mockResolvedValue(false);
     const { result, rerender } = renderHook(
@@ -120,12 +115,41 @@ describe('useModerationStatus', () => {
     await waitFor(() => expect(result.current.isLoading).toBe(false));
     await act(async () => { result.current.recheckAfterAction(); });
     await waitFor(() => expect(result.current.isEventGone).toBe(true));
+
+    // The post is withheld after Unsuspend, then a thread refresh finds it
+    // before the restore window closes or a moderator presses Re-check.
     rerender({ notFound: true });
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+    rerender({ notFound: false });
+
+    // An independent relay check is needed if a later thread read misses again.
+    rerender({ notFound: true });
+    await waitFor(() => expect(result.current.isEventGone).toBe(false));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(2);
+  });
+
+  // A Re-check runs the live check and reads the post again at once. A
+  // present answer can arrive while the panel still shows a miss, or while
+  // the panel is waiting for its thread or banned-event read.
+  it.each([
+    { readState: 'missing', notFound: true },
+    { readState: 'loading', notFound: undefined },
+  ])('does not repeat a check that found the post while the pane was $readState', async ({ notFound }) => {
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValueOnce(true).mockResolvedValue(false);
+    const { result, rerender } = renderHook(
+      ({ notFound }: { notFound: boolean | undefined }) => useModerationStatus(PUBKEY, EVENT_ID, notFound),
+      { wrapper, initialProps: { notFound: false } },
+    );
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+    await act(async () => { result.current.recheckAfterAction(); });
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+
+    rerender({ notFound });
     expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
     await act(async () => { result.current.recheck(); });
     await waitFor(() => expect(result.current.isEventGone).toBe(false));
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
+    rerender({ notFound: true });
     expect(result.current.isChecking).toBe(false);
     expect(verifyEventDeleted).toHaveBeenCalledTimes(2);
 

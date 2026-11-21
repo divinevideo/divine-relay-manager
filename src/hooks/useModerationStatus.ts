@@ -169,7 +169,7 @@ function sinceReRead(
 export function useModerationStatus(
   pubkey?: string | null,
   eventId?: string | null,
-  /** Set true when the event could not be found via normal relay queries or banned event lookup */
+  /** True for a settled miss, false for a found post, undefined while the post is loading or untracked. */
   eventNotFound?: boolean,
 ): ModerationStatus {
   const { verifyEventDeleted, verifyPubkeyBanned } = useAdminApi();
@@ -211,13 +211,12 @@ export function useModerationStatus(
   const [reReadMarks, setReReadMarks] = useState<{ banned: ListReads; suspended: ListReads } | null>(null);
   const queryClient = useQueryClient();
 
-  // Track which report we've auto-checked to avoid re-running on every render
-  const autoCheckedRef = useRef<string | null>(null);
-  // Whether the latest live check answer the auto-check below has seen found
-  // the post on the relay while the post read as missing, and that answer's
-  // checkedAt, so that only a new answer changes the flag.
-  const foundDuringMissRef = useRef(false);
-  const seenAnswerRef = useRef<Date | null>(null);
+  const autoCheck = useRef({
+    attempted: false,
+    previousRead: undefined as boolean | undefined,
+    answeredMiss: false,
+    seenAnswer: null as Date | null,
+  });
 
   // Defined once in useRelayBanLists. These keys are shared with the reports
   // queue, and React Query runs the queryFn of whichever observer triggers the
@@ -361,52 +360,39 @@ export function useModerationStatus(
   const recheck = useCallback(() => { void runCheck({ afterAction: false }); }, [runCheck]);
   const recheckAfterAction = useCallback(() => { void runCheck({ afterAction: true }); }, [runCheck]);
 
-  // Reset when the report or the environment changes. Declared BEFORE the
-  // auto-check below on purpose: effects run in declaration order, and running
-  // after it would wipe the marker the auto-check just set, so a second check
-  // fired for the same report.
+  // Reset before the auto-check effect so the new report starts with a clean slate.
   useEffect(() => {
-    // Any check still in flight is for the previous report or environment.
     generationRef.current += 1;
     setWsResult({ userBanned: undefined, eventGone: undefined, checkedAt: null, isChecking: false });
-    autoCheckedRef.current = null;
+    autoCheck.current.attempted = false;
+    autoCheck.current.previousRead = undefined;
+    autoCheck.current.answeredMiss = false;
   }, [eventId, pubkey, apiUrl]);
 
-  // Auto-check: for events when not found, for users always (just a ban list refresh)
   useEffect(() => {
-    // A Re-check (or the restore window closing) runs the live check and reads
-    // the post again at once. The check can answer first, while the post still
-    // reads as missing, and the auto-check would then ask what it just
-    // answered. Set from a new answer only. Right after the report changes,
-    // this runs once more with the previous report's answer, and the reset's
-    // own render (checkedAt null) then clears the flag. A null answer (the
-    // check could not answer) is not a find and clears it too, so the
-    // auto-check can still try, as before. Cleared while the post does not
-    // read as missing, which includes while the pane is still reading it.
-    // That can only let a check through.
-    if (wsResult.checkedAt !== seenAnswerRef.current) {
-      seenAnswerRef.current = wsResult.checkedAt;
-      foundDuringMissRef.current = !!eventNotFound && wsResult.eventGone === false;
+    const check = autoCheck.current;
+    if (check.seenAnswer !== wsResult.checkedAt) {
+      check.seenAnswer = wsResult.checkedAt;
+      // A gone answer covers the expected miss after an account action. A
+      // present answer also covers a miss already shown or still loading.
+      check.answeredMiss = wsResult.eventGone === true
+        || (wsResult.eventGone === false && eventNotFound !== false);
     }
-    if (!eventNotFound) foundDuringMissRef.current = false;
-    const checkKey = `${eventId || ''}:${pubkey || ''}`;
-    if (autoCheckedRef.current === checkKey || banListsLoading || wsResult.isChecking) return;
+    if (eventNotFound === false && check.previousRead !== false) {
+      // The pane found the post. Any answer for the previous read says
+      // nothing about a later disappearance.
+      check.attempted = false;
+      check.answeredMiss = false;
+    }
+    check.previousRead = eventNotFound;
+    if (check.attempted || banListsLoading || wsResult.isChecking) return;
 
-    const shouldAutoCheck =
-      // A missing read that no live check has answered yet. A latest answer
-      // that calls the post gone answers it, and so does a check that found the
-      // post during this miss. After a check finds the post, the next miss
-      // gets its auto-check.
-      (eventNotFound && eventId && wsResult.eventGone !== true && !foundDuringMissRef.current) ||
-      // User report (no event): check ban status
-      (pubkey && !eventId);
-
+    const shouldAutoCheck = eventId ? eventNotFound && !check.answeredMiss : !!pubkey;
     if (shouldAutoCheck) {
-      autoCheckedRef.current = checkKey;
-      runCheck({ afterAction: false });
+      check.attempted = true;
+      void runCheck({ afterAction: false });
     }
-  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.eventGone, wsResult.checkedAt, wsResult.isChecking, runCheck]);
-
+  }, [eventNotFound, eventId, pubkey, apiUrl, banListsLoading, wsResult.eventGone, wsResult.checkedAt, wsResult.isChecking, runCheck]);
 
   // A later successful list read that contains the pubkey is newer than a
   // live check that said absent. The queue poll and other screens refresh this
