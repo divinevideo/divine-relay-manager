@@ -7,6 +7,8 @@ import { ensureSchema } from '../src/db';
 import { isHumanHandling } from '../../shared/handling';
 import { DURATION_ERROR, formatSuspensionEnd, suspensionEndsAt } from '../../shared/suspension';
 import { emptyManagementState, managementFake, type ManagementState } from '../src/test-helpers/management-fake';
+import { runTimedSuspensionTick } from '../src/timed-suspensions';
+import { liveSuspensionIo } from '../src/timed-suspensions-io';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
 const PK = 'c3'.repeat(32);
@@ -491,6 +493,24 @@ describe('POST /api/suspensions/end', () => {
     expect(fake.notifies).toEqual([]);
   });
 
+  // H3 (hm21): the timer never lifts an age_review relay row (that is the age-review flow's), so
+  // an end date there would tell the person "your suspension now ends on…" for a lift that never
+  // comes. Reached with no open case: a denied case bans the account and leaves the row behind.
+  it('refuses an age_review relay row with no open case, and sends no message', async () => {
+    const fake = setup({ suspended: new Map([[PK, 'age_review']]) });
+    await seedRecord('active', FUTURE_END);
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+
+    expect(res.status).toBe(409);
+    expect(res.json).toMatchObject({
+      success: false, code: 'age_review_suspension',
+      error: 'This suspension is from age review, so it has no end date to change.',
+    });
+    expect(fake.notifies).toHaveLength(0);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: FUTURE_END, version: 0 });
+    expect(await decisions()).toHaveLength(0);
+  });
+
   it('refuses with 409 account_banned when the relay ban list has the account', async () => {
     const fake = setup({ banned: new Set([PK]), suspended: new Map([[PK, null]]) });
     const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
@@ -767,6 +787,19 @@ describe('unbanpubkey and a running suspension', () => {
     expect(fake.notifies.map(n => n.action)).toEqual(['ACCOUNT_SUSPENSION_CHANGED']);
     // The explicit choice's own row only, not the default's as well.
     expect((await decisions()).map(r => r.reason)).toEqual([`Unbanned; suspension resumed until ${formatSuspensionEnd(FUTURE_END)}`]);
+  });
+
+  // The H3 sibling: the timer never lifts an age_review relay row, so "your suspension now ends
+  // on…" would announce a lift that never comes. The resume itself still goes ahead.
+  it.each([['the default', undefined], ['an explicit resume', 'resume']])('%s over an age_review relay row sends no end-date message', async (_label, choice) => {
+    const fake = suspendedSetup({ suspended: new Map([[PK, 'age_review']]) });
+    await seedRecord('active', FUTURE_END);
+    const res = await unban(choice);
+
+    expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: FUTURE_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toHaveLength(0);
   });
 
   it('resuming a cancelled_ban record whose end is already past sends no message', async () => {
@@ -1107,8 +1140,9 @@ describe('unbanpubkey with the timer version the dialog showed', () => {
   });
 
   // The record moves during the relay unban itself, after the first check passed: the unban
-  // has landed, but the choice is not applied and nothing about the suspension changes.
-  it.each(['resume', 'end_now', 'open_ended'])('%s whose record changes during the relay unban: state changed, timer untouched, no message', async (choice) => {
+  // has landed, but the choice is not applied and the timer and messages are untouched. The
+  // relay suspension still stands, so Keycast follows it from banned to suspended.
+  it.each(['resume', 'end_now', 'open_ended'])('%s whose record changes during the relay unban: state changed, timer untouched, no message, Keycast suspended', async (choice) => {
     const fake = suspendedSetup();
     await seedRecord('active', FUTURE_END);
     let reads = 0;
@@ -1135,7 +1169,10 @@ describe('unbanpubkey with the timer version the dialog showed', () => {
     expect(res.status).toBe(200);
     expect(res.json.suspension).toMatchObject({ state: 'changed' });
     expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
-    await expectNothingChanged(fake, OTHER_END);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: OTHER_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toHaveLength(0);
+    expect(await decisions()).toHaveLength(0);
   });
 
   // A DB whose record moves right after the nth read of it: read 1 is the pre-relay check,
@@ -1162,18 +1199,132 @@ describe('unbanpubkey with the timer version the dialog showed', () => {
     });
   };
 
-  // The tick claims the row during the relay unban. Every choice must say 'changed', not fall
-  // to 'unknown' through the lift-in-flight check.
-  it.each(['open_ended', 'end_now', 'resume'])('%s whose row the tick claims during the relay unban: state changed, nothing else', async (choice) => {
+  // The tick claims the row during the relay unban. "Left as it was" would be untrue while the
+  // timer is lifting, so every choice says 'unknown'. Keycast is left as it is: the timer sets
+  // it active when the lift finishes, and a suspend from here could land after that and never
+  // be repaired.
+  it.each([
+    ['open_ended', 'lifting'], ['end_now', 'lifting'], ['resume', 'lifting'],
+    ['open_ended', 'keycast_pending'], ['end_now', 'keycast_pending'], ['resume', 'keycast_pending'],
+  ])('%s whose row the tick moves to %s during the relay unban: state unknown, Keycast left as it is', async (choice, status) => {
     const fake = suspendedSetup();
     await seedRecord('active', FUTURE_END);
-    const claim = () => DB.prepare(`UPDATE timed_suspensions SET status = 'lifting', version = version + 1 WHERE pubkey = ?`).bind(PK).run();
+    const claim = () => DB.prepare(`UPDATE timed_suspensions SET status = ?, version = version + 1 WHERE pubkey = ?`).bind(status, PK).run();
     const res = await unbanShown(choice, 0, { ...(env() as object), DB: movesAfterRead(1, claim) });
 
     expect(res.status).toBe(200);
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
+    expect(await record()).toMatchObject({ status, ends_at: FUTURE_END });
+    expect(fake.keycastPuts).toHaveLength(0);
+    expect(fake.notifies).toHaveLength(0);
+  });
+
+  // The stuck timer (Meylis, PR #444): a due, banned account's tick sees the ban and moves the
+  // row to cancelled_ban during the relay unban. The unban says 'changed'. Keycast used to stay
+  // banned, so the timer would never lift, Change end date refused ("banned"), and no Unban was
+  // offered (the relay is not banned). Keycast now follows the relay to suspended, so Change
+  // end date restarts the timer and the timer lifts it.
+  it.each(['resume', 'end_now', 'open_ended'])('%s racing the tick\'s ban cancel no longer strands the timer', async (choice) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', PAST_END);
+    const tickCancels = () => DB.prepare(
+      `UPDATE timed_suspensions SET status = 'cancelled_ban', version = version + 1 WHERE pubkey = ?`,
+    ).bind(PK).run();
+    const res = await unbanShown(choice, 0, { ...(env() as object), DB: movesAfterRead(1, tickCancels) });
+
     expect(res.json.suspension).toMatchObject({ state: 'changed' });
     expect(fake.relayWrites().map(c => c.method)).toEqual(['unbanpubkey']);
-    expect(await record()).toMatchObject({ status: 'lifting', ends_at: FUTURE_END });
+    expect(await record()).toMatchObject({ status: 'cancelled_ban', ends_at: PAST_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.state.keycast.get(PK)).toBe('suspended');
+
+    // Change end date now works, and restarts the timer.
+    const edit = await changeEnd({ pubkey: PK, duration: THREE_DAYS });
+    expect(edit.status).toBe(200);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: edit.json.endsAt });
+
+    // And the timer lifts it at the new end, with the one restored message.
+    const tickNotifies: string[] = [];
+    const io = liveSuspensionIo(env() as never, async (_pk, action) => { tickNotifies.push(action); });
+    const summary = await runTimedSuspensionTick({ DB, ENVIRONMENT: 'test' }, io,
+      new Date(new Date(edit.json.endsAt as string).getTime() + 60_000));
+    expect(summary.lifted).toBe(1);
+    expect(await record()).toMatchObject({ status: 'lifted' });
+    expect(fake.state.suspended.has(PK)).toBe(false);
+    expect(fake.state.keycast.get(PK)).toBe('active');
+    expect(tickNotifies).toEqual(['ACCOUNT_RESTORED']);
+  });
+
+  // If the record can't be checked after it moved, whether a lift is running is unknown, so
+  // Keycast is left as it is and the outcome is unknown.
+  it('a record that moved and then cannot be checked: state unknown, Keycast left as it is', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const moved = movesAfterRead(1, changeAfterDialogRead);
+    const failingCheck = new Proxy(moved, {
+      get(target, prop) {
+        if (prop !== 'prepare') return Reflect.get(target, prop);
+        return (sql: string) => (sql.includes('SET version = version + 1 WHERE pubkey = ? AND status IN')
+          ? { bind: () => ({ run: async () => { throw new Error('D1 down'); } }) }
+          : target.prepare(sql));
+      },
+    });
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const res = await unbanShown('resume', 0, { ...(env() as object), DB: failingCheck });
+
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(fake.keycastPuts).toHaveLength(0);
+  });
+
+  // H2 (hm21): an unban that finds the account not suspended closes only the record the dialog
+  // showed. A re-suspend whose record lands during the relay unban (and whose relay call lands
+  // after this unban's list read) keeps its new timer. Keycast still follows the relay to active.
+  it('not suspended: a record that changed during the relay unban is not closed', async () => {
+    const fake = bannedSetup();
+    await seedRecord('active', FUTURE_END);
+    const res = await unbanShown('resume', 0, { ...(env() as object), DB: movesAfterRead(1, changeAfterDialogRead) });
+
+    expect(res.json.suspension).toMatchObject({ state: 'not_suspended' });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: OTHER_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'active', actor: MOD }]);
+  });
+
+  it('not suspended: a dialog that showed no timer leaves a record that appeared during the relay unban', async () => {
+    const fake = bannedSetup();
+    const res = await unbanShown('resume', null,
+      { ...(env() as object), DB: movesAfterRead(1, () => seedRecord('active', FUTURE_END)) });
+
+    expect(res.json.suspension).toMatchObject({ state: 'not_suspended' });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: FUTURE_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'active', actor: MOD }]);
+  });
+
+  it('not suspended: the record the dialog showed is still closed', async () => {
+    bannedSetup();
+    await seedRecord('cancelled_ban', FUTURE_END);
+    const res = await unbanShown('resume', 0);
+
+    expect(res.json.suspension).toMatchObject({ state: 'not_suspended' });
+    expect(await record()).toMatchObject({ status: 'already_lifted' });
+  });
+
+  // A suspension that ended during the relay unban (the tick lifted it or found it lifted, or a
+  // manual Unsuspend ended it): "left as it was" would be untrue, so the outcome is unknown and
+  // the moderator checks the account. Keycast is left as it is: whatever ended it owns the restore.
+  it.each([
+    ['resume', 'lifted'], ['end_now', 'lifted'], ['open_ended', 'lifted'],
+    ['resume', 'already_lifted'], ['end_now', 'already_lifted'], ['open_ended', 'already_lifted'],
+    ['resume', 'cancelled_unsuspend'], ['end_now', 'cancelled_unsuspend'], ['open_ended', 'cancelled_unsuspend'],
+  ])('%s over a record that went %s during the relay unban: state unknown, Keycast left as it is', async (choice, status) => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const end = () => DB.prepare(`UPDATE timed_suspensions SET status = ?, version = version + 1 WHERE pubkey = ?`)
+      .bind(status, PK).run();
+    const res = await unbanShown(choice, 0, { ...(env() as object), DB: movesAfterRead(1, end) });
+
+    expect(res.json.suspension).toMatchObject({ state: 'unknown' });
+    expect(await record()).toMatchObject({ status });
     expect(fake.keycastPuts).toHaveLength(0);
     expect(fake.notifies).toHaveLength(0);
   });

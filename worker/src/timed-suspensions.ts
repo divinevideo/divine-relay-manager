@@ -318,6 +318,10 @@ function noticeLeg(
 }
 
 const IN_FORCE: readonly SuspensionRecordStatus[] = ['active', 'lifting', 'keycast_pending', 'cancelled_ban'];
+// Records whose suspension is being lifted or has ended: after a change during the relay unban,
+// "left as it was" would be untrue for these, so the unban answers unknown.
+const LIFTING_OR_ENDED: readonly SuspensionRecordStatus[] =
+  ['lifting', 'keycast_pending', 'lifted', 'already_lifted', 'cancelled_unsuspend'];
 
 export interface UnbanChoiceResult {
   state: UnbanSuspensionState;
@@ -334,8 +338,9 @@ export interface UnbanChoiceResult {
 // the caller enforces that. Never throws.
 // shownVersion: the timer version the unban dialog showed (null: it showed none). The caller
 // refuses a stale one before the relay unban; this re-checks it against a change landing
-// during that call. A moved record gets 'changed': no timer write, no message and, as for F7,
-// Keycast left as it is. Undefined (callers that send none) checks nothing.
+// during that call. A moved record gets 'changed': no timer write and no message, with Keycast
+// following the relay to suspended, or 'unknown' with Keycast left as it is while a lift is
+// running (see changedSince). Undefined (callers that send none) checks nothing.
 export async function applyUnbanChoice(
   db: D1Database | undefined,
   io: SuspensionIo,
@@ -380,12 +385,16 @@ export async function applyUnbanChoice(
   }
 
   if (!entry.suspended) {
-    // Today's behavior: the unban restores the Keycast account.
+    // Today's behavior: the unban restores the Keycast account. The relay says not suspended,
+    // so Keycast follows it even when the record below is left open.
     waitUntil.push(keycastLeg('unban', pubkey, () => io.keycastActivate(pubkey, a.moderator)));
-    if (db) {
+    // Only the record the dialog showed is closed, as in the other branches: a re-suspend whose
+    // record landed during the relay unban keeps its timer. A dialog that showed none (null)
+    // closes nothing, since any record this could close is one it did not show.
+    if (db && shownVersion !== null) {
       try {
         // A lift in progress is left to the tick to finish; this branch sends no message of its own.
-        await endSuspensionRecord(db, pubkey, 'already_lifted');
+        await endSuspensionRecord(db, pubkey, 'already_lifted', shownVersion);
       } catch (error) {
         console.error(`[applyUnbanChoice] closing the record failed for ${pubkey}:`, error);
       }
@@ -395,11 +404,41 @@ export async function applyUnbanChoice(
 
   const resuspend = () => waitUntil.push(keycastLeg('suspend', pubkey, () => io.keycastSuspend(pubkey, a.moderator)));
 
+  // The record moved during the relay unban, so no choice is applied and the timer and the
+  // person's messages are left as they are. The relay suspension still stands (read above), so
+  // Keycast follows it to suspended, as for end_failed. Left banned, the timer would cancel on
+  // the Keycast ban and Change end date would refuse it, with no Unban offered (the relay is not
+  // banned): a stuck timer. Keycast's signing gate treats banned and suspended alike, so the
+  // account is no less restricted.
+  // Not while a lift is running: the timer sets Keycast active when it finishes, and a suspend
+  // landing after that would never be repaired, so Keycast is left as it is and the outcome is
+  // unknown ("left as it was" would be untrue). One statement bumps the version only where no
+  // lift is running, so a tick that read the row before it loses its claim rather than racing
+  // this suspend. A suspension that ended during the relay unban (lifted, already_lifted,
+  // cancelled_unsuspend) is unknown for the same reason as one lifting, and is left as it is,
+  // Keycast included: whatever ended it owns the restore.
+  const changedSince = async (d1: D1Database): Promise<UnbanChoiceResult> => {
+    try {
+      const held = await d1.prepare(`
+        UPDATE timed_suspensions SET version = version + 1 WHERE pubkey = ? AND status IN ('active','cancelled_ban')
+      `).bind(pubkey).run();
+      if (held.meta.changes > 0) {
+        resuspend();
+        return changed();
+      }
+      const row = await getSuspensionRecord(d1, pubkey);
+      return row && LIFTING_OR_ENDED.includes(row.status) ? unknown() : changed();
+    } catch (error) {
+      console.error(`[applyUnbanChoice] record check after a change failed for ${pubkey}:`, error);
+      return unknown();
+    }
+  };
+
   if (choice === 'end_now') {
     // Checked before the relay unsuspend, which cannot be taken back.
     if (db && shownVersion !== undefined) {
       try {
-        if (!suspensionAsShown(await getSuspensionRecord(db, pubkey), shownVersion)) return changed();
+        if (!suspensionAsShown(await getSuspensionRecord(db, pubkey), shownVersion)) return changedSince(db);
       } catch (error) {
         console.error(`[applyUnbanChoice] record read failed for ${pubkey}:`, error);
         return unknown();
@@ -463,7 +502,7 @@ export async function applyUnbanChoice(
       try {
         const res = await changeSuspensionEnd(db, { pubkey, endsAt: null, moderator, ifShown: shownVersion });
         // F7: a lift in flight or a concurrent edit wins; change nothing further.
-        if (res.kind === 'conflict' && shownVersion !== undefined) return changed();
+        if (res.kind === 'conflict' && shownVersion !== undefined) return changedSince(db);
         if (res.kind !== 'changed') return unknown();
       } catch (error) {
         console.error(`[applyUnbanChoice] record write failed for ${pubkey}:`, error);
@@ -485,7 +524,7 @@ export async function applyUnbanChoice(
   if (db) {
     try {
       const row = await getSuspensionRecord(db, pubkey);
-      if (shownVersion !== undefined && !suspensionAsShown(row, shownVersion)) return changed();
+      if (shownVersion !== undefined && !suspensionAsShown(row, shownVersion)) return changedSince(db);
       if (row && IN_FORCE.includes(row.status)) {
         // A lift in flight wins (F7).
         if (row.status === 'lifting' || row.status === 'keycast_pending') return unknown();
@@ -508,8 +547,9 @@ export async function applyUnbanChoice(
   }
   resuspend();
   // Only a still-future end is told to the person: a past one is lifted by the next tick,
-  // which sends the one "restored" notice.
-  if (endsAt !== null && new Date(endsAt).getTime() > a.now.getTime()) {
+  // which sends the one "restored" notice. Never for an age_review relay row: the timer does not
+  // lift those (the age-review flow does), so the end would announce a lift that never comes.
+  if (endsAt !== null && new Date(endsAt).getTime() > a.now.getTime() && entry.reason !== 'age_review') {
     waitUntil.push(noticeLeg(io, pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension resumed', endsAt));
   }
   const reason = `Unbanned; suspension resumed ${endsAt ? `until ${formatSuspensionEnd(endsAt)}` : 'with no end date'}`;
@@ -592,6 +632,13 @@ export async function handleChangeSuspensionEnd(
   }
   if (!entry.suspended) {
     return refuse(corsHeaders, 409, 'not_suspended', 'This account is not suspended, so there is no end date to change.');
+  }
+  // The timer never lifts an age_review row (the age-review flow owns it), so an end date here
+  // would tell the person their suspension ends on a date when nothing will lift it. The guard
+  // above covers an open case; this covers a row left behind, by a denied case's ban, say.
+  if (entry.reason === 'age_review') {
+    return refuse(corsHeaders, 409, 'age_review_suspension',
+      'This suspension is from age review, so it has no end date to change.');
   }
 
   const endsAt = suspensionEndsAt(checked.duration, new Date());

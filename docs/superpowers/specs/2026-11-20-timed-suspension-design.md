@@ -84,12 +84,20 @@ The worker validates the duration: positive, with a sensible maximum the builder
 A "Change end date" action wherever a suspended account is shown with its suspension: the report pane's account controls and the Suspended tab card. It sets a new end time, or adds one to an open-ended suspension.
 - An end time already in the past means "lift now", through the normal lift path.
 - It writes a decision row and sends the "new end time" message.
+- Refused for a relay suspension whose reason is `age_review`, even with no open case (Matt, 2026-11-21, from hm21's review). The timer never lifts those, so the person would be told an end date when nothing will lift the suspension. A denied case's ban can leave such a row behind.
 
 ### Unban against a changed timer ("ask again if it changed")
 (Matt, 2026-11-21, from PR #444 review.) The unban prompt's options are built from a timer read that can be up to 30 seconds old. A choice is only applied to the timer the moderator saw.
 - The timers list carries each record's version. The prompt sends back the version it showed, or `null` when it showed no timer. It waits for the timers' first read before allowing Confirm. If that read failed, nothing was shown to compare against, so it sends no version and keeps decision 13's unknown-end default (resume as it is).
 - If the record has changed since, the unban is refused before the relay is touched: the account stays banned, and the timer, Keycast and the person's messages are untouched. The prompt re-reads the timers, says the suspension changed, and asks again against the current end. Any version change counts, including the scheduler's own bookkeeping.
-- A change landing during the relay unban itself leaves the unban standing and applies no choice. The timer is left as it was and Keycast stays banned, which is the stricter side. For End now, a change landing during the relay unsuspend, or a record that can't be checked afterwards, sends no restored message, leaves Keycast as it is, and alerts for a hand check.
+- A change landing during the relay unban itself leaves the unban standing and applies no choice, and the timer and the person's messages are left as they were. (Matt, 2026-11-21, from Meylis's stuck-timer finding.) Keycast then depends on the record:
+  - **No lift running** (the record is active, or paused by a ban): Keycast follows the relay from banned to suspended. Left banned, the timer would cancel on the Keycast ban and Change end date would refuse it, with no Unban offered, so the timer was stuck. Keycast's signing gate treats every status other than active the same way, so banned and suspended restrict the account alike and it is no less restricted.
+  - **A lift running**: Keycast is left as it is and the outcome is unknown, not changed. The timer sets Keycast active when the lift finishes, and a suspend landing after that would never be repaired.
+  - **A suspension that ended during the relay unban** (the timer lifted it or found it lifted, or a moderator's Unsuspend ended it): the outcome is unknown too, so the moderator checks the account. Keycast is left as it is: whatever ended the suspension owns the restore.
+  The version is bumped in the same statement that checks no lift is running, so a tick that read the record earlier loses its claim instead of racing the Keycast suspend.
+- An unban that finds the account not suspended closes only the record the dialog showed (none when it showed none), and sets Keycast active.
+- Resuming over a relay suspension whose reason is `age_review` sends no "your suspension now ends on…" message, because the timer never lifts that row (Matt, 2026-11-21).
+- For End now, a change landing during the relay unsuspend, or a record that can't be checked afterwards, sends no restored message, leaves Keycast as it is, and alerts for a hand check.
 - Callers that send no version (moderation-service `allow_pubkey`, Coop) keep decision 13 unchanged.
 
 ### The automatic lift

@@ -19,6 +19,7 @@ const REFUSALS = new Map<string, string>([
   ['suspension_ending', 'This suspension is ending now. Check again in a few minutes.'],
   ['conflict', 'Someone changed this suspension at the same time. Try again.'],
   ['status_unavailable', "Could not check the account's status. Try again."],
+  ['age_review_suspension', 'This suspension is from age review, so it has no end date to change.'],
 ]);
 
 export function useChangeSuspensionEnd(): UseMutationResult<

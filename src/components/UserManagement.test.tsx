@@ -1043,6 +1043,47 @@ describe('UserManagement timed suspensions', () => {
       expect(api.unbanPubkey).toHaveBeenCalledTimes(1);
     });
 
+    // Leaving the page with the prompt open unmounts it without a close: the refusal still
+    // arrives (a mutation-level callback), and nothing on screen can say it but the toast.
+    it('a suspension_changed refusal after the page unmounted with the prompt open is a toast', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      let refuse!: (e: unknown) => void;
+      api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+      const { unmount } = renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      await within(await screen.findByRole('dialog')).findByLabelText('Keep suspended with no end date');
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+      unmount();
+
+      await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(refusedToast));
+    });
+
+    // Each opening gets a fresh form. In a browser the old form can still be mounted when a new
+    // opening starts (a reopen during the close animation); jsdom runs no animation, so the new
+    // opening starts here while the old prompt is still up. Its pick must not carry over.
+    it("a new opening does not inherit the previous opening's pick", async () => {
+      api.callRelayRpc.mockImplementation(lists({
+        banned: [{ pubkey: PUBKEY }, { pubkey: OTHER }], suspended: [{ pubkey: PUBKEY }, { pubkey: OTHER }],
+      }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, threeDaysOut()), timer(OTHER, threeDaysOut())]);
+      renderPage();
+      const [first, second] = await screen.findAllByRole('button', { name: /^Unban$/i });
+      fireEvent.click(first);
+      const dialog = await screen.findByRole('dialog');
+      await within(dialog).findByLabelText(/^Resume until /);
+      fireEvent.click(within(dialog).getByLabelText('Keep suspended with no end date'));
+      expect(within(dialog).getByLabelText('Keep suspended with no end date')).toBeChecked();
+
+      fireEvent.click(second);
+
+      const reopened = await screen.findByRole('dialog');
+      await waitFor(() => expect(within(reopened).getByLabelText(/^Resume until /)).toBeChecked());
+      expect(within(reopened).getByLabelText('Keep suspended with no end date')).not.toBeChecked();
+    });
+
     it("a successful unban leaves another account's prompt open", async () => {
       api.callRelayRpc.mockImplementation(lists({
         banned: [{ pubkey: PUBKEY }, { pubkey: OTHER }],

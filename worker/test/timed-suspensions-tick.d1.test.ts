@@ -366,6 +366,33 @@ describe('moderator races', () => {
     expect(summary.lifted).toBe(1);
   });
 
+  // An unban whose record moved during its relay unban sets Keycast suspended. A tick that read
+  // the row before that must not go on to lift it: its Keycast activate could land before the
+  // unban's suspend, leaving the account lifted on the relay and suspended in Keycast with
+  // nothing to repair it. The unban bumps the version, so that tick loses its claim.
+  it('a tick that read the row before an unban\'s Keycast suspend loses its claim', async () => {
+    // The dialog showed version 1. A change moved the row to 2 during the relay unban, and
+    // this tick selected it at 2.
+    await seed(PK, { version: 2 });
+    const unbanIo = fakeIo();
+    let unbanState: string | undefined;
+    const io = fakeIo({
+      hasOpenAgeReviewCase: async () => {
+        const res = await applyUnbanChoice(DB, unbanIo, PK, 'resume', { now: NOW, shownVersion: 1 });
+        await Promise.all(res.waitUntil);
+        unbanState = res.state;
+        return false;
+      },
+    });
+
+    await runTimedSuspensionTick(env(), io, NOW);
+
+    expect(unbanState).toBe('changed');
+    expect(unbanIo.keycastSuspend).toHaveBeenCalledTimes(1);
+    expectNoLift(io);
+    expect(await record()).toMatchObject({ status: 'active', claimed_at: null });
+  });
+
   it('the same unban landing after the post-lift CAS (keycast_pending) still gets the one message', async () => {
     await seed(PK);
     const unbanIo = fakeIo({ readSuspension: async () => ({ suspended: false }) });

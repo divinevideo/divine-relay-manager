@@ -754,6 +754,17 @@ describe('UserActions', () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
   });
 
+  // A suspend writes a new timer (or none, for no end date), so a cached answer from before it
+  // must not stand in for the new end. Reset, not invalidate, as below.
+  it('resets the timers after a suspend', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const resetSpy = vi.spyOn(qc, 'resetQueries');
+    renderWithProvider(<UserActions pubkey={PUBKEY} />, qc);
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+    expect(resetSpy).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY });
+  });
+
   // Reset, not invalidate, like every other timer-changing action: if the re-read
   // fails, the old end must not stay on screen as if current.
   it('resets the timers after an unsuspend', async () => {
@@ -1542,6 +1553,7 @@ describe('UserActions timed suspensions', () => {
       ['suspension_ending', 409, 'This suspension is ending now. Check again in a few minutes.'],
       ['conflict', 409, 'Someone changed this suspension at the same time. Try again.'],
       ['status_unavailable', 503, 'Could not check the account\'s status. Try again.'],
+      ['age_review_suspension', 409, 'This suspension is from age review, so it has no end date to change.'],
     ] as const)('a refusal with code %s toasts its own copy and keeps the dialog open', async (code, status, title) => {
       api.changeSuspensionEnd.mockRejectedValue(new ApiError('server words', status, 'x', code));
       renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
