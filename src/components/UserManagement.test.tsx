@@ -649,17 +649,15 @@ describe('UserManagement timed suspensions', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     });
 
-    // The worker's change route takes canonical lowercase hex only, and the relay's list
-    // may spell a pubkey in either case (F14), so the page lowercases before sending.
-    it('sends a lowercase pubkey to Change end date when the list spells it in uppercase', async () => {
-      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY.toUpperCase() }] }));
+    it('shows the timer and its edit on the exact relay row while preserving legacy cleanup', async () => {
+      const endsAt = threeDaysOut();
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY.toUpperCase() }, { pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, endsAt)]);
       renderPage();
       await openSuspendedTab();
-      fireEvent.click(await screen.findByRole('button', { name: 'Change end date' }));
-      const dialog = screen.getByRole('dialog');
-      fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: '2' } });
-      fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
-      await waitFor(() => expect(api.changeSuspensionEnd).toHaveBeenCalledWith(PUBKEY, expect.anything()));
+      expect(await screen.findAllByRole('button', { name: 'Unsuspend' })).toHaveLength(2);
+      expect(await screen.findAllByText(`Suspended until ${formatSuspensionEnd(endsAt)}`)).toHaveLength(1);
+      expect(screen.getAllByRole('button', { name: 'Change end date' })).toHaveLength(1);
     });
 
     // The Change end date dialog states the end it is changing.

@@ -32,6 +32,7 @@ import { useChangeSuspensionEnd } from "@/hooks/useChangeSuspensionEnd";
 import { SuspensionEndLine } from "@/components/SuspensionEndLine";
 import { SuspensionDurationDialog } from "@/components/SuspensionDurationDialog";
 import { UnbanSuspensionDialog } from "@/components/UnbanSuspensionDialog";
+import { canonicalHex64 } from "../../shared/hex-id";
 import type { UnbanSuspensionChoice } from "../../shared/suspension";
 
 interface UserManagementProps {
@@ -616,37 +617,46 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {suspendedUsers.map((user: BannedPubkeyEntry, index: number) => (
-                    <BannedUserCard
-                      key={index}
-                      pubkey={user.pubkey}
-                      reason={user.reason}
-                      suspended
-                      statusLine={<SuspensionEndLine pubkey={user.pubkey} banned={listHas(bannedUsers, user.pubkey)} />}
-                      actionButton={
-                        <>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            className="border-green-500 text-green-600 hover:bg-green-50"
-                            onClick={() => handleRemoveUser(user.pubkey, 'suspend')}
-                          >
-                            <Play className="h-4 w-4 mr-1" />
-                            Unsuspend
-                          </Button>
-                          <Button
-                            variant="outline"
-                            size="sm"
-                            onClick={() => setChangeEndDialog({ pubkey: user.pubkey, open: true })}
-                            disabled={changeEnd.isPending}
-                          >
-                            <CalendarClock className="h-4 w-4 mr-1" />
-                            Change end date
-                          </Button>
-                        </>
-                      }
-                    />
-                  ))}
+                  {suspendedUsers.map((user: BannedPubkeyEntry, index: number) => {
+                    // The relay keeps legacy rows by their exact spelling. Those rows can
+                    // still be removed using Unsuspend. Only the canonical row has a timer.
+                    const canHaveTimer = canonicalHex64(user.pubkey) === user.pubkey;
+                    return (
+                      <BannedUserCard
+                        key={index}
+                        pubkey={user.pubkey}
+                        reason={user.reason}
+                        suspended
+                        statusLine={canHaveTimer && (
+                          <SuspensionEndLine pubkey={user.pubkey} banned={listHas(bannedUsers, user.pubkey)} />
+                        )}
+                        actionButton={
+                          <>
+                            <Button
+                              variant="outline"
+                              size="sm"
+                              className="border-green-500 text-green-600 hover:bg-green-50"
+                              onClick={() => handleRemoveUser(user.pubkey, 'suspend')}
+                            >
+                              <Play className="h-4 w-4 mr-1" />
+                              Unsuspend
+                            </Button>
+                            {canHaveTimer && (
+                              <Button
+                                variant="outline"
+                                size="sm"
+                                onClick={() => setChangeEndDialog({ pubkey: user.pubkey, open: true })}
+                                disabled={changeEnd.isPending}
+                              >
+                                <CalendarClock className="h-4 w-4 mr-1" />
+                                Change end date
+                              </Button>
+                            )}
+                          </>
+                        }
+                      />
+                    );
+                  })}
                 </div>
               )}
             </CardContent>
