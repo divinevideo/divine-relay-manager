@@ -1067,6 +1067,14 @@ export async function handleCreateMinorAccount(
     return json({ success: false, code: 'provisioning_result_conflict', error: 'Provisioning replay returned a conflicting result' }, 409, corsHeaders);
   }
   if (existingOperation?.state !== 'complete') {
+    // A failed write acknowledgment or re-read does not establish the current
+    // operation state. Retry with the same ID so the ownership checks use a
+    // fresh read. Do not return the link or pubkey on either error.
+    const failedToRecord = (step: string, err: unknown): Response => {
+      console.error(`[age-review] ${step} for a minor-account operation; no link returned`, err);
+      return json({ success: false, error: 'Could not persist provisioning result. Retry with the same operation ID.',
+        provisioning_operation_id: provisioningOperationId }, 500, corsHeaders);
+    };
     const observedAt = new Date().toISOString();
     // A request that saw Keycast create the account (201) is authoritative
     // for this operation id: if a concurrent attempt closed it before this
@@ -1076,16 +1084,26 @@ export async function handleCreateMinorAccount(
     // Only a 201 request can meet a failed row here (others without a record
     // are refused above, and a close never takes a recorded row), so the
     // created gate is defense in depth. PR #430.
-    const observed = await env.DB.prepare(`UPDATE protected_minor_provisioning_operations
-      SET result_pubkey = ?, state = 'pending', updated_at = ?
-      WHERE provisioning_operation_id = ? AND kind = 'onboarding'
-        AND (state = 'pending' OR (? = 1 AND state = 'failed'))
-        AND (result_pubkey IS NULL OR result_pubkey = ?)`)
-      .bind(result.pubkey, observedAt, provisioningOperationId, result.created === true ? 1 : 0, result.pubkey).run();
+    let observed: D1Result;
+    try {
+      observed = await env.DB.prepare(`UPDATE protected_minor_provisioning_operations
+        SET result_pubkey = ?, state = 'pending', updated_at = ?
+        WHERE provisioning_operation_id = ? AND kind = 'onboarding'
+          AND (state = 'pending' OR (? = 1 AND state = 'failed'))
+          AND (result_pubkey IS NULL OR result_pubkey = ?)`)
+        .bind(result.pubkey, observedAt, provisioningOperationId, result.created === true ? 1 : 0, result.pubkey).run();
+    } catch (err) {
+      return failedToRecord('Could not record Keycast\'s answer', err);
+    }
     if (observed.meta.changes !== 1) {
-      const current = await env.DB.prepare(`SELECT kind, request_fingerprint, state, subject_id, result_pubkey
-        FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
-        .first<{ kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null }>();
+      let current: { kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null } | null;
+      try {
+        current = await env.DB.prepare(`SELECT kind, request_fingerprint, state, subject_id, result_pubkey
+          FROM protected_minor_provisioning_operations WHERE provisioning_operation_id = ?`).bind(provisioningOperationId)
+          .first<{ kind: string; request_fingerprint: string; state: string; subject_id: string | null; result_pubkey: string | null }>();
+      } catch (err) {
+        return failedToRecord('Could not re-read an operation after recording Keycast\'s answer changed nothing', err);
+      }
       // Closed under this request (it could not be reopened): its refusal is
       // the answer, rather than a registry write that could land nothing.
       if (current?.state === 'failed') {
@@ -1205,11 +1223,12 @@ export async function handleCreateMinorAccount(
     completed = written[written.length - 1].meta.changes === 1;
   } catch (err) {
     console.error('[age-review] D1 audit record failed for minor account', err);
+    // No case_id: nothing was saved under it, and the retry that records the
+    // account creates a different case (issue #436).
     return json({
       success: false,
       error: `Account created in Keycast but registry persistence failed. Retry with provisioning operation ${provisioningOperationId}.`,
       pubkey: result.pubkey,
-      case_id: caseId,
       provisioning_operation_id: provisioningOperationId,
     }, 500, corsHeaders);
   }
