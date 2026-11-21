@@ -69,15 +69,23 @@ export async function replaceSuspensionRecord(
 
 // True when a live record was ended. Terminal rows (and absent ones) are left alone. With
 // `ifVersion`, only that version is ended, so a change landing since the caller read it wins.
+// 'already_lifted' (an unban that found the account unsuspended) also leaves a lift in progress
+// ('lifting', 'keycast_pending') to the tick: the lift that unban saw may be the tick's own, and
+// ending the record would make the tick skip the restored message (and, for 'lifting', its
+// auto_unsuspend_user row). 'cancelled_unsuspend' ends it: those callers send their own
+// restored message when one is due, or alert when they cannot tell.
 export async function endSuspensionRecord(
   db: D1Database,
   pubkey: string,
   status: 'cancelled_unsuspend' | 'already_lifted',
   ifVersion?: number,
 ): Promise<boolean> {
+  const live = status === 'already_lifted'
+    ? `'active','cancelled_ban'`
+    : `'active','lifting','keycast_pending','cancelled_ban'`;
   const res = await db.prepare(`
     UPDATE timed_suspensions SET status = ?, changed_by = NULL, changed_at = ?, version = version + 1
-    WHERE pubkey = ? AND status IN ('active','lifting','keycast_pending','cancelled_ban')
+    WHERE pubkey = ? AND status IN (${live})
       AND (? IS NULL OR version = ?)
   `).bind(status, new Date().toISOString(), pubkey, ifVersion ?? null, ifVersion ?? null).run();
   return res.meta.changes > 0;
@@ -376,6 +384,7 @@ export async function applyUnbanChoice(
     waitUntil.push(keycastLeg('unban', pubkey, () => io.keycastActivate(pubkey, a.moderator)));
     if (db) {
       try {
+        // A lift in progress is left to the tick to finish; this branch sends no message of its own.
         await endSuspensionRecord(db, pubkey, 'already_lifted');
       } catch (error) {
         console.error(`[applyUnbanChoice] closing the record failed for ${pubkey}:`, error);

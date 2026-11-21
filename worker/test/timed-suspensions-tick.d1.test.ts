@@ -4,7 +4,8 @@ import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import {
-  endSuspensionRecord, replaceSuspensionRecord, runTimedSuspensionTick, TICK_BATCH, type SuspensionIo, type SuspensionRecord,
+  applyUnbanChoice, endSuspensionRecord, replaceSuspensionRecord, runTimedSuspensionTick, TICK_BATCH,
+  type SuspensionIo, type SuspensionRecord,
 } from '../src/timed-suspensions';
 
 const PK = 'e5'.repeat(32);
@@ -338,6 +339,55 @@ describe('moderator races', () => {
     expect(io.keycastActivate).not.toHaveBeenCalled();
     expect((await record())!.status).toBe('cancelled_unsuspend');
     expect(await decisions()).toEqual([]);
+  });
+
+  it('an unban that sees the lift land during the relay call leaves it to the tick: one message, one row', async () => {
+    await seed(PK);
+    // The unban reads the relay after the tick's unsuspend landed, so it finds the account
+    // unsuspended and sends no message of its own.
+    const unbanIo = fakeIo({ readSuspension: async () => ({ suspended: false }) });
+    const io = fakeIo({
+      relayUnsuspend: async () => {
+        await applyUnbanChoice(DB, unbanIo, PK, undefined, { now: NOW });
+        return { success: true };
+      },
+    });
+
+    const summary = await runTimedSuspensionTick(env(), io, NOW);
+
+    expect(unbanIo.notify).not.toHaveBeenCalled();
+    expect(io.notify).toHaveBeenCalledTimes(1);
+    expect(io.notify.mock.calls[0].slice(0, 2)).toEqual([PK, 'ACCOUNT_RESTORED']);
+    expect(io.keycastActivate).toHaveBeenCalledTimes(1);
+    expect((await record())!.status).toBe('lifted');
+    expect(await decisions()).toEqual([
+      { action: 'auto_unsuspend_user', reason: 'Timed suspension ended', moderator_pubkey: null },
+    ]);
+    expect(summary.lifted).toBe(1);
+  });
+
+  it('the same unban landing after the post-lift CAS (keycast_pending) still gets the one message', async () => {
+    await seed(PK);
+    const unbanIo = fakeIo({ readSuspension: async () => ({ suspended: false }) });
+    const io = fakeIo({
+      // The first call is the pre-lift hold check; the second is clearToRestore's re-check,
+      // after the record went keycast_pending and before its record re-read.
+      hasOpenAgeReviewCase: inTurn<boolean>(false, async () => {
+        await applyUnbanChoice(DB, unbanIo, PK, undefined, { now: NOW });
+        return false;
+      }),
+    });
+
+    await runTimedSuspensionTick(env(), io, NOW);
+
+    expect(io.hasOpenAgeReviewCase).toHaveBeenCalledTimes(2);
+    expect(unbanIo.notify).not.toHaveBeenCalled();
+    expect(io.notify).toHaveBeenCalledTimes(1);
+    expect(io.notify.mock.calls[0].slice(0, 2)).toEqual([PK, 'ACCOUNT_RESTORED']);
+    expect((await record())!.status).toBe('lifted');
+    expect(await decisions()).toEqual([
+      { action: 'auto_unsuspend_user', reason: 'Timed suspension ended', moderator_pubkey: null },
+    ]);
   });
 });
 

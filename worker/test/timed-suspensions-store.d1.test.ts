@@ -141,6 +141,21 @@ describe('endSuspensionRecord', () => {
   it('returns false for an absent row', async () => {
     expect(await endSuspensionRecord(DB, PK, 'cancelled_unsuspend')).toBe(false);
   });
+
+  it.each(['active', 'cancelled_ban'])('already_lifted ends a %s row', async (status) => {
+    await force(PK, status);
+    expect(await endSuspensionRecord(DB, PK, 'already_lifted')).toBe(true);
+    expect((await getSuspensionRecord(DB, PK))!.status).toBe('already_lifted');
+  });
+
+  // The unban that finds the account unsuspended may be seeing the tick's own lift.
+  it.each(['lifting', 'keycast_pending'])('already_lifted leaves a %s row to the tick', async (status) => {
+    await force(PK, status);
+    expect(await endSuspensionRecord(DB, PK, 'already_lifted')).toBe(false);
+    const r = (await getSuspensionRecord(DB, PK))!;
+    expect(r.status).toBe(status);
+    expect(r.version).toBe(3);
+  });
 });
 
 describe('changeSuspensionEnd', () => {
