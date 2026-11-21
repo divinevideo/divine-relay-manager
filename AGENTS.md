@@ -275,6 +275,15 @@ When a moderation action completes, `handleModerate()` triggers side effects:
 - Health check: cron trigger every 5 minutes, internal heartbeat every 30 seconds
 - Known limitation: same-second concurrent reports can bypass dedup (idempotent, no user impact)
 
+### Timed suspensions
+
+Store, routes and scheduler tick live in `worker/src/timed-suspensions.ts`; the record is the `timed_suspensions` table.
+
+- The relay suspend is critical. Writing the `timed_suspensions` record after it is best-effort, but a failed write is reported, not hidden: the response carries `recorded: false`, the moderator is told the end date was not saved, and the decision row says "(end date not saved)". When the write fails and the pre-check could not read the record either, Slack also gets an alert.
+- The scheduler lifts an ended suspension through `restoreAfterLift()`, the same restored message and Keycast activate a manual unsuspend uses. It fails closed: an unreadable ban or suspension list, or an unknown Keycast status, means no lift this tick.
+- Unban applies the moderator's `suspensionChoice` (`resume`, `end_now`, `open_ended`) to any suspension. A caller that sends none, such as moderation-service `allow_pubkey` or Coop, gets `resume`: the suspension and its timer carry on.
+- `auto_unsuspend_user` and `cancel_suspension_timer` are the timer's own decision rows. `isAutomatedDecision()` treats them as automated whatever the moderator field holds, so they never count as human handling.
+
 ## Frontend Data Flow
 
 The frontend connects directly to the relay via WebSocket for reading events. It calls the worker API for moderation actions.
