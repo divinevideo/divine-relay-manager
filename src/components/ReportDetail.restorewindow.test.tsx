@@ -68,6 +68,7 @@ vi.mock('@/hooks/useReportContext', () => ({
       // disabled) or while the read is out, a null event for a post it did not find.
       thread: !postId || shown.loading ? undefined : { event: shown.post ?? null, ancestors: [], replies: [] },
       threadLoading: !!postId && shown.loading,
+      threadFetching: !!postId && shown.loading,
       reportedUser: { profile: undefined, pubkey, isFunnelcakeUser: false },
       userStats: undefined,
       isLoading: false,

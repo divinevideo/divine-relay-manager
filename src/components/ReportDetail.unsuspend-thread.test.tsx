@@ -25,12 +25,12 @@ const API_URL = 'https://api.a.example';
 
 // What the relay returns for the post right now. The thread read below asks it
 // only when its query runs, so a cached answer outlives a change here.
-// `firstRead`, when set, holds the next read open until it settles, and that
+// `nextRead`, when set, holds the next read open until it settles, and that
 // read answers with what it settles to. `bannedLookup`, when set, holds the
 // banned-event fallback open the same way.
 const relay = vi.hoisted(() => ({
   post: undefined as NostrEvent | undefined,
-  firstRead: undefined as Promise<NostrEvent | undefined> | undefined,
+  nextRead: undefined as Promise<NostrEvent | undefined> | undefined,
   bannedLookup: undefined as Promise<void> | undefined,
   finishAction: undefined as Promise<void> | undefined,
   reads: 0,
@@ -92,8 +92,8 @@ vi.mock('@/hooks/useThread', () => ({
     queryKey: ['thread', eventId, depth, apiUrl, relayHint],
     queryFn: async () => {
       relay.reads += 1;
-      const held = relay.firstRead;
-      relay.firstRead = undefined;
+      const held = relay.nextRead;
+      relay.nextRead = undefined;
       const post = held ? await held : relay.post?.id === eventId ? relay.post : undefined;
       return { event: post ?? null, ancestors: [], replies: [], repostedEvent: null, isRepost: false, fetchSource: null };
     },
@@ -104,7 +104,7 @@ vi.mock('@/hooks/useThread', () => ({
 // The account actions, reduced to what each tells the pane when it succeeds,
 // as UserActions does: an Unsuspend opens the restore window first.
 vi.mock('@/components/UserActions', () => ({
-  UserActions: ({ pubkey, reportTarget, onActionComplete }: ComponentProps<typeof UserActions>) => {
+  UserActions: ({ pubkey, reportTarget, statusPending, onActionComplete }: ComponentProps<typeof UserActions>) => {
     const queryClient = useQueryClient();
     const action = useMutation({
       mutationFn: async ({ pubkey: target }: { pubkey: string; reportTarget: typeof reportTarget }) => {
@@ -114,7 +114,7 @@ vi.mock('@/components/UserActions', () => ({
       onSuccess: (_, target) => onActionComplete?.({ ...target, accountStatusChanged: true, action: 'unsuspend' }),
     });
     return (
-      <button data-pubkey={pubkey} onClick={() => action.mutate({ pubkey, reportTarget })}>
+      <button data-pubkey={pubkey} data-status-pending={statusPending} onClick={() => action.mutate({ pubkey, reportTarget })}>
         Unsuspend
       </button>
     );
@@ -149,7 +149,7 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
   beforeEach(() => {
     vi.clearAllMocks();
     relay.post = undefined;
-    relay.firstRead = undefined;
+    relay.nextRead = undefined;
     relay.bannedLookup = undefined;
     relay.finishAction = undefined;
     relay.reads = 0;
@@ -202,7 +202,7 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
   // read started before the action, so its answer must not land as the re-read.
   it('replaces a first read still out when the action finishes', async () => {
     let answerFirstRead!: (post: NostrEvent | undefined) => void;
-    relay.firstRead = new Promise(resolve => { answerFirstRead = resolve; });
+    relay.nextRead = new Promise(resolve => { answerFirstRead = resolve; });
     api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     render(
@@ -261,6 +261,39 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
 
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 100)); });
     expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not repeat a live check that answers while the thread is refreshing a cached post', async () => {
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={REPORT} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+
+    let answerRead!: (post: NostrEvent | undefined) => void;
+    relay.nextRead = new Promise(resolve => { answerRead = resolve; });
+    let answerCheck!: (gone: boolean) => void;
+    api.verifyEventDeleted.mockImplementation(() => new Promise(resolve => { answerCheck = resolve; }));
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    const unsuspend = screen.getByRole('button', { name: 'Unsuspend' });
+    fireEvent.click(unsuspend);
+
+    await waitFor(() => expect(relay.reads).toBe(2));
+    await waitFor(() => expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1));
+    expect(unsuspend).toHaveAttribute('data-status-pending', 'true');
+    expect(screen.getByText('the reported post')).toBeInTheDocument();
+
+    await act(async () => { answerCheck(false); });
+    await waitFor(() => expect(unsuspend).toHaveAttribute('data-status-pending', 'false'));
+    await act(async () => { answerRead(undefined); });
+
+    await waitFor(() => expect(screen.queryByText('the reported post')).not.toBeInTheDocument());
+    expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Event is still on the relay/)).toBeInTheDocument();
   });
 
   it('refreshes the original post if the moderator switches to a different account during an Unsuspend', async () => {
