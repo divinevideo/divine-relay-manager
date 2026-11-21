@@ -725,8 +725,14 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       </Tabs>
 
       <UnbanSuspensionDialog
+        key={unbanDialog?.opening}
         open={!!unbanDialog?.open}
-        onOpenChange={(open) => { if (!open) setUnbanDialog((d) => d && { ...d, open: false }); }}
+        onOpenChange={(open) => {
+          if (!open) {
+            // The request can finish after the moderator has opened another prompt.
+            setUnbanDialog((d) => d && d.opening === unbanDialog?.opening ? { ...d, open: false } : d);
+          }
+        }}
         // A failed refresh over an older copy is unknown here: that copy may
         // predate a suspend, and its "no timer" would default to no end date.
         record={unbanTimer.refreshFailed ? undefined : unbanTimer.record}

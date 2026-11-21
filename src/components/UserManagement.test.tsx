@@ -1043,6 +1043,32 @@ describe('UserManagement timed suspensions', () => {
       expect(api.unbanPubkey).toHaveBeenCalledTimes(1);
     });
 
+    it("a successful unban leaves another account's prompt open", async () => {
+      api.callRelayRpc.mockImplementation(lists({
+        banned: [{ pubkey: PUBKEY }, { pubkey: OTHER }],
+        suspended: [{ pubkey: PUBKEY }, { pubkey: OTHER }],
+      }));
+      let finish!: () => void;
+      api.unbanPubkey.mockReturnValueOnce(new Promise(resolve => {
+        finish = () => resolve({ suspension: { state: 'resumed', endsAt: null } });
+      }));
+      renderPage();
+      const [first, second] = await screen.findAllByRole('button', { name: 'Unban' });
+      fireEvent.click(first);
+      const firstPrompt = await screen.findByRole('dialog');
+      await waitFor(() => expect(within(firstPrompt).getByRole('button', { name: 'Unban' })).toBeEnabled());
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+      fireEvent.click(within(firstPrompt).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      fireEvent.click(second);
+      const secondPrompt = await screen.findByRole('dialog');
+
+      await act(async () => { finish(); });
+      await waitFor(() => expect(within(secondPrompt).getByRole('button', { name: 'Unban' })).toBeEnabled());
+      expect(screen.getByRole('dialog')).toBe(secondPrompt);
+    });
+
     it('blocks confirm while the timers are first loading', async () => {
       api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
       api.listTimedSuspensions.mockReturnValue(new Promise(() => {}));
