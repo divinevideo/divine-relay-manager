@@ -2,7 +2,7 @@
 // The shared hook's own tests pin the predicate; these pin that each mutation
 // actually calls it, which is the failure mode that shipped once.
 
-import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import type { UserActionChange } from '@/components/UserActions';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -12,6 +12,8 @@ import { UserManagement } from './UserManagement';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
+import { TIMED_SUSPENSIONS_KEY } from '@/hooks/useTimedSuspensions';
+import { formatSuspensionEnd } from '../../shared/suspension';
 
 const api = vi.hoisted(() => ({
   callRelayRpc: vi.fn(),
@@ -21,6 +23,9 @@ const api = vi.hoisted(() => ({
   unbanPubkey: vi.fn(),
   unsuspendPubkey: vi.fn(),
   logDecision: vi.fn(),
+  // Timed suspensions (F4): the Suspended tab's end lines and Change end date.
+  listTimedSuspensions: vi.fn(),
+  changeSuspensionEnd: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
@@ -30,7 +35,8 @@ vi.mock('react-router-dom', async (orig) => ({
   useNavigate: () => navigate,
 }));
 const moderatorApi = withAsModerator(api);
-vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
+// useApiUrl: the timed-suspensions read keys its cache by environment.
+vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi, useApiUrl: () => 'https://api.test' }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast }) }));
 const MOD_PUBKEY = 'e'.repeat(64);
 const MOD_TOKEN = 'moderator-login-token';
@@ -50,11 +56,15 @@ vi.mock('@/components/UserActions', () => ({
     return null;
   },
 }));
-// Render the action affordances it is handed, so the remove/unsuspend wiring
-// is reachable; everything else about the card is irrelevant here.
+// Render the action affordances and the status line it is handed, so the
+// remove/unsuspend wiring and the end line are reachable (F4); everything else
+// about the card is irrelevant here.
 vi.mock('@/components/BannedUserCard', () => ({
-  BannedUserCard: ({ actionButton, onUnban, suspended }: { actionButton?: React.ReactNode; onUnban?: () => void; suspended?: boolean }) => (
+  BannedUserCard: ({ actionButton, onUnban, suspended, statusLine }: {
+    actionButton?: React.ReactNode; onUnban?: () => void; suspended?: boolean; statusLine?: React.ReactNode;
+  }) => (
     <div>
+      {statusLine}
       {actionButton}
       {onUnban ? <button onClick={onUnban}>Unban</button> : null}
       <span>{suspended ? 'card says suspended' : 'card says not suspended'}</span>
@@ -87,6 +97,9 @@ describe('UserManagement age-review guard wiring', () => {
     // The post-ban background check chains .then on this; an unset mock would
     // throw inside onSuccess, which TanStack routes to onError.
     api.verifyPubkeyBanned.mockResolvedValue(true);
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'none' } });
+    api.listTimedSuspensions.mockResolvedValue([]);
   });
 
   it('routes an allow_user refusal to the case rather than a dead-end toast', async () => {
@@ -284,8 +297,11 @@ describe('UserManagement drops cached authored-content reads after an account ac
     api.banPubkey.mockResolvedValue({ unconfirmed: null });
     api.logDecision.mockResolvedValue(undefined);
     api.verifyPubkeyBanned.mockResolvedValue(true);
-    api.unbanPubkey.mockResolvedValue(undefined);
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+    // An unban answers with what became of a timed suspension (B8).
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'none' } });
     api.unsuspendPubkey.mockResolvedValue(undefined);
+    api.listTimedSuspensions.mockResolvedValue([]);
   });
 
   it('after an unsuspend', async () => {
@@ -537,5 +553,371 @@ describe('UserManagement drops cached authored-content reads after an account ac
     await act(async () => { onActionComplete({ accountStatusChanged: false }); });
 
     expect(client.getQueryData(STATS_KEY)).toEqual({ postCount: 0 });
+  });
+});
+
+// Timed suspensions on the User Management page: the Banned tab's unban asks
+// what happens to a suspension, and Suspended-tab cards show its end and offer
+// Change end date.
+describe('UserManagement timed suspensions', () => {
+  const OTHER = 'b'.repeat(64);
+  // A minute-aligned end three days from now. A real-clock literal would turn
+  // into "End time passed" once that date went by (F2).
+  const threeDaysOut = () => new Date(Math.ceil((Date.now() + 3 * 86_400_000) / 60_000) * 60_000).toISOString();
+  const timer = (pubkey: string, endsAt: string | null, status: 'active' | 'cancelled_ban' = 'active') => ({
+    pubkey, endsAt, status, setBy: null, setAt: '2026-11-20T00:00:00.000Z', changedAt: null,
+  });
+  // The timers read sets its own retry (1); keep its delay out of the tests.
+  const client = () => new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 }, mutations: { retry: false } } });
+  const lists = (l: { banned?: unknown[] | (() => Promise<unknown>); suspended?: unknown[] | (() => Promise<unknown>) }) =>
+    (method: string) => {
+      const pick = method === 'listbannedpubkeys' ? l.banned : method === 'listsuspendedpubkeys' ? l.suspended : undefined;
+      if (typeof pick === 'function') return pick();
+      return Promise.resolve(pick ?? []);
+    };
+  const never = () => new Promise(() => {});
+  const openSuspendedTab = async () => fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+  const confirmUnban = () => fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Unban' }));
+
+  function renderPage(qc = client()) {
+    return render(
+      <QueryClientProvider client={qc}>
+        <TooltipProvider><UserManagement /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.callRelayRpc.mockResolvedValue([]);
+    api.logDecision.mockResolvedValue(undefined);
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'none' } });
+    api.unsuspendPubkey.mockResolvedValue(undefined);
+    api.listTimedSuspensions.mockResolvedValue([]);
+    api.changeSuspensionEnd.mockResolvedValue({ endsAt: threeDaysOut(), decisionRecorded: true });
+  });
+
+  describe('Suspended tab cards', () => {
+    it('show when the suspension ends', async () => {
+      const endsAt = threeDaysOut();
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, endsAt)]);
+      renderPage();
+      await openSuspendedTab();
+      expect(await screen.findByText(`Suspended until ${formatSuspensionEnd(endsAt)}`)).toBeInTheDocument();
+    });
+
+    it('say a card also in the banned list will not lift while the ban stands', async () => {
+      const endsAt = threeDaysOut();
+      // Uppercase in the banned list: the comparison is case-insensitive (F14).
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY.toUpperCase() }], suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, endsAt, 'cancelled_ban')]);
+      renderPage();
+      await openSuspendedTab();
+      expect(await screen.findByText('Banned. The timed suspension will not lift while the ban stands')).toBeInTheDocument();
+      expect(screen.queryByText(`Suspended until ${formatSuspensionEnd(endsAt)}`)).not.toBeInTheDocument();
+    });
+
+    it('offer Unsuspend and Change end date, which sends the new length', async () => {
+      const endsAt = threeDaysOut();
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, endsAt)]);
+      api.changeSuspensionEnd.mockResolvedValue({ endsAt, decisionRecorded: true });
+      renderPage();
+      await openSuspendedTab();
+      expect(await screen.findByRole('button', { name: /^Unsuspend$/i })).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
+      const dialog = screen.getByRole('dialog');
+      fireEvent.change(within(dialog).getByRole('combobox', { name: 'Unit' }), { target: { value: 'hours' } });
+      fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: '12' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
+      await waitFor(() => expect(api.changeSuspensionEnd).toHaveBeenCalledWith(PUBKEY, { value: 12, unit: 'hours' }));
+      expect(tokensFor(moderatorApi, 'changeSuspensionEnd')).toEqual([MOD_TOKEN]);
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: `End date changed to ${formatSuspensionEnd(endsAt)}` }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+    });
+
+    // The Change end date dialog states the end it is changing.
+    it('the Change end date dialog names the current end', async () => {
+      const endsAt = threeDaysOut();
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, endsAt)]);
+      renderPage();
+      await openSuspendedTab();
+      await screen.findByText(`Suspended until ${formatSuspensionEnd(endsAt)}`);
+      fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
+      expect(within(screen.getByRole('dialog')).getByText(`Currently: ${formatSuspensionEnd(endsAt)}`)).toBeInTheDocument();
+    });
+
+    // UserActions has its host re-read after these refusals; on this tab the
+    // page is the host, so it re-reads the lists itself.
+    it.each(['not_suspended', 'account_banned'] as const)('re-reads the account lists after a %s refusal', async (code) => {
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY }] }));
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('refused', 409, 'Conflict', code));
+      const qc = client();
+      const invalidate = vi.spyOn(qc, 'invalidateQueries');
+      renderPage(qc);
+      await openSuspendedTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Change end date' }));
+      const dialog = screen.getByRole('dialog');
+      fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: '2' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['suspended-users'] }));
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-users'] });
+    });
+
+    it('does not re-read the account lists after another refusal', async () => {
+      api.callRelayRpc.mockImplementation(lists({ suspended: [{ pubkey: PUBKEY }] }));
+      api.changeSuspensionEnd.mockRejectedValue(new ApiError('refused', 409, 'Conflict', 'conflict'));
+      const qc = client();
+      const invalidate = vi.spyOn(qc, 'invalidateQueries');
+      renderPage(qc);
+      await openSuspendedTab();
+      fireEvent.click(await screen.findByRole('button', { name: 'Change end date' }));
+      const dialog = screen.getByRole('dialog');
+      fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: '2' } });
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Change end date' }));
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' })));
+      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['suspended-users'] });
+    });
+  });
+
+  // F6 for the selected user's card: an unanswered suspended list is not a
+  // confirmed "not suspended", so UserActions gets the unknown and its unban asks.
+  describe('selected user status', () => {
+    const lastProps = () => userActionsProps.last as Record<string, unknown>;
+
+    it.each([
+      ['still loading', never, true],
+      ['failed', () => Promise.reject(new Error('relay down')), false],
+    ] as const)('passes the suspension as unknown while the suspended list is %s', async (_name, suspended, pending) => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended }));
+      renderWithProvider(client());
+      await waitFor(() => expect(lastProps()?.isBanned).toBe(true));
+      if (!pending) await waitFor(() => expect(lastProps().statusPending).toBe(false));
+      expect(lastProps().isSuspended).toBeNull();
+      // Loading says "checking"; a failure says it could not be confirmed.
+      expect(lastProps().statusPending).toBe(pending);
+    });
+
+    // A failed refresh keeps the older copy, which may predate a suspend.
+    it('passes the suspension as unknown when a refresh failed over an older copy', async () => {
+      let suspendedReads = 0;
+      api.callRelayRpc.mockImplementation((method: string) => {
+        if (method === 'listsuspendedpubkeys') {
+          suspendedReads += 1;
+          return suspendedReads === 1 ? Promise.resolve([]) : Promise.reject(new Error('relay down'));
+        }
+        return Promise.resolve([]);
+      });
+      const qc = client();
+      renderWithProvider(qc);
+      await waitFor(() => expect(lastProps()?.isSuspended).toBe(false));
+      await act(async () => { await qc.refetchQueries({ queryKey: ['suspended-users'] }); });
+      await waitFor(() => expect(lastProps().isSuspended).toBeNull());
+    });
+
+    it.each([
+      ['listed', [{ pubkey: PUBKEY.toUpperCase() }], true],
+      ['not listed', [{ pubkey: OTHER }], false],
+    ] as const)('passes the answered suspension when the account is %s', async (_name, suspended, expected) => {
+      api.callRelayRpc.mockImplementation(lists({ suspended: [...suspended] }));
+      renderWithProvider(client());
+      await waitFor(() => expect(lastProps()?.isSuspended).toBe(expected));
+      expect(lastProps().statusPending).toBe(false);
+    });
+  });
+
+  describe('Banned tab unban', () => {
+    it('of a suspended account opens the prompt, and Keep suspended with no end date sends open_ended', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.listTimedSuspensions.mockResolvedValue([timer(PUBKEY, threeDaysOut(), 'cancelled_ban')]);
+      api.unbanPubkey.mockResolvedValue({ suspension: { state: 'open_ended', endsAt: null, decisionRecorded: true } });
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      const dialog = await screen.findByRole('dialog');
+      expect(api.unbanPubkey).not.toHaveBeenCalled();
+      await within(dialog).findByLabelText(/^Resume until /);
+      fireEvent.click(within(dialog).getByLabelText('Keep suspended with no end date'));
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended'));
+      expect(tokensFor(moderatorApi, 'unbanPubkey')).toEqual([MOD_TOKEN]);
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unbanned. Still suspended, no end date' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      // The browser's unban_user row stays.
+      expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'unban_user', targetId: PUBKEY }));
+    });
+
+    // The prompt can then name the end as it opens, rather than start unknown.
+    it('reads the timers ahead only while a banned account may be suspended', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      renderPage();
+      await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalled());
+    });
+
+    it('does not read the timers ahead when no banned account is suspended', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [] }));
+      renderPage();
+      await screen.findByRole('button', { name: /^Unban$/i });
+      await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('listsuspendedpubkeys'));
+      await act(async () => {});
+      expect(api.listTimedSuspensions).not.toHaveBeenCalled();
+    });
+
+    it('matches the suspended list case-insensitively (F14)', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY.toUpperCase() }] }));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+    });
+
+    it('of an account the suspended list answered without unbans with no prompt and no choice', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: OTHER }] }));
+      renderPage();
+      // The other account's card on the Suspended tab proves the list answered.
+      await openSuspendedTab();
+      await screen.findByRole('button', { name: /^Unsuspend$/i });
+      fireEvent.mouseDown(screen.getByRole('tab', { name: /Banned Users/i }));
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY));
+      expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({ title: 'User unbanned' }));
+    });
+
+    // F6: while the suspended list is loading, or after it failed, nobody knows
+    // whether the account is suspended, so the unban asks.
+    it.each([
+      ['still loading', never],
+      ['failed', () => Promise.reject(new Error('relay down'))],
+    ] as const)('asks while the suspended list is %s', async (_name, suspended) => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended }));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+      expect(api.unbanPubkey).not.toHaveBeenCalled();
+      // Nobody knows whether it is suspended, so the prompt does not say it is.
+      expect(screen.getByText('This account may also be suspended; its suspension status is not confirmed. Choose what happens to any suspension when the ban is lifted.')).toBeInTheDocument();
+      expect(screen.queryByText('This account is also suspended. Choose what happens to the suspension when the ban is lifted.')).not.toBeInTheDocument();
+    });
+
+    // An older copy that lists the account is not a confirmation once its
+    // refresh failed: the account may have been unsuspended since.
+    it('does not call a suspension confirmed from an older copy whose refresh failed', async () => {
+      let suspendedReads = 0;
+      api.callRelayRpc.mockImplementation((method: string) => {
+        if (method === 'listbannedpubkeys') return Promise.resolve([{ pubkey: PUBKEY }]);
+        if (method === 'listsuspendedpubkeys') {
+          suspendedReads += 1;
+          return suspendedReads === 1 ? Promise.resolve([{ pubkey: PUBKEY }]) : Promise.reject(new Error('relay down'));
+        }
+        return Promise.resolve([]);
+      });
+      const qc = client();
+      renderPage(qc);
+      await screen.findByRole('button', { name: /^Unban$/i });
+      await waitFor(() => expect(suspendedReads).toBe(1));
+      await act(async () => { await qc.refetchQueries({ queryKey: ['suspended-users'] }); });
+      await waitFor(() => expect(qc.getQueryState(['suspended-users'])?.status).toBe('error'));
+      fireEvent.click(screen.getByRole('button', { name: /^Unban$/i }));
+      expect(await screen.findByText('This account may also be suspended; its suspension status is not confirmed. Choose what happens to any suspension when the ban is lifted.')).toBeInTheDocument();
+    });
+
+    it('says a listed account is suspended', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      expect(await screen.findByText('This account is also suspended. Choose what happens to the suspension when the ban is lifted.')).toBeInTheDocument();
+      expect(screen.queryByText('This account may also be suspended; its suspension status is not confirmed. Choose what happens to any suspension when the ban is lifted.')).not.toBeInTheDocument();
+    });
+
+    // A failed refresh keeps the older copy on screen, which may predate a
+    // suspend: that copy is not an answer, so the unban still asks.
+    it('asks when a refresh of the suspended list failed over an older copy', async () => {
+      let suspendedReads = 0;
+      api.callRelayRpc.mockImplementation((method: string) => {
+        if (method === 'listbannedpubkeys') return Promise.resolve([{ pubkey: PUBKEY }]);
+        if (method === 'listsuspendedpubkeys') {
+          suspendedReads += 1;
+          return suspendedReads === 1 ? Promise.resolve([]) : Promise.reject(new Error('relay down'));
+        }
+        return Promise.resolve([]);
+      });
+      const qc = client();
+      renderPage(qc);
+      await screen.findByRole('button', { name: /^Unban$/i });
+      await waitFor(() => expect(suspendedReads).toBe(1));
+      await act(async () => { await qc.refetchQueries({ queryKey: ['suspended-users'] }); });
+      await waitFor(() => expect(qc.getQueryState(['suspended-users'])?.status).toBe('error'));
+      expect(qc.getQueryData(['suspended-users'])).toEqual([]);
+      fireEvent.click(screen.getByRole('button', { name: /^Unban$/i }));
+      expect(await screen.findByRole('dialog')).toBeInTheDocument();
+      expect(api.unbanPubkey).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      [{ suspension: { state: 'end_failed' } }, {
+        title: 'User unbanned, but the suspension could not be lifted',
+        description: 'It is still suspended. Try Unsuspend.', variant: 'destructive',
+      }],
+      [{ suspension: { state: 'unknown' } }, {
+        title: 'User unbanned, but the suspension status could not be checked',
+        description: 'Check the account before acting again.',
+      }],
+      [{ suspension: { state: 'none' }, choiceSkipped: 'non_canonical_pubkey' }, {
+        title: 'User unbanned, but the suspension choice was not applied',
+        description: 'Check the account before acting again.',
+      }],
+    ] as const)('toasts the outcome honestly (%#)', async (outcome, expected) => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.unbanPubkey.mockResolvedValue(outcome);
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      fireEvent.click(within(await screen.findByRole('dialog')).getByLabelText('End the suspension now'));
+      confirmUnban();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expected));
+      expect(toast).toHaveBeenCalledTimes(1);
+    });
+
+    // The unban landed before the audit write, so a failed write must not read
+    // as "Failed to unban user", and must not hide what became of the suspension.
+    it('carries the outcome on a failed audit write, without calling the unban failed', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.unbanPubkey.mockResolvedValue({ suspension: { state: 'end_failed' } });
+      api.logDecision.mockRejectedValue(new Error('audit down'));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      await screen.findByRole('dialog');
+      confirmUnban();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith({
+        title: 'Action applied; audit log not recorded',
+        description: 'User unbanned, but the suspension could not be lifted. It is still suspended. Try Unsuspend.',
+      }));
+      expect(toast).not.toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' }));
+    });
+
+    it('stays open after a failed unban, with the failure toast', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      api.unbanPubkey.mockRejectedValue(new ApiError('relay down', 502, 'Bad Gateway'));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      await screen.findByRole('dialog');
+      confirmUnban();
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to unban user' })));
+      expect(screen.getByRole('dialog')).toBeInTheDocument();
+    });
+
+    // The unban may have ended or changed the timer: a failed re-read must not
+    // leave the old end on screen as current.
+    it('resets the timers after an unban', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      const qc = client();
+      const reset = vi.spyOn(qc, 'resetQueries');
+      renderPage(qc);
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      await screen.findByRole('dialog');
+      confirmUnban();
+      await waitFor(() => expect(reset).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY }));
+    });
   });
 });

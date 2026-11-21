@@ -14,7 +14,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from "@/components/ui/dialog";
 import { useToast } from "@/hooks/useToast";
-import { UserX, UserCheck, Plus, Users, Trash2, User, X, Pause, Play } from "lucide-react";
+import { UserX, UserCheck, Plus, Users, Trash2, User, X, Pause, Play, CalendarClock } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
@@ -23,9 +23,16 @@ import { UserActions } from "@/components/UserActions";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { UserDisplayName } from "@/components/UserIdentifier";
 import { CopyableId } from "@/components/CopyableId";
-import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from "@/lib/banFeedback";
 import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from "@/lib/userStatsCache";
+import { ApiError, type BannedPubkeyEntry } from "@/lib/adminApi";
+import { unbanOutcomeNote, unbanOutcomeToast } from "@/lib/unbanOutcomeToast";
+import { TIMED_SUSPENSIONS_KEY, useTimedSuspension, useTimedSuspensions } from "@/hooks/useTimedSuspensions";
+import { useChangeSuspensionEnd } from "@/hooks/useChangeSuspensionEnd";
+import { SuspensionEndLine } from "@/components/SuspensionEndLine";
+import { SuspensionDurationDialog } from "@/components/SuspensionDurationDialog";
+import { UnbanSuspensionDialog } from "@/components/UnbanSuspensionDialog";
+import type { UnbanSuspensionChoice } from "../../shared/suspension";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -67,6 +74,10 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
+    // Reset, not invalidate: after an action the timers on screen may be out of
+    // date, and if the re-read fails the old end must not stay as if current;
+    // the end line then says the end is unavailable.
+    void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
   };
 
   // After an account action, the acted-on account's authored-content reads
@@ -226,24 +237,40 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     }
   };
 
-  // Mutation for unbanning users
+  // Mutation for unbanning users. `choice` is what happens to a timed
+  // suspension; with none the body carries no choice and the worker keeps its
+  // default (resume).
   const unbanUserMutation = useMutation({
-    mutationFn: async ({ pubkey }: { pubkey: string }) => {
+    mutationFn: async ({ pubkey, choice }: { pubkey: string; choice?: UnbanSuspensionChoice }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      await act.unbanPubkey(pubkey);
+      const outcome = choice === undefined ? await act.unbanPubkey(pubkey) : await act.unbanPubkey(pubkey, choice);
       // A ban usually purged the posts, so no restore window: reset only.
       void resetAccountContentReads(queryClient, pubkey);
-      await act.logDecision({
-        targetType: 'pubkey',
-        targetId: pubkey,
-        action: 'unban_user',
-        reason: 'Unbanned via User Management',
-      });
-      return pubkey;
+      // The unban has landed, so a failed audit write must not fail the
+      // mutation: that would read as "Failed to unban user" and hide what
+      // became of the suspension (an end_failed most of all).
+      let auditRecorded = true;
+      try {
+        await act.logDecision({
+          targetType: 'pubkey',
+          targetId: pubkey,
+          action: 'unban_user',
+          reason: 'Unbanned via User Management',
+        });
+      } catch (e) {
+        console.warn('[UserManagement] audit log failed', e);
+        auditRecorded = false;
+      }
+      return { pubkey, outcome, auditRecorded };
     },
-    onSuccess: async (pubkey) => {
+    onSuccess: async ({ pubkey, outcome, auditRecorded }) => {
       invalidateUserQueries();
-      toast({ title: "User unbanned successfully" });
+      // One toast (the app shows one at a time): a missing audit row carries
+      // the outcome as its description, so neither is lost.
+      const outcomeToast = unbanOutcomeToast(outcome);
+      toast(auditRecorded
+        ? outcomeToast
+        : { title: 'Action applied; audit log not recorded', description: unbanOutcomeNote(outcomeToast) });
 
       // Background verification
       verifyPubkeyUnbanned(pubkey).then(verified => {
@@ -252,7 +279,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         }
       });
     },
-    onError: (error: Error, variables: { pubkey: string }) => {
+    onError: (error: Error, variables: { pubkey: string; choice?: UnbanSuspensionChoice }) => {
       if (redirectIfGuarded(error, variables.pubkey)) return;
       toast({
         title: "Failed to unban user",
@@ -290,9 +317,39 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     },
   });
 
+  // F14: the relay's lists may spell a pubkey in either case.
+  const listHas = (list: BannedPubkeyEntry[] | undefined, pubkey: string) => {
+    const target = pubkey.toLowerCase();
+    return !!list?.some((u) => typeof u?.pubkey === 'string' && u.pubkey.toLowerCase() === target);
+  };
+
+  // The Banned tab's unban asks what happens to a suspension unless the
+  // suspended list has answered without this account (F6). While the list is
+  // loading, or after it failed (even over an older copy), nobody knows, so it
+  // asks: failing toward asking, as UserActions does with isSuspended !== false.
+  // The target outlives the close, so the prompt's options don't change while
+  // it animates out; `open` is separate.
+  const [unbanDialog, setUnbanDialog] = useState<{ pubkey: string; open: boolean } | null>(null);
+  const unbanTimer = useTimedSuspension(unbanDialog?.pubkey);
+  // An answer is a list that loaded and whose latest read did not fail: a
+  // failed refresh keeps an older copy that may predate a suspend.
+  const suspendedListAnswered = suspendedUsers !== undefined && !suspendedError;
+  const suspendedListAnsweredWithout = (pubkey: string) =>
+    suspendedListAnswered && !listHas(suspendedUsers, pubkey);
+  // Read the timers ahead whenever a banned account may be suspended, so the
+  // prompt can usually name the end when it opens rather than start unknown.
+  useTimedSuspensions({ enabled: !!bannedUsers?.some((u: BannedUser) => !suspendedListAnsweredWithout(u.pubkey)) });
+
+  // Suspended-tab Change end date, for one account at a time. Like the prompt,
+  // the target outlives the close so its Currently line stays while it animates out.
+  const changeEnd = useChangeSuspensionEnd();
+  const [changeEndDialog, setChangeEndDialog] = useState<{ pubkey: string; open: boolean } | null>(null);
+  const changeEndTimer = useTimedSuspension(changeEndDialog?.pubkey);
+
   const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow' | 'suspend') => {
     if (type === 'ban') {
-      unbanUserMutation.mutate({ pubkey });
+      if (suspendedListAnsweredWithout(pubkey)) unbanUserMutation.mutate({ pubkey });
+      else setUnbanDialog({ pubkey, open: true });
     } else if (type === 'suspend') {
       unsuspendUserMutation.mutate({ pubkey });
     } else {
@@ -422,7 +479,11 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               pubkey={selectedPubkey}
               context="users"
               isBanned={bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ?? false}
-              isSuspended={suspendedUsers?.some((u: BannedPubkeyEntry) => u.pubkey === selectedPubkey) ?? false}
+              // null while the suspended list has not answered (loading, failed,
+              // or a failed refresh over an older copy), never a guessed false:
+              // UserActions then says so, and its unban asks (F6).
+              isSuspended={suspendedListAnswered ? listHas(suspendedUsers, selectedPubkey) : null}
+              statusPending={loadingSuspended}
               onActionComplete={invalidateUserQueries}
             />
           </CardContent>
@@ -539,16 +600,28 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                       pubkey={user.pubkey}
                       reason={user.reason}
                       suspended
+                      statusLine={<SuspensionEndLine pubkey={user.pubkey} banned={listHas(bannedUsers, user.pubkey)} />}
                       actionButton={
-                        <Button
-                          variant="outline"
-                          size="sm"
-                          className="border-green-500 text-green-600 hover:bg-green-50"
-                          onClick={() => handleRemoveUser(user.pubkey, 'suspend')}
-                        >
-                          <Play className="h-4 w-4 mr-1" />
-                          Unsuspend
-                        </Button>
+                        <>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            className="border-green-500 text-green-600 hover:bg-green-50"
+                            onClick={() => handleRemoveUser(user.pubkey, 'suspend')}
+                          >
+                            <Play className="h-4 w-4 mr-1" />
+                            Unsuspend
+                          </Button>
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setChangeEndDialog({ pubkey: user.pubkey, open: true })}
+                            disabled={changeEnd.isPending}
+                          >
+                            <CalendarClock className="h-4 w-4 mr-1" />
+                            Change end date
+                          </Button>
+                        </>
                       }
                     />
                   ))}
@@ -618,6 +691,41 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
           </Card>
         </TabsContent>
       </Tabs>
+
+      <UnbanSuspensionDialog
+        open={!!unbanDialog?.open}
+        onOpenChange={(open) => { if (!open) setUnbanDialog((d) => d && { ...d, open: false }); }}
+        record={unbanTimer.record}
+        // The prompt opens only when the list has not answered without the
+        // account, so it is either listed (confirmed) or not yet known.
+        suspensionConfirmed={!!unbanDialog && suspendedListAnswered && listHas(suspendedUsers, unbanDialog.pubkey)}
+        isPending={unbanUserMutation.isPending}
+        onConfirm={async (choice) => {
+          if (!unbanDialog) return;
+          await unbanUserMutation.mutateAsync({ pubkey: unbanDialog.pubkey, choice });
+        }}
+      />
+
+      <SuspensionDurationDialog
+        open={!!changeEndDialog?.open}
+        onOpenChange={(open) => { if (!open) setChangeEndDialog((d) => d && { ...d, open: false }); }}
+        mode="change"
+        // undefined while the timer is unknown, so the dialog states no end it doesn't have.
+        currentEndsAt={changeEndTimer.record === undefined ? undefined : changeEndTimer.record?.endsAt ?? null}
+        isPending={changeEnd.isPending}
+        onConfirm={async (duration) => {
+          if (!changeEndDialog || duration === null) return; // change mode has no "No end date"
+          await changeEnd.mutateAsync({ pubkey: changeEndDialog.pubkey, duration }).catch((error: unknown) => {
+            // The worker found the account banned or no longer suspended, so
+            // the lists on screen are out of date. UserActions asks its host to
+            // re-read; on this tab the page is the host, so it re-reads here.
+            if (error instanceof ApiError && (error.code === 'not_suspended' || error.code === 'account_banned')) {
+              invalidateUserQueries();
+            }
+            throw error;
+          });
+        }}
+      />
     </div>
   );
 }

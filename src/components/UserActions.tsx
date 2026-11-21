@@ -13,7 +13,7 @@ import { invalidateResolutionState } from '@/lib/queueInvalidation';
 import { isTerminal, useBulkModerateJob } from '@/hooks/useBulkModerateJob';
 import { useBulkJobNotes } from '@/hooks/useBulkJobNotes';
 import { countIssues } from '../../shared/bulk-moderation';
-import { formatSuspensionEnd, type SuspensionDuration } from '../../shared/suspension';
+import { formatSuspensionEnd, type SuspensionDuration, type UnbanSuspensionChoice } from '../../shared/suspension';
 import { ApiError, type SuspendOutcome } from '@/lib/adminApi';
 import { TIMED_SUSPENSIONS_KEY, useTimedSuspension } from '@/hooks/useTimedSuspensions';
 import { useChangeSuspensionEnd } from '@/hooks/useChangeSuspensionEnd';
@@ -21,6 +21,8 @@ import { ConfirmDialog } from './ConfirmDialog';
 import { BulkNotesPanel } from './BulkNotesPanel';
 import { SuspensionDurationDialog } from './SuspensionDurationDialog';
 import { SuspensionEndLine } from './SuspensionEndLine';
+import { UnbanSuspensionDialog } from './UnbanSuspensionDialog';
+import { unbanOutcomeNote, unbanOutcomeToast } from '@/lib/unbanOutcomeToast';
 import { useNavigate } from 'react-router-dom';
 import { UserX, UserCheck, ShieldAlert, Trash2, Pause, Play, ArrowRight, CalendarClock } from 'lucide-react';
 
@@ -263,24 +265,32 @@ export function UserActions({
     },
   });
 
+  // `choice` is what happens to a timed suspension; with none the body carries
+  // no choice and the worker keeps its default (resume).
   const unbanUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ target, choice }: { target: string; choice?: UnbanSuspensionChoice }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      await act.unbanPubkey(target);
+      const outcome = choice === undefined ? await act.unbanPubkey(target) : await act.unbanPubkey(target, choice);
       // A ban usually purged the posts, so no restore window: reset only.
       void resetAccountContentReads(queryClient, target);
+      const outcomeToast = unbanOutcomeToast(outcome);
+      // The audit warning replaces the outcome toast, so it carries the outcome.
       logAudit(act, {
         targetType: 'pubkey',
         targetId: target,
         action: 'unban_user',
         reason: 'Unbanned by moderator',
-      });
+      }, unbanOutcomeNote(outcomeToast));
+      return outcomeToast;
     },
-    onSuccess: (_data, target) => {
-      toast({ title: 'User unbanned' });
+    onSuccess: (outcomeToast, { target }) => {
+      // Reset, not invalidate: the unban may have ended or changed the timer,
+      // and a failed re-read must not leave the old end on screen as current.
+      void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
+      toast(outcomeToast);
       onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
     },
-    onError: (error: Error, target) => {
+    onError: (error: Error, { target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
@@ -363,7 +373,14 @@ export function UserActions({
   // The end-time line and Change end date show only for a confirmed suspension
   // (St7), and the timer read runs only then: null (unconfirmed) shows neither.
   const confirmedSuspended = isSuspended === true && !isBanned && !isUnderageReport;
-  const timer = useTimedSuspension(confirmedSuspended ? pubkey : null);
+  // Unban asks what happens to the suspension unless the account is confirmed
+  // not suspended (St7): an unconfirmed status (null) asks, failing toward asking.
+  const unbanAsks = isSuspended !== false;
+  // The timer is also read for a banned account that may be suspended, so the
+  // unban prompt can name its end.
+  const timer = useTimedSuspension(confirmedSuspended || (isBanned && unbanAsks) ? pubkey : null);
+  // Open for one account, like the duration dialog above.
+  const [unbanDialogPubkey, setUnbanDialogPubkey] = useState<string | null>(null);
 
   const anyPending = suspendUserMutation.isPending || unsuspendUserMutation.isPending ||
     banUserMutation.isPending || unbanUserMutation.isPending || changeEnd.isPending || bulkJob.isRunning;
@@ -407,15 +424,27 @@ export function UserActions({
         </p>
       )}
       {isBanned ? (
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => unbanUserMutation.mutate(pubkey)} disabled={anyPending}>
-              <UserCheck className="h-4 w-4 mr-1" />
-              {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent><p>Unban this user. They can post new content, but previously purged content is not restored.</p></TooltipContent>
-        </Tooltip>
+        <>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button variant="outline" disabled={anyPending}
+                onClick={() => (unbanAsks ? setUnbanDialogPubkey(pubkey) : unbanUserMutation.mutate({ target: pubkey }))}>
+                <UserCheck className="h-4 w-4 mr-1" />
+                {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent><p>Unban this user. They can post new content, but previously purged content is not restored.</p></TooltipContent>
+          </Tooltip>
+          <UnbanSuspensionDialog
+            open={unbanDialogPubkey === pubkey}
+            onOpenChange={(open) => { if (!open) setUnbanDialogPubkey(null); }}
+            record={timer.record}
+            suspensionConfirmed={isSuspended === true}
+            isPending={unbanUserMutation.isPending}
+            // The account is taken at the click, like every action here.
+            onConfirm={async (choice) => { await unbanUserMutation.mutateAsync({ target: pubkey, choice }); }}
+          />
+        </>
       ) : (
         <>
           {/* The underage hand-off comes first (F18): Age Review owns that
