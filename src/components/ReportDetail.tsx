@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryFilters } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -207,14 +207,29 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     eventNotFound,
   );
 
+  // Read the post again. Prefix match: every depth and relay hint of its
+  // thread read. Cancel first: with no data yet (the report's first read still
+  // out when an account action finishes, or when the restore window closes),
+  // invalidating would join that read, which started before, and its answer
+  // would land as fresh. Match this pane's API URL: a pending action can
+  // finish after RelayManager has cleared the cache and mounted another pane.
+  const rereadPost = (eventId: string | undefined) => {
+    if (!eventId) return;
+    const filters: QueryFilters = {
+      queryKey: ['thread', eventId],
+      predicate: query => query.queryKey[3] === config.apiUrl,
+    };
+    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
+  };
+
   // Re-check on the post: the live check, and a fresh read of the post itself.
   // The thread read holds a missing post for its staleTime, so without this a
   // post the live check finds again (an unsuspended account's, once the
   // relay's read filter catches up) reads "Event is still on the relay." with
-  // nothing under it. Prefix match: every depth and relay hint of its thread read.
+  // nothing under it.
   const recheckPost = () => {
     moderationStatus.recheck();
-    if (targetEventId) void queryClient.invalidateQueries({ queryKey: ['thread', targetEventId] });
+    rereadPost(targetEventId);
   };
 
   // Get decision history for this target
@@ -677,6 +692,21 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
+      // After an Unsuspend or Unban, read the post again: the relay can still
+      // withhold it, and the panel should say why rather than show the old read.
+      // Not after a Ban or Suspend: the re-read would find no post, and the
+      // media actions (Block Media, Age Restrict, Unblock) would lose the files
+      // they act on. The earlier read stays, and the header says why it's gone.
+      if (change.action === 'unsuspend' || change.action === 'unban') {
+        // Refresh the report the action started from, even after navigating away.
+        // Also refresh a different post on screen if it belongs to that account.
+        const origin = change.reportTarget;
+        if (origin) rereadPost(origin.eventId);
+        if ((!origin || origin.eventId !== targetEventId)
+          && reportedPubkey?.toLowerCase() === change.pubkey.toLowerCase()) {
+          rereadPost(targetEventId);
+        }
+      }
       // The acted-on account's Keycast label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
       // keeps its pre-action answer for the query's minute of staleness. The mirror
@@ -1580,6 +1610,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
+                reportTarget={{ eventId: targetEventId }}
                 reportCategory={ageReviewCategory(report)}
                 // Pass null through. `?? undefined` handed UserActions an
                 // absent prop, which its default turned into a confirmed

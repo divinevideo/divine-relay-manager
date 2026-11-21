@@ -354,7 +354,14 @@ export function useModerationStatus(
   }, [pubkey, eventId, verifyPubkeyBanned, verifyEventDeleted, bannedPubkeys, bannedEvents, suspendedPubkeys, queryClient]);
   // Take no arguments, so a button can pass either as its onClick.
   const recheck = useCallback(() => { void runCheck({ afterAction: false }); }, [runCheck]);
-  const recheckAfterAction = useCallback(() => { void runCheck({ afterAction: true }); }, [runCheck]);
+  // The check after an account action stands in for this report's auto-check:
+  // the pane's re-read after an Unsuspend or Unban can find the post missing,
+  // and this check is already answering that.
+  const autoCheckKey = `${eventId || ''}:${pubkey || ''}`;
+  const recheckAfterAction = useCallback(() => {
+    autoCheckedRef.current = autoCheckKey;
+    void runCheck({ afterAction: true });
+  }, [runCheck, autoCheckKey]);
 
   // Reset when the report or the environment changes. Declared BEFORE the
   // auto-check below on purpose: effects run in declaration order, and running
@@ -369,8 +376,7 @@ export function useModerationStatus(
 
   // Auto-check: for events when not found, for users always (just a ban list refresh)
   useEffect(() => {
-    const checkKey = `${eventId || ''}:${pubkey || ''}`;
-    if (autoCheckedRef.current === checkKey || banListsLoading || wsResult.isChecking) return;
+    if (autoCheckedRef.current === autoCheckKey || banListsLoading || wsResult.isChecking) return;
 
     const shouldAutoCheck =
       // Event not found via normal queries: run WebSocket verification
@@ -379,10 +385,10 @@ export function useModerationStatus(
       (pubkey && !eventId);
 
     if (shouldAutoCheck) {
-      autoCheckedRef.current = checkKey;
-      runCheck({ afterAction: false });
+      autoCheckedRef.current = autoCheckKey;
+      void runCheck({ afterAction: false });
     }
-  }, [eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
+  }, [autoCheckKey, eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
 
 
   // A later successful list read that contains the pubkey is newer than a

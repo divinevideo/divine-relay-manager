@@ -243,18 +243,22 @@ describe('UserActions', () => {
     { action: 'unsuspend', props: { isSuspended: true }, button: /Unsuspend User/i, call: api.unsuspendPubkey },
     { action: 'ban', props: {}, button: /Ban User/i, call: api.banPubkey },
     { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
-  ] as const)('reports the account a $action was taken on, even after the pubkey changes mid-action', async ({ action, props, button, call }) => {
+  ] as const)('reports the original account and post when a $action finishes after switching reports', async ({ action, props, button, call }) => {
     const OTHER = 'b'.repeat(64);
+    const original = { eventId: 'c'.repeat(64) };
+    const next = { ...original, eventId: 'd'.repeat(64) };
     let finish!: (value: unknown) => void;
     call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const onActionComplete = vi.fn();
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    const ui = (pubkey: string) => (
+    const ui = (pubkey: string, reportTarget: typeof original) => (
       <QueryClientProvider client={qc}>
-        <TooltipProvider><UserActions pubkey={pubkey} {...props} onActionComplete={onActionComplete} /></TooltipProvider>
+        <TooltipProvider>
+          <UserActions pubkey={pubkey} {...props} reportTarget={reportTarget} onActionComplete={onActionComplete} />
+        </TooltipProvider>
       </QueryClientProvider>
     );
-    const { rerender } = render(ui(PUBKEY));
+    const { rerender } = render(ui(PUBKEY, original));
 
     fireEvent.click(screen.getByRole('button', { name: button }));
     if (action === 'ban') {
@@ -263,11 +267,11 @@ describe('UserActions', () => {
     }
     await waitFor(() => expect(call).toHaveBeenCalledWith(PUBKEY, ...(action === 'suspend' || action === 'ban' ? [expect.any(String)] : [])));
 
-    rerender(ui(OTHER));
+    rerender(ui(OTHER, next));
     finish(action === 'ban' ? { unconfirmed: null } : { success: true });
 
     await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
-    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action });
+    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action, reportTarget: original });
     // The decision log names the acted-on account too.
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ targetId: PUBKEY })));
     expect(api.logDecision).not.toHaveBeenCalledWith(expect.objectContaining({ targetId: OTHER }));

@@ -52,16 +52,21 @@ interface UserActionsProps {
    * current.
    */
   statusStale?: boolean;
+  reportTarget?: AccountActionTarget['reportTarget'];
   onActionComplete?: (change: UserActionChange) => void;
+}
+
+interface AccountActionTarget {
+  pubkey: string;
+  reportTarget?: { eventId?: string };
 }
 
 /**
  * What a finished action changed. `accountStatusChanged`: the action was a ban,
  * unban, suspend or unsuspend; the bulk content actions leave the account's
- * status as it was. `pubkey` is the account the action was taken on, captured
- * when it started: TanStack hands a pending mutation the latest render's
- * callbacks, so a pubkey read at completion is whichever account is on screen
- * by then, not the one acted on.
+ * status as it was. The account and report target are captured when the
+ * action starts because TanStack updates pending mutations' callbacks as the
+ * moderator opens other reports.
  */
 // Each account action also drops the acted-on account's authored-content
 // reads, here rather than in each host so every host gets it (report detail,
@@ -75,7 +80,7 @@ interface UserActionsProps {
 // would mislead.
 export type UserActionChange =
   | { accountStatusChanged: false }
-  | { accountStatusChanged: true; pubkey: string; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' };
+  | (AccountActionTarget & { accountStatusChanged: true; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' });
 
 export function UserActions({
   pubkey,
@@ -85,6 +90,7 @@ export function UserActions({
   isSuspended = false,
   statusPending = false,
   statusStale = false,
+  reportTarget,
   onActionComplete,
 }: UserActionsProps) {
   const { toast } = useToast();
@@ -92,6 +98,7 @@ export function UserActions({
   const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
   const restoreEnvironment = useRestoreEnvironment();
+  const accountTarget: AccountActionTarget = { pubkey, reportTarget };
   // The api bound to the moderator's login at bulk-job start; a logout/switch
   // during the long job must not retarget its completion audit write (#178).
   const bulkActRef = useRef<ModeratorApi>();
@@ -167,7 +174,7 @@ export function UserActions({
       });
 
   const suspendUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ pubkey: target }: AccountActionTarget) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       await runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator'));
@@ -180,16 +187,16 @@ export function UserActions({
     },
     onSuccess: (_data, target) => {
       toast({ title: 'User suspended' });
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'suspend' });
+      onActionComplete?.({ ...target, accountStatusChanged: true, action: 'suspend' });
     },
-    onError: (error: Error, target) => {
+    onError: (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const unsuspendUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ pubkey: target }: AccountActionTarget) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // captured before the call
       await act.unsuspendPubkey(target);
@@ -203,16 +210,16 @@ export function UserActions({
     },
     onSuccess: (_data, target) => {
       toast({ title: 'User unsuspended' });
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
+      onActionComplete?.({ ...target, accountStatusChanged: true, action: 'unsuspend' });
     },
-    onError: (error: Error, target) => {
+    onError: (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const banUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ pubkey: target }: AccountActionTarget) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       const outcome = await runHidingAction(queryClient, target, env, () => act.banPubkey(target, 'Banned by moderator'));
@@ -226,7 +233,7 @@ export function UserActions({
     },
     onSuccess: (outcome, target) => {
       toast({ title: 'User banned from relay', description: banSuccessNote(outcome) });
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'ban' });
+      onActionComplete?.({ ...target, accountStatusChanged: true, action: 'ban' });
     },
     onError: (error: Error) => {
       refreshAfterUnconfirmedBan(error, queryClient);
@@ -235,7 +242,7 @@ export function UserActions({
   });
 
   const unbanUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ pubkey: target }: AccountActionTarget) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       await act.unbanPubkey(target);
       // A ban usually purged the posts, so no restore window: reset only.
@@ -249,9 +256,9 @@ export function UserActions({
     },
     onSuccess: (_data, target) => {
       toast({ title: 'User unbanned' });
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
+      onActionComplete?.({ ...target, accountStatusChanged: true, action: 'unban' });
     },
-    onError: (error: Error, target) => {
+    onError: (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
@@ -368,7 +375,7 @@ export function UserActions({
       {isBanned ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => unbanUserMutation.mutate(pubkey)} disabled={anyPending}>
+            <Button variant="outline" onClick={() => unbanUserMutation.mutate(accountTarget)} disabled={anyPending}>
               <UserCheck className="h-4 w-4 mr-1" />
               {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
             </Button>
@@ -392,7 +399,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                  onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
+                  onClick={() => unsuspendUserMutation.mutate(accountTarget)} disabled={anyPending}>
                   <Play className="h-4 w-4 mr-1" />
                   {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
                 </Button>
@@ -403,7 +410,7 @@ export function UserActions({
             <Tooltip>
               <TooltipTrigger asChild>
                 <Button variant="outline" className="border-amber-500 text-amber-600 hover:bg-amber-50"
-                  onClick={() => suspendUserMutation.mutate(pubkey)} disabled={anyPending}>
+                  onClick={() => suspendUserMutation.mutate(accountTarget)} disabled={anyPending}>
                   <Pause className="h-4 w-4 mr-1" />
                   {suspendUserMutation.isPending ? 'Suspending...' : 'Suspend User'}
                 </Button>
@@ -425,7 +432,7 @@ export function UserActions({
               : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
-            onConfirm={async () => { await banUserMutation.mutateAsync(pubkey); }}
+            onConfirm={async () => { await banUserMutation.mutateAsync(accountTarget); }}
             isPending={banUserMutation.isPending}
           />
         </>

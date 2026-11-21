@@ -9,7 +9,15 @@ import type { NostrEvent } from '@nostrify/nostrify';
 import { useReportContext } from './useReportContext';
 
 vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: { apiUrl: 'https://api.example.test' } }) }));
-vi.mock('@/hooks/useThread', () => ({ useThread: () => ({ data: undefined, isLoading: false, error: null }) }));
+// What the thread read holds right now: a post, a read that found none, or no read.
+const threadState = vi.hoisted(() => ({ event: undefined as NostrEvent | null | undefined }));
+vi.mock('@/hooks/useThread', () => ({
+  useThread: () => ({
+    data: threadState.event === undefined ? undefined : { event: threadState.event, ancestors: [], replies: [] },
+    isLoading: false,
+    error: null,
+  }),
+}));
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false, error: null }) }));
 
 const authorState = vi.hoisted(() => ({
@@ -44,6 +52,7 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 beforeEach(() => {
+  threadState.event = undefined;
   authorState.loadingFor = undefined;
   authorState.result = { data: undefined, isLoading: true, error: null };
 });
@@ -86,5 +95,65 @@ describe('useReportContext isLoading', () => {
     authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false, error: null };
     const { result } = renderHook(() => useReportContext(report), { wrapper });
     expect(result.current.isLoading).toBe(true);
+  });
+});
+
+describe('useReportContext reported account after a re-read finds no post', () => {
+  // After this tab unsuspends or unbans the post's author, the pane re-reads
+  // the post and the relay can still return nothing. The pane must
+  // keep acting on the author it already read, not switch to the p tag.
+  const POST_ID = '2'.repeat(64);
+  const AUTHOR = '3'.repeat(64);
+  const OTHER = '4'.repeat(64);
+  const post: NostrEvent = { ...report, id: POST_ID, pubkey: AUTHOR, kind: 1, tags: [] };
+
+  it.each([
+    ['the p tag names another account', [['e', POST_ID], ['p', OTHER]]],
+    ['the report has no p tag', [['e', POST_ID]]],
+  ])('keeps the post\'s author when %s', (_, tags) => {
+    const postReport = { ...report, tags };
+    threadState.event = post;
+    const { result, rerender } = renderHook(() => useReportContext(postReport), { wrapper });
+    expect(result.current.reportedUser.pubkey).toBe(AUTHOR);
+
+    threadState.event = null;
+    rerender();
+    expect(result.current.reportedUser.pubkey).toBe(AUTHOR);
+  });
+
+  it('keeps the author after the moderator opens a report on another post and comes back', () => {
+    threadState.event = post;
+    const first: NostrEvent = { ...report, tags: [['e', POST_ID], ['p', OTHER]] };
+    let current = first;
+    const { result, rerender } = renderHook(() => useReportContext(current), { wrapper });
+    threadState.event = null;
+    rerender();
+    expect(result.current.reportedUser.pubkey).toBe(AUTHOR);
+
+    // Another report, whose post is found and has another author.
+    const elsewhere = '5'.repeat(64);
+    threadState.event = { ...post, id: elsewhere, pubkey: '6'.repeat(64) };
+    current = { ...report, tags: [['e', elsewhere]] };
+    rerender();
+    expect(result.current.reportedUser.pubkey).toBe('6'.repeat(64));
+
+    // Back to the first: its read still holds no post.
+    threadState.event = null;
+    current = first;
+    rerender();
+    expect(result.current.reportedUser.pubkey).toBe(AUTHOR);
+  });
+
+  it('does not carry one report\'s author over to a report on another post', () => {
+    threadState.event = post;
+    let current: NostrEvent = { ...report, tags: [['e', POST_ID], ['p', OTHER]] };
+    const { result, rerender } = renderHook(() => useReportContext(current), { wrapper });
+    expect(result.current.reportedUser.pubkey).toBe(AUTHOR);
+
+    // The pane is not keyed per report: the next report reuses this hook.
+    threadState.event = null;
+    current = { ...report, tags: [['e', '5'.repeat(64)], ['p', OTHER]] };
+    rerender();
+    expect(result.current.reportedUser.pubkey).toBe(OTHER);
   });
 });
