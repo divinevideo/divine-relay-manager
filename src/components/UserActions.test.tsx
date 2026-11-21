@@ -245,7 +245,7 @@ describe('UserActions', () => {
     { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
   ] as const)('reports the original account and post when a $action finishes after switching reports', async ({ action, props, button, call }) => {
     const OTHER = 'b'.repeat(64);
-    const original = { eventId: 'c'.repeat(64), apiUrl: 'https://api.example.test' };
+    const original = { eventId: 'c'.repeat(64) };
     const next = { ...original, eventId: 'd'.repeat(64) };
     let finish!: (value: unknown) => void;
     call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));

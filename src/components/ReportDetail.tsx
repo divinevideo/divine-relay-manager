@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient, type QueryFilters } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -200,10 +200,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   // Unified moderation status: ban lists + WebSocket verification.
   // Auto-runs WebSocket check when event is not found via normal queries or banned event lookup.
-  // A thread refresh is still reading even when the pane shows its cached post.
-  const eventNotFound = context.threadFetching || isBannedEventLoading
-    ? undefined
-    : !displayEvent && !!targetEventId;
+  const eventNotFound = !context.threadLoading && !isBannedEventLoading && !displayEvent && !!targetEventId;
   const moderationStatus = useModerationStatus(
     context.reportedUser.pubkey,
     context.target?.type === 'event' ? context.target.value : null,
@@ -214,14 +211,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // thread read. Cancel first: with no data yet (the report's first read still
   // out when an account action finishes, or when the restore window closes),
   // invalidating would join that read, which started before, and its answer
-  // would land as fresh.
-  const rereadPost = (eventId: string | undefined, apiUrl: string) => {
+  // would land as fresh. No environment filter: an environment switch clears
+  // the query cache (RelayManager), so every thread read held is this one's.
+  const rereadPost = (eventId: string | undefined) => {
     if (!eventId) return;
-    const filters: QueryFilters = {
-      queryKey: ['thread', eventId],
-      predicate: query => query.queryKey[3] === apiUrl,
-    };
-    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
+    const queryKey = ['thread', eventId];
+    void queryClient.cancelQueries({ queryKey }).then(() => queryClient.invalidateQueries({ queryKey }));
   };
 
   // Re-check on the post: the live check, and a fresh read of the post itself.
@@ -231,7 +226,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // nothing under it.
   const recheckPost = () => {
     moderationStatus.recheck();
-    rereadPost(targetEventId, config.apiUrl);
+    rereadPost(targetEventId);
   };
 
   // Get decision history for this target
@@ -694,13 +689,20 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // The account status on screen predates the action. This check
       // re-reads the account lists (banned and suspended pubkeys) itself.
       moderationStatus.recheckAfterAction();
-      // Refresh the report the action started from, even after navigating away.
-      // Also refresh a different post on screen if it belongs to that account.
-      const origin = change.reportTarget;
-      if (origin) rereadPost(origin.eventId, origin.apiUrl);
-      if ((!origin || origin.apiUrl === config.apiUrl && origin.eventId !== targetEventId)
-        && reportedPubkey?.toLowerCase() === change.pubkey.toLowerCase()) {
-        rereadPost(targetEventId, config.apiUrl);
+      // After an Unsuspend or Unban, read the post again: the relay can still
+      // withhold it, and the panel should say why rather than show the old read.
+      // Not after a Ban or Suspend: the re-read would find no post, and the
+      // media actions (Block Media, Age Restrict, Unblock) would lose the files
+      // they act on. The earlier read stays, and the header says why it's gone.
+      if (change.action === 'unsuspend' || change.action === 'unban') {
+        // Refresh the report the action started from, even after navigating away.
+        // Also refresh a different post on screen if it belongs to that account.
+        const origin = change.reportTarget;
+        if (origin) rereadPost(origin.eventId);
+        if ((!origin || origin.eventId !== targetEventId)
+          && reportedPubkey?.toLowerCase() === change.pubkey.toLowerCase()) {
+          rereadPost(targetEventId);
+        }
       }
       // The acted-on account's Keycast label reads the shared account-status query,
       // and the worker mirrors this action into Keycast. Refresh it, or the label
@@ -1605,7 +1607,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
-                reportTarget={{ eventId: targetEventId, apiUrl: config.apiUrl }}
+                reportTarget={{ eventId: targetEventId }}
                 reportCategory={ageReviewCategory(report)}
                 // Pass null through. `?? undefined` handed UserActions an
                 // absent prop, which its default turned into a confirmed

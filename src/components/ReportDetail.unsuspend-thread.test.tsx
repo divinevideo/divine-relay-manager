@@ -1,11 +1,12 @@
-// ABOUTME: Report detail after this tab changes the reported account's status: the post panel
-// ABOUTME: reads the post again with the live check, so the header and body agree.
+// ABOUTME: Report detail after this tab changes the reported account's status: after an Unsuspend
+// ABOUTME: or Unban the post panel reads the post again; after a Ban or Suspend it keeps its read.
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider, useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { endRestoreWindow, markRestored } from '@/lib/userStatsCache';
+import { GONE_NO_CAUSE_LINE } from '@/lib/suspendedContent';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { ComponentProps } from 'react';
@@ -35,6 +36,8 @@ const relay = vi.hoisted(() => ({
   finishAction: undefined as Promise<void> | undefined,
   reads: 0,
 }));
+// The account action the mocked UserActions takes.
+const account = vi.hoisted(() => ({ action: 'unsuspend' as 'suspend' | 'unsuspend' | 'ban' | 'unban' }));
 
 const api = vi.hoisted(() => ({
   deleteEvent: vi.fn(),
@@ -103,19 +106,21 @@ vi.mock('@/hooks/useThread', () => ({
 }));
 // The account actions, reduced to what each tells the pane when it succeeds,
 // as UserActions does: an Unsuspend opens the restore window first.
+const ACTION_LABELS = { suspend: 'Suspend', unsuspend: 'Unsuspend', ban: 'Ban', unban: 'Unban' } as const;
 vi.mock('@/components/UserActions', () => ({
   UserActions: ({ pubkey, reportTarget, statusPending, onActionComplete }: ComponentProps<typeof UserActions>) => {
     const queryClient = useQueryClient();
+    const kind = account.action;
     const action = useMutation({
       mutationFn: async ({ pubkey: target }: { pubkey: string; reportTarget: typeof reportTarget }) => {
         await relay.finishAction;
-        await markRestored(queryClient, target, undefined);
+        if (kind === 'unsuspend') await markRestored(queryClient, target, undefined);
       },
-      onSuccess: (_, target) => onActionComplete?.({ ...target, accountStatusChanged: true, action: 'unsuspend' }),
+      onSuccess: (_, target) => onActionComplete?.({ ...target, accountStatusChanged: true, action: kind }),
     });
     return (
       <button data-pubkey={pubkey} data-status-pending={statusPending} onClick={() => action.mutate({ pubkey, reportTarget })}>
-        Unsuspend
+        {ACTION_LABELS[kind]}
       </button>
     );
   },
@@ -127,7 +132,10 @@ vi.mock('@/components/HiveAIReport', () => ({ HiveAIReport: () => null }));
 vi.mock('@/components/AIDetectionReport', () => ({ AIDetectionReport: () => null }));
 vi.mock('@/components/MediaPreview', () => ({ MediaPreview: () => null }));
 vi.mock('@/components/ThreadModal', () => ({ ThreadModal: () => null }));
-vi.mock('@/components/EventActions', () => ({ EventActions: () => null }));
+// The files the post's media actions (Block Media, Age Restrict, Unblock) act on.
+vi.mock('@/components/EventActions', () => ({
+  EventActions: ({ mediaHashes }: { mediaHashes: string[] }) => <div data-testid="event-actions" data-media={mediaHashes.join(',')} />,
+}));
 vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
 vi.mock('@/components/ReporterCard', () => ({ ReporterInline: () => null }));
 vi.mock('@/components/UserIdentifier', () => ({ UserIdentifier: () => null }));
@@ -143,9 +151,15 @@ const REPORT: NostrEvent = {
 };
 const POST: NostrEvent = { ...REPORT, id: EVENT_ID, pubkey: REPORTED_PUBKEY, kind: 1, tags: [], content: 'the reported post' };
 
+const VIDEO_HASH = '5'.repeat(64);
+const VIDEO_POST: NostrEvent = {
+  ...POST,
+  tags: [['imeta', `url https://media.example/${VIDEO_HASH}.mp4`, `x ${VIDEO_HASH}`, 'm video/mp4']],
+};
+
 const JUST_RESTORED = /The account was just unsuspended, and its posts can take a few minutes to reappear, if they are still stored\./;
 
-describe('ReportDetail after an Unsuspend of a post read before the suspension', () => {
+describe('ReportDetail after an account action on a post read before it', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     relay.post = undefined;
@@ -153,6 +167,7 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     relay.bannedLookup = undefined;
     relay.finishAction = undefined;
     relay.reads = 0;
+    account.action = 'unsuspend';
     api.verifyPubkeyBanned.mockResolvedValue(false);
     api.verifyEventDeleted.mockResolvedValue(true);
     api.listBannedPubkeys.mockResolvedValue([]);
@@ -384,5 +399,63 @@ describe('ReportDetail after an Unsuspend of a post read before the suspension',
     expect(await screen.findByText(JUST_RESTORED, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Unsuspend' })).toHaveAttribute('data-pubkey', REPORTED_PUBKEY);
+  });
+  // A Ban purges the account's posts and a Suspend withholds them, so a re-read
+  // would find no post, and the media actions would lose the files they act on.
+  // The pane keeps the read from before the action instead; the header says why
+  // the post is gone.
+  it.each(['ban', 'suspend'] as const)('keeps the earlier read and its media actions after a %s', async (kind) => {
+    account.action = kind;
+    relay.post = VIDEO_POST;
+    api.verifyEventDeleted.mockResolvedValue(false);
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={REPORT} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+    expect(screen.getByTestId('event-actions')).toHaveAttribute('data-media', VIDEO_HASH);
+
+    relay.post = undefined;
+    api.verifyEventDeleted.mockResolvedValue(true);
+    fireEvent.click(screen.getByRole('button', { name: ACTION_LABELS[kind] }));
+
+    // The after-action live check has answered: the post is gone from the relay.
+    // A re-read would have started with that check, so once nothing is reading
+    // any more, none ran.
+    expect((await screen.findAllByText('Not Found on Relay', {}, { timeout: 4000 })).length).toBeGreaterThan(0);
+    await waitFor(() => expect(client.isFetching() + client.isMutating()).toBe(0));
+    expect(relay.reads).toBe(1);
+    expect(screen.getByText('the reported post')).toBeInTheDocument();
+    expect(screen.getByTestId('event-actions')).toHaveAttribute('data-media', VIDEO_HASH);
+  });
+
+  // An Unban lifts what hid the post, so the pane reads it again, as after an
+  // Unsuspend. Here the ban had purged it, and an Unban opens no restore
+  // window, so the body says the relay returned nothing, as the header does.
+  it('reads the post again after an Unban', async () => {
+    account.action = 'unban';
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    render(
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={REPORT} /></TooltipProvider>
+      </QueryClientProvider>,
+    );
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+
+    relay.post = undefined;
+    fireEvent.click(screen.getByRole('button', { name: 'Unban' }));
+
+    expect((await screen.findAllByText('Not Found on Relay', {}, { timeout: 4000 })).length).toBeGreaterThan(0);
+    expect(await screen.findByText(GONE_NO_CAUSE_LINE, {}, { timeout: 4000 })).toBeInTheDocument();
+    expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+    // One live check: the after-action one, not a second for the re-read's miss.
+    await waitFor(() => expect(client.isFetching() + client.isMutating()).toBe(0));
+    expect(relay.reads).toBe(2);
+    expect(api.verifyEventDeleted).toHaveBeenCalledTimes(1);
   });
 });

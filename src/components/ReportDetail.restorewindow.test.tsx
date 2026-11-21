@@ -68,7 +68,6 @@ vi.mock('@/hooks/useReportContext', () => ({
       // disabled) or while the read is out, a null event for a post it did not find.
       thread: !postId || shown.loading ? undefined : { event: shown.post ?? null, ancestors: [], replies: [] },
       threadLoading: !!postId && shown.loading,
-      threadFetching: !!postId && shown.loading,
       reportedUser: { profile: undefined, pubkey, isFunnelcakeUser: false },
       userStats: undefined,
       isLoading: false,
@@ -249,7 +248,7 @@ describe('ReportDetail missing post just after an unsuspend', () => {
     // The pane's part: an invalidation by the post's own key, which refetches
     // the read the pane observes (useReportContext is mocked here, so nothing
     // observes it and no refetch can be counted).
-    expect(invalidate).toHaveBeenCalledWith(expect.objectContaining({ queryKey: ['thread', EVENT_ID] }));
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['thread', EVENT_ID] });
   });
 
   // The window-close check reads the post again. An account report has no post,

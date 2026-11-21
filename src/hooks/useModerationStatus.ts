@@ -169,7 +169,7 @@ function sinceReRead(
 export function useModerationStatus(
   pubkey?: string | null,
   eventId?: string | null,
-  /** True for a settled miss, false for a found post, undefined while the post is loading or untracked. */
+  /** Set true when the event could not be found via normal relay queries or banned event lookup */
   eventNotFound?: boolean,
 ): ModerationStatus {
   const { verifyEventDeleted, verifyPubkeyBanned } = useAdminApi();
@@ -211,12 +211,8 @@ export function useModerationStatus(
   const [reReadMarks, setReReadMarks] = useState<{ banned: ListReads; suspended: ListReads } | null>(null);
   const queryClient = useQueryClient();
 
-  const autoCheck = useRef({
-    attempted: false,
-    previousRead: undefined as boolean | undefined,
-    answeredMiss: false,
-    seenAnswer: null as Date | null,
-  });
+  // Track which report we've auto-checked to avoid re-running on every render
+  const autoCheckedRef = useRef<string | null>(null);
 
   // Defined once in useRelayBanLists. These keys are shared with the reports
   // queue, and React Query runs the queryFn of whichever observer triggers the
@@ -358,41 +354,42 @@ export function useModerationStatus(
   }, [pubkey, eventId, verifyPubkeyBanned, verifyEventDeleted, bannedPubkeys, bannedEvents, suspendedPubkeys, queryClient]);
   // Take no arguments, so a button can pass either as its onClick.
   const recheck = useCallback(() => { void runCheck({ afterAction: false }); }, [runCheck]);
-  const recheckAfterAction = useCallback(() => { void runCheck({ afterAction: true }); }, [runCheck]);
+  // The check after an account action stands in for this report's auto-check:
+  // the pane's re-read after an Unsuspend or Unban can find the post missing,
+  // and this check is already answering that.
+  const autoCheckKey = `${eventId || ''}:${pubkey || ''}`;
+  const recheckAfterAction = useCallback(() => {
+    autoCheckedRef.current = autoCheckKey;
+    void runCheck({ afterAction: true });
+  }, [runCheck, autoCheckKey]);
 
-  // Reset before the auto-check effect so the new report starts with a clean slate.
+  // Reset when the report or the environment changes. Declared BEFORE the
+  // auto-check below on purpose: effects run in declaration order, and running
+  // after it would wipe the marker the auto-check just set, so a second check
+  // fired for the same report.
   useEffect(() => {
+    // Any check still in flight is for the previous report or environment.
     generationRef.current += 1;
     setWsResult({ userBanned: undefined, eventGone: undefined, checkedAt: null, isChecking: false });
-    autoCheck.current.attempted = false;
-    autoCheck.current.previousRead = undefined;
-    autoCheck.current.answeredMiss = false;
+    autoCheckedRef.current = null;
   }, [eventId, pubkey, apiUrl]);
 
+  // Auto-check: for events when not found, for users always (just a ban list refresh)
   useEffect(() => {
-    const check = autoCheck.current;
-    if (check.seenAnswer !== wsResult.checkedAt) {
-      check.seenAnswer = wsResult.checkedAt;
-      // A gone answer covers the expected miss after an account action. A
-      // present answer also covers a miss already shown or still loading.
-      check.answeredMiss = wsResult.eventGone === true
-        || (wsResult.eventGone === false && eventNotFound !== false);
-    }
-    if (eventNotFound === false && check.previousRead !== false) {
-      // The pane found the post. Any answer for the previous read says
-      // nothing about a later disappearance.
-      check.attempted = false;
-      check.answeredMiss = false;
-    }
-    check.previousRead = eventNotFound;
-    if (check.attempted || banListsLoading || wsResult.isChecking) return;
+    if (autoCheckedRef.current === autoCheckKey || banListsLoading || wsResult.isChecking) return;
 
-    const shouldAutoCheck = eventId ? eventNotFound && !check.answeredMiss : !!pubkey;
+    const shouldAutoCheck =
+      // Event not found via normal queries: run WebSocket verification
+      (eventNotFound && eventId) ||
+      // User report (no event): check ban status
+      (pubkey && !eventId);
+
     if (shouldAutoCheck) {
-      check.attempted = true;
+      autoCheckedRef.current = autoCheckKey;
       void runCheck({ afterAction: false });
     }
-  }, [eventNotFound, eventId, pubkey, apiUrl, banListsLoading, wsResult.eventGone, wsResult.checkedAt, wsResult.isChecking, runCheck]);
+  }, [autoCheckKey, eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
+
 
   // A later successful list read that contains the pubkey is newer than a
   // live check that said absent. The queue poll and other screens refresh this

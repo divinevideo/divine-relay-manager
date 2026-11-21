@@ -58,7 +58,7 @@ interface UserActionsProps {
 
 interface AccountActionTarget {
   pubkey: string;
-  reportTarget?: { eventId?: string; apiUrl: string };
+  reportTarget?: { eventId?: string };
 }
 
 /**
