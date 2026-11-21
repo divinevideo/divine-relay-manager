@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient, type QueryFilters } from "@tanstack/react-query";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -211,12 +211,15 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // thread read. Cancel first: with no data yet (the report's first read still
   // out when an account action finishes, or when the restore window closes),
   // invalidating would join that read, which started before, and its answer
-  // would land as fresh. No environment filter: an environment switch clears
-  // the query cache (RelayManager), so every thread read held is this one's.
+  // would land as fresh. Match this pane's API URL: a pending action can
+  // finish after RelayManager has cleared the cache and mounted another pane.
   const rereadPost = (eventId: string | undefined) => {
     if (!eventId) return;
-    const queryKey = ['thread', eventId];
-    void queryClient.cancelQueries({ queryKey }).then(() => queryClient.invalidateQueries({ queryKey }));
+    const filters: QueryFilters = {
+      queryKey: ['thread', eventId],
+      predicate: query => query.queryKey[3] === config.apiUrl,
+    };
+    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
   };
 
   // Re-check on the post: the live check, and a fresh read of the post itself.

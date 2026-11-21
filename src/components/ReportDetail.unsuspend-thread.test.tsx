@@ -30,6 +30,7 @@ const API_URL = 'https://api.a.example';
 // read answers with what it settles to. `bannedLookup`, when set, holds the
 // banned-event fallback open the same way.
 const relay = vi.hoisted(() => ({
+  apiUrl: undefined as string | undefined,
   post: undefined as NostrEvent | undefined,
   nextRead: undefined as Promise<NostrEvent | undefined> | undefined,
   bannedLookup: undefined as Promise<void> | undefined,
@@ -59,14 +60,14 @@ vi.mock('react-router-dom', async (orig) => ({
 }));
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => api,
-  useApiUrl: () => API_URL,
+  useApiUrl: () => relay.apiUrl ?? API_URL,
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({
-  useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: API_URL } }),
+  useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: relay.apiUrl ?? API_URL } }),
 }));
 // The banned-event fallback the pane reads once the thread finds no post: not
 // banned one at a time, so null, at once. While `relay.bannedLookup` is set it
@@ -162,6 +163,7 @@ const JUST_RESTORED = /The account was just unsuspended, and its posts can take 
 describe('ReportDetail after an account action on a post read before it', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    relay.apiUrl = undefined;
     relay.post = undefined;
     relay.nextRead = undefined;
     relay.bannedLookup = undefined;
@@ -339,6 +341,37 @@ describe('ReportDetail after an account action on a post read before it', () => 
     rerender(pane(REPORT));
     expect(await screen.findByText(JUST_RESTORED)).toBeInTheDocument();
     expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+  });
+
+  it('keeps the thread read for another environment when an Unsuspend finishes after a switch', async () => {
+    let finish!: () => void;
+    relay.finishAction = new Promise(resolve => { finish = resolve; });
+    relay.post = POST;
+    api.listSuspendedPubkeys.mockResolvedValue([{ pubkey: REPORTED_PUBKEY }]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+    const pane = (environment: string) => (
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail key={environment} report={REPORT} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(pane(API_URL));
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Unsuspend' }));
+    await waitFor(() => expect(client.isMutating()).toBe(1));
+
+    // As in RelayManager, clear the shared cache and remount the report pane
+    // for the new environment. The same signed event can be on both relays.
+    const otherApi = 'https://api.b.example';
+    relay.apiUrl = otherApi;
+    rerender(<></>);
+    client.clear();
+    rerender(pane(otherApi));
+    await waitFor(() => expect(client.getQueryData(['thread', EVENT_ID, 3, otherApi, undefined])).toMatchObject({ event: POST }));
+    expect(relay.reads).toBe(2);
+
+    await act(async () => { finish(); });
+    await waitFor(() => expect(api.verifyEventDeleted).toHaveBeenCalledWith(EVENT_ID));
+    expect(relay.reads).toBe(2);
   });
 
   // The report on screen when the action finishes is on another post by the
