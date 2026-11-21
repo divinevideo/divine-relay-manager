@@ -986,6 +986,65 @@ describe('UserManagement timed suspensions', () => {
       await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     });
 
+    // Cancel stays enabled during the unban, and a closed prompt is unmounted, so it can't say
+    // why nothing happened: the refusal is a toast instead, and the account is still banned.
+    const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
+    const refusedToast = expect.objectContaining({ title: 'Failed to unban user', description: REFUSED });
+
+    it('a suspension_changed refusal after the prompt was closed says so in a toast, once the timers are re-read', async () => {
+      api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
+      let reread!: (v: unknown) => void;
+      api.listTimedSuspensions.mockResolvedValue([]).mockResolvedValueOnce([])
+        .mockReturnValueOnce(new Promise(r => { reread = r; }));
+      let refuse!: (e: unknown) => void;
+      api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+      renderPage();
+      fireEvent.click(await screen.findByRole('button', { name: /^Unban$/i }));
+      const dialog = await screen.findByRole('dialog');
+      await within(dialog).findByLabelText('Keep suspended with no end date');
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+      fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+      await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+      await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
+      expect(toast).not.toHaveBeenCalledWith(refusedToast);
+
+      await act(async () => { reread([]); });
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(refusedToast));
+    });
+
+    // The Banned tab's Unban stays clickable while an unban is pending, so another account's
+    // prompt can be open when the first refusal comes back. That prompt can't say it either.
+    it("a refusal whose prompt was closed is a toast even while another account's prompt is open", async () => {
+      api.callRelayRpc.mockImplementation(lists({
+        banned: [{ pubkey: PUBKEY }, { pubkey: OTHER }], suspended: [{ pubkey: PUBKEY }, { pubkey: OTHER }],
+      }));
+      api.listTimedSuspensions.mockResolvedValue([]);
+      let refuse!: (e: unknown) => void;
+      api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+      renderPage();
+      // The Banned tab lists PUBKEY, then OTHER.
+      const unbanButtons = await screen.findAllByRole('button', { name: /^Unban$/i });
+      expect(unbanButtons).toHaveLength(2);
+      fireEvent.click(unbanButtons[0]);
+      const first = await screen.findByRole('dialog');
+      await within(first).findByLabelText('Keep suspended with no end date');
+      confirmUnban();
+      await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+      fireEvent.click(within(first).getByRole('button', { name: 'Cancel' }));
+      await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+      fireEvent.click(screen.getAllByRole('button', { name: /^Unban$/i })[1]);
+      const second = await screen.findByRole('dialog');
+
+      await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(refusedToast));
+      expect(screen.getByRole('dialog')).toBe(second);
+      expect(api.unbanPubkey).toHaveBeenCalledTimes(1);
+    });
+
     it('blocks confirm while the timers are first loading', async () => {
       api.callRelayRpc.mockImplementation(lists({ banned: [{ pubkey: PUBKEY }], suspended: [{ pubkey: PUBKEY }] }));
       api.listTimedSuspensions.mockReturnValue(new Promise(() => {}));

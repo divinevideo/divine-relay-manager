@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Button } from '@/components/ui/button';
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip';
@@ -273,6 +273,10 @@ export function UserActions({
     },
   });
 
+  // The account whose unban prompt is on screen, or null (kept in step below). A refusal
+  // is left to the prompt only while it still shows for that account; a closed prompt is
+  // unmounted and can't say why nothing happened.
+  const unbanPromptFor = useRef<string | null>(null);
   // `choice` is what happens to a timed suspension; with none the body carries
   // no choice and the worker keeps its default (resume). `version` is the timer
   // version the prompt showed, so the worker can refuse a choice made against an
@@ -306,12 +310,13 @@ export function UserActions({
     onError: async (error: Error, { target }) => {
       if (redirectIfGuarded(error, target)) return;
       // The timer moved since the prompt read it and nothing was done: read it again, and
-      // the prompt (still open) says why and asks against the current end.
+      // the prompt, if still open, says why and asks against the current end.
       // Awaited: the mutation stays pending (Confirm disabled) until the re-read settles. A
       // failed re-read shows the end as unavailable, and the next confirm sends no version.
+      // A prompt closed before then can say nothing, so the toast below does (still banned).
       if (isSuspensionChanged(error)) {
         await queryClient.invalidateQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
-        return;
+        if (unbanPromptFor.current === target) return;
       }
       toast({ title: 'Failed to unban user', description: error.message, variant: 'destructive' });
     },
@@ -402,6 +407,13 @@ export function UserActions({
   const timer = useTimedSuspension(confirmedSuspended || (isBanned && unbanAsks) ? pubkey : null);
   // Open for one account, like the duration dialog above.
   const [unbanDialogPubkey, setUnbanDialogPubkey] = useState<string | null>(null);
+  // The prompt shows only under isBanned (see below), and Unban is disabled while one is
+  // pending, so the account identifies the opening. Cleared on unmount, when none shows.
+  const unbanPromptShown = isBanned && unbanDialogPubkey === pubkey ? pubkey : null;
+  useEffect(() => {
+    unbanPromptFor.current = unbanPromptShown;
+    return () => { unbanPromptFor.current = null; };
+  }, [unbanPromptShown]);
   // A prop-driven close fires no onOpenChange, so an account switch also drops
   // both targets: otherwise going back to the first account would reopen the
   // dialog it abandoned. Set during render, React's pattern for state that

@@ -1,7 +1,7 @@
 // ABOUTME: User management interface for banning, suspending, and allowing users on the relay
 // ABOUTME: Includes verification to confirm NIP-86 actions succeeded and D1 audit logging
 
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -237,13 +237,19 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     }
   };
 
+  // The unban prompt's opening on screen, or null (kept in step below). A refusal is left
+  // to the prompt only while the opening that sent it still shows: a closed prompt is
+  // unmounted, and the Banned tab can open another account's prompt while an unban is
+  // pending, so neither can say why nothing happened.
+  const unbanOpenings = useRef(0);
+  const unbanPromptShown = useRef<number | null>(null);
   // Mutation for unbanning users. `choice` is what happens to a timed
   // suspension; with none the body carries no choice and the worker keeps its
   // default (resume). `version` is the timer version the prompt showed, so the
   // worker can refuse a choice made against an older read (null: no timer
-  // shown; undefined: nothing to compare).
+  // shown; undefined: nothing to compare). `opening` is the prompt that sent it.
   const unbanUserMutation = useMutation({
-    mutationFn: async ({ pubkey, choice, version }: { pubkey: string; choice?: UnbanSuspensionChoice; version?: number | null }) => {
+    mutationFn: async ({ pubkey, choice, version }: { pubkey: string; choice?: UnbanSuspensionChoice; version?: number | null; opening?: number }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const outcome = choice === undefined ? await act.unbanPubkey(pubkey)
         : version === undefined ? await act.unbanPubkey(pubkey, choice)
@@ -281,15 +287,16 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         }
       });
     },
-    onError: async (error: Error, variables: { pubkey: string; choice?: UnbanSuspensionChoice; version?: number | null }) => {
+    onError: async (error: Error, variables: { pubkey: string; choice?: UnbanSuspensionChoice; version?: number | null; opening?: number }) => {
       if (redirectIfGuarded(error, variables.pubkey)) return;
       // The timer moved since the prompt read it and nothing was done: read it again, and
-      // the prompt (still open) says why and asks against the current end.
+      // the prompt, if still open, says why and asks against the current end.
       // Awaited: the mutation stays pending (Confirm disabled) until the re-read settles. A
       // failed re-read shows the end as unavailable, and the next confirm sends no version.
+      // A prompt closed before then can say nothing, so the toast below does (still banned).
       if (isSuspensionChanged(error)) {
         await queryClient.invalidateQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
-        return;
+        if (variables.opening !== undefined && unbanPromptShown.current === variables.opening) return;
       }
       toast({
         title: "Failed to unban user",
@@ -339,7 +346,11 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   // asks: failing toward asking, as UserActions does with isSuspended !== false.
   // The target outlives the close, so the prompt's options don't change while
   // it animates out; `open` is separate.
-  const [unbanDialog, setUnbanDialog] = useState<{ pubkey: string; open: boolean } | null>(null);
+  const [unbanDialog, setUnbanDialog] = useState<{ pubkey: string; open: boolean; opening: number } | null>(null);
+  useEffect(() => {
+    unbanPromptShown.current = unbanDialog?.open ? unbanDialog.opening : null;
+    return () => { unbanPromptShown.current = null; };
+  }, [unbanDialog]);
   const unbanTimer = useTimedSuspension(unbanDialog?.pubkey);
   // An answer is a list that loaded and whose latest read did not fail: a
   // failed refresh keeps an older copy that may predate a suspend.
@@ -360,7 +371,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const handleRemoveUser = async (pubkey: string, type: 'ban' | 'allow' | 'suspend') => {
     if (type === 'ban') {
       if (suspendedListAnsweredWithout(pubkey)) unbanUserMutation.mutate({ pubkey });
-      else setUnbanDialog({ pubkey, open: true });
+      else setUnbanDialog({ pubkey, open: true, opening: ++unbanOpenings.current });
     } else if (type === 'suspend') {
       unsuspendUserMutation.mutate({ pubkey });
     } else {
@@ -716,7 +727,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         timersLoading={unbanTimer.isLoading}
         onConfirm={async (choice, version) => {
           if (!unbanDialog) return;
-          await unbanUserMutation.mutateAsync({ pubkey: unbanDialog.pubkey, choice, version });
+          await unbanUserMutation.mutateAsync({ pubkey: unbanDialog.pubkey, choice, version, opening: unbanDialog.opening });
         }}
       />
 

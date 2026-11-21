@@ -1786,6 +1786,54 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
   });
 
+  // Cancel stays enabled during the unban, and a closed prompt is unmounted, so it can't say
+  // why nothing happened: the refusal is a toast instead, and the account is still banned.
+  it('a suspension_changed refusal after the prompt was closed says so in a toast, once the timers are re-read', async () => {
+    const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
+    const refusedToast = expect.objectContaining({ title: 'Failed to unban user', description: REFUSED });
+    let reread!: (v: unknown) => void;
+    api.listTimedSuspensions.mockResolvedValue([]).mockResolvedValueOnce([])
+      .mockReturnValueOnce(new Promise(r => { reread = r; }));
+    let refuse!: (e: unknown) => void;
+    api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    await within(dialog).findByLabelText('Keep suspended with no end date');
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+    await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
+    expect(toast).not.toHaveBeenCalledWith(refusedToast);
+
+    await act(async () => { reread([]); });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(refusedToast));
+  });
+
+  // Leaving the page with the prompt open unmounts it without a close: the refusal still
+  // arrives (a mutation-level callback), and nothing on screen can say it but the toast.
+  it('a suspension_changed refusal after the page unmounted with the prompt open is a toast', async () => {
+    const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
+    api.listTimedSuspensions.mockResolvedValue([]);
+    let refuse!: (e: unknown) => void;
+    api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
+    const { unmount } = renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    await within(screen.getByRole('dialog')).findByLabelText('Keep suspended with no end date');
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'open_ended', null));
+    unmount();
+
+    await act(async () => { refuse(new ApiError(REFUSED, 409, 'Conflict', 'suspension_changed')); });
+
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({
+      title: 'Failed to unban user', description: REFUSED,
+    })));
+  });
+
   // A confirm before the timers' first read answers would carry no version and skip the check.
   it('blocks confirm while the timers are first loading', async () => {
     api.listTimedSuspensions.mockReturnValue(new Promise(() => {}));
