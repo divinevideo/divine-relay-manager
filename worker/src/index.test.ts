@@ -4,6 +4,8 @@ import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
 import * as accountStatus from './account-status';
+import * as retention from './retention';
+import * as timedSuspensions from './timed-suspensions';
 import { __clearModeratorLoginCache } from './moderator-identity';
 import { relayFake } from './test-helpers/relay-fake';
 
@@ -381,7 +383,7 @@ describe('relay-rpc account-state side effects', () => {
 
   // Routes a mocked fetch by URL so each backend can be asserted independently.
   function makeFetchSpy() {
-    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL) => {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.includes('/api/v1/notify')) {
         return new Response(JSON.stringify({ dm_sent: true }), { status: 200 });
@@ -393,7 +395,14 @@ describe('relay-rpc account-state side effects', () => {
       if (url.includes('/api/admin/users/')) {
         return new Response('', { status: 200 });
       }
-      // NIP-86 relay RPC management endpoint
+      // NIP-86 relay RPC management endpoint. The suspended and banned lists answer empty: an
+      // unban reads the suspended list (B7) and a manual unsuspend reads the ban list, and a
+      // bare {result:true} is not a list, which reads as 'unknown' and would stop the Keycast
+      // restore these tests assert.
+      const rpcBody = typeof init?.body === 'string' ? init.body : '';
+      if (rpcBody.includes('"method":"listsuspendedpubkeys"') || rpcBody.includes('"method":"listbannedpubkeys"')) {
+        return new Response(JSON.stringify({ result: [] }), { status: 200 });
+      }
       return new Response(JSON.stringify({ result: true }), { status: 200 });
     });
   }
@@ -1671,6 +1680,31 @@ describe('relay-rpc account-state side effects', () => {
       },
     );
 
+    // Suspend and unban now await D1 writes, list reads (and, for unban end_now,
+    // a second relay call) before their Keycast and notice legs are registered.
+    // A client that gives up in that window must not cancel the rest: a relay
+    // unsuspend that landed with no Keycast step or notice is a silent half-restore.
+    it.each([
+      ['suspendpubkey', () => makeAccountStateEnv()],
+      ['unbanpubkey', () => makeAccountStateEnvWithDb(null)],
+    ] as const)('relay-rpc keeps a %s alive past a client disconnect while the relay is still answering', async (method, makeEnv) => {
+      let releaseRelay!: () => void;
+      const relayAnswered = new Promise<void>(resolve => { releaseRelay = resolve; });
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async () => {
+        await relayAnswered;
+        return new Response(JSON.stringify({ result: true }), { status: 200 });
+      });
+      const waitUntil = vi.fn();
+      const testCtx = { waitUntil } as unknown as ExecutionContext;
+
+      const pending = callRelayRpc(method, [VALID_PUBKEY, 'policy'], makeEnv(), testCtx);
+      await new Promise(resolve => setTimeout(resolve, 0));
+
+      expect(waitUntil).toHaveBeenCalled();
+      releaseRelay();
+      expect((await pending).status).toBe(200);
+    });
+
     // The relay call's own keep-alive settles once the relay answers, so the
     // moderate route must keep its later follow-ups (here the human-review
     // mark) alive too.
@@ -2679,6 +2713,118 @@ describe('scheduled cron — DB-unavailable alert', () => {
     await worker.scheduled(scheduledEvent, cronEnv, ctx);
 
     expect(mockFetch).not.toHaveBeenCalled();
+  });
+});
+
+// -- scheduled() timed-suspension tick (#263) ----------------------------------
+
+describe('scheduled cron — timed-suspension tick', () => {
+  const zeroSummary = {
+    lifted: 0, alreadyLifted: 0, cancelledByBan: 0, waiting: 0, failed: 0, keycastSettled: 0, recovered: 0,
+    dueForManualLift: 0,
+  };
+
+  function recordingDb() {
+    const sqls: string[] = [];
+    const statement = (sql: string): unknown => ({
+      bind: () => statement(sql),
+      run: async () => ({ success: true, meta: { changes: 0 } }),
+      first: async () => null,
+      all: async () => ({ results: [] }),
+    });
+    return { sqls, db: { prepare: (sql: string) => { sqls.push(sql); return statement(sql); } } };
+  }
+
+  function cronEnv(db: unknown) {
+    return {
+      ALLOWED_ORIGINS: 'https://app.divine.video',
+      RELAY_URL: 'wss://relay.divine.video',
+      ENVIRONMENT: 'test',
+      DB: db,
+    } as never;
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('runs the tick even when the age-review deadline check throws', async () => {
+    vi.spyOn(ageReview, 'checkAgeReviewDeadlines').mockRejectedValue(new Error('deadline check down'));
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent, cronEnv(recordingDb().db), ctx);
+
+    expect(tick).toHaveBeenCalledTimes(1);
+  });
+
+  it('runs the tick last, after the retention scan has finished', async () => {
+    const order: string[] = [];
+    vi.spyOn(retention, 'runRetentionDisposal').mockImplementation(async () => {
+      order.push('retention');
+      return {
+        claimLinksCleared: 0, casesRedacted: 0, casesDeleted: 0, projectionsDeleted: 0, bindingsDeleted: 0,
+        operationsCompacted: 0, subjectsDeleted: 0, privateReportsRedacted: 0,
+      } as never;
+    });
+    vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockImplementation(async () => {
+      order.push('tick');
+      return zeroSummary;
+    });
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 0) } as ScheduledEvent, cronEnv(recordingDb().db), ctx);
+
+    expect(order).toEqual(['retention', 'tick']);
+  });
+
+  it('a failing tick does not stop the retention scan', async () => {
+    vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockRejectedValue(new Error('tick down'));
+    const disposal = vi.spyOn(retention, 'runRetentionDisposal').mockResolvedValue({
+      claimLinksCleared: 0, casesRedacted: 0, casesDeleted: 0, projectionsDeleted: 0, bindingsDeleted: 0,
+      operationsCompacted: 0, subjectsDeleted: 0, privateReportsRedacted: 0,
+    } as never);
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 0) } as ScheduledEvent, cronEnv(recordingDb().db), ctx);
+
+    expect(disposal).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(console.error).mock.calls.some(call =>
+      String(call[0]).includes('[scheduled] Timed suspension tick failed'))).toBe(true);
+  });
+
+  it('logs the summary only when something changed', async () => {
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+    const event = { scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent;
+    const tickLogs = () => vi.mocked(console.log).mock.calls.filter(call =>
+      String(call[0]).includes('[scheduled] Timed suspension tick'));
+
+    await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
+    expect(tick).toHaveBeenCalledTimes(1);
+    expect(tickLogs()).toHaveLength(0);
+
+    tick.mockResolvedValue({ ...zeroSummary, lifted: 1 });
+    await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
+    expect(tickLogs()).toHaveLength(1);
+    expect(String(tickLogs()[0][0])).toContain('"lifted":1');
+
+    tick.mockResolvedValue({ ...zeroSummary, dueForManualLift: 1 });
+    await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
+    expect(tickLogs()).toHaveLength(2);
+    expect(String(tickLogs()[1][0])).toContain('"dueForManualLift":1');
+  });
+
+  it('passes the automatic-lift switch through to the tick, as set', async () => {
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+    const event = { scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent;
+    const withSwitch = (value: string) =>
+      ({ ...(cronEnv(recordingDb().db) as object), TIMED_SUSPENSION_AUTO_LIFT_ENABLED: value }) as never;
+
+    await worker.scheduled(event, withSwitch('true'), ctx);
+    await worker.scheduled(event, withSwitch('false'), ctx);
+
+    expect(tick.mock.calls.map(c => c[0].TIMED_SUSPENSION_AUTO_LIFT_ENABLED)).toEqual(['true', 'false']);
   });
 });
 

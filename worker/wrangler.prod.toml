@@ -136,6 +136,12 @@ MODERATOR_LOGIN_URL = "https://login.divine.video"
 # Keycast outage. Server callers on an admin key are never affected.
 REQUIRE_MODERATOR_LOGIN = "false"
 PROTECTED_MINOR_REPLACEMENT_ENABLED = "false"
+# Timed suspensions: "true" lets the scheduler lift a suspension when its end passes.
+# Off until Platform supplies conditional relay and Keycast writes (a lift cannot yet
+# be made conditional on the state it read, so it could undo a concurrent action).
+# While off, a passed end alerts Slack and a moderator unsuspends by hand, and the
+# person's messages state no end date. Anything other than "true" is off.
+TIMED_SUSPENSION_AUTO_LIFT_ENABLED = "false"
 # Greenlight consent reviewer playback: the dedicated Access application's
 # team domain. CONSENT_ACCESS_AUD is set only once that path-scoped Access
 # application exists (see PR rollout steps); while unset, playback fails

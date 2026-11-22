@@ -2,6 +2,7 @@
 // ABOUTME: and the test for a decision row that no person made.
 
 import { AUTO_HIDE_ACTIONS } from './autohide';
+import { TIMER_DECISION_ACTIONS } from './suspension';
 
 // ReportWatcher writes this when no moderator pubkey comes with a decision:
 // on its own decisions (logDecision, today when it opens an age-review case),
@@ -12,7 +13,9 @@ export const AUTOMATED_MODERATOR = 'auto';
 // A decision no person made. Auto-hide actions never count, whoever wrote
 // them: the fallback above puts this marker on a person's auto-hide decisions
 // too, and every reader of auto-hide rows goes by their state, not their author.
+// The suspension timer's own rows always count, whatever the moderator field holds.
 export function isAutomatedDecision(row: { action: string; moderator_pubkey?: string | null }): boolean {
+  if (TIMER_DECISION_ACTIONS.includes(row.action)) return true;
   return row.moderator_pubkey === AUTOMATED_MODERATOR
     && !(AUTO_HIDE_ACTIONS as readonly string[]).includes(row.action);
 }

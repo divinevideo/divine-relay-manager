@@ -277,6 +277,8 @@ describe('private-report intake: open to MOD_RELAY_ADMIN_KEY on POST, and no fur
     '/api/age-review/create-minor-account',
     '/api/admin/protected-minors/backfill',
     '/api/internal/private-reports/extra',
+    // Changing a suspension's end date is a moderator decision, not moderation-service's.
+    '/api/suspensions/end',
   ])('still refuses moderation-service\'s key on POST %s', async (path) => {
     expect((await send(`https://api.test${path}`, 'POST', { 'X-Admin-Key': 'mod-relay-key' })).status).toBe(401);
   });

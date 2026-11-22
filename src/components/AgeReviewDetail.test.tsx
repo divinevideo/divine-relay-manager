@@ -27,7 +27,8 @@ vi.mock('@/hooks/useUserStats', () => ({
 }));
 import type { AgeReviewCase, AgeBand, AgeReviewState } from '../../shared/age-review';
 
-const suspendPubkey = vi.fn().mockResolvedValue({ success: true });
+// suspendPubkey answers a SuspendOutcome (timed suspensions); an open-ended one here.
+const suspendPubkey = vi.fn().mockResolvedValue({ endsAt: null, recorded: false, decisionRecorded: true });
 const updateAgeReviewCase = vi.fn().mockResolvedValue({ success: true });
 const getAgeReviewConfig = vi.fn().mockResolvedValue({ auto_delete_on_deny: false });
 const getAccountStatus = vi
@@ -1139,8 +1140,12 @@ describe('AgeReviewDetail drops cached authored-content reads after a decision',
     );
 
     fireEvent.click(await screen.findByRole('button', { name: /Suspend User/i }));
+    // Suspend asks for a length first (timed suspensions).
+    const dialog = screen.getByRole('dialog');
+    fireEvent.change(within(dialog).getByLabelText('Length'), { target: { value: '3' } });
+    fireEvent.click(within(dialog).getByRole('button', { name: 'Suspend' }));
 
-    await waitFor(() => expect(suspendPubkey).toHaveBeenCalled());
+    await waitFor(() => expect(suspendPubkey).toHaveBeenCalledWith('a'.repeat(64), 'Suspended by moderator', { value: 3, unit: 'days' }));
     await waitFor(() => expect(queryClient.getQueryData(STATS_KEY)).toBeUndefined());
     // The embedded suspend goes through asModerator(token) like the case's own actions (#178).
     expect(tokensFor(moderatorApi, 'suspendPubkey')).toEqual([MOD_TOKEN]);
