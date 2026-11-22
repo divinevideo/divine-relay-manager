@@ -697,6 +697,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // Not after a Ban or Suspend: the re-read would find no post, and the
       // media actions (Block Media, Age Restrict, Unblock) would lose the files
       // they act on. The earlier read stays, and the header says why it's gone.
+      // After a Suspend, mark the cached banned-event reads (kept 5 minutes)
+      // stale without refetching them: the post and its media files stay on
+      // screen now, and reopening the report reads afresh, which the worker
+      // refuses for a suspended author, so the pane offers the audited viewer
+      // instead (#445). Not after a Ban: moderators may still view a banned post.
+      if (change.action === 'suspend') {
+        queryClient.invalidateQueries({ queryKey: ['banned-event'], refetchType: 'none' });
+      }
       if (change.action === 'unsuspend' || change.action === 'unban') {
         // Refresh the report the action started from, even after navigating away.
         // Also refresh a different post on screen if it belongs to that account.

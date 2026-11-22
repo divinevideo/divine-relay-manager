@@ -28,8 +28,12 @@ const API_URL = 'https://api.a.example';
 // only when its query runs, so a cached answer outlives a change here.
 // `nextRead`, when set, holds the next read open until it settles, and that
 // read answers with what it settles to. `bannedLookup`, when set, holds the
-// banned-event fallback open the same way.
+// banned-event fallback open the same way. While `bannedServes` is set, the
+// fallback answers `banned`, kept for useBannedEvent's five minutes.
 const relay = vi.hoisted(() => ({
+  banned: undefined as NostrEvent | undefined,
+  bannedServes: false,
+  bannedReads: 0,
   apiUrl: undefined as string | undefined,
   post: undefined as NostrEvent | undefined,
   nextRead: undefined as Promise<NostrEvent | undefined> | undefined,
@@ -75,12 +79,18 @@ vi.mock('@/hooks/useAppContext', () => ({
 vi.mock('@/hooks/useBannedEvent', () => ({
   useBannedEvent: (eventId: string | undefined, enabled: boolean) => {
     const held = relay.bannedLookup;
+    const live = !!held || relay.bannedServes;
     const lookup = useQuery({
       queryKey: ['banned-event', eventId],
-      queryFn: async () => { await held; return null; },
-      enabled: !!held && enabled && !!eventId,
+      queryFn: async () => {
+        await held;
+        relay.bannedReads += 1;
+        return relay.banned?.id === eventId ? relay.banned : null;
+      },
+      enabled: live && enabled && !!eventId,
+      staleTime: 5 * 60 * 1000,
     });
-    return held ? lookup : { data: null, isLoading: false };
+    return live ? lookup : { data: null, isLoading: false };
   },
 }));
 vi.mock('@/hooks/useUserSummary', () => ({ useUserSummary: () => ({ data: null, isLoading: false }) }));
@@ -167,6 +177,9 @@ describe('ReportDetail after an account action on a post read before it', () => 
     relay.post = undefined;
     relay.nextRead = undefined;
     relay.bannedLookup = undefined;
+    relay.banned = undefined;
+    relay.bannedServes = false;
+    relay.bannedReads = 0;
     relay.finishAction = undefined;
     relay.reads = 0;
     account.action = 'unsuspend';
@@ -463,6 +476,50 @@ describe('ReportDetail after an account action on a post read before it', () => 
     expect(relay.reads).toBe(1);
     expect(screen.getByText('the reported post')).toBeInTheDocument();
     expect(screen.getByTestId('event-actions')).toHaveAttribute('data-media', VIDEO_HASH);
+  });
+
+  // Issue #445: the banned-event read is kept for five minutes. After a Suspend
+  // the worker refuses that read for the author. The pane keeps the post and
+  // its media files on screen at the moment of the Suspend, but a reopened
+  // report reads it afresh, so the refusal is what shows. After a Ban
+  // moderators may still view the post, so its cached read stands.
+  it.each(['suspend', 'ban'] as const)('after a %s, keeps the banned-event read on screen and handles it on reopen', async (kind) => {
+    account.action = kind;
+    relay.bannedServes = true;
+    relay.banned = VIDEO_POST;
+    api.listSuspendedPubkeys.mockResolvedValue([]);
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const pane = () => (
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={REPORT} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { unmount } = render(pane());
+    expect(await screen.findByText('the reported post')).toBeInTheDocument();
+    expect(screen.getByText('Event is banned on relay')).toBeInTheDocument();
+    expect(relay.bannedReads).toBe(1);
+
+    // From now on a fresh read answers nothing: after a Suspend that is the
+    // worker's refusal; after a Ban it only shows whether a fresh read ran.
+    relay.banned = undefined;
+    fireEvent.click(screen.getByRole('button', { name: ACTION_LABELS[kind] }));
+    await waitFor(() => expect(client.isFetching() + client.isMutating()).toBe(0), { timeout: 4000 });
+    // Nothing changes on screen at the action.
+    expect(screen.getByText('the reported post')).toBeInTheDocument();
+    expect(screen.getByTestId('event-actions')).toHaveAttribute('data-media', VIDEO_HASH);
+    expect(relay.bannedReads).toBe(1);
+    unmount();
+
+    render(pane());
+    await waitFor(() => expect(client.isFetching() + client.isMutating()).toBe(0), { timeout: 4000 });
+    if (kind === 'suspend') {
+      expect(relay.bannedReads).toBe(2);
+      expect(screen.queryByText('the reported post')).not.toBeInTheDocument();
+      expect(screen.queryByText('Event is banned on relay')).not.toBeInTheDocument();
+    } else {
+      expect(relay.bannedReads).toBe(1);
+      expect(screen.getByText('the reported post')).toBeInTheDocument();
+    }
   });
 
   // An Unban lifts what hid the post, so the pane reads it again, as after an
