@@ -476,4 +476,17 @@ export async function ensureSchema(db: D1Database): Promise<void> {
     report_id TEXT PRIMARY KEY,
     first_seen_at INTEGER NOT NULL
   )`).run();
+
+  // Timed suspension records and their lift state machine. Keep in sync with migration 0021.
+  await db.prepare(`CREATE TABLE IF NOT EXISTS timed_suspensions (
+    pubkey TEXT PRIMARY KEY,
+    ends_at TEXT,
+    status TEXT NOT NULL CHECK (status IN ('active','lifting','keycast_pending','lifted','already_lifted','cancelled_unsuspend','cancelled_ban')),
+    set_by TEXT, set_at TEXT NOT NULL,
+    changed_by TEXT, changed_at TEXT,
+    version INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT, last_attempt_at TEXT, last_alerted_at TEXT, claimed_at TEXT
+  )`).run();
+  await db.prepare(`CREATE INDEX IF NOT EXISTS idx_timed_suspensions_due ON timed_suspensions(status, ends_at)`).run();
 }

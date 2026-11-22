@@ -117,12 +117,27 @@ interface ReportDetailProps {
   // handled only by a label has no handling row in the decision log, yet the
   // queue counts it and a Reopen cancels it, so Reopen shows on this as well.
   queueHandled?: boolean;
+  // Whether the queue's author rule applies to this post's report (#432): the
+  // author the queue reads (the report's p tag) is relay-banned, matched as
+  // the relay matches. The ban then keeps the report handled whatever its own
+  // handling, so Reopen is not offered. Null when the queue cannot say, and by
+  // default, so a caller that omits it gets the qualified promise rather than
+  // an unchecked one. The pane's own ban check reads another author (the event's) and
+  // ignores case, so it cannot stand in for this. Unused on an account report.
+  authorBanned?: boolean | null;
 }
+
+// Reopen's promise, in its tooltip and its toast. While the queue cannot say
+// whether the post's author is banned, a ban may still keep the earlier
+// reports handled (#432), so the promise is qualified.
+const REOPEN_PROMISE = "Its history is kept, and reports filed before now count as new again.";
+const REOPEN_PROMISE_AUTHOR_UNKNOWN =
+  "Its history is kept. Reports filed before now count as new again unless the post's author is banned, which keeps them handled.";
 
 const ACCOUNT_HANDLED_BEFORE_PROMPT =
   "This account was handled before. Does this report, with the account's current state, change the call?";
 
-export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBefore, queueHandled = false }: ReportDetailProps) {
+export function ReportDetail({ report, allReportsForTarget, allReportsForTargetTruncated = false, targetReportsMayBePartial = false, targetLeftList = false, onDismiss, switchState, handledBefore, queueHandled = false, authorBanned = null }: ReportDetailProps) {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
@@ -325,6 +340,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const lastHandlingDecision = decisionLog.latestHandlingDecision
     || (isUserBanned ? pubkeyDecisionLog.latestHandlingDecision : undefined);
 
+  // A relay ban that keeps this report handled whatever a Reopen does: on a
+  // post, its author's ban as the queue applies it (#432); on an account
+  // report, the account's own. While the queue cannot say (null), Reopen is
+  // offered and its promise qualified (see reopenMutation).
+  const isPostReport = context.target?.type === 'event';
+  const banKeepsHandled = isPostReport ? authorBanned === true : isUserBanned;
+  const reopenPromise = isPostReport && authorBanned === null ? REOPEN_PROMISE_AUTHOR_UNKNOWN : REOPEN_PROMISE;
+
   // The decision log card's "Already Handled" title and colour.
   const showAlreadyHandled = decisionLog.hasHandlingDecisions && !handledBefore;
 
@@ -394,10 +417,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // the mutation from the observer's LATEST options -- so a mutationFn closing
   // over `context` would send the retry at whichever report is selected when
   // it is clicked, reopening that report instead.
-  type ReopenTarget = ReportTarget;
+  // Likewise the promise its toast makes, which depends on what was known
+  // about the author's ban at the click.
+  type ReopenRequest = { target: ReportTarget | null; promise: string };
 
   const reopenMutation = useMutation({
-    mutationFn: async (target: ReopenTarget | null) => {
+    mutationFn: async ({ target }: ReopenRequest) => {
       if (!target) throw new Error('No target');
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       // Reopen the target, and only the target. The worker records a dated
@@ -409,14 +434,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // post's own row is enough to bring its report back, because the
       // author's handling only counts for a post report while the author is
       // relay-banned (reportResolution.ts), and Reopen is not offered once the
-      // ban is known. It is offered while the ban status is loading or failed
-      // to load (isUserBanned null), and reopening a banned author's post then
-      // leaves its report handled by the ban. That is accepted: hiding Reopen
-      // until the status is known would hide it during every load or relay
-      // outage, and on reports with no author, whose status is never known.
+      // queue applies that ban (authorBanned). It is offered while the queue
+      // has no ban list (authorBanned null), and reopening a banned author's
+      // post then leaves its report handled by the ban; the toast's promise
+      // says so (#432). That is accepted: hiding Reopen until the status is
+      // known would hide it through every relay outage.
       return act.deleteDecisions(target.value, target.type);
     },
-    onSuccess: ({ labelCleanupFailed }, target) => {
+    onSuccess: ({ labelCleanupFailed }, request) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
       // The helper above refreshes the report feeds: a reopen moves the target
@@ -463,9 +488,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             // resolve the report again and reopen.
             //
             // Re-sends the target this toast was raised for, not whatever is
-            // selected when it is clicked -- see ReopenTarget above.
+            // selected when it is clicked -- see ReopenRequest above.
             action: (
-              <ToastAction altText="Retry the reopen" onClick={() => reopenMutation.mutate(target)}>
+              <ToastAction altText="Retry the reopen" onClick={() => reopenMutation.mutate(request)}>
                 Try again
               </ToastAction>
             ),
@@ -473,7 +498,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
           }
         : {
             title: "Report reopened",
-            description: "Its history is kept, and reports filed before now count as new again.",
+            description: request.promise,
             // Longer than the 5s Radix default can be read in.
             duration: 10000,
           });
@@ -1550,15 +1575,16 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               {/* Reopen: only when something handled the target since its last
                   reopen, by the decision log or, for a label, by the queue. Not
                   the author's log: it covers a post only while the author is
-                  banned, and Reopen is not offered once that ban is known (see
-                  reopenMutation for the loading and failed-to-load case). */}
-              {(decisionLog.hasHandlingDecisions || queueHandled) && !isUserBanned && !isEventDeleted && (
+                  banned, and Reopen is not offered once the queue applies that
+                  ban (banKeepsHandled; see reopenMutation for when the queue
+                  cannot say). */}
+              {(decisionLog.hasHandlingDecisions || queueHandled) && !banKeepsHandled && !isEventDeleted && (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <Button
                       variant="outline"
                       className="border-orange-500 text-orange-600 hover:bg-orange-50"
-                      onClick={() => reopenMutation.mutate(context.target)}
+                      onClick={() => reopenMutation.mutate({ target: context.target, promise: reopenPromise })}
                       disabled={reopenMutation.isPending}
                     >
                       <History className="h-4 w-4 mr-1" />
@@ -1566,7 +1592,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent side="bottom" className="max-w-xs">
-                    <p>Reopen this report for review. Its history is kept, and reports filed before now count as new again.</p>
+                    <p>Reopen this report for review. {reopenPromise}</p>
                   </TooltipContent>
                 </Tooltip>
               )}

@@ -7,17 +7,18 @@ import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import TestApp from '@/test/TestApp';
-import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
+import { EMPTY_RESOLVED_PAGE, resolvedPage } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
 
 const RELAY_URL = 'wss://relay.example';
 const TARGET = 'c'.repeat(64);
 
 vi.mock('@/components/ReportDetail', () => ({
-  ReportDetail: ({ report, handledBefore, queueHandled }: {
+  ReportDetail: ({ report, handledBefore, queueHandled, authorBanned }: {
     report: { id: string } | null;
     handledBefore?: { history: unknown; via: string };
     queueHandled?: boolean;
+    authorBanned?: boolean | null;
   }) => (
     <div
       data-testid="detail"
@@ -25,6 +26,7 @@ vi.mock('@/components/ReportDetail', () => ({
       data-handled-before={JSON.stringify(handledBefore?.history ?? null)}
       data-handled-before-via={handledBefore?.via ?? ''}
       data-queue-handled={String(queueHandled ?? false)}
+      data-author-banned={String(authorBanned)}
     />
   ),
 }));
@@ -485,6 +487,8 @@ describe('items handled before a newer report', () => {
     labelTargets = [],
     feedFails = false,
     lookupEvents = [],
+    bannedPubkeysFail = false,
+    resolvedEvents = [],
   }: {
     events: unknown[];
     // undefined: a worker from before #324, which sends no handling rows.
@@ -498,10 +502,16 @@ describe('items handled before a newer report', () => {
     feedFails?: boolean;
     // What a deep link's targeted lookup (?event= / ?pubkey=) finds.
     lookupEvents?: unknown[];
+    // listbannedpubkeys fails, with no earlier list to fall back on.
+    bannedPubkeysFail?: boolean;
+    // What resolved history (the Hide resolved off view) holds.
+    resolvedEvents?: unknown[];
   }) {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input instanceof Request ? input.url : input);
-      if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
+      if (url.includes('/api/reports/resolved')) {
+        return jsonResponse(resolvedPage(resolvedEvents, { nextCursor: null, done: true }));
+      }
       if (url.includes('/api/reports?event=') || url.includes('/api/reports?pubkey=')) {
         return jsonResponse({ success: true, events: lookupEvents });
       }
@@ -527,6 +537,12 @@ describe('items handled before a newer report', () => {
       }
       if (url.includes('/api/relay-rpc')) {
         const listsPubkeys = String(init?.body ?? '').includes('listbannedpubkeys');
+        if (listsPubkeys && bannedPubkeysFail) {
+          return new Response(JSON.stringify({ success: false, error: 'relay unavailable' }), {
+            status: 502,
+            headers: { 'Content-Type': 'application/json' },
+          });
+        }
         return jsonResponse({ success: true, result: listsPubkeys ? bannedPubkeys.map(pubkey => ({ pubkey })) : [] });
       }
       return jsonResponse({ success: true });
@@ -815,6 +831,84 @@ describe('items handled before a newer report', () => {
       } finally {
         window.history.pushState({}, '', '/');
       }
+    });
+
+    // #432: the pane offers Reopen on a post only when the queue would bring
+    // its report back, so it takes the queue's own reading of the author ban:
+    // the author the report's p tag names, matched as the relay matches.
+    it("tells the pane the queue applies the post's author ban (#432)", async () => {
+      stubDated(fixture);
+      const user = userEvent.setup();
+      renderQueue();
+
+      await user.click(await screen.findByRole('button', { name: /already handled/ }));
+      await user.click(row(`event:${POST}`)!);
+      await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-author-banned', 'true'));
+    });
+
+    // The relay matches a ban exactly, so an uppercase entry never banned the
+    // lowercase account and the queue does not apply it. Nor may the pane.
+    it('tells the pane an uppercase ban-list entry does not ban the lowercase author (#432)', async () => {
+      stubDated({ ...fixture, bannedPubkeys: [BANNED, AUTHOR.toUpperCase()] });
+      const user = userEvent.setup();
+      renderQueue();
+
+      await user.click(await screen.findByRole('button', { name: /already handled/ }));
+      await waitFor(() => expect(row(`event:${POST}`)).not.toBeNull());
+      await user.click(row(`event:${POST}`)!);
+      await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', POST_REPORT.id));
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-author-banned', 'false');
+    });
+
+    // Until the queue has read the ban list it cannot say, and the pane hears
+    // that rather than "not banned". The pane opens without the list only once
+    // the list has failed cold and the moderator chose to see the queue anyway.
+    it('tells the pane the author ban is unknown when the queue has no ban list (#432)', async () => {
+      stubDated({ ...fixture, bannedPubkeysFail: true });
+      const user = userEvent.setup();
+      renderQueue();
+
+      await user.click(await screen.findByRole('button', { name: /show the queue anyway/i }));
+      await waitFor(() => expect(row(`event:${POST}`)).not.toBeNull());
+      await user.click(row(`event:${POST}`)!);
+      await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', POST_REPORT.id));
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-author-banned', 'null');
+    });
+
+    // A post whose report names no author: the rule cannot apply, which the
+    // queue knows, so the pane hears "not banned" rather than unknown.
+    it('tells the pane the author rule does not apply to a post report with no author (#432)', async () => {
+      const NO_AUTHOR_POST = '8b'.repeat(32);
+      const noAuthorReport = { ...POST_REPORT, id: '32'.repeat(32), tags: [['e', NO_AUTHOR_POST, 'spam']] };
+      stubDated({ ...fixture, events: [...fixture.events, noAuthorReport] });
+      const user = userEvent.setup();
+      renderQueue();
+
+      await waitFor(() => expect(row(`event:${NO_AUTHOR_POST}`)).not.toBeNull());
+      await user.click(row(`event:${NO_AUTHOR_POST}`)!);
+      await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', noAuthorReport.id));
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-author-banned', 'false');
+    });
+
+    // A report the pane keeps open after it left the loaded reports (here, one
+    // opened from resolved history before Hide resolved went back on) is in no
+    // group, so the queue has no author for it. That is not "no author": the
+    // pane hears unknown, not "not banned".
+    it('tells the pane the author ban is unknown for an open report no longer loaded (#432)', async () => {
+      stubDated({ ...fixture, events: [A_OLD, A_NEW, C_NEW], resolvedEvents: [POST_REPORT] });
+      const user = userEvent.setup();
+      renderQueue();
+
+      await screen.findByRole('button', { name: /already handled/ });
+      await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+      await waitFor(() => expect(row(`event:${POST}`)).not.toBeNull());
+      await user.click(row(`event:${POST}`)!);
+      await waitFor(() => expect(screen.getByTestId('detail')).toHaveAttribute('data-author-banned', 'true'));
+
+      await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
+      await waitFor(() => expect(row(`event:${POST}`)).toBeNull());
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-report-id', POST_REPORT.id);
+      expect(screen.getByTestId('detail')).toHaveAttribute('data-author-banned', 'null');
     });
 
     it("hands the pane the author's history for a post handled before through its author", async () => {

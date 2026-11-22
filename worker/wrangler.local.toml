@@ -39,6 +39,9 @@ RELAY_URL = "ws://127.0.0.1:4444"
 # pairing RELAY_URL :4444 with API :3000 mixes two stacks.
 FUNNELCAKE_API_URL = "http://127.0.0.1:3333"
 AUTO_HIDE_ENABLED = "false"
+# Timed suspensions: off, as deployed (see wrangler.prod.toml). Set "true" to
+# exercise the automatic lift against the local relay.
+TIMED_SUSPENSION_AUTO_LIFT_ENABLED = "false"
 TRUSTED_CLIENTS = "diVine,divine-web,divine-mobile"
 # Path for NIP-86 management API. Appended to RELAY_URL with the scheme mapped to
 # its http counterpart: wss -> https, ws -> http (see getManagementUrl).

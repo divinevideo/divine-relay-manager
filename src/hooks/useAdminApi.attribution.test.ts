@@ -2,6 +2,7 @@
 // ABOUTME: X-Divine-Login-Token header, and the plain useAdminApi() has none of them (#178).
 import { renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '@/lib/adminApi';
 import { buildAdminApi, useAdminApi, type ModeratorApi, type PlainAdminApi } from './useAdminApi';
 
 // The worker records the moderator it verifies from this header, and nothing
@@ -36,6 +37,13 @@ const ATTRIBUTION_CALLS: Array<[string, (api: ModeratorApi) => Promise<unknown>]
   ['unbanPubkey', (a) => a.unbanPubkey(PK)],
   ['suspendPubkey', (a) => a.suspendPubkey(PK, 'r')],
   ['unsuspendPubkey', (a) => a.unsuspendPubkey(PK)],
+  // Answers with the end date a real success carries; the table's generic answer has none.
+  ['changeSuspensionEnd', (a) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200, json: async () => ({ success: true, endsAt: '2026-11-21T00:00:00.000Z', decisionRecorded: true }),
+    });
+    return a.changeSuspensionEnd(PK, { value: 12, unit: 'hours' });
+  }],
   ['logDecision', (a) => a.logDecision({ targetType: 'event', targetId: 'e1', action: 'x' })],
   ['closeTicket', (a) => a.closeTicket(55)],
   ['confirmAutoHide', (a) => a.confirmAutoHide({ eventId: 'e1' })],
@@ -172,6 +180,123 @@ describe('useAdminApi attribution header', () => {
   });
 });
 
+// The wrappers rewrite their argument lists by hand, so a new argument the wrapper
+// forgets to forward passes tsc and every component test (they mock this hook).
+// These run the real wrappers down to the request body.
+describe('timed suspension arguments reach the request', () => {
+  const sentBodies = () => mockFetch.mock.calls.map(([, init]) => (init as RequestInit).body as string);
+  const sentUrls = () => mockFetch.mock.calls.map(([url]) => String(url));
+
+  it('suspendPubkey forwards a duration', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).suspendPubkey(PK, 'r', { value: 3, unit: 'days' });
+    expect(JSON.parse(sentBodies()[0])).toEqual({
+      method: 'suspendpubkey', params: [PK, 'r'], suspension: { duration: { value: 3, unit: 'days' } },
+    });
+  });
+
+  // Both at once, so a wrapper that forwards the login but not the duration (or the reverse) fails.
+  it('suspendPubkey sends the login token and the duration together', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).suspendPubkey(PK, 'r', { value: 3, unit: 'days' });
+    expect(sentHeaders()[0][HEADER]).toBe(TOKEN);
+    expect(JSON.parse(sentBodies()[0]).suspension).toEqual({ duration: { value: 3, unit: 'days' } });
+  });
+
+  it('suspendPubkey forwards an explicit open end as duration null', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).suspendPubkey(PK, 'r', null);
+    expect(sentBodies()[0]).toBe(JSON.stringify({
+      method: 'suspendpubkey', params: [PK, 'r'], suspension: { duration: null },
+    }));
+  });
+
+  it('suspendPubkey with no duration argument sends no suspension key', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).suspendPubkey(PK, 'r');
+    expect(JSON.parse(sentBodies()[0])).not.toHaveProperty('suspension');
+  });
+
+  it('unbanPubkey forwards the suspension choice', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).unbanPubkey(PK, 'end_now');
+    expect(sentBodies()[0]).toBe(JSON.stringify({
+      method: 'unbanpubkey', params: [PK], suspensionChoice: 'end_now',
+    }));
+  });
+
+  // Ask again if it changed: the timer version the dialog showed must reach the body, or the
+  // worker cannot refuse a choice made against an older read.
+  it.each([[7, 7], [null, null]])('unbanPubkey forwards the shown timer version %j', async (version, sent) => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).unbanPubkey(PK, 'open_ended', version);
+    expect(sentBodies()[0]).toBe(JSON.stringify({
+      method: 'unbanpubkey', params: [PK], suspensionChoice: 'open_ended', suspensionVersion: sent,
+    }));
+  });
+
+  it('unbanPubkey with no shown version sends no suspensionVersion key', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).unbanPubkey(PK, 'resume');
+    expect(JSON.parse(sentBodies()[0])).not.toHaveProperty('suspensionVersion');
+  });
+
+  it('unbanPubkey with no choice sends no suspensionChoice key', async () => {
+    const { result } = renderHook(() => useAdminApi());
+    await result.current.asModerator(TOKEN).unbanPubkey(PK);
+    expect(sentBodies()[0]).toBe(JSON.stringify({ method: 'unbanpubkey', params: [PK] }));
+  });
+
+  it('changeSuspensionEnd posts the pubkey and duration to /api/suspensions/end', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: async () => ({ success: true, endsAt: '2026-11-21T00:00:00.000Z', decisionRecorded: true }),
+    });
+    const { result } = renderHook(() => useAdminApi());
+    const out = await result.current.asModerator(TOKEN).changeSuspensionEnd(PK, { value: 12, unit: 'hours' });
+    expect(sentUrls()[0]).toBe(`${API_URL}/api/suspensions/end`);
+    expect(JSON.parse(sentBodies()[0])).toEqual({ pubkey: PK, duration: { value: 12, unit: 'hours' } });
+    expect(out).toEqual({ endsAt: '2026-11-21T00:00:00.000Z', decisionRecorded: true });
+  });
+
+  it('changeSuspensionEnd rejects with the body code on a refusal', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: false, status: 409, statusText: 'Conflict',
+      json: async () => ({ success: false, error: 'This account is banned.', code: 'account_banned' }),
+    });
+    const { result } = renderHook(() => useAdminApi());
+    const error = await result.current.asModerator(TOKEN)
+      .changeSuspensionEnd(PK, { value: 1, unit: 'days' }).catch((e: unknown) => e) as ApiError;
+    expect(error).toBeInstanceOf(ApiError);
+    expect(error.code).toBe('account_banned');
+    expect(error.statusCode).toBe(409);
+  });
+
+  it('the plain api lists timed suspensions with a GET to /api/suspensions', async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: async () => ({ success: true, suspensions: [{ pubkey: PK, endsAt: null, status: 'active' }], autoLift: true }),
+    });
+    const { result } = renderHook(() => useAdminApi());
+    const list = await result.current.listTimedSuspensions();
+    expect(sentUrls()[0]).toBe(`${API_URL}/api/suspensions`);
+    expect((mockFetch.mock.calls[0][1] as RequestInit).method).toBe('GET');
+    expect(list).toEqual({ suspensions: [{ pubkey: PK, endsAt: null, status: 'active' }], autoLift: true });
+  });
+
+  // Fail closed: only an explicit true from the worker means a passed end lifts on its own.
+  it.each([
+    ['false', false], ['missing', undefined], ['a string', 'true'],
+  ])('reads automatic lifting as off when the worker sends %s', async (_label, autoLift) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: async () => ({ success: true, suspensions: [], ...(autoLift !== undefined && { autoLift }) }),
+    });
+    const { result } = renderHook(() => useAdminApi());
+    expect(await result.current.listTimedSuspensions()).toEqual({ suspensions: [], autoLift: false });
+  });
+});
+
 // Type-level: tsc (run by `npm run test`) fails if any of these becomes
 // reachable on the plain api again. Never called; it only has to type-check.
 export function plainApiHasNoAttributionCalls(api: PlainAdminApi): void {
@@ -207,6 +332,8 @@ export function plainApiHasNoAttributionCalls(api: PlainAdminApi): void {
   void api.suspendPubkey;
   // @ts-expect-error attribution calls go through asModerator(token)
   void api.unsuspendPubkey;
+  // @ts-expect-error attribution calls go through asModerator(token)
+  void api.changeSuspensionEnd;
   // @ts-expect-error attribution calls go through asModerator(token)
   void api.publishLabel;
   // @ts-expect-error attribution calls go through asModerator(token)
