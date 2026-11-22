@@ -931,7 +931,7 @@ describe('adminApi', () => {
       const out = await unbanPubkey(API_URL, 'pk');
       expect(typeof out.suspension.endsAt).toBe('string');
       expect(Number.isNaN(Date.parse(out.suspension.endsAt as string))).toBe(true);
-      expect(unbanOutcomeToast(out)).toEqual({ title: 'User unbanned', description: SUSPENSION_END_UNAVAILABLE });
+      expect(unbanOutcomeToast(out, { autoLift: true })).toEqual({ title: 'User unbanned', description: SUSPENSION_END_UNAVAILABLE });
     });
 
     it('unbanPubkey keeps a null endsAt as no end date', async () => {

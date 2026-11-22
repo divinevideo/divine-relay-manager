@@ -100,6 +100,18 @@ A "Change end date" action wherever a suspended account is shown with its suspen
 - For End now, a change landing during the relay unsuspend, or a record that can't be checked afterwards, sends no restored message, leaves Keycast as it is, and alerts for a hand check.
 - Callers that send no version (moderation-service `allow_pubkey`, Coop) keep decision 13 unchanged.
 
+### Automatic lifting is behind a switch (pending Platform)
+(Matt, 2026-11-22, from PR #444 review.) The relay unsuspend and Keycast activate that a lift makes cannot be made conditional on the state the tick read, so a moderator action landing in that window could be undone. Until Platform supplies conditional enforcement writes, or explicitly designs and reviews an alternative, automatic lifting ships behind `TIMED_SUSPENSION_AUTO_LIFT_ENABLED`, off by default. Only the exact value `"true"` turns it on; anything else is off.
+
+While it is off:
+- The tick makes no relay or Keycast write and sends no message. A due row that would have been lifted gets a Slack alert, at most once every 12 hours: "`<pubkey>`: timed suspension ended at `<date>`; automatic lifting is off, so unsuspend it by hand." The record stays active until a moderator's Unsuspend closes it.
+- A ban still cancels the timer. An account found already unsuspended still closes the record. An open age-review case still holds the timer.
+- A lift whose relay step landed before the switch went off is not finished by the timer. Its Keycast step counts as a failed attempt and is alerted, and a manual Unsuspend finishes it.
+- The person is never told an end date. ACCOUNT_SUSPENDED goes without one, and Change end date and an unban resume send no ACCOUNT_SUSPENSION_CHANGED.
+- Moderators still set, see and change end dates, and decision rows record them. A passed end reads "End time passed. Unsuspend to lift it." The unban prompt offers "Resume. The end date has passed, so unsuspend to lift it", and the unban toast says "User unbanned. The end date has passed, so unsuspend to lift the suspension".
+
+Turning it on lifts every overdue timer at the next ticks (25 per tick). With the switch on, the lift works as below.
+
 ### The automatic lift
 On each scheduler tick, for each record whose end time has passed:
 1. **Ban check first** (a ban wins). Check the relay ban list and Keycast's status. If banned, mark the record cancelled by ban and do nothing else.

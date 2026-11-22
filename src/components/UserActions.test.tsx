@@ -94,7 +94,7 @@ beforeEach(() => {
   api.suspendPubkey.mockResolvedValue({ endsAt: threeDaysOut(), recorded: true, decisionRecorded: true });
   api.unsuspendPubkey.mockResolvedValue({ success: true });
   api.changeSuspensionEnd.mockResolvedValue({ endsAt: threeDaysOut(), decisionRecorded: true });
-  api.listTimedSuspensions.mockResolvedValue([]);
+  api.listTimedSuspensions.mockResolvedValue({ suspensions: [], autoLift: true });
   api.getActiveAgeReviewCase.mockResolvedValue({ success: true, case: null });
   api.logDecision.mockResolvedValue(undefined);
 });
@@ -1401,7 +1401,7 @@ describe('UserActions timed suspensions', () => {
   describe('end-time line', () => {
     it('shows when a suspended account\'s suspension ends', async () => {
       const endsAt = threeDaysOut();
-      api.listTimedSuspensions.mockResolvedValue([timer(endsAt)]);
+      api.listTimedSuspensions.mockResolvedValue({ suspensions: [timer(endsAt)], autoLift: true });
       renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
       expect(await screen.findByText(`Suspended until ${formatSuspensionEnd(endsAt)}`)).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Unsuspend User/i })).toBeInTheDocument();
@@ -1418,7 +1418,7 @@ describe('UserActions timed suspensions', () => {
     // F18: an underage report hands off to Age Review, which owns the
     // suspension; the end line and Change end date stay out of it.
     it('keeps the Age Review hand-off ahead of the end line for an underage report', async () => {
-      api.listTimedSuspensions.mockResolvedValue([timer(threeDaysOut())]);
+      api.listTimedSuspensions.mockResolvedValue({ suspensions: [timer(threeDaysOut())], autoLift: true });
       renderWithProvider(
         <UserActions pubkey={PUBKEY} context="report" reportCategory="NS-underageUser" isSuspended />, client());
       expect(screen.getByRole('button', { name: /Handle in Age Review/i })).toBeInTheDocument();
@@ -1468,7 +1468,7 @@ describe('UserActions timed suspensions', () => {
 
     it('shows the current end in the dialog', async () => {
       const endsAt = threeDaysOut();
-      api.listTimedSuspensions.mockResolvedValue([timer(endsAt)]);
+      api.listTimedSuspensions.mockResolvedValue({ suspensions: [timer(endsAt)], autoLift: true });
       renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
       await screen.findByText(`Suspended until ${formatSuspensionEnd(endsAt)}`);
       fireEvent.click(screen.getByRole('button', { name: 'Change end date' }));
@@ -1508,7 +1508,7 @@ describe('UserActions timed suspensions', () => {
     // end as unavailable, not keep the old end on screen.
     it('shows the end as unavailable, not the old end, when the re-read after a change fails', async () => {
       const oldEnd = threeDaysOut();
-      api.listTimedSuspensions.mockResolvedValueOnce([timer(oldEnd)]).mockRejectedValue(new Error('worker down'));
+      api.listTimedSuspensions.mockResolvedValueOnce({ suspensions: [timer(oldEnd)], autoLift: true }).mockRejectedValue(new Error('worker down'));
       renderWithProvider(<UserActions pubkey={PUBKEY} isSuspended />, client());
       await screen.findByText(`Suspended until ${formatSuspensionEnd(oldEnd)}`);
       changeTo('12', 'hours');
@@ -1599,7 +1599,7 @@ describe('UserActions unban prompt', () => {
 
   it('banned and suspended: Unban opens the prompt, and End the suspension now sends end_now', async () => {
     const endsAt = threeDaysOut();
-    api.listTimedSuspensions.mockResolvedValue([timer(endsAt)]);
+    api.listTimedSuspensions.mockResolvedValue({ suspensions: [timer(endsAt)], autoLift: true });
     api.unbanPubkey.mockResolvedValue({ suspension: { state: 'ended', endsAt: null, decisionRecorded: true } });
     renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
     clickUnban();
@@ -1617,6 +1617,26 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     // The browser's unban_user row stays.
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'unban_user', targetId: PUBKEY })));
+  });
+
+  // The prompt and the toast take the switch from the cached timers list.
+  it.each([
+    [true, 'Resume. The end date has passed, so it lifts at the next check',
+      'User unbanned. The end date has passed, so the suspension lifts at the next check'],
+    [false, 'Resume. The end date has passed, so unsuspend to lift it',
+      'User unbanned. The end date has passed, so unsuspend to lift the suspension'],
+    [undefined, 'Resume. The end date has passed, so unsuspend to lift it',
+      'User unbanned. The end date has passed, so unsuspend to lift the suspension'],
+  ])('a passed end with automatic lifting %s: the prompt and the toast say so', async (autoLift, label, title) => {
+    const past = new Date(Math.floor((Date.now() - 86_400_000) / 60_000) * 60_000).toISOString();
+    api.listTimedSuspensions.mockResolvedValue({ suspensions: [timer(past)], ...(autoLift !== undefined && { autoLift }) });
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'resumed', endsAt: past, decisionRecorded: true } });
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
+    clickUnban();
+    const dialog = screen.getByRole('dialog');
+    expect(await within(dialog).findByLabelText(label)).toBeChecked();
+    await confirmUnban();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith({ title }));
   });
 
   it('banned and confirmed not suspended: unbans with no prompt and no choice', async () => {
@@ -1664,7 +1684,7 @@ describe('UserActions unban prompt', () => {
   // An older "no timer" copy whose refresh failed may predate a timed suspend: defaulting
   // to "no end date" from it could erase a real end, so the prompt treats it as unknown.
   it('defaults to resume as it is when a timer refresh failed over an older copy', async () => {
-    api.listTimedSuspensions.mockResolvedValueOnce([]);
+    api.listTimedSuspensions.mockResolvedValueOnce({ suspensions: [], autoLift: true });
     const qc = client();
     renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, qc);
     await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(1));
@@ -1780,7 +1800,7 @@ describe('UserActions unban prompt', () => {
   // against the current end, with no "Failed to unban" toast, and the retry carries it.
   it('a suspension_changed refusal re-reads the timers and asks again against the current end', async () => {
     const endsAt = threeDaysOut();
-    api.listTimedSuspensions.mockResolvedValueOnce([]).mockResolvedValue([timer(endsAt, 6)]);
+    api.listTimedSuspensions.mockResolvedValueOnce({ suspensions: [], autoLift: true }).mockResolvedValue({ suspensions: [timer(endsAt, 6)], autoLift: true });
     api.unbanPubkey
       .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
       .mockResolvedValue({ suspension: { state: 'resumed', endsAt, decisionRecorded: true } });
@@ -1807,7 +1827,7 @@ describe('UserActions unban prompt', () => {
     const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
     const refusedToast = expect.objectContaining({ title: 'Failed to unban user', description: REFUSED });
     let reread!: (v: unknown) => void;
-    api.listTimedSuspensions.mockResolvedValue([]).mockResolvedValueOnce([])
+    api.listTimedSuspensions.mockResolvedValue({ suspensions: [], autoLift: true }).mockResolvedValueOnce({ suspensions: [], autoLift: true })
       .mockReturnValueOnce(new Promise(r => { reread = r; }));
     let refuse!: (e: unknown) => void;
     api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
@@ -1824,7 +1844,7 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
     expect(toast).not.toHaveBeenCalledWith(refusedToast);
 
-    await act(async () => { reread([]); });
+    await act(async () => { reread({ suspensions: [], autoLift: true }); });
     await waitFor(() => expect(toast).toHaveBeenCalledWith(refusedToast));
   });
 
@@ -1832,7 +1852,7 @@ describe('UserActions unban prompt', () => {
   // arrives (a mutation-level callback), and nothing on screen can say it but the toast.
   it('a suspension_changed refusal after the page unmounted with the prompt open is a toast', async () => {
     const REFUSED = 'The suspension changed after this was opened. Check the end date and confirm again.';
-    api.listTimedSuspensions.mockResolvedValue([]);
+    api.listTimedSuspensions.mockResolvedValue({ suspensions: [], autoLift: true });
     let refuse!: (e: unknown) => void;
     api.unbanPubkey.mockReturnValueOnce(new Promise((_, reject) => { refuse = reject; }));
     const { unmount } = renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
@@ -1863,7 +1883,7 @@ describe('UserActions unban prompt', () => {
   it('keeps confirm disabled until the timers re-read after a suspension_changed refusal', async () => {
     const endsAt = threeDaysOut();
     let answer!: (v: unknown) => void;
-    api.listTimedSuspensions.mockResolvedValueOnce([]).mockReturnValueOnce(new Promise(r => { answer = r; }));
+    api.listTimedSuspensions.mockResolvedValueOnce({ suspensions: [], autoLift: true }).mockReturnValueOnce(new Promise(r => { answer = r; }));
     api.unbanPubkey.mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'));
     renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended />, client());
     clickUnban();
@@ -1873,7 +1893,7 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(api.listTimedSuspensions).toHaveBeenCalledTimes(2));
     expect(within(dialog).getByRole('button', { name: 'Unbanning...' })).toBeDisabled();
     expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeEnabled();
-    await act(async () => { answer([timer(endsAt, 6)]); });
+    await act(async () => { answer({ suspensions: [timer(endsAt, 6)], autoLift: true }); });
     expect(await within(dialog).findByLabelText(`Resume until ${formatSuspensionEnd(endsAt)}`)).toBeChecked();
     expect(within(dialog).getByRole('button', { name: 'Unban' })).toBeEnabled();
   });
@@ -1881,7 +1901,7 @@ describe('UserActions unban prompt', () => {
   // The re-read failed: the prompt says the end is unavailable (F5), defaults to resume, and
   // the next confirm sends no version, since no timer is shown to compare against.
   it('a failed re-read after a suspension_changed refusal shows the end as unavailable and sends no version', async () => {
-    api.listTimedSuspensions.mockResolvedValueOnce([]).mockRejectedValue(new Error('worker down'));
+    api.listTimedSuspensions.mockResolvedValueOnce({ suspensions: [], autoLift: true }).mockRejectedValue(new Error('worker down'));
     api.unbanPubkey
       .mockRejectedValueOnce(new ApiError('changed', 409, 'Conflict', 'suspension_changed'))
       .mockResolvedValue({ suspension: { state: 'resumed', endsAt: null, decisionRecorded: true } });

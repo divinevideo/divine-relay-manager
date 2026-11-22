@@ -30,7 +30,7 @@ beforeEach(() => {
 
 describe('useTimedSuspension', () => {
   it('is undefined while the list is loading, then the record', async () => {
-    listTimedSuspensions.mockResolvedValue([record]);
+    listTimedSuspensions.mockResolvedValue({ suspensions: [record], autoLift: true });
     const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
     expect(result.current.record).toBeUndefined();
     expect(result.current.isLoading).toBe(true);
@@ -39,13 +39,13 @@ describe('useTimedSuspension', () => {
   });
 
   it('is null once the list has answered without this pubkey', async () => {
-    listTimedSuspensions.mockResolvedValue([{ ...record, pubkey: 'cd'.repeat(32) }]);
+    listTimedSuspensions.mockResolvedValue({ suspensions: [{ ...record, pubkey: 'cd'.repeat(32) }], autoLift: true });
     const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
     await waitFor(() => expect(result.current.record).toBeNull());
   });
 
   it('matches the pubkey case-insensitively', async () => {
-    listTimedSuspensions.mockResolvedValue([record]);
+    listTimedSuspensions.mockResolvedValue({ suspensions: [record], autoLift: true });
     const { result } = renderHook(() => useTimedSuspension(PK.toUpperCase()), { wrapper });
     await waitFor(() => expect(result.current.record).toEqual(record));
   });
@@ -59,7 +59,7 @@ describe('useTimedSuspension', () => {
   });
 
   it('is not an error when a refetch fails but earlier data exists', async () => {
-    listTimedSuspensions.mockResolvedValueOnce([record]);
+    listTimedSuspensions.mockResolvedValueOnce({ suspensions: [record], autoLift: true });
     const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
     await waitFor(() => expect(result.current.record).toEqual(record));
     listTimedSuspensions.mockRejectedValue(new Error('down'));
@@ -72,7 +72,7 @@ describe('useTimedSuspension', () => {
   });
 
   it('does not flag refreshFailed for a read that answered', async () => {
-    listTimedSuspensions.mockResolvedValue([record]);
+    listTimedSuspensions.mockResolvedValue({ suspensions: [record], autoLift: true });
     const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
     await waitFor(() => expect(result.current.record).toEqual(record));
     expect(result.current.refreshFailed).toBe(false);
@@ -86,6 +86,28 @@ describe('useTimedSuspension', () => {
     expect(listTimedSuspensions).toHaveBeenCalledTimes(2);
   });
 
+  it('says whether automatic lifting is on, as the worker answered', async () => {
+    listTimedSuspensions.mockResolvedValue({ suspensions: [record], autoLift: true });
+    const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
+    await waitFor(() => expect(result.current.record).toEqual(record));
+    expect(result.current.autoLift).toBe(true);
+  });
+
+  it('reads automatic lifting as off when it is off, unknown, or the list has not answered', async () => {
+    listTimedSuspensions.mockReturnValueOnce(new Promise(() => {}));
+    const loading = renderHook(() => useTimedSuspension(PK), { wrapper });
+    expect(loading.result.current.autoLift).toBe(false);
+    loading.unmount();
+
+    for (const answer of [{ suspensions: [record], autoLift: false }, { suspensions: [record] }]) {
+      client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+      listTimedSuspensions.mockResolvedValue(answer);
+      const { result } = renderHook(() => useTimedSuspension(PK), { wrapper });
+      await waitFor(() => expect(result.current.record).toEqual(record));
+      expect(result.current.autoLift).toBe(false);
+    }
+  });
+
   it('does not read the list for no pubkey', () => {
     const { result } = renderHook(() => useTimedSuspension(null), { wrapper });
     expect(result.current.record).toBeUndefined();
@@ -93,11 +115,11 @@ describe('useTimedSuspension', () => {
   });
 
   it('shares one read between callers', async () => {
-    listTimedSuspensions.mockResolvedValue([record]);
+    listTimedSuspensions.mockResolvedValue({ suspensions: [record], autoLift: true });
     const a = renderHook(() => useTimedSuspensions(), { wrapper });
     const b = renderHook(() => useTimedSuspension(PK), { wrapper });
     await waitFor(() => expect(b.result.current.record).toEqual(record));
-    expect(a.result.current.data).toEqual([record]);
+    expect(a.result.current.data).toEqual({ suspensions: [record], autoLift: true });
     expect(listTimedSuspensions).toHaveBeenCalledTimes(1);
   });
 });

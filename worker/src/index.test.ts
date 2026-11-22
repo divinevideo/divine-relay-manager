@@ -2721,6 +2721,7 @@ describe('scheduled cron — DB-unavailable alert', () => {
 describe('scheduled cron — timed-suspension tick', () => {
   const zeroSummary = {
     lifted: 0, alreadyLifted: 0, cancelledByBan: 0, waiting: 0, failed: 0, keycastSettled: 0, recovered: 0,
+    dueForManualLift: 0,
   };
 
   function recordingDb() {
@@ -2807,6 +2808,23 @@ describe('scheduled cron — timed-suspension tick', () => {
     await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
     expect(tickLogs()).toHaveLength(1);
     expect(String(tickLogs()[0][0])).toContain('"lifted":1');
+
+    tick.mockResolvedValue({ ...zeroSummary, dueForManualLift: 1 });
+    await worker.scheduled(event, cronEnv(recordingDb().db), ctx);
+    expect(tickLogs()).toHaveLength(2);
+    expect(String(tickLogs()[1][0])).toContain('"dueForManualLift":1');
+  });
+
+  it('passes the automatic-lift switch through to the tick, as set', async () => {
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+    const event = { scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent;
+    const withSwitch = (value: string) =>
+      ({ ...(cronEnv(recordingDb().db) as object), TIMED_SUSPENSION_AUTO_LIFT_ENABLED: value }) as never;
+
+    await worker.scheduled(event, withSwitch('true'), ctx);
+    await worker.scheduled(event, withSwitch('false'), ctx);
+
+    expect(tick.mock.calls.map(c => c[0].TIMED_SUSPENSION_AUTO_LIFT_ENABLED)).toEqual(['true', 'false']);
   });
 });
 

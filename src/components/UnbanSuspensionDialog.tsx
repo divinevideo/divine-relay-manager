@@ -39,6 +39,8 @@ interface UnbanSuspensionDialogProps {
    */
   timersLoading: boolean;
   now?: Date;
+  /** Whether a passed end lifts on its own (useTimedSuspension's autoLift; false when unknown). */
+  autoLift: boolean;
   /**
    * The dialog closes once this resolves, and stays open if it throws. `shownVersion` is
    * the version of the timer the options were built from: null when no timer was shown,
@@ -62,7 +64,9 @@ const OPEN_ENDED: Option = { value: 'open_ended', label: 'Keep suspended with no
  * resume, which keeps whatever end the server has (F5): defaulting to "no end
  * date" there would erase a real end.
  */
-function unbanOptions(record: TimedSuspensionView | null | undefined, now: Date): { options: Option[]; endUnknown: boolean } {
+function unbanOptions(
+  record: TimedSuspensionView | null | undefined, now: Date, autoLift: boolean,
+): { options: Option[]; endUnknown: boolean } {
   const unknown = { options: [{ value: 'resume' as const, label: 'Resume the suspension as it is' }, END_NOW, OPEN_ENDED], endUnknown: true };
   if (record === undefined) return unknown;
   const endsAt = record?.endsAt;
@@ -71,7 +75,10 @@ function unbanOptions(record: TimedSuspensionView | null | undefined, now: Date)
   if (Number.isNaN(end.getTime())) return unknown;
   const resume: Option = end.getTime() > now.getTime()
     ? { value: 'resume', label: `Resume until ${formatSuspensionEnd(endsAt)}` }
-    : { value: 'resume', label: 'Resume. The end date has passed, so it lifts at the next check' };
+    : autoLift
+      ? { value: 'resume', label: 'Resume. The end date has passed, so it lifts at the next check' }
+      // With automatic lifting off, nothing lifts it but a moderator's Unsuspend.
+      : { value: 'resume', label: 'Resume. The end date has passed, so unsuspend to lift it' };
   return { options: [resume, END_NOW, OPEN_ENDED], endUnknown: false };
 }
 
@@ -86,7 +93,7 @@ export function UnbanSuspensionDialog(p: UnbanSuspensionDialogProps) {
   );
 }
 
-function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, timersLoading, now, onConfirm }: UnbanSuspensionDialogProps) {
+function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, timersLoading, now, autoLift, onConfirm }: UnbanSuspensionDialogProps) {
   const ids = useId();
   // null until the moderator picks one. The record can arrive while the
   // dialog is open and change the options, so the default is worked out at
@@ -95,7 +102,7 @@ function UnbanForm({ onOpenChange, record, suspensionConfirmed, isPending, timer
   // Set once the worker refused a choice made against an older timer. It stays for the rest
   // of this opening, so the moderator knows why the options may now read differently.
   const [changed, setChanged] = useState(false);
-  const { options, endUnknown } = unbanOptions(record, now ?? new Date());
+  const { options, endUnknown } = unbanOptions(record, now ?? new Date(), autoLift);
   const selected = options.find((o) => o.value === picked)?.value ?? options[0].value;
   // A worker that predates listing the version sends none (undefined): nothing to compare.
   const shownVersion = record === undefined ? undefined : record === null ? null : record.version;

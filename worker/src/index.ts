@@ -76,6 +76,7 @@ import { secretsMatch } from './secret-compare';
 import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, noteClaimedModerator, requireVerifiedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 import {
   applyUnbanChoice,
+  autoLiftEnabled,
   endSuspensionRecord,
   getSuspensionRecord,
   handleChangeSuspensionEnd,
@@ -152,6 +153,9 @@ interface Env extends KeycastEnv, ConsentVideoEnv, PrivateReportEnv, ModeratorLo
   REPORT_WATCHER?: DurableObjectNamespace;
   // Auto-hide feature flag
   AUTO_HIDE_ENABLED?: string;
+  // "true" lets the scheduler lift timed suspensions whose end has passed; anything else is
+  // off (see autoLiftEnabled in timed-suspensions.ts).
+  TIMED_SUSPENSION_AUTO_LIFT_ENABLED?: string;
   // Admin API key — required on all admin endpoints when request doesn't come through CF Access
   ADMIN_API_KEY?: string;
   // Dedicated shared key for divine-moderation-service's calls to /api/relay-rpc,
@@ -1143,9 +1147,11 @@ export default {
         await ensureSchemaOnce(env.DB);
         const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
           notifyModerationService(env, pk, action, text, undefined, undefined, endsAt));
-        const summary = await runTimedSuspensionTick({ DB: env.DB, ENVIRONMENT: env.ENVIRONMENT }, io);
+        const summary = await runTimedSuspensionTick({
+          DB: env.DB, ENVIRONMENT: env.ENVIRONMENT, TIMED_SUSPENSION_AUTO_LIFT_ENABLED: env.TIMED_SUSPENSION_AUTO_LIFT_ENABLED,
+        }, io);
         if (summary.lifted + summary.alreadyLifted + summary.cancelledByBan + summary.failed
-          + summary.keycastSettled + summary.recovered > 0) {
+          + summary.keycastSettled + summary.recovered + summary.dueForManualLift > 0) {
           console.log(`[scheduled] Timed suspension tick: ${JSON.stringify(summary)}`);
         }
       } catch (error) {
@@ -2039,6 +2045,7 @@ async function runRelayRpc(
         }
         const applied = await applyUnbanChoice(env.DB, io, pubkey, suspensionChoice, {
           moderator, now: new Date(), environment: env.ENVIRONMENT, shownVersion: suspensionVersion,
+          autoLift: autoLiftEnabled(env),
         });
         if (ctx) {
           for (const p of applied.waitUntil) ctx.waitUntil(p);
@@ -2100,9 +2107,10 @@ async function runRelayRpc(
           });
         }
         enforceKeycastState('suspend', pubkey, () => suspendUser(pubkey, 'moderation', env, moderator), ctx);
-        // Only a recorded end is stated: an end nothing will act on would be untrue.
+        // Only a recorded end is stated: an end nothing will act on would be untrue. So none
+        // while automatic lifting is off, though the record and decision row keep it.
         notifyAccountState(env, pubkey, 'ACCOUNT_SUSPENDED', reason || 'Account suspended by moderator', ctx,
-          recorded && endsAt ? endsAt : undefined);
+          recorded && endsAt && autoLiftEnabled(env) ? endsAt : undefined);
         if (suspensionField !== undefined) {
           suspensionResponse = { endsAt: recorded ? endsAt : null, recorded, decisionRecorded };
         }

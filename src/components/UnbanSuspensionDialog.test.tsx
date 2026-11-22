@@ -27,6 +27,7 @@ function renderDialog(over: Partial<Props> = {}) {
     isPending: false,
     timersLoading: false,
     now: NOW,
+    autoLift: true,
     onConfirm: vi.fn(),
     ...over,
   };
@@ -74,6 +75,23 @@ describe('UnbanSuspensionDialog', () => {
       'Keep suspended with no end date',
     ]);
     expect(checkedLabel()).toBe('Resume. The end date has passed, so it lifts at the next check');
+  });
+
+  describe('with automatic lifting off', () => {
+    it('with an end that has passed, says to unsuspend by hand', () => {
+      renderDialog({ record: record(PAST), autoLift: false });
+      expect(optionLabels()).toEqual([
+        'Resume. The end date has passed, so unsuspend to lift it',
+        'End the suspension now',
+        'Keep suspended with no end date',
+      ]);
+      expect(checkedLabel()).toBe('Resume. The end date has passed, so unsuspend to lift it');
+    });
+
+    it('with an end still ahead, names it as before', () => {
+      renderDialog({ record: record(FUTURE), autoLift: false });
+      expect(checkedLabel()).toBe(`Resume until ${formatSuspensionEnd(FUTURE)}`);
+    });
   });
 
   it.each([

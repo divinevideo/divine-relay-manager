@@ -279,7 +279,9 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
       // One toast (the app shows one at a time): a missing audit row carries
       // the outcome, so neither is lost, and a failure keeps its title and
       // severity (G4).
-      toast(auditRecorded ? unbanOutcomeToast(outcome) : unbanAuditFailedToast(outcome));
+      // The switch from the cached timers list; false when unknown.
+      const opts = { autoLift: unbanTimer.autoLift };
+      toast(auditRecorded ? unbanOutcomeToast(outcome, opts) : unbanAuditFailedToast(outcome, opts));
 
       // Background verification
       verifyPubkeyUnbanned(pubkey).then(verified => {
@@ -741,6 +743,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
         suspensionConfirmed={!!unbanDialog && suspendedListAnswered && listHas(suspendedUsers, unbanDialog.pubkey)}
         isPending={unbanUserMutation.isPending}
         timersLoading={unbanTimer.isLoading}
+        autoLift={unbanTimer.autoLift}
         onConfirm={async (choice, version) => {
           if (!unbanDialog) return;
           await unbanUserMutation.mutateAsync({ pubkey: unbanDialog.pubkey, choice, version, opening: unbanDialog.opening });

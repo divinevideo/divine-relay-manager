@@ -13,15 +13,24 @@ const AUDIT_NOT_RECORDED = 'Action applied; audit log not recorded';
 const CHECK_ACCOUNT = 'Check the account before acting again.';
 const STILL_NO_END = 'User unbanned. Still suspended, no end date';
 
+/**
+ * How the toast is worded. `autoLift` is whether a passed end lifts on its own, from the
+ * cached timers list (useTimedSuspension); false when unknown, so no lift is promised.
+ */
+export interface UnbanToastOpts { autoLift: boolean; now?: Date }
+
 /** The suspension stayed on (resumed): say until when, honestly. */
-function resumedToast(endsAt: string | null | undefined, now: Date): UnbanToast {
+function resumedToast(endsAt: string | null | undefined, now: Date, autoLift: boolean): UnbanToast {
   if (!endsAt) return { title: STILL_NO_END };
   const end = new Date(endsAt);
   // An end the UI cannot read is unknown: never a formatted "NaN", never "no end date".
   if (Number.isNaN(end.getTime())) return { title: 'User unbanned', description: SUSPENSION_END_UNAVAILABLE };
-  // A past end is lifted by the next check, so "still suspended until" it would be untrue.
+  // "Still suspended until" a past end would be untrue: the next check lifts it, or, with
+  // automatic lifting off, a moderator's Unsuspend does.
   if (end.getTime() <= now.getTime()) {
-    return { title: 'User unbanned. The end date has passed, so the suspension lifts at the next check' };
+    return autoLift
+      ? { title: 'User unbanned. The end date has passed, so the suspension lifts at the next check' }
+      : { title: 'User unbanned. The end date has passed, so unsuspend to lift the suspension' };
   }
   return { title: `User unbanned. Still suspended until ${formatSuspensionEnd(endsAt)}` };
 }
@@ -32,7 +41,7 @@ function resumedToast(endsAt: string | null | undefined, now: Date): UnbanToast 
  * that the moderator's choice was not applied. A missing decision row is said
  * only over an outcome that went as asked; a failure or an unknown outranks it.
  */
-export function unbanOutcomeToast(o: UnbanOutcome, now: Date = new Date()): UnbanToast {
+export function unbanOutcomeToast(o: UnbanOutcome, { autoLift, now = new Date() }: UnbanToastOpts): UnbanToast {
   if (o.choiceSkipped) {
     return { title: 'User unbanned, but the suspension choice was not applied', description: CHECK_ACCOUNT };
   }
@@ -63,7 +72,7 @@ export function unbanOutcomeToast(o: UnbanOutcome, now: Date = new Date()): Unba
       done = { title: STILL_NO_END };
       break;
     case 'resumed':
-      done = resumedToast(endsAt, now);
+      done = resumedToast(endsAt, now, autoLift);
       break;
   }
   return decisionRecorded === false ? { title: AUDIT_NOT_RECORDED, description: unbanOutcomeNote(done) } : done;
@@ -89,8 +98,8 @@ function outranksAudit(o: UnbanOutcome): boolean {
  * variant, with the audit note added; anything else leads with the warning and
  * carries the outcome, saying the warning once when the outcome already does.
  */
-export function unbanAuditFailedToast(o: UnbanOutcome, now: Date = new Date()): UnbanToast {
-  const t = unbanOutcomeToast(o, now);
+export function unbanAuditFailedToast(o: UnbanOutcome, opts: UnbanToastOpts): UnbanToast {
+  const t = unbanOutcomeToast(o, opts);
   if (outranksAudit(o)) return { ...t, description: t.description ? `${t.description} ${AUDIT_NOTE}` : AUDIT_NOTE };
   if (t.title === AUDIT_NOT_RECORDED) return t;
   return { title: AUDIT_NOT_RECORDED, description: unbanOutcomeNote(t), ...(t.variant && { variant: t.variant }) };

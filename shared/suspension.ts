@@ -69,6 +69,15 @@ export const TIMER_DECISION_ACTIONS: readonly string[] = [
   SUSPENSION_ACTIONS.resumeTimer,
 ];
 
+/**
+ * GET /api/suspensions. `autoLift` says whether the scheduler lifts a suspension when its end
+ * passes; while false a moderator unsuspends by hand. The UI reads only an explicit true as on.
+ */
+export interface TimedSuspensionList {
+  suspensions: TimedSuspensionView[];
+  autoLift: boolean;
+}
+
 export interface TimedSuspensionView {
   pubkey: string;
   endsAt: string | null;

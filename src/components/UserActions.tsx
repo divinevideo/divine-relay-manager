@@ -289,7 +289,9 @@ export function UserActions({
           : await act.unbanPubkey(target, choice, version);
       // A ban usually purged the posts, so no restore window: reset only.
       void resetAccountContentReads(queryClient, target);
-      const outcomeToast = unbanOutcomeToast(outcome);
+      // The switch from the cached timers list; false when unknown.
+      const toastOpts = { autoLift: timer.autoLift };
+      const outcomeToast = unbanOutcomeToast(outcome, toastOpts);
       // The audit warning replaces the outcome toast, so it carries the outcome,
       // and a failure keeps its title and severity (G4).
       logAudit(act, {
@@ -297,7 +299,7 @@ export function UserActions({
         targetId: target,
         action: 'unban_user',
         reason: 'Unbanned by moderator',
-      }, unbanAuditFailedToast(outcome));
+      }, unbanAuditFailedToast(outcome, toastOpts));
       return outcomeToast;
     },
     onSuccess: (outcomeToast, { target }) => {
@@ -487,6 +489,7 @@ export function UserActions({
             suspensionConfirmed={isSuspended === true}
             isPending={unbanUserMutation.isPending}
             timersLoading={timer.isLoading}
+            autoLift={timer.autoLift}
             // The account is taken at the click, like every action here.
             onConfirm={async (choice, version) => { await unbanUserMutation.mutateAsync({ target: pubkey, choice, version }); }}
           />

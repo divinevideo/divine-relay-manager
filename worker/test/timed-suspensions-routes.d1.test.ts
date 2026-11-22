@@ -49,9 +49,13 @@ function env() {
     MODERATOR_LOGIN_URL: 'https://login.example',
     SLACK_WEBHOOK_URL: 'https://hooks.example/services/T/B/x',
     ENVIRONMENT: 'test',
+    // On, so every test outside the switch-off block sees today's behaviour.
+    TIMED_SUSPENSION_AUTO_LIFT_ENABLED: 'true',
     DB,
   } as never;
 }
+const envWithAutoLift = (value: string | undefined) =>
+  ({ ...(env() as object), TIMED_SUSPENSION_AUTO_LIFT_ENABLED: value }) as never;
 
 function setup(overrides: Partial<ManagementState> = {}) {
   const state: ManagementState = {
@@ -63,7 +67,7 @@ function setup(overrides: Partial<ManagementState> = {}) {
   return managementFake(state);
 }
 
-async function rpc(body: Record<string, unknown>) {
+async function rpc(body: Record<string, unknown>, e: unknown = env()) {
   const pending: Promise<unknown>[] = [];
   const ctx = { waitUntil: (p: Promise<unknown>) => { pending.push(p); } } as unknown as ExecutionContext;
   const res = await worker.fetch(new Request('https://api.example/api/relay-rpc', {
@@ -75,7 +79,7 @@ async function rpc(body: Record<string, unknown>) {
       Origin: 'https://app.example',
     },
     body: JSON.stringify(body),
-  }), env(), ctx);
+  }), e as never, ctx);
   const json = await res.json() as Record<string, unknown>;
   // Everything registered off the response path has finished before asserting.
   await Promise.allSettled(pending);
@@ -1247,7 +1251,7 @@ describe('unbanpubkey with the timer version the dialog showed', () => {
     // And the timer lifts it at the new end, with the one restored message.
     const tickNotifies: string[] = [];
     const io = liveSuspensionIo(env() as never, async (_pk, action) => { tickNotifies.push(action); });
-    const summary = await runTimedSuspensionTick({ DB, ENVIRONMENT: 'test' }, io,
+    const summary = await runTimedSuspensionTick({ DB, ENVIRONMENT: 'test', TIMED_SUSPENSION_AUTO_LIFT_ENABLED: 'true' }, io,
       new Date(new Date(edit.json.endsAt as string).getTime() + 60_000));
     expect(summary.lifted).toBe(1);
     expect(await record()).toMatchObject({ status: 'lifted' });
@@ -1358,5 +1362,93 @@ describe('unbanpubkey with the timer version the dialog showed', () => {
 
     expect(res.json.suspension).toMatchObject({ state: 'open_ended', endsAt: null });
     expect(await record()).toMatchObject({ status: 'active', ends_at: null });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Automatic lifting switched off: everything else ships, and the person is never told an end
+// date nothing will act on. Moderator-facing ends and decision rows are unchanged.
+// ---------------------------------------------------------------------------
+
+describe('automatic lifting switched off', () => {
+  // A function: DB is bound in beforeAll, after this block is collected.
+  const OFF = () => envWithAutoLift('false');
+
+  it('suspend with an end stores and records the end, but the message states no end', async () => {
+    const fake = setup();
+    const res = await rpc({ method: 'suspendpubkey', params: [PK, 'policy'], suspension: { duration: { value: 3, unit: 'days' } } }, OFF());
+
+    const suspension = res.json.suspension as { endsAt: string; recorded: boolean };
+    expect(suspension.recorded).toBe(true);
+    expect(suspension.endsAt).toMatch(/Z$/);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: suspension.endsAt });
+    expect((await decisions())[0].reason).toContain(suspension.endsAt);
+    expect(fake.notifies).toHaveLength(1);
+    expect(fake.notifies[0]).toMatchObject({ action: 'ACCOUNT_SUSPENDED', recipientPubkey: PK });
+    expect(fake.notifies[0]).not.toHaveProperty('endsAt');
+  });
+
+  it.each([['missing', undefined], ['unrecognised', 'on']])('a %s value is off: the message states no end', async (_l, value) => {
+    const fake = setup();
+    await rpc({ method: 'suspendpubkey', params: [PK, 'policy'], suspension: { duration: { value: 3, unit: 'days' } } },
+      envWithAutoLift(value));
+    expect(fake.notifies[0]).toMatchObject({ action: 'ACCOUNT_SUSPENDED' });
+    expect(fake.notifies[0]).not.toHaveProperty('endsAt');
+  });
+
+  it('Change end date saves and records the end, and sends no message', async () => {
+    const fake = setup({ suspended: new Map([[PK, 'policy']]) });
+    await seedRecord('active', '2030-01-01T00:00:00.000Z');
+    const res = await changeEnd({ pubkey: PK, duration: THREE_DAYS }, OFF());
+
+    expect(res.status).toBe(200);
+    const endsAt = res.json.endsAt as string;
+    expect(await record()).toMatchObject({ status: 'active', ends_at: endsAt });
+    expect((await decisions()).map(d => d.action)).toEqual(['change_suspension_end']);
+    expect(fake.notifies).toEqual([]);
+  });
+
+  it('an unban that resumes a future end sends no message', async () => {
+    const fake = suspendedSetup();
+    await seedRecord('active', FUTURE_END);
+    const res = await rpc({ method: 'unbanpubkey', params: [PK], suspensionChoice: 'resume' }, OFF());
+
+    expect(res.json.suspension).toMatchObject({ state: 'resumed', endsAt: FUTURE_END });
+    expect(await record()).toMatchObject({ status: 'active', ends_at: FUTURE_END });
+    expect(fake.keycastPuts).toEqual([{ pubkey: PK, status: 'suspended', actor: MOD }]);
+    expect(fake.notifies).toEqual([]);
+    expect((await decisions()).map(d => d.action)).toEqual(['change_suspension_end']);
+  });
+
+  it('an end that has passed is not lifted: the tick alerts, and a manual Unsuspend closes the record', async () => {
+    const fake = setup({ suspended: new Map([[PK, 'policy']]), keycast: new Map([[PK, 'suspended']]) });
+    await seedRecord('active', '2030-01-01T00:00:00.000Z');
+    const edit = await changeEnd({ pubkey: PK, duration: { value: 1, unit: 'hours' } }, OFF());
+    expect(edit.status).toBe(200);
+
+    const io = liveSuspensionIo(OFF(), async () => { throw new Error('the tick must not notify'); });
+    const summary = await runTimedSuspensionTick({ DB, ENVIRONMENT: 'test', TIMED_SUSPENSION_AUTO_LIFT_ENABLED: 'false' }, io,
+      new Date(new Date(edit.json.endsAt as string).getTime() + 60_000));
+
+    expect(summary).toMatchObject({ lifted: 0, dueForManualLift: 1 });
+    expect(fake.state.suspended.has(PK)).toBe(true);
+    expect(fake.state.keycast.get(PK)).toBe('suspended');
+    expect(fake.relayWrites()).toEqual([]);
+    expect(fake.keycastPuts).toEqual([]);
+    expect(await record()).toMatchObject({ status: 'active', ends_at: edit.json.endsAt });
+    expect(fake.alerts).toEqual([`:warning: [test] ${PK}: timed suspension ended at `
+      + `${formatSuspensionEnd(edit.json.endsAt as string)}; automatic lifting is off, so unsuspend it by hand.`]);
+
+    await rpc({ method: 'unsuspendpubkey', params: [PK, 'lifted by hand'] }, OFF());
+    expect(await record()).toMatchObject({ status: 'cancelled_unsuspend' });
+    expect(fake.state.suspended.has(PK)).toBe(false);
+  });
+
+  it('GET /api/suspensions says whether automatic lifting is on, and off for a missing or unrecognised value', async () => {
+    setup();
+    expect((await call('GET', '/api/suspensions')).json.autoLift).toBe(true);
+    expect((await call('GET', '/api/suspensions', undefined, OFF())).json.autoLift).toBe(false);
+    expect((await call('GET', '/api/suspensions', undefined, envWithAutoLift(undefined))).json.autoLift).toBe(false);
+    expect((await call('GET', '/api/suspensions', undefined, envWithAutoLift('True'))).json.autoLift).toBe(false);
   });
 });

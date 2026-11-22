@@ -4,10 +4,10 @@ import { useTimedSuspension } from '@/hooks/useTimedSuspensions';
 import { suspensionEndText } from '@/lib/suspensionEndText';
 
 export function SuspensionEndLine({ pubkey, banned = false }: { pubkey: string; banned?: boolean }) {
-  const { record, isError } = useTimedSuspension(pubkey);
+  const { record, isError, autoLift } = useTimedSuspension(pubkey);
   return (
     <p className="basis-full text-xs text-muted-foreground">
-      {suspensionEndText({ record, isError, banned, now: new Date() })}
+      {suspensionEndText({ record, isError, banned, now: new Date(), autoLift })}
     </p>
   );
 }

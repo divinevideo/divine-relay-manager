@@ -22,7 +22,9 @@ export function useTimedSuspensions(opts?: { enabled?: boolean }) {
 }
 
 /**
- * This account's timer record.
+ * This account's timer record, and whether a passed end lifts on its own.
+ * `autoLift` is true only once the list has answered that it does; loading, unreadable or
+ * unknown reads as off, so the screen never promises a lift that may not come.
  * - `undefined`: the list has not answered yet (or no pubkey was given)
  * - `null`: the list answered and this account has no timer
  * - a record: its timer
@@ -36,14 +38,16 @@ export function useTimedSuspension(pubkey: string | null | undefined): {
   isError: boolean;
   isLoading: boolean;
   refreshFailed: boolean;
+  autoLift: boolean;
 } {
   const query = useTimedSuspensions({ enabled: !!pubkey });
   const target = pubkey?.toLowerCase();
   const record = !target || !query.data
     ? undefined
-    : query.data.find(entry => typeof entry.pubkey === 'string' && entry.pubkey.toLowerCase() === target) ?? null;
+    : query.data.suspensions.find(entry => typeof entry.pubkey === 'string' && entry.pubkey.toLowerCase() === target) ?? null;
   return {
     record,
+    autoLift: query.data?.autoLift === true,
     isError: !!pubkey && query.isError && !query.data,
     isLoading: !!pubkey && query.isLoading,
     refreshFailed: !!pubkey && query.isError && !!query.data,

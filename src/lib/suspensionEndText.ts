@@ -20,8 +20,10 @@ export function suspensionEndText(a: {
   isError: boolean;
   banned: boolean;
   now: Date;
+  /** Whether the scheduler lifts a passed end on its own. False when unknown (fail closed). */
+  autoLift: boolean;
 }): string {
-  const { record, isError, banned, now } = a;
+  const { record, isError, banned, now, autoLift } = a;
   // A failed read also leaves the record undefined, so loading is "undefined
   // and no error"; the error case comes next.
   if (record === undefined && !isError) return 'Checking suspension end date';
@@ -37,9 +39,9 @@ export function suspensionEndText(a: {
     // An end the UI cannot read is not one it can show.
     if (Number.isNaN(end.getTime())) return UNAVAILABLE;
     const formatted = formatSuspensionEnd(endsAt);
-    return end.getTime() > now.getTime()
-      ? `Suspended until ${formatted}`
-      : `End time passed (${formatted}). Lifts at the next check`;
+    if (end.getTime() > now.getTime()) return `Suspended until ${formatted}`;
+    // With automatic lifting off, nothing lifts it but a moderator's Unsuspend.
+    return autoLift ? `End time passed (${formatted}). Lifts at the next check` : 'End time passed. Unsuspend to lift it.';
   }
   return 'Suspended, no end date';
 }

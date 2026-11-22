@@ -3,6 +3,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
+import { formatSuspensionEnd } from '../../shared/suspension';
 import {
   applyUnbanChoice, endSuspensionRecord, replaceSuspensionRecord, runTimedSuspensionTick, TICK_BATCH,
   type SuspensionIo, type SuspensionRecord,
@@ -44,7 +45,11 @@ afterEach(async () => {
   await DB.prepare('DELETE FROM moderation_targets').run();
 });
 
-const env = () => ({ DB, ENVIRONMENT: 'test' });
+// The switch on, so every test outside the switch-off block sees today's lift.
+const env = () => ({ DB, ENVIRONMENT: 'test', TIMED_SUSPENSION_AUTO_LIFT_ENABLED: 'true' });
+// No default parameter: envOff(undefined) must mean a missing value, not 'false'.
+const envOff = (...value: [] | [string | undefined]) =>
+  ({ DB, ENVIRONMENT: 'test', TIMED_SUSPENSION_AUTO_LIFT_ENABLED: value.length ? value[0] : 'false' });
 
 type Seed = Partial<Pick<SuspensionRecord,
   'status' | 'ends_at' | 'attempts' | 'last_error' | 'last_attempt_at' | 'last_alerted_at' | 'claimed_at' | 'version'>>;
@@ -348,7 +353,7 @@ describe('moderator races', () => {
     const unbanIo = fakeIo({ readSuspension: async () => ({ suspended: false }) });
     const io = fakeIo({
       relayUnsuspend: async () => {
-        await applyUnbanChoice(DB, unbanIo, PK, undefined, { now: NOW });
+        await applyUnbanChoice(DB, unbanIo, PK, undefined, { now: NOW, autoLift: true });
         return { success: true };
       },
     });
@@ -378,7 +383,7 @@ describe('moderator races', () => {
     let unbanState: string | undefined;
     const io = fakeIo({
       hasOpenAgeReviewCase: async () => {
-        const res = await applyUnbanChoice(DB, unbanIo, PK, 'resume', { now: NOW, shownVersion: 1 });
+        const res = await applyUnbanChoice(DB, unbanIo, PK, 'resume', { now: NOW, shownVersion: 1, autoLift: true });
         await Promise.all(res.waitUntil);
         unbanState = res.state;
         return false;
@@ -400,7 +405,7 @@ describe('moderator races', () => {
       // The first call is the pre-lift hold check; the second is clearToRestore's re-check,
       // after the record went keycast_pending and before its record re-read.
       hasOpenAgeReviewCase: inTurn<boolean>(false, async () => {
-        await applyUnbanChoice(DB, unbanIo, PK, undefined, { now: NOW });
+        await applyUnbanChoice(DB, unbanIo, PK, undefined, { now: NOW, autoLift: true });
         return false;
       }),
     });
@@ -949,5 +954,155 @@ describe('isolation', () => {
     expect(io.relayUnsuspend).toHaveBeenCalledWith(PK2);
     expect(io.relayUnsuspend).not.toHaveBeenCalledWith(PK);
     expect(summary).toMatchObject({ lifted: 1, failed: 1 });
+  });
+});
+
+describe('automatic lifting switched off', () => {
+  const dueAlert = (pubkey: string, endsAt: string) =>
+    `:warning: [test] ${pubkey}: timed suspension ended at ${formatSuspensionEnd(endsAt)}; `
+    + 'automatic lifting is off, so unsuspend it by hand.';
+
+  it('leaves a due row active, unclaimed and unlifted, and alerts once with the approved text', async () => {
+    await seed(PK);
+    const io = fakeIo();
+
+    const summary = await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expectNoLift(io);
+    expect(io.keycastSuspend).not.toHaveBeenCalled();
+    expect(await record()).toMatchObject({ status: 'active', claimed_at: null, attempts: 0, last_error: null });
+    expect((await record())!.last_alerted_at).toBe(NOW.toISOString());
+    expect(io.alert).toHaveBeenCalledTimes(1);
+    expect(io.alert).toHaveBeenCalledWith(dueAlert(PK, ONE_MIN_AGO));
+    expect(await decisions()).toEqual([]);
+    expect(summary).toMatchObject({ lifted: 0, dueForManualLift: 1, failed: 0 });
+  });
+
+  it.each([
+    ['missing', undefined], ['empty', ''], ['upper case', 'TRUE'], ['yes', 'yes'], ['1', '1'],
+  ])('treats a %s value as off', async (_label, value) => {
+    await seed(PK);
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(envOff(value), io, NOW);
+
+    expectNoLift(io);
+    expect((await record())!.status).toBe('active');
+    expect(io.alert).toHaveBeenCalledWith(dueAlert(PK, ONE_MIN_AGO));
+  });
+
+  it('alerts a row at most once in 12 hours, and again after', async () => {
+    await seed(PK);
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+    await runTimedSuspensionTick(envOff(), io, at(5));
+    await runTimedSuspensionTick(envOff(), io, at(12 * 60 - 1));
+    expect(io.alert).toHaveBeenCalledTimes(1);
+
+    await runTimedSuspensionTick(envOff(), io, at(12 * 60 + 1));
+    expect(io.alert).toHaveBeenCalledTimes(2);
+    expect((await record())!.last_alerted_at).toBe(at(12 * 60 + 1).toISOString());
+    expectNoLift(io);
+  });
+
+  it('does not mark a row alerted when the alert is not delivered, so the next tick tries again', async () => {
+    await seed(PK);
+    const io = fakeIo({ alert: async () => false });
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+    expect((await record())!.last_alerted_at).toBeNull();
+    await runTimedSuspensionTick(envOff(), io, at(5));
+
+    expect(io.alert).toHaveBeenCalledTimes(2);
+    expectNoLift(io);
+  });
+
+  it('a ban still cancels the timer, with no alert to unsuspend', async () => {
+    await seed(PK);
+    const io = fakeIo({ readBan: async () => true });
+
+    const summary = await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expectNoLift(io);
+    expect((await record())!.status).toBe('cancelled_ban');
+    expect(io.alert).not.toHaveBeenCalled();
+    expect(summary).toMatchObject({ cancelledByBan: 1, dueForManualLift: 0 });
+  });
+
+  it('an open age-review case still holds the timer, with no alert to unsuspend', async () => {
+    await seed(PK);
+    const io = fakeIo({ hasOpenAgeReviewCase: async () => true });
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expectNoLift(io);
+    expect(io.alert).not.toHaveBeenCalled();
+    expect((await record())!.status).toBe('active');
+  });
+
+  it('an account already unsuspended closes as already_lifted, with no alert to unsuspend', async () => {
+    await seed(PK);
+    const io = fakeIo({ readSuspension: async () => ({ suspended: false }) });
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expectNoLift(io);
+    expect(io.alert).not.toHaveBeenCalled();
+    expect((await record())!.status).toBe('already_lifted');
+  });
+
+  it('a row not yet due is left alone', async () => {
+    await seed(PK, { ends_at: ONE_MIN_AHEAD });
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expect(io.alert).not.toHaveBeenCalled();
+    expect(io.readBan).not.toHaveBeenCalled();
+  });
+
+  it('reaches due rows beyond a full batch already alerted', async () => {
+    const alerted = Array.from({ length: TICK_BATCH }, (_, i) => i.toString(16).padStart(64, '0'));
+    await Promise.all(alerted.map(pubkey => seed(pubkey, { ends_at: at(-2).toISOString(), last_alerted_at: at(-1).toISOString() })));
+    await seed(PK2);
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expect(io.alert).toHaveBeenCalledTimes(1);
+    expect(io.alert).toHaveBeenCalledWith(dueAlert(PK2, ONE_MIN_AGO));
+  });
+
+  it('never activates Keycast for a lift whose relay step already landed (keycast_pending)', async () => {
+    await seed(PK, { status: 'keycast_pending' });
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expect(io.keycastActivate).not.toHaveBeenCalled();
+    expect(io.notify).not.toHaveBeenCalled();
+    expect(await record()).toMatchObject({ status: 'keycast_pending', attempts: 1 });
+    expect((await record())!.last_error).toContain('automatic lifting is off');
+  });
+
+  it('still settles a keycast_pending row that needs no Keycast write', async () => {
+    await seed(PK, { status: 'keycast_pending' });
+    const io = fakeIo({ readKeycastStatus: async () => 'active' });
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expect(io.keycastActivate).not.toHaveBeenCalled();
+    expect((await record())!.status).toBe('lifted');
+  });
+
+  it('a stale claim whose lift never landed goes back to active and is not lifted', async () => {
+    await seed(PK, { status: 'lifting', claimed_at: at(-60).toISOString() });
+    const io = fakeIo();
+
+    await runTimedSuspensionTick(envOff(), io, NOW);
+
+    expectNoLift(io);
+    expect((await record())!.status).toBe('active');
   });
 });

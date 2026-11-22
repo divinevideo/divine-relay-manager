@@ -19,6 +19,17 @@ export interface SuspensionRecord {
   last_alerted_at: string | null; claimed_at: string | null;
 }
 
+// Automatic lifting is behind a switch, off unless the var is exactly "true". The relay and
+// Keycast writes a lift makes cannot be made conditional on the state the tick read, so a
+// moderator's action landing in that window could be undone. Until Platform supplies
+// conditional enforcement writes (or an alternative is designed and reviewed), the timer only
+// alerts when an end passes, a moderator unsuspends by hand, and the person is never told an
+// end date. A missing or unrecognised value is off: fail closed.
+export interface AutoLiftEnv { TIMED_SUSPENSION_AUTO_LIFT_ENABLED?: string }
+export function autoLiftEnabled(env: AutoLiftEnv): boolean {
+  return env.TIMED_SUSPENSION_AUTO_LIFT_ENABLED === 'true';
+}
+
 // Every ends_at comparison elsewhere must use datetime(ends_at): ISO text ('T') sorts after
 // datetime('now') (' ') on the same day, so a lexical compare delays expiry to midnight.
 
@@ -346,7 +357,7 @@ export async function applyUnbanChoice(
   io: SuspensionIo,
   pubkey: string,
   choice: UnbanSuspensionChoice | undefined,
-  a: { moderator?: string; now: Date; environment?: string; shownVersion?: number | null },
+  a: { moderator?: string; now: Date; environment?: string; shownVersion?: number | null; autoLift?: boolean },
 ): Promise<UnbanChoiceResult> {
   const waitUntil: Promise<unknown>[] = [];
   const moderator = a.moderator ?? null;
@@ -549,7 +560,9 @@ export async function applyUnbanChoice(
   // Only a still-future end is told to the person: a past one is lifted by the next tick,
   // which sends the one "restored" notice. Never for an age_review relay row: the timer does not
   // lift those (the age-review flow does), so the end would announce a lift that never comes.
-  if (endsAt !== null && new Date(endsAt).getTime() > a.now.getTime() && entry.reason !== 'age_review') {
+  // Nor while automatic lifting is off (see autoLiftEnabled), for the same reason.
+  if (a.autoLift === true && endsAt !== null && new Date(endsAt).getTime() > a.now.getTime()
+    && entry.reason !== 'age_review') {
     waitUntil.push(noticeLeg(io, pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension resumed', endsAt));
   }
   const reason = `Unbanned; suspension resumed ${endsAt ? `until ${formatSuspensionEnd(endsAt)}` : 'with no end date'}`;
@@ -573,14 +586,16 @@ export async function applyUnbanChoice(
 const jsonOut = (data: Record<string, unknown>, status: number, cors: Record<string, string>) =>
   new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json', ...cors } });
 
+// autoLift tells the UI whether a passed end lifts on its own or needs a moderator's Unsuspend.
 export async function handleListSuspensions(
-  env: { DB?: D1Database },
+  env: { DB?: D1Database } & AutoLiftEnv,
   corsHeaders: Record<string, string>,
 ): Promise<Response> {
   if (!env.DB) return jsonOut({ success: false, error: 'Database not configured' }, 503, corsHeaders);
   try {
     const rows = await listInForceSuspensions(env.DB);
-    return jsonOut({ success: true, suspensions: rows.map(toSuspensionView) }, 200, corsHeaders);
+    return jsonOut({ success: true, suspensions: rows.map(toSuspensionView), autoLift: autoLiftEnabled(env) },
+      200, corsHeaders);
   } catch (error) {
     console.error('[handleListSuspensions] read failed:', error);
     return jsonOut({ success: false, error: 'Could not read timed suspensions' }, 503, corsHeaders);
@@ -595,7 +610,7 @@ const refuse = (cors: Record<string, string>, status: number, code: string, erro
 // (never "not suspended"). Keycast is left alone: only the end date moves.
 export async function handleChangeSuspensionEnd(
   request: Request,
-  env: AgeReviewEnv,
+  env: AgeReviewEnv & AutoLiftEnv,
   corsHeaders: Record<string, string>,
   ctx: ExecutionContext | undefined,
   moderator: string | undefined,
@@ -663,9 +678,12 @@ export async function handleChangeSuspensionEnd(
   });
   // Best effort, and off the response path: the end date is already saved. An older
   // moderation-service ignores the unknown action, so a failed or ignored send is harmless.
-  const sent = io.notify(pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension end changed', endsAt)
-    .catch(error => console.error(`[handleChangeSuspensionEnd] notice failed for ${pubkey}:`, error));
-  if (ctx) ctx.waitUntil(sent); else await sent;
+  // None while automatic lifting is off: nothing will act on the end it would state.
+  if (autoLiftEnabled(env)) {
+    const sent = io.notify(pubkey, 'ACCOUNT_SUSPENSION_CHANGED', 'Suspension end changed', endsAt)
+      .catch(error => console.error(`[handleChangeSuspensionEnd] notice failed for ${pubkey}:`, error));
+    if (ctx) ctx.waitUntil(sent); else await sent;
+  }
   return jsonOut({ success: true, endsAt, decisionRecorded }, 200, corsHeaders);
 }
 
@@ -674,6 +692,11 @@ export async function handleChangeSuspensionEnd(
 // its own, so it fails closed: any read it cannot trust (ban list, Keycast status, suspended
 // list, age-review check) leaves the account suspended and records a failed attempt for retry
 // and, past LIFT_ALERT_AFTER_ATTEMPTS, an alert. It never unsuspends on a guess.
+// With automatic lifting off (see autoLiftEnabled) it makes no relay or Keycast write and sends
+// no message: a due row that would have been lifted gets a throttled alert asking a moderator to
+// unsuspend it by hand, and stays active until that Unsuspend closes it. The steps that only
+// write the record (a ban cancelling the timer, an account found already unsuspended, a stale
+// claim returned to active) run as before.
 // ---------------------------------------------------------------------------
 
 export const LIFT_ALERT_AFTER_ATTEMPTS = 3;
@@ -691,8 +714,9 @@ const RECOVERED_REASON = 'Timed suspension ended (recovered; restored message ma
 // pre-restore re-check, or Keycast) then failed; that row is also counted in failed. failed can
 // also count one row twice when the write reverting a failed relay call itself throws. keycastSettled counts
 // Phase 2 rows finished. recovered counts stale 'lifting' claims released in Phase 0.
+// dueForManualLift counts due rows alerted for a hand Unsuspend because automatic lifting is off.
 export interface TickSummary { lifted: number; alreadyLifted: number; cancelledByBan: number;
-  waiting: number; failed: number; keycastSettled: number; recovered: number }
+  waiting: number; failed: number; keycastSettled: number; recovered: number; dueForManualLift: number }
 
 // The version and attempts the next write must compare against. Updated after each CAS this
 // tick wins, so a throw part-way through records its attempt against the row as it now is.
@@ -701,14 +725,16 @@ interface RowCursor { pubkey: string; version: number; attempts: number }
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 export async function runTimedSuspensionTick(
-  env: { DB: D1Database; ENVIRONMENT?: string },
+  env: { DB: D1Database; ENVIRONMENT?: string } & AutoLiftEnv,
   io: SuspensionIo,
   now: Date = new Date(),
 ): Promise<TickSummary> {
   const db = env.DB;
   const nowIso = now.toISOString();
+  const autoLift = autoLiftEnabled(env);
   const summary: TickSummary = {
     lifted: 0, alreadyLifted: 0, cancelledByBan: 0, waiting: 0, failed: 0, keycastSettled: 0, recovered: 0,
+    dueForManualLift: 0,
   };
   // One-off events alerted once in Phase 3 whatever the attempt count: Phase 0 recoveries, and
   // Phase 1 lifts whose restored message was withheld on an unreadable ban re-read.
@@ -875,12 +901,15 @@ export async function runTimedSuspensionTick(
   // Phase 1: due lifts. datetime(ends_at), never a plain text compare (see the note at the top).
   // Prioritize rows waiting the longest since they became due or were last checked. Rows
   // blocked by a hold or an error give other due rows a turn on the next tick.
+  // With automatic lifting off, a row alerted in the last ALERT_THROTTLE_HOURS is left out, so
+  // it is alerted at most that often and a batch of alerted rows never crowds out the rest.
   try {
     const { results: due } = await db.prepare(`
       SELECT * FROM timed_suspensions
       WHERE status = 'active' AND ends_at IS NOT NULL AND datetime(ends_at) <= datetime(?)
+        AND (? OR last_alerted_at IS NULL OR datetime(last_alerted_at) < datetime(?, ?))
       ORDER BY COALESCE(datetime(last_attempt_at), datetime(ends_at)), attempts, ends_at, pubkey LIMIT ?
-    `).bind(nowIso, TICK_BATCH).all<SuspensionRecord>();
+    `).bind(nowIso, autoLift ? 1 : 0, nowIso, `-${ALERT_THROTTLE_HOURS} hours`, TICK_BATCH).all<SuspensionRecord>();
     await eachRow(due, async (row, cur) => {
       const pubkey = row.pubkey;
       handledInPhase1.add(pubkey);
@@ -926,6 +955,23 @@ export async function runTimedSuspensionTick(
       }
       // An age-review suspension is the age-review flow's to lift, never the timer's.
       if (entry.reason === 'age_review') return fail(cur, 'age_review row');
+
+      // Automatic lifting off: everything above said this row would be lifted now. No claim,
+      // no relay or Keycast write, no message; a moderator is asked to unsuspend it by hand.
+      // last_attempt_at moves either way, so an undelivered alert still yields its batch slot.
+      if (!autoLift) {
+        let sent = false;
+        try {
+          sent = (await io.alert(`:warning: [${env.ENVIRONMENT ?? 'unknown'}] ${pubkey}: timed suspension ended at `
+            + `${formatSuspensionEnd(row.ends_at!)}; automatic lifting is off, so unsuspend it by hand.`)) === true;
+        } catch (error) {
+          console.error(`[timedSuspensionTick] due alert threw for ${pubkey}:`, errorText(error));
+        }
+        if (sent) summary.dueForManualLift += 1;
+        else console.error(`[timedSuspensionTick] due alert not delivered: ${pubkey} ended at ${row.ends_at}; unsuspend it by hand`);
+        await cas(cur, sent ? { last_alerted_at: nowIso, last_attempt_at: nowIso } : { last_attempt_at: nowIso });
+        return;
+      }
 
       // Claim. Losing means a moderator changed the record since it was read: they win.
       if (!(await cas(cur, { status: 'lifting', claimed_at: nowIso }))) {
@@ -1025,6 +1071,10 @@ export async function runTimedSuspensionTick(
       }
       // Nothing left to restore: already active, banned (the ban owns it), or no Keycast account.
       if (keycast !== 'suspended') return settle();
+      // Automatic lifting off: a lift whose relay step landed before it was turned off is not
+      // finished here. A failed attempt, so Phase 3 alerts a person after a few ticks; a manual
+      // Unsuspend sets Keycast active and closes the record.
+      if (!autoLift) return fail(cur, 'automatic lifting is off, so Keycast was not set active; unsuspend it by hand');
       if (!(await clearToRestore(cur, { messageWithheld: false }))) return;
       const res = await io.keycastActivate(pubkey);
       if (res.success || res.notFound) return settle();

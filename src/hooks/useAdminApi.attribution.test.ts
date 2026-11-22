@@ -275,13 +275,25 @@ describe('timed suspension arguments reach the request', () => {
   it('the plain api lists timed suspensions with a GET to /api/suspensions', async () => {
     mockFetch.mockResolvedValueOnce({
       ok: true, status: 200,
-      json: async () => ({ success: true, suspensions: [{ pubkey: PK, endsAt: null, status: 'active' }] }),
+      json: async () => ({ success: true, suspensions: [{ pubkey: PK, endsAt: null, status: 'active' }], autoLift: true }),
     });
     const { result } = renderHook(() => useAdminApi());
     const list = await result.current.listTimedSuspensions();
     expect(sentUrls()[0]).toBe(`${API_URL}/api/suspensions`);
     expect((mockFetch.mock.calls[0][1] as RequestInit).method).toBe('GET');
-    expect(list).toEqual([{ pubkey: PK, endsAt: null, status: 'active' }]);
+    expect(list).toEqual({ suspensions: [{ pubkey: PK, endsAt: null, status: 'active' }], autoLift: true });
+  });
+
+  // Fail closed: only an explicit true from the worker means a passed end lifts on its own.
+  it.each([
+    ['false', false], ['missing', undefined], ['a string', 'true'],
+  ])('reads automatic lifting as off when the worker sends %s', async (_label, autoLift) => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true, status: 200,
+      json: async () => ({ success: true, suspensions: [], ...(autoLift !== undefined && { autoLift }) }),
+    });
+    const { result } = renderHook(() => useAdminApi());
+    expect(await result.current.listTimedSuspensions()).toEqual({ suspensions: [], autoLift: false });
   });
 });
 

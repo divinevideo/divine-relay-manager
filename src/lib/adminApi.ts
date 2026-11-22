@@ -24,7 +24,7 @@ import type { AgeReviewCaseResponse } from "../../shared/age-review";
 import { REOPENED_ACTION, type HandlingRow } from "../../shared/handling";
 import type { SexualCase } from "../../shared/sexual-quarantine";
 import type {
-  SuspensionDuration, TimedSuspensionView, UnbanSuspensionChoice, UnbanSuspensionState,
+  SuspensionDuration, TimedSuspensionList, TimedSuspensionView, UnbanSuspensionChoice, UnbanSuspensionState,
 } from "../../shared/suspension";
 import { handleLoginRefusal, isModeratorLoginRequired } from "./moderatorLoginRequired";
 import type {
@@ -663,13 +663,15 @@ export async function changeSuspensionEnd(
   return { endsAt: data.endsAt, decisionRecorded: data.decisionRecorded === true };
 }
 
-export async function listTimedSuspensions(apiUrl: string): Promise<TimedSuspensionView[]> {
-  const data = await apiRequest<{ success: boolean; suspensions?: TimedSuspensionView[]; error?: string }>(
-    apiUrl, '/api/suspensions', 'GET');
+export async function listTimedSuspensions(apiUrl: string): Promise<TimedSuspensionList> {
+  const data = await apiRequest<{
+    success: boolean; suspensions?: TimedSuspensionView[]; autoLift?: unknown; error?: string;
+  }>(apiUrl, '/api/suspensions', 'GET');
   if (!data.success || !Array.isArray(data.suspensions)) {
     throw new ApiError(data.error || 'Could not read timed suspensions');
   }
-  return data.suspensions;
+  // Fail closed: anything but an explicit true (an older worker sends none) reads as off.
+  return { suspensions: data.suspensions, autoLift: data.autoLift === true };
 }
 
 export async function unsuspendPubkey(apiUrl: string, pubkey: string, opts?: LoginOpts): Promise<void> {
