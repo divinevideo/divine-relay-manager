@@ -60,6 +60,27 @@ describe('useModerationStatus', () => {
     verifyEventDeleted.mockResolvedValue(null);
   });
 
+  // The next report's post can read as missing at once (a cached read). The
+  // last report's auto-check, done once for that report, must not hold this
+  // one's back.
+  it('auto-checks the next report when its post reads as missing at once', async () => {
+    const NEXT_EVENT_ID = 'c'.repeat(64);
+    verifyPubkeyBanned.mockResolvedValue(false);
+    verifyEventDeleted.mockResolvedValueOnce(false).mockResolvedValue(true);
+    const { result, rerender } = renderHook(
+      ({ eventId, notFound }: { eventId: string; notFound: boolean }) => useModerationStatus(PUBKEY, eventId, notFound),
+      { wrapper, initialProps: { eventId: EVENT_ID, notFound: true } },
+    );
+    // The last report's post read as missing, and its auto-check found it.
+    await waitFor(() => expect(result.current.isEventGone).toBe(false));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(1);
+
+    rerender({ eventId: NEXT_EVENT_ID, notFound: true });
+    await waitFor(() => expect(verifyEventDeleted).toHaveBeenCalledWith(NEXT_EVENT_ID));
+    await waitFor(() => expect(result.current.isEventGone).toBe(true));
+    expect(verifyEventDeleted).toHaveBeenCalledTimes(2);
+  });
+
   it('uses the ban list before any check has run', async () => {
     listBannedPubkeys.mockResolvedValue([{ pubkey: PUBKEY }]);
     verifyPubkeyBanned.mockResolvedValue(null);

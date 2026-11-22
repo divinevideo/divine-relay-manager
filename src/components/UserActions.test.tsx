@@ -284,18 +284,22 @@ describe('UserActions', () => {
     { action: 'unsuspend', props: { isSuspended: true }, button: /Unsuspend User/i, call: api.unsuspendPubkey },
     { action: 'ban', props: {}, button: /Ban User/i, call: api.banPubkey },
     { action: 'unban', props: { isBanned: true }, button: /Unban User/i, call: api.unbanPubkey },
-  ] as const)('reports the account a $action was taken on, even after the pubkey changes mid-action', async ({ action, props, button, call }) => {
+  ] as const)('reports the original account and post when a $action finishes after switching reports', async ({ action, props, button, call }) => {
     const OTHER = 'b'.repeat(64);
+    const original = { eventId: 'c'.repeat(64) };
+    const next = { ...original, eventId: 'd'.repeat(64) };
     let finish!: (value: unknown) => void;
     call.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
     const onActionComplete = vi.fn();
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    const ui = (pubkey: string) => (
+    const ui = (pubkey: string, reportTarget: typeof original) => (
       <QueryClientProvider client={qc}>
-        <TooltipProvider><UserActions pubkey={pubkey} {...props} onActionComplete={onActionComplete} /></TooltipProvider>
+        <TooltipProvider>
+          <UserActions pubkey={pubkey} {...props} reportTarget={reportTarget} onActionComplete={onActionComplete} />
+        </TooltipProvider>
       </QueryClientProvider>
     );
-    const { rerender } = render(ui(PUBKEY));
+    const { rerender } = render(ui(PUBKEY, original));
 
     fireEvent.click(screen.getByRole('button', { name: button }));
     if (action === 'ban') {
@@ -311,14 +315,14 @@ describe('UserActions', () => {
     }[action];
     await waitFor(() => expect(call).toHaveBeenCalledWith(PUBKEY, ...args));
 
-    rerender(ui(OTHER));
+    rerender(ui(OTHER, next));
     finish(action === 'ban' ? { unconfirmed: null }
       : action === 'suspend' ? { endsAt: threeDaysOut(), recorded: true, decisionRecorded: true }
       : action === 'unban' ? { suspension: { state: 'none' } }
       : { success: true });
 
     await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
-    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action });
+    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action, reportTarget: original });
     // The decision log names the acted-on account too. A suspend writes no
     // row from the browser: the worker records it for the account it was sent.
     if (action !== 'suspend') {
@@ -1721,6 +1725,39 @@ describe('UserActions unban prompt', () => {
     rerender(tree(PUBKEY));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(api.unbanPubkey).not.toHaveBeenCalled();
+  });
+
+  // The prompt's Confirm takes the report shown at that click, like the direct
+  // unban: an unban that finishes after the moderator opens another report
+  // (same account or another) still names the report it was taken from.
+  it.each([
+    ['another account', 'b'.repeat(64)],
+    ['the same account', PUBKEY],
+  ])('reports the original post when a prompted unban finishes after switching to a report on %s', async (_label, nextPubkey) => {
+    const original = { eventId: 'c'.repeat(64) };
+    const next = { eventId: 'd'.repeat(64) };
+    let finish!: (value: unknown) => void;
+    api.unbanPubkey.mockImplementationOnce(() => new Promise((resolve) => { finish = resolve; }));
+    const onActionComplete = vi.fn();
+    const qc = client();
+    const tree = (pk: string, reportTarget: typeof original) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <UserActions pubkey={pk} isBanned isSuspended reportTarget={reportTarget} onActionComplete={onActionComplete} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(tree(PUBKEY, original));
+    clickUnban();
+    fireEvent.click(within(screen.getByRole('dialog')).getByLabelText('End the suspension now'));
+    await confirmUnban();
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(PUBKEY, 'end_now', null)); // null: no timer shown
+
+    rerender(tree(nextPubkey, next));
+    finish({ suspension: { state: 'ended', endsAt: null, decisionRecorded: true } });
+
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban', reportTarget: original });
   });
 
   it.each([

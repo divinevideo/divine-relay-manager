@@ -79,7 +79,13 @@ interface UserActionsProps {
    * current.
    */
   statusStale?: boolean;
+  reportTarget?: AccountActionTarget['reportTarget'];
   onActionComplete?: (change: UserActionChange) => void;
+}
+
+interface AccountActionTarget {
+  pubkey: string;
+  reportTarget?: { eventId?: string };
 }
 
 /**
@@ -87,10 +93,10 @@ interface UserActionsProps {
  * unban, suspend or unsuspend; the bulk content actions leave the account's
  * status as it was, and so does a Change end date the worker refused because
  * the account is banned or no longer suspended (sent so the host re-reads the
- * status it shows). `pubkey` is the account the action was taken on, captured
- * when it started: TanStack hands a pending mutation the latest render's
- * callbacks, so a pubkey read at completion is whichever account is on screen
- * by then, not the one acted on.
+ * status it shows). `pubkey` is the account the action was taken on and
+ * `reportTarget` the report it was taken from, both captured when it started:
+ * TanStack hands a pending mutation the latest render's callbacks, so a value
+ * read at completion is whatever is on screen by then, not the one acted on.
  */
 // Each account action also drops the acted-on account's authored-content
 // reads, here rather than in each host so every host gets it (report detail,
@@ -104,7 +110,11 @@ interface UserActionsProps {
 // would mislead.
 export type UserActionChange =
   | { accountStatusChanged: false }
-  | { accountStatusChanged: true; pubkey: string; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' };
+  | (AccountActionTarget & { accountStatusChanged: true; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' });
+
+// Only the account and report a change reports, not the action's other
+// variables (a suspend's duration, an unban's choice and version).
+const accountOf = ({ pubkey, reportTarget }: AccountActionTarget): AccountActionTarget => ({ pubkey, reportTarget });
 
 export function UserActions({
   pubkey,
@@ -114,6 +124,7 @@ export function UserActions({
   isSuspended = false,
   statusPending = false,
   statusStale = false,
+  reportTarget,
   onActionComplete,
 }: UserActionsProps) {
   const { toast } = useToast();
@@ -121,6 +132,7 @@ export function UserActions({
   const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
   const restoreEnvironment = useRestoreEnvironment();
+  const accountTarget: AccountActionTarget = { pubkey, reportTarget };
   // The api bound to the moderator's login at bulk-job start; a logout/switch
   // during the long job must not retarget its completion audit write (#178).
   const bulkActRef = useRef<ModeratorApi>();
@@ -202,12 +214,12 @@ export function UserActions({
   // A worker that predates timed suspensions writes none; the deploy order
   // (worker before frontend) covers that (F15).
   const suspendUserMutation = useMutation({
-    mutationFn: async ({ target, duration }: { target: string; duration: SuspensionDuration | null }) => {
+    mutationFn: async ({ pubkey: target, duration }: AccountActionTarget & { duration: SuspensionDuration | null }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       return runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator', duration));
     },
-    onSuccess: (outcome, { target, duration }) => {
+    onSuccess: (outcome, variables) => {
       // Suspend resolution comes only from the decision row, already written.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
@@ -215,17 +227,17 @@ export function UserActions({
       // timer, or an old end) must not stand in for the new end if the re-read
       // fails; the line then says the end is unavailable.
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
-      toast(suspendToast(outcome, duration));
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'suspend' });
+      toast(suspendToast(outcome, variables.duration));
+      onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'suspend' });
     },
-    onError: (error: Error, { target }) => {
+    onError: (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const unsuspendUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ pubkey: target }: AccountActionTarget) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // captured before the call
       await act.unsuspendPubkey(target);
@@ -242,16 +254,16 @@ export function UserActions({
       // invalidate: if the re-read fails, the old end must not stay on screen.
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast({ title: 'User unsuspended' });
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unsuspend' });
+      onActionComplete?.({ ...target, accountStatusChanged: true, action: 'unsuspend' });
     },
-    onError: (error: Error, target) => {
+    onError: (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to unsuspend user', description: error.message, variant: 'destructive' });
     },
   });
 
   const banUserMutation = useMutation({
-    mutationFn: async (target: string) => {
+    mutationFn: async ({ pubkey: target }: AccountActionTarget) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       const outcome = await runHidingAction(queryClient, target, env, () => act.banPubkey(target, 'Banned by moderator'));
@@ -265,7 +277,7 @@ export function UserActions({
     },
     onSuccess: (outcome, target) => {
       toast({ title: 'User banned from relay', description: banSuccessNote(outcome) });
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'ban' });
+      onActionComplete?.({ ...target, accountStatusChanged: true, action: 'ban' });
     },
     onError: (error: Error) => {
       refreshAfterUnconfirmedBan(error, queryClient);
@@ -282,7 +294,7 @@ export function UserActions({
   // version the prompt showed, so the worker can refuse a choice made against an
   // older read (null: no timer shown; undefined: nothing to compare).
   const unbanUserMutation = useMutation({
-    mutationFn: async ({ target, choice, version }: { target: string; choice?: UnbanSuspensionChoice; version?: number | null }) => {
+    mutationFn: async ({ pubkey: target, choice, version }: AccountActionTarget & { choice?: UnbanSuspensionChoice; version?: number | null }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const outcome = choice === undefined ? await act.unbanPubkey(target)
         : version === undefined ? await act.unbanPubkey(target, choice)
@@ -302,14 +314,14 @@ export function UserActions({
       }, unbanAuditFailedToast(outcome, toastOpts));
       return outcomeToast;
     },
-    onSuccess: (outcomeToast, { target }) => {
+    onSuccess: (outcomeToast, variables) => {
       // Reset, not invalidate: the unban may have ended or changed the timer,
       // and a failed re-read must not leave the old end on screen as current.
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast(outcomeToast);
-      onActionComplete?.({ accountStatusChanged: true, pubkey: target, action: 'unban' });
+      onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'unban' });
     },
-    onError: async (error: Error, { target }) => {
+    onError: async (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
       // The timer moved since the prompt read it and nothing was done: read it again, and
       // the prompt, if still open, says why and asks against the current end.
@@ -473,7 +485,7 @@ export function UserActions({
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="outline" disabled={anyPending}
-                onClick={() => (unbanAsks ? setUnbanDialogPubkey(pubkey) : unbanUserMutation.mutate({ target: pubkey }))}>
+                onClick={() => (unbanAsks ? setUnbanDialogPubkey(pubkey) : unbanUserMutation.mutate(accountTarget))}>
                 <UserCheck className="h-4 w-4 mr-1" />
                 {unbanUserMutation.isPending ? 'Unbanning...' : 'Unban User'}
               </Button>
@@ -490,8 +502,8 @@ export function UserActions({
             isPending={unbanUserMutation.isPending}
             timersLoading={timer.isLoading}
             autoLift={timer.autoLift}
-            // The account is taken at the click, like every action here.
-            onConfirm={async (choice, version) => { await unbanUserMutation.mutateAsync({ target: pubkey, choice, version }); }}
+            // The account and report are taken at the click, like every action here.
+            onConfirm={async (choice, version) => { await unbanUserMutation.mutateAsync({ ...accountTarget, choice, version }); }}
           />
         </>
       ) : (
@@ -516,7 +528,7 @@ export function UserActions({
               <Tooltip>
                 <TooltipTrigger asChild>
                   <Button variant="outline" className="border-green-500 text-green-600 hover:bg-green-50"
-                    onClick={() => unsuspendUserMutation.mutate(pubkey)} disabled={anyPending}>
+                    onClick={() => unsuspendUserMutation.mutate(accountTarget)} disabled={anyPending}>
                     <Play className="h-4 w-4 mr-1" />
                     {unsuspendUserMutation.isPending ? 'Unsuspending...' : 'Unsuspend User'}
                   </Button>
@@ -549,11 +561,11 @@ export function UserActions({
             currentEndsAt={timer.record === undefined ? undefined : timer.record?.endsAt ?? null}
             isPending={dialogMode === 'change' ? changeEnd.isPending : suspendUserMutation.isPending}
             onConfirm={async (duration) => {
-              // The account is taken at the click, like every action here.
-              const target = pubkey;
+              // The account and report are taken at the click, like every action here.
+              const target = accountTarget;
               if (dialogMode === 'change') {
                 if (duration === null) return; // change mode has no "No end date"
-                await changeEnd.mutateAsync({ pubkey: target, duration }).catch((error: unknown) => {
+                await changeEnd.mutateAsync({ pubkey: target.pubkey, duration }).catch((error: unknown) => {
                   // The worker found the account banned or no longer suspended,
                   // so the status on screen is out of date: have the host re-read
                   // it, as after any action here. Nothing changed, hence false.
@@ -563,7 +575,7 @@ export function UserActions({
                   throw error;
                 });
               } else {
-                await suspendUserMutation.mutateAsync({ target, duration });
+                await suspendUserMutation.mutateAsync({ ...target, duration });
               }
             }}
           />
@@ -581,7 +593,7 @@ export function UserActions({
               : "Permanently ban this user and purge all their content from the relay. This destroys events across 16+ tables and cannot be fully reversed — unbanning allows new posts but does not restore purged content."}
             confirmLabel="Ban User"
             pendingLabel="Banning..."
-            onConfirm={async () => { await banUserMutation.mutateAsync(pubkey); }}
+            onConfirm={async () => { await banUserMutation.mutateAsync(accountTarget); }}
             isPending={banUserMutation.isPending}
           />
         </>
