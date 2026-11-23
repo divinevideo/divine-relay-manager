@@ -255,6 +255,8 @@ export interface UserStatusResult {
   suspended_at?: string;
   verified_minor?: boolean;
   verified_minor_at?: string;
+  /** Absent until Keycast ships the field; only an explicit boolean is carried. */
+  email_unconfirmed?: boolean;
   notFound?: boolean;
   error?: string;
 }
@@ -307,6 +309,7 @@ export async function getUserStatus(
       suspended_at: typeof data.suspended_at === 'string' ? data.suspended_at : undefined,
       verified_minor: data.verified_minor === true,
       verified_minor_at: typeof data.verified_minor_at === 'string' ? data.verified_minor_at : undefined,
+      email_unconfirmed: typeof data.email_unconfirmed === 'boolean' ? data.email_unconfirmed : undefined,
     };
   } catch (err) {
     if (err instanceof Error && err.name === 'TimeoutError') {

@@ -79,6 +79,7 @@ export async function handleAccountStatus(
       suspended_at: result.suspended_at,
       verified_minor: result.verified_minor ?? false,
       verified_minor_at: result.verified_minor_at,
+      email_unconfirmed: result.email_unconfirmed,
       protected_minor,
     },
     200,

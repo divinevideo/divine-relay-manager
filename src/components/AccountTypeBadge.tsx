@@ -6,6 +6,7 @@ import type { AccountStatusResponse } from '@/lib/adminApi';
 import { deriveAccountIdentity } from '@/lib/accountVerdict';
 import { ACCOUNT_TYPE_BADGE, isHex64 } from '@/lib/constants';
 import { useAccountStatus } from '@/hooks/useAccountStatus';
+import { EmailUnconfirmedChip } from '@/components/EmailUnconfirmedChip';
 
 interface Props {
   accountStatus: AccountStatusResponse | undefined;
@@ -53,6 +54,7 @@ export function AccountTypeBadge({ accountStatus, accountStatusError, accountSta
         </Tooltip>
       </TooltipProvider>
       {keycastLine ? <span className="text-xs text-muted-foreground">{keycastLine}</span> : null}
+      <EmailUnconfirmedChip accountStatus={accountStatus} />
     </span>
   );
 }

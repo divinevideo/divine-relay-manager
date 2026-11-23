@@ -52,6 +52,23 @@ describe('AccountTypeBadge', () => {
     expect(screen.queryByText(/^Keycast (active|restricted|status)/)).not.toBeInTheDocument();
   });
 
+  it('adds the email chip beside the Keycast state only for an explicit true', () => {
+    renderBadge({ success: true, status: 'active', email_unconfirmed: true });
+    expect(screen.getByText('Divine login account')).toBeInTheDocument();
+    expect(screen.getByText('Keycast active')).toBeInTheDocument();
+    expect(screen.getByText('Email not confirmed')).toBeInTheDocument();
+  });
+
+  it.each([[false], [undefined]])('shows no email chip when email_unconfirmed is %s', (flag) => {
+    renderBadge({ success: true, status: 'active', email_unconfirmed: flag });
+    expect(screen.queryByText('Email not confirmed')).not.toBeInTheDocument();
+  });
+
+  it('shows no email chip when the lookup failed', () => {
+    renderBadge({ success: false, error: 'unavailable', email_unconfirmed: true });
+    expect(screen.queryByText('Email not confirmed')).not.toBeInTheDocument();
+  });
+
   it('says the account type is unavailable when the lookup failed', () => {
     renderBadge({ success: false, error: 'unavailable' });
     expect(screen.getByText('Account type unavailable')).toBeInTheDocument();
@@ -101,6 +118,12 @@ describe('AccountTypeLabel', () => {
     getAccountStatus.mockResolvedValue({ success: false, error: 'unavailable' });
     renderLabel(PUBKEY);
     expect(await screen.findByText('Account type unavailable')).toBeInTheDocument();
+  });
+
+  it('shows the email chip for a pubkey whose account Keycast reports unconfirmed', async () => {
+    getAccountStatus.mockResolvedValue({ success: true, status: 'active', email_unconfirmed: true });
+    renderLabel(PUBKEY);
+    expect(await screen.findByText('Email not confirmed')).toBeInTheDocument();
   });
 
   it('renders nothing without a pubkey', () => {
