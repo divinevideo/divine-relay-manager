@@ -1,9 +1,9 @@
 // ABOUTME: User management interface for banning, suspending, and allowing users on the relay
 // ABOUTME: Includes verification to confirm NIP-86 actions succeeded and D1 audit logging
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -47,6 +47,153 @@ interface BannedUser {
 interface AllowedUser {
   pubkey: string;
   reason?: string;
+}
+
+// The relay lists every banned account (about 1,600 in production) and each card
+// reads a profile and its content, so a tab renders one page at a time.
+const USERS_PAGE_SIZE = 50;
+const SEARCH_DEBOUNCE_MS = 250;
+
+// A removal can leave the current page past the end; show the last page then.
+function clampPage(total: number, page: number): number {
+  return Math.min(page, Math.max(0, Math.ceil(total / USERS_PAGE_SIZE) - 1));
+}
+
+/** Profile names already in the cache. Reads no relay: a card that has not loaded has no name here. */
+function cachedNames(queryClient: QueryClient): Map<string, string> {
+  const names = new Map<string, string>();
+  for (const [key, data] of queryClient.getQueriesData<{ metadata?: { name?: string; display_name?: string } }>({ queryKey: ['author'] })) {
+    const pubkey = key[1];
+    const m = data?.metadata;
+    const name = [m?.display_name, m?.name].filter(Boolean).join(' ');
+    if (typeof pubkey === 'string' && name) names.set(pubkey, name.toLowerCase());
+  }
+  return names;
+}
+
+function matcher(query: string, names: Map<string, string>) {
+  // A hex or npub fragment, or a whole npub, is found as text: the npub is
+  // re-encoded from each pubkey, so no decoding of the query is needed.
+  const q = query.trim().toLowerCase();
+  return (entry: BannedPubkeyEntry): boolean => {
+    const pubkey = entry.pubkey.toLowerCase();
+    if (pubkey.includes(q)) return true;
+    try {
+      if (nip19.npubEncode(pubkey).includes(q)) return true;
+    } catch { /* a legacy spelling that is not hex has no npub */ }
+    if (entry.reason?.toLowerCase().includes(q)) return true;
+    return !!names.get(entry.pubkey)?.includes(q);
+  };
+}
+
+/**
+ * One tab's search box and page. The filter runs over the list already loaded
+ * (no request), and paging applies to what it leaves. The page is written back
+ * when the list or filter changes, so a refetch can't move the view.
+ */
+function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: string | undefined) {
+  const queryClient = useQueryClient();
+  // What the box shows, and what the list is filtered by. A card reads a profile
+  // and content when it mounts, so the filter waits for typing to pause rather
+  // than mounting a new page of cards on every keystroke.
+  const [query, setQueryState] = useState('');
+  const [applied, setApplied] = useState('');
+  const [page, setPage] = useState(0);
+  useEffect(() => {
+    if (query === applied) return;
+    const timer = setTimeout(() => { setApplied(query); setPage(0); }, SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [query, applied]);
+  const filtered = useMemo(() => {
+    if (!list) return undefined;
+    if (!applied.trim()) return list;
+    return list.filter(matcher(applied, cachedNames(queryClient)));
+  }, [list, applied, queryClient]);
+  const total = filtered?.length ?? 0;
+  const current = clampPage(total, page);
+
+  useEffect(() => { setPage(p => clampPage(total, p)); }, [total]);
+  // A different environment is a different list.
+  const lastEnvironment = useRef(environment);
+  useEffect(() => {
+    if (lastEnvironment.current === environment) return;
+    lastEnvironment.current = environment;
+    setPage(0);
+    setQueryState('');
+    setApplied('');
+  }, [environment]);
+
+  return {
+    query,
+    filtering: applied.trim() !== '',
+    setQuery: setQueryState,
+    page: current,
+    setPage,
+    total,
+    items: filtered?.slice(current * USERS_PAGE_SIZE, (current + 1) * USERS_PAGE_SIZE) ?? [],
+  };
+}
+
+function AccountSearch({ label, value, onChange, filtering, total }: {
+  label: string; value: string; onChange: (value: string) => void; filtering: boolean; total: number;
+}) {
+  // Above one page the pager's range line says the count; this covers the rest.
+  const status = !filtering || total > USERS_PAGE_SIZE ? '' : total === 0 ? 'No accounts match' : `${total} match${total === 1 ? '' : 'es'}`;
+  return (
+    <>
+    <Input
+      type="search"
+      role="searchbox"
+      aria-label={label}
+      placeholder="Search by pubkey, npub, reason or name"
+      value={value}
+      onChange={e => onChange(e.target.value)}
+      className="mb-3"
+    />
+    <p role="status" className={status === 'No accounts match' ? 'text-center py-6 text-muted-foreground' : 'sr-only'}>{status}</p>
+    </>
+  );
+}
+
+function Pager({ label, total, page, onPage, listRef }: {
+  label: string; total: number; page: number; onPage: (page: number) => void; listRef: React.RefObject<HTMLElement>;
+}) {
+  const prevRef = useRef<HTMLButtonElement>(null);
+  const nextRef = useRef<HTMLButtonElement>(null);
+  const current = clampPage(total, page);
+  const last = clampPage(total, Infinity);
+  // Set by a Previous or Next click, so a page reset from typing in the search
+  // box does not scroll the box out of view.
+  const clicked = useRef(false);
+  const refocus = useRef<'prev' | 'next' | null>(null);
+  useEffect(() => {
+    if (!clicked.current) return;
+    clicked.current = false;
+    // The list is long: bring its top back after a page change.
+    listRef.current?.scrollIntoView?.({ block: 'start' });
+    // A button that just became disabled drops keyboard focus; hand it to the
+    // other one. preventScroll keeps the view at the list top.
+    if (refocus.current === 'prev') prevRef.current?.focus({ preventScroll: true });
+    if (refocus.current === 'next') nextRef.current?.focus({ preventScroll: true });
+    refocus.current = null;
+  }, [current, listRef]);
+  if (total <= USERS_PAGE_SIZE) return null;
+  const from = current * USERS_PAGE_SIZE + 1;
+  const to = Math.min(total, from + USERS_PAGE_SIZE - 1);
+  const go = (target: number) => {
+    clicked.current = true;
+    refocus.current = target >= last ? 'prev' : target <= 0 ? 'next' : null;
+    onPage(target);
+  };
+  return (
+    <nav aria-label={label} className="flex items-center justify-between pt-2">
+      <span aria-live="polite" className="text-sm text-muted-foreground">{from}-{to} of {total}</span>
+      <div className="flex gap-2">
+        <Button ref={prevRef} type="button" variant="outline" size="sm" disabled={current === 0} onClick={() => go(current - 1)}>Previous</Button>
+        <Button ref={nextRef} type="button" variant="outline" size="sm" disabled={current >= last} onClick={() => go(current + 1)}>Next</Button>
+      </div>
+    </nav>
+  );
 }
 
 export function UserManagement({ selectedPubkey }: UserManagementProps) {
@@ -112,6 +259,11 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     queryKey: ['suspended-users'],
     queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listsuspendedpubkeys'),
   });
+
+  const bannedView = usePagedAccounts(bannedUsers, restoreEnvironment);
+  const suspendedView = usePagedAccounts(suspendedUsers, restoreEnvironment);
+  const bannedListRef = useRef<HTMLDivElement>(null);
+  const suspendedListRef = useRef<HTMLDivElement>(null);
 
   // Mutation for banning users
   const banUserMutation = useMutation({
@@ -568,14 +720,18 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {bannedUsers.map((user: BannedUser, index: number) => (
+                  <AccountSearch label="Search banned users" value={bannedView.query} onChange={bannedView.setQuery} filtering={bannedView.filtering} total={bannedView.total} />
+                  <div ref={bannedListRef} tabIndex={-1} className="space-y-3 outline-none">
+                  {bannedView.items.map((user: BannedUser) => (
                     <BannedUserCard
-                      key={index}
+                      key={user.pubkey}
                       pubkey={user.pubkey}
                       reason={user.reason}
                       onUnban={() => handleRemoveUser(user.pubkey, 'ban')}
                     />
                   ))}
+                  </div>
+                  <Pager label="Banned users pages" total={bannedView.total} page={bannedView.page} onPage={bannedView.setPage} listRef={bannedListRef} />
                 </div>
               )}
             </CardContent>
@@ -619,13 +775,15 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  {suspendedUsers.map((user: BannedPubkeyEntry, index: number) => {
+                  <AccountSearch label="Search suspended users" value={suspendedView.query} onChange={suspendedView.setQuery} filtering={suspendedView.filtering} total={suspendedView.total} />
+                  <div ref={suspendedListRef} tabIndex={-1} className="space-y-3 outline-none">
+                  {suspendedView.items.map((user: BannedPubkeyEntry) => {
                     // The relay keeps legacy rows by their exact spelling. Those rows can
                     // still be removed using Unsuspend. Only the canonical row has a timer.
                     const canHaveTimer = canonicalHex64(user.pubkey) === user.pubkey;
                     return (
                       <BannedUserCard
-                        key={index}
+                        key={user.pubkey}
                         pubkey={user.pubkey}
                         reason={user.reason}
                         suspended
@@ -659,6 +817,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                       />
                     );
                   })}
+                  </div>
+                  <Pager label="Suspended users pages" total={suspendedView.total} page={suspendedView.page} onPage={suspendedView.setPage} listRef={suspendedListRef} />
                 </div>
               )}
             </CardContent>

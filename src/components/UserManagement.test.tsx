@@ -2,12 +2,15 @@
 // The shared hook's own tests pin the predicate; these pin that each mutation
 // actually calls it, which is the failure mode that shipped once.
 
+import React from 'react';
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
 import type { UserActionChange } from '@/components/UserActions';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { AppContext } from '@/contexts/AppContext';
+import { nip19 } from 'nostr-tools';
 import { TooltipProvider } from '@/components/ui/tooltip';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 import { UserManagement } from './UserManagement';
 import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
@@ -59,17 +62,24 @@ vi.mock('@/components/UserActions', () => ({
 // Render the action affordances and the status line it is handed, so the
 // remove/unsuspend wiring and the end line are reachable (F4); everything else
 // about the card is irrelevant here.
+// Mounts are logged so a test can tell a card that survived a list change from
+// one that was rebuilt or handed a different account (index keys move a card's
+// open state, such as an expanded detail panel, onto the next account).
+const cardMounts = vi.hoisted(() => ({ log: [] as string[] }));
 vi.mock('@/components/BannedUserCard', () => ({
-  BannedUserCard: ({ actionButton, onUnban, suspended, statusLine }: {
-    actionButton?: React.ReactNode; onUnban?: () => void; suspended?: boolean; statusLine?: React.ReactNode;
-  }) => (
-    <div>
-      {statusLine}
-      {actionButton}
-      {onUnban ? <button onClick={onUnban}>Unban</button> : null}
-      <span>{suspended ? 'card says suspended' : 'card says not suspended'}</span>
-    </div>
-  ),
+  BannedUserCard: ({ pubkey, actionButton, onUnban, suspended, statusLine }: {
+    pubkey?: string; actionButton?: React.ReactNode; onUnban?: () => void; suspended?: boolean; statusLine?: React.ReactNode;
+  }) => {
+    React.useEffect(() => { cardMounts.log.push(pubkey ?? ''); }, [pubkey]);
+    return (
+      <div data-testid="user-card" data-pubkey={pubkey}>
+        {statusLine}
+        {actionButton}
+        {onUnban ? <button onClick={onUnban}>Unban</button> : null}
+        <span>{suspended ? 'card says suspended' : 'card says not suspended'}</span>
+      </div>
+    );
+  },
 }));
 
 const PUBKEY = 'a'.repeat(64);
@@ -1207,6 +1217,446 @@ describe('UserManagement timed suspensions', () => {
       await screen.findByRole('dialog');
       confirmUnban();
       await waitFor(() => expect(reset).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY }));
+    });
+  });
+});
+
+// The Banned and Suspended tabs hold every account the relay lists (about 1,600
+// banned in production). Rendering one card per account fired thousands of
+// profile and content reads on open, so each tab shows one page at a time.
+describe('UserManagement paged Banned and Suspended lists', () => {
+  const hex = (i: number) => i.toString(16).padStart(64, '0');
+  const entries = (n: number) => Array.from({ length: n }, (_, i) => ({ pubkey: hex(i + 1), reason: `r${i}` }));
+  const pubkeysShown = () => screen.getAllByTestId('user-card').map(c => c.getAttribute('data-pubkey'));
+
+  function serve(banned: unknown[], suspended: unknown[] = []) {
+    api.callRelayRpc.mockImplementation((method: string) => {
+      if (method === 'listbannedpubkeys') return Promise.resolve(banned);
+      if (method === 'listsuspendedpubkeys') return Promise.resolve(suspended);
+      return Promise.resolve([]);
+    });
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    cardMounts.log.length = 0;
+    api.unbanPubkey.mockResolvedValue({ suspension: { state: 'none' } });
+    api.unsuspendPubkey.mockResolvedValue(undefined);
+    api.logDecision.mockResolvedValue(undefined);
+    api.verifyPubkeyUnbanned.mockResolvedValue(true);
+    api.listTimedSuspensions.mockResolvedValue({ suspensions: [], autoLift: true });
+  });
+
+  it('renders only the first page of banned accounts', async () => {
+    serve(entries(120));
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+    expect(pubkeysShown()).toEqual(entries(50).map(e => e.pubkey));
+  });
+
+  it('shows the next page, then the previous one again', async () => {
+    serve(entries(120));
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(pubkeysShown()).toEqual(entries(120).slice(50, 100).map(e => e.pubkey));
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(pubkeysShown()).toHaveLength(20);
+    expect(screen.getByRole('button', { name: /^Next$/ })).toBeDisabled();
+
+    fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
+    expect(pubkeysShown()[0]).toBe(hex(51));
+  });
+
+  it('shows no pager when everything fits on one page', async () => {
+    serve(entries(50));
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+    expect(screen.queryByRole('button', { name: /^Next$/ })).not.toBeInTheDocument();
+  });
+
+  it('pages the Suspended tab too', async () => {
+    serve([], entries(70));
+    renderWithProvider();
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    await screen.findAllByTestId('user-card');
+    expect(pubkeysShown()).toHaveLength(50);
+
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(pubkeysShown()).toEqual(entries(70).slice(50).map(e => e.pubkey));
+  });
+
+  it('unbans the account on a later page, not the one at the same index on page one', async () => {
+    serve(entries(60));
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('listsuspendedpubkeys'));
+    await act(async () => {});
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Unban$/ })[0]);
+
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(hex(51)));
+  });
+
+  it('steps back a page when the last account on the last page is removed', async () => {
+    let banned = entries(51);
+    api.callRelayRpc.mockImplementation((method: string) => {
+      if (method === 'listbannedpubkeys') return Promise.resolve(banned);
+      return Promise.resolve([]);
+    });
+    api.unbanPubkey.mockImplementation(async (pk: string) => {
+      banned = banned.filter(b => b.pubkey !== pk);
+      return { suspension: { state: 'none' } };
+    });
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('listsuspendedpubkeys'));
+    await act(async () => {});
+    fireEvent.click(screen.getByRole('button', { name: /^Unban$/ }));
+
+    await waitFor(() => expect(screen.getAllByTestId('user-card')).toHaveLength(50));
+  });
+
+  it('keeps the other cards mounted when one account is removed from the page', async () => {
+    let banned = entries(5);
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listbannedpubkeys' ? banned : []));
+    api.unbanPubkey.mockImplementation(async (pk: string) => {
+      banned = banned.filter(b => b.pubkey !== pk);
+      return { suspension: { state: 'none' } };
+    });
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('listsuspendedpubkeys'));
+    await act(async () => {});
+    cardMounts.log.length = 0;
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Unban$/ })[0]);
+    await waitFor(() => expect(screen.getAllByTestId('user-card')).toHaveLength(4));
+
+    expect(cardMounts.log).toEqual([]);
+  });
+
+  it('keeps the other Suspended cards mounted when one account is unsuspended', async () => {
+    let suspended = entries(5);
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listsuspendedpubkeys' ? suspended : []));
+    api.unsuspendPubkey.mockImplementation(async (pk: string) => {
+      suspended = suspended.filter(b => b.pubkey !== pk);
+    });
+    renderWithProvider();
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    await screen.findAllByTestId('user-card');
+    cardMounts.log.length = 0;
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Unsuspend$/ })[0]);
+    await waitFor(() => expect(screen.getAllByTestId('user-card')).toHaveLength(4));
+
+    expect(cardMounts.log).toEqual([]);
+  });
+
+  it('disables Previous on the first page and names the range on every page', async () => {
+    serve(entries(120));
+    renderWithProvider();
+    await screen.findAllByTestId('user-card');
+    expect(screen.getByRole('button', { name: /^Previous$/ })).toBeDisabled();
+    expect(screen.getByText('1-50 of 120')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(screen.getByText('51-100 of 120')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(screen.getByText('101-120 of 120')).toBeInTheDocument();
+  });
+
+  it('does not jump forward when a list shrinks past the page and then grows back', async () => {
+    let banned = entries(101);
+    api.callRelayRpc.mockImplementation((method: string) =>
+      Promise.resolve(method === 'listbannedpubkeys' ? banned : []));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    renderWithProvider(client);
+    await screen.findAllByTestId('user-card');
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(screen.getByText('101-101 of 101')).toBeInTheDocument();
+
+    banned = entries(100);
+    await act(async () => { await client.invalidateQueries({ queryKey: ['banned-users'] }); });
+    expect(await screen.findByText('51-100 of 100')).toBeInTheDocument();
+
+    banned = entries(101);
+    await act(async () => { await client.invalidateQueries({ queryKey: ['banned-users'] }); });
+    expect(await screen.findByText('51-100 of 101')).toBeInTheDocument();
+  });
+
+  it('returns to page one when the environment changes', async () => {
+    serve(entries(120));
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const tree = (relayUrl: string) => (
+      <AppContext.Provider value={{ config: { relayUrl } as never, updateConfig: vi.fn() }}>
+        <QueryClientProvider client={client}>
+          <TooltipProvider><UserManagement selectedPubkey={PUBKEY} /></TooltipProvider>
+        </QueryClientProvider>
+      </AppContext.Provider>
+    );
+    const { rerender } = render(tree('wss://one.test'));
+    await screen.findAllByTestId('user-card');
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    expect(screen.getByText('51-100 of 120')).toBeInTheDocument();
+    fireEvent.change(screen.getByRole('searchbox', { name: /search banned users/i }), { target: { value: hex(77).slice(-4) } });
+    await waitFor(() => expect(screen.getAllByTestId('user-card')).toHaveLength(1));
+    expect(screen.queryByText(/of 120/)).not.toBeInTheDocument();
+
+    rerender(tree('wss://two.test'));
+
+    expect(await screen.findByText('1-50 of 120')).toBeInTheDocument();
+    expect(screen.getByRole('searchbox', { name: /search banned users/i })).toHaveValue('');
+  });
+
+  describe('pager accessibility', () => {
+    const scrollIntoView = vi.fn();
+    const originalScroll = Element.prototype.scrollIntoView;
+    beforeEach(() => {
+      scrollIntoView.mockClear();
+      Element.prototype.scrollIntoView = scrollIntoView;
+    });
+    afterEach(() => { Element.prototype.scrollIntoView = originalScroll; });
+
+    it('is a labelled navigation landmark with plain buttons and a polite range line', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      const nav = screen.getByRole('navigation', { name: /banned users pages/i });
+      expect(within(nav).getByRole('button', { name: /^Next$/ })).toHaveAttribute('type', 'button');
+      expect(within(nav).getByRole('button', { name: /^Previous$/ })).toHaveAttribute('type', 'button');
+      expect(within(nav).getByText('1-50 of 120')).toHaveAttribute('aria-live', 'polite');
+    });
+
+    it('labels the Suspended pager separately', async () => {
+      serve([], entries(120));
+      renderWithProvider();
+      fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+      await screen.findAllByTestId('user-card');
+      expect(screen.getByRole('navigation', { name: /suspended users pages/i })).toBeInTheDocument();
+    });
+
+    it('scrolls the list to its top when the page changes, but not on first render', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      expect(scrollIntoView).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands focus to Next when Previous reaches the first page', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      screen.getByRole('button', { name: /^Previous$/ }).focus();
+      fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
+      expect(screen.getByRole('button', { name: /^Previous$/ })).toBeDisabled();
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Next$/ })).toHaveFocus());
+    });
+
+    it('hands focus over without scrolling the page back down', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      const focus = vi.spyOn(HTMLElement.prototype, 'focus');
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Previous$/ })).toHaveFocus());
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      focus.mockClear();
+      fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
+      fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Next$/ })).toHaveFocus());
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
+      focus.mockRestore();
+    });
+
+    it('moves focus to the other button when the clicked one becomes disabled', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      screen.getByRole('button', { name: /^Next$/ }).focus();
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      expect(screen.getByRole('button', { name: /^Next$/ })).toBeDisabled();
+      await waitFor(() => expect(screen.getByRole('button', { name: /^Previous$/ })).toHaveFocus());
+    });
+  });
+
+  describe('search', () => {
+    const npubOf = (i: number) => nip19.npubEncode(hex(i));
+    const search = () => screen.getByRole('searchbox', { name: /search banned users/i });
+    const type = (el: HTMLElement, value: string) => fireEvent.change(el, { target: { value } });
+
+    it('filters by a hex pubkey fragment', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      type(search(), hex(77).slice(-4));
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(77)]));
+    });
+
+    it('accepts a full npub and matches its hex', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      type(search(), npubOf(88));
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(88)]));
+    });
+
+    it('filters by reason, ignoring case', async () => {
+      serve([{ pubkey: hex(1), reason: 'Comment SPAM' }, { pubkey: hex(2), reason: 'harassment' }]);
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      type(search(), 'spam');
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(1)]));
+    });
+
+    it('filters by a display name already in the profile cache', async () => {
+      serve(entries(3));
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      client.setQueryData(['author', hex(2), ''], { metadata: { display_name: 'Zebra Fan' }, isFunnelcakeUser: true });
+      renderWithProvider(client);
+      await screen.findAllByTestId('user-card');
+      type(search(), 'zebra');
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(2)]));
+    });
+
+    it('makes no list request, and pages the filtered result', async () => {
+      const list = [
+        ...Array.from({ length: 60 }, (_, i) => ({ pubkey: hex(i + 1), reason: 'spam' })),
+        { pubkey: hex(500), reason: 'other' },
+      ];
+      serve(list);
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      await act(async () => {});
+      const rpcCalls = api.callRelayRpc.mock.calls.length;
+
+      type(search(), 'spam');
+      expect(await screen.findByText('1-50 of 60')).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      expect(pubkeysShown()).toHaveLength(10);
+      expect(api.callRelayRpc.mock.calls.length).toBe(rpcCalls);
+    });
+
+    it('returns to page one when the filter changes', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      type(search(), '0');
+      expect(await screen.findByText(/^1-50 of /)).toBeInTheDocument();
+    });
+
+    it('says when nothing matches', async () => {
+      serve(entries(3));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      type(search(), 'nomatchanywhere');
+      expect(await screen.findByText('No accounts match')).toBeInTheDocument();
+      expect(screen.queryAllByTestId('user-card')).toHaveLength(0);
+    });
+
+    it('searches the Suspended tab independently', async () => {
+      serve(entries(3), [{ pubkey: hex(9), reason: 'x' }, { pubkey: hex(10), reason: 'y' }]);
+      renderWithProvider();
+      fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+      await screen.findAllByTestId('user-card');
+      type(screen.getByRole('searchbox', { name: /search suspended users/i }), hex(10).slice(-3));
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(10)]));
+    });
+    it('matches an uppercase hex pubkey and an uppercase reason', async () => {
+      serve([{ pubkey: hex(171), reason: 'comment spam' }, { pubkey: hex(2), reason: 'other' }]);
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      type(search(), '  ' + hex(171).slice(-4).toUpperCase() + ' ');
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(171)]));
+      type(search(), 'SPAM');
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(171)]));
+    });
+
+    it('waits for typing to pause before it swaps the cards', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      cardMounts.log.length = 0;
+
+      type(search(), hex(77).slice(-5, -1));
+      type(search(), hex(77).slice(-4));
+      expect(pubkeysShown()).toHaveLength(50);
+      expect(cardMounts.log).toEqual([]);
+
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(77)]));
+      // Only the settled filter mounted cards, not each keystroke's.
+      expect(cardMounts.log).toEqual([hex(77)]);
+    });
+
+    it('applies the filter only after 250 ms of quiet', async () => {
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      vi.useFakeTimers();
+      try {
+        type(search(), hex(77).slice(-4));
+        act(() => { vi.advanceTimersByTime(200); });
+        expect(pubkeysShown()).toHaveLength(50);
+        // Another keystroke restarts the wait.
+        type(search(), hex(77).slice(-4) + ' ');
+        act(() => { vi.advanceTimersByTime(200); });
+        expect(pubkeysShown()).toHaveLength(50);
+        act(() => { vi.advanceTimersByTime(60); });
+        expect(pubkeysShown()).toEqual([hex(77)]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('does not scroll the list away from the search box while typing', async () => {
+      const scrollIntoView = vi.fn();
+      const original = Element.prototype.scrollIntoView;
+      Element.prototype.scrollIntoView = scrollIntoView;
+      onTestFinished(() => { Element.prototype.scrollIntoView = original; });
+      serve(entries(120));
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      scrollIntoView.mockClear();
+
+      type(search(), hex(77).slice(-4));
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(77)]));
+
+      expect(scrollIntoView).not.toHaveBeenCalled();
+    });
+
+    it('announces the match count, and when nothing matches, outside the pager', async () => {
+      serve([
+        ...Array.from({ length: 60 }, (_, i) => ({ pubkey: hex(i + 1), reason: 'spam' })),
+        { pubkey: hex(500), reason: 'other' },
+      ]);
+      renderWithProvider();
+      await screen.findAllByTestId('user-card');
+      const status = screen.getByRole('status');
+      expect(status).toBeEmptyDOMElement();
+
+      // Over a page of matches the pager's range line speaks; this line stays quiet.
+      type(search(), 'spam');
+      expect(await screen.findByText('1-50 of 60')).toBeInTheDocument();
+      expect(status).toBeEmptyDOMElement();
+
+      type(search(), hex(30).slice(-4));
+      await waitFor(() => expect(status).toHaveTextContent(/^1 match$/));
+
+      type(search(), 'nomatchanywhere');
+      await waitFor(() => expect(status).toHaveTextContent('No accounts match'));
     });
   });
 });
