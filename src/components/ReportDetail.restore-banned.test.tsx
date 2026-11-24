@@ -377,9 +377,28 @@ describe('ReportDetail after a restore', () => {
     await waitFor(() => expect(relay.bannedReads).toBe(2));
     relay.banned = POST;
     fireEvent.click(screen.getByRole('button', { name: button }));
+    await waitFor(() => expect(relay.bannedReads).toBe(3));
     await act(async () => { release(); });
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
-    expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
+    expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
+  });
+
+  it('finishes refreshing a restored post when a bulk delete of another kind completes', async () => {
+    await openOnBannedPost();
+    relay.post = undefined;
+    let release!: () => void;
+    relay.hold = new Promise(resolve => { release = resolve; });
+    fireEvent.click(screen.getByRole('button', { name: 'Restore Event' }));
+    await waitFor(() => expect(relay.bannedReads).toBe(2));
+
+    // The bulk job did not touch this post, so the worker still reports no ban.
+    fireEvent.click(screen.getByRole('button', { name: 'Bulk delete by kind' }));
+    await waitFor(() => expect(relay.bannedReads).toBe(3));
+    await act(async () => { release(); });
+    await waitFor(() => expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))).toMatchObject({
+      data: null,
+      fetchStatus: 'idle',
+    }));
+    expect(screen.queryByText(BANNED_VIEW)).not.toBeInTheDocument();
   });
 
   it('Age Restrict All leaves the banned-event read fresh', async () => {

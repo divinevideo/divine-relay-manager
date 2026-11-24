@@ -287,10 +287,15 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     setRetainedBanned(kept => (kept?.eventId === eventId ? null : kept));
   };
 
-  // A read started before a ban can still answer "not banned". Cancel it and
-  // refresh active reads that have no post. Keep any displayed post and its
-  // media until the next normal read, since the worker can refuse a refresh.
+  // A read started before a ban can still answer "not banned". Replace it
+  // even if a restore refresh still has a cached post. Also refresh active
+  // reads with no post. Leave a settled displayed post and its media in place
+  // until the next normal read, since the worker can refuse a refresh.
   const refreshBannedEventReads = (filters: Pick<QueryFilters, 'queryKey' | 'exact'>) => {
+    const pending = new Set(queryClient.getQueryCache().findAll({
+      ...filters,
+      predicate: query => query.state.fetchStatus !== 'idle',
+    }));
     // Marked stale now, so a reopen straight away finds the read stale.
     void queryClient.invalidateQueries({ ...filters, refetchType: 'none' });
     void queryClient.cancelQueries(filters).then(() => {
@@ -298,7 +303,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return queryClient.refetchQueries({
         ...filters,
         type: 'active',
-        predicate: query => query.state.data == null,
+        predicate: query => query.state.data == null || pending.has(query),
       });
     });
   };
