@@ -570,6 +570,19 @@ describe('UserManagement drops cached authored-content reads after an account ac
     }
   });
 
+  // Delete All Content bans every post of the account on the relay.
+  it('invalidates the banned-events list after a content action', async () => {
+    const client = clientWithStats();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+
+    renderWithProvider(client);
+    await waitFor(() => expect(userActionsProps.last).not.toBeNull());
+    const onActionComplete = userActionsProps.last?.onActionComplete as (c: UserActionChange) => void;
+    await act(async () => { onActionComplete({ accountStatusChanged: false }); });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+  });
+
   it('keeps them after a content action that leaves the account status as it was', async () => {
     const client = clientWithStats();
 

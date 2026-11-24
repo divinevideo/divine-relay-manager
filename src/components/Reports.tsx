@@ -56,7 +56,7 @@ import { classifyTargetedFetch, reportsMatchingTarget, type DeepLinkStatus } fro
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailure";
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
-import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
+import { useBannedPubkeys, useBannedEvents, BAN_LIST_POLL_MS } from "@/hooks/useRelayBanLists";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_LABEL_READ_TIMEOUT_MS, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
 import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
@@ -177,8 +177,8 @@ const MEDIUM_PRIORITY_CATEGORIES = ['doxxing_pii', 'malware_scam', 'illegal_good
 // walks every report on the relay and, inside the worker, every resolution
 // label and both decision projections, so it runs once a minute: new reports
 // reach the queue within a minute. Handled work still leaves sooner, because
-// the resolution reads below keep their own cadence (decisions and both ban
-// lists every 15s).
+// the resolution reads below keep their own cadence (decisions every 15s,
+// both ban lists every minute).
 // A moderator's own resolve or reopen refreshes this read at once
 // (invalidateResolutionState).
 const QUEUE_POLL_MS = 60 * 1000;
@@ -735,7 +735,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   } = useQuery({
     queryKey: ['resolution-label-targets', relayUrl],
     queryFn: () => fetchResolutionLabelTargets({ timeoutMs: RESOLUTION_LABEL_READ_TIMEOUT_MS }),
-    // 60s, not the 15s the other sources use. This one walks every page of
+    // 60s, not the 15s resolution-state uses. This one walks every page of
     // resolution labels on the relay (two today, and one more every few
     // months), so a 15s poll opens a socket per page per tab per interval to
     // re-derive a set that barely moves. A moderator's OWN action still clears
@@ -764,7 +764,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // 0 on a deep link so an arriving report reads current ban status rather
     // than a cached one.
     staleTime: hasDeepLinkParams ? 0 : 30 * 1000,
-    refetchInterval: 15 * 1000,
+    refetchInterval: BAN_LIST_POLL_MS,
   });
 
   // Query banned/deleted events from relay (NIP-86 RPC)
@@ -776,7 +776,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     fetchStatus: bannedEventsFetchStatus,
     errorUpdateCount: bannedEventsErrorUpdateCount,
     refetch: refetchBannedEvents,
-  } = useBannedEvents({ refetchInterval: 15 * 1000 });
+  } = useBannedEvents({ refetchInterval: BAN_LIST_POLL_MS });
 
   // Query all moderation decisions from our D1 database.
   // retry: 1, not 0. The original reasoning still holds (stacking retries on a

@@ -9,6 +9,16 @@ import { beginSuspendedListRead } from '@/lib/suspensionAfterRestore';
 const BAN_LIST_STALE_MS = 30_000;
 
 /**
+ * How often the reports queue re-reads the relay's ban lists. Each read is a
+ * database query on the relay, per open tab, so this is a steady load. A
+ * moderator's own action in this tab refreshes a list itself: an invalidation,
+ * or, for account actions, the status check's re-read (recheckAfterAction).
+ * Another moderator's change, or one made in a second browser tab, waits for
+ * this poll, or for a focus refetch once the copy is 30s old.
+ */
+export const BAN_LIST_POLL_MS = 60_000;
+
+/**
  * Why these live here rather than beside their callers.
  *
  * `['banned-pubkeys']` and `['banned-events']` are read by both the reports

@@ -161,8 +161,8 @@ function sinceReRead(
   // regains focus, and after a failure no newer read is on its way. One comes
   // from the next check, from a refetch when the window regains focus once the
   // copy is stale (30s by default), or, for the banned list only, from the
-  // reports queue's 15s poll while the queue is mounted. The suspended list is
-  // never polled.
+  // reports queue's one-minute poll while the queue is mounted. The suspended
+  // list is never polled.
   return { current: false, rereading: query.fetchStatus === 'fetching' };
 }
 

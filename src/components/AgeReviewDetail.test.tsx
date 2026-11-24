@@ -368,6 +368,33 @@ describe('AgeReviewDetail', () => {
     expect(screen.queryByText(/Failed to update/)).not.toBeInTheDocument();
   });
 
+  // The reports queue reads the relay's ban lists on a one-minute poll, and a
+  // deny bans the account (and may purge its posts), so the deny itself must
+  // mark both lists stale rather than leave handled reports in the queue.
+  describe('the relay ban lists after a deny', () => {
+    it('invalidates the banned lists when a deny settles', async () => {
+      const before = makeCase({ pubkey: 'a'.repeat(64) });
+      const after = makeCase({ pubkey: 'a'.repeat(64), state: 'denied_closed', version: 1 });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, case: after, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+      fireEvent.click(screen.getByRole('button', { name: /Deny.*Close/ }));
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] }));
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+    });
+
+    it('leaves the banned lists alone for a restrict', async () => {
+      const before = makeCase({ pubkey: 'a'.repeat(64), suspected_age_band: 'age_13_15' });
+      const after = makeCase({ pubkey: 'a'.repeat(64), suspected_age_band: 'age_13_15', state: 'restricted_pending_parental_consent', version: 1 });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, case: after, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['suspended-pubkeys'], exact: true }));
+      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
+    });
+  });
+
   // The active-case route matches the pubkey exactly (#313), so a case's own
   // pubkey is the only lookup key that can answer with it. After a transition
   // that entry is written (null once the case closes), or dropped when the

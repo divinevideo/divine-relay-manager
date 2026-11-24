@@ -123,7 +123,7 @@ describe('useBannedEvents', () => {
   }
 
   // The reports queue passes both of these, and both are silent if dropped: the
-  // queue would stop its 15s poll of the ban lists, or lose the fresh read it
+  // queue would stop its one-minute poll of the ban lists, or lose the fresh read it
   // asks for on a deep link. Nothing in the Reports tests would notice.
   it('polls when the caller passes a refetchInterval', async () => {
     listBannedEvents.mockResolvedValue([]);

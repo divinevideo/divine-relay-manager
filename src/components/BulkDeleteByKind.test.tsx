@@ -550,6 +550,19 @@ describe('BulkDeleteByKind outcomes', () => {
     await waitFor(() => expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument());
   });
 
+  // Each deleted post is banned on the relay, so the queue's banned-events read
+  // is stale after any bulk delete, whichever screen hosts the dialog.
+  it('invalidates the banned-events list when a bulk delete completes', async () => {
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const invalidate = vi.spyOn(qc, 'invalidateQueries');
+    api.getBulkJobStatus.mockResolvedValue(job({}));
+    renderDialog({}, qc);
+    await openAndPickReactions();
+    fireEvent.click(screen.getByRole('button', { name: 'Delete 3 Reaction events' }));
+    await waitFor(() => expect(toast).toHaveBeenCalled());
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+  });
+
   it('says what was no longer listed when a clean job deleted fewer than the exact count', async () => {
     await runWith({ eventsProcessed: 1 });
 

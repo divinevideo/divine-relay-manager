@@ -333,6 +333,37 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
+  // The queue polls the banned-events list only once a minute, so a post action
+  // (delete, restore, media) must invalidate it itself or the handled post stays
+  // in the queue until the next poll. Asserted on our call, not on React Query.
+  it('invalidates the banned-events list when a post action completes', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onComplete = bulkDeleteProps.last?.onComplete as () => void;
+
+      onComplete();
+
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
+  it('invalidates the banned-events list when an account action completes', () => {
+    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
+    try {
+      renderDetail();
+      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
+
+      onActionComplete({ accountStatusChanged: true, action: 'ban', pubkey: 'a'.repeat(64) } as UserActionChange);
+
+      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+    } finally {
+      invalidate.mockRestore();
+    }
+  });
+
   it('passes the account ban and suspend status to the by-kind delete', () => {
     status.value = moderationStatusMock({ isUserBanned: true, isEventGone: null, checkedAt: CHECKED_AT });
     status.value.isUserSuspended = null;

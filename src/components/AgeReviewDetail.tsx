@@ -339,6 +339,13 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
       void invalidateAccountStatus(queryClient, ctx.casePubkey);
+      // A deny bans the account and may purge its posts, so the queue's
+      // ban-list reads (a one-minute poll) are stale. Settled, like the rest:
+      // a lost response can follow a ban that committed.
+      if (updates.state === 'denied_closed') {
+        void queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+        void queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      }
       // The viewer uses the relay's suspended list (#437). Cancel the old read
       // first because invalidating alone reuses an in-flight read when the
       // cache has no result yet. Funnelcake deletes an unsuspended account from

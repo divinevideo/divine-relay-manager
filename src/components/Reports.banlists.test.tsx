@@ -1,7 +1,7 @@
 // ABOUTME: Pins the options the reports queue passes to the shared ban-list reads.
 // ABOUTME: The queue polls both lists, and a deep link reads the banned accounts fresh.
 
-import { render, waitFor } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
@@ -26,7 +26,9 @@ vi.mock('@/hooks/useRelayBanLists', async (orig) => {
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
 
 const TARGET_PUBKEY = 'd'.repeat(64);
-const BAN_LIST_POLL_MS = 15 * 1000;
+// The relay's ban lists are a database read per open tab, so poll once a minute.
+// Literal on purpose: importing the production constant would make the pin tautological.
+const BAN_LIST_POLL_MS = 60 * 1000;
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -89,5 +91,32 @@ describe('Reports ban-list reads', () => {
 
     await waitFor(() => expect(useBannedPubkeys).toHaveBeenCalled());
     expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ staleTime: 0 }));
+  });
+
+  describe('over time', () => {
+    const rpcCalls = (method: string) =>
+      (fetch as unknown as MockInstance).mock.calls.filter(([input, init]) => {
+        const url = String(input instanceof Request ? input.url : input);
+        return url.includes('/api/relay-rpc') && String(init?.body ?? '').includes(`"${method}"`);
+      }).length;
+
+    afterEach(() => vi.useRealTimers());
+
+    it('does not re-request the ban lists at 15s, and does at 60s', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      renderQueue();
+      await waitFor(() => expect(rpcCalls('listbannedpubkeys')).toBeGreaterThan(0));
+      await waitFor(() => expect(rpcCalls('listbannedevents')).toBeGreaterThan(0));
+      const pubkeys0 = rpcCalls('listbannedpubkeys');
+      const events0 = rpcCalls('listbannedevents');
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000 * 3 + 1_000); });
+      expect(rpcCalls('listbannedpubkeys')).toBe(pubkeys0);
+      expect(rpcCalls('listbannedevents')).toBe(events0);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(15_000 + 1_000); });
+      await waitFor(() => expect(rpcCalls('listbannedpubkeys')).toBe(pubkeys0 + 1));
+      await waitFor(() => expect(rpcCalls('listbannedevents')).toBe(events0 + 1));
+    });
   });
 });

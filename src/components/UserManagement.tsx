@@ -240,6 +240,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const invalidateUserQueries = () => {
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
+    // Delete All Content bans each post on the relay.
+    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
