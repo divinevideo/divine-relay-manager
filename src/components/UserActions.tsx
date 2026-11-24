@@ -86,7 +86,8 @@ interface UserActionsProps {
 
 interface AccountActionTarget {
   pubkey: string;
-  reportTarget?: { eventId?: string };
+  /** `selection`: which uninterrupted selection of the post the report pane was on (ReportDetail). */
+  reportTarget?: { eventId?: string; selection?: number };
 }
 
 /**
@@ -112,7 +113,12 @@ interface AccountActionTarget {
 // would mislead.
 export type UserActionChange =
   | { accountStatusChanged: false; action?: 'delete-all' }
-  | (AccountActionTarget & { accountStatusChanged: true; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' });
+  | (AccountActionTarget & {
+    accountStatusChanged: true;
+    action: 'suspend' | 'unsuspend' | 'ban' | 'unban';
+    /** An unban whose outcome confirms the suspension ended too. */
+    suspensionEnded?: boolean;
+  });
 
 // Only the account and report a change reports, not the action's other
 // variables (a suspend's duration, an unban's choice and version).
@@ -328,14 +334,16 @@ export function UserActions({
         action: 'unban_user',
         reason: 'Unbanned by moderator',
       }, unbanAuditFailedToast(outcome, toastOpts));
-      return outcomeToast;
+      // The unban ended the suspension too (not when the choice was skipped or the
+      // suspension continues): hosts that kept a post from a Suspend drop it.
+      return { outcomeToast, suspensionEnded: !outcome.choiceSkipped && outcome.suspension.state === 'ended' };
     },
-    onSuccess: (outcomeToast, variables) => {
+    onSuccess: ({ outcomeToast, suspensionEnded }, variables) => {
       // Reset, not invalidate: the unban may have ended or changed the timer,
       // and a failed re-read must not leave the old end on screen as current.
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast(outcomeToast);
-      onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'unban' });
+      onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'unban', ...(suspensionEnded && { suspensionEnded }) });
     },
     onError: async (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;

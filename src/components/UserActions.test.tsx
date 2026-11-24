@@ -1634,6 +1634,22 @@ describe('UserActions unban prompt', () => {
     await waitFor(() => expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ action: 'unban_user', targetId: PUBKEY })));
   });
 
+  // The host learns whether the unban ended the suspension, so a report pane can
+  // drop what it kept from a Suspend; a suspension that continues changes nothing.
+  it.each([
+    ['ended', true],
+    ['resumed', false],
+    ['open_ended', false],
+  ] as const)('reports to the host that the suspension ended: %s -> %s', async (state, ended) => {
+    api.unbanPubkey.mockResolvedValue({ suspension: { state, endsAt: null, decisionRecorded: true } });
+    const onActionComplete = vi.fn();
+    renderWithProvider(<UserActions pubkey={PUBKEY} isBanned isSuspended onActionComplete={onActionComplete} />, client());
+    clickUnban();
+    await confirmUnban();
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith(expect.objectContaining({ action: 'unban', accountStatusChanged: true })));
+    expect(onActionComplete.mock.calls[0][0].suspensionEnded === true).toBe(ended);
+  });
+
   // The prompt and the toast take the switch from the cached timers list.
   it.each([
     [true, 'Resume. The end date has passed, so it lifts at the next check',
@@ -1768,7 +1784,7 @@ describe('UserActions unban prompt', () => {
     finish({ suspension: { state: 'ended', endsAt: null, decisionRecorded: true } });
 
     await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
-    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban', reportTarget: original });
+    expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban', reportTarget: original, suspensionEnded: true });
   });
 
   it.each([

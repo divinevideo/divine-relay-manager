@@ -108,17 +108,27 @@ vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined,
 
 // The latest completion callback the pane gave UserActions: a Suspend that
 // lands after the pane was closed runs the closed pane's callback.
-const completion = vi.hoisted(() => ({ latest: undefined as undefined | ((c: UserActionChange) => void) }));
+const completion = vi.hoisted(() => ({
+  latest: undefined as undefined | ((c: UserActionChange) => void),
+  // The report target the pane gave UserActions at the latest render, and the
+  // one captured when a Suspend was started (it finishes later).
+  target: undefined as undefined | { eventId?: string; selection?: number },
+  started: undefined as undefined | { eventId?: string; selection?: number },
+}));
 vi.mock('@/components/UserActions', () => ({
-  UserActions: ({ onActionComplete }: { onActionComplete?: (c: UserActionChange) => void }) => (completion.latest = onActionComplete, (
+  UserActions: ({ onActionComplete, reportTarget }: { onActionComplete?: (c: UserActionChange) => void; reportTarget?: { eventId?: string; selection?: number } }) => (completion.latest = onActionComplete, completion.target = reportTarget, (
     <>
-      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: '6'.repeat(64), reportTarget: { eventId: EVENT_ID } })}>Suspend p-tag account</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: '6'.repeat(64), reportTarget })}>Suspend p-tag account</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Suspend from the first report</button>
+      <button onClick={() => { completion.started = reportTarget; }}>Start suspend</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: completion.started })}>Finish suspend</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unban', pubkey: REPORTED_PUBKEY, reportTarget, suspensionEnded: true })}>Unban ending suspension</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: false, action: 'delete-all' })}>Delete All Content</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: false })}>Age Restrict All</button>
-      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Suspend</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget })}>Suspend</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: '7'.repeat(64), reportTarget: { eventId: OTHER_ID } })}>Suspend other author</button>
-      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unsuspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Unsuspend</button>
-      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unban', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Unban</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unsuspend', pubkey: REPORTED_PUBKEY, reportTarget })}>Unsuspend</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unban', pubkey: REPORTED_PUBKEY, reportTarget })}>Unban</button>
     </>
   )),
 }));
@@ -569,8 +579,8 @@ describe('ReportDetail banned-post reads and a Suspend', () => {
     render(pane(REPORT_B));
     expect(await screen.findByText('the other post')).toBeInTheDocument();
     relay.banned = undefined;
-    // The mocked Suspend reports the first report (EVENT_ID) as its origin.
-    fireEvent.click(screen.getByRole('button', { name: 'Suspend' }));
+    // This Suspend names the first report (EVENT_ID) as its origin.
+    fireEvent.click(screen.getByRole('button', { name: 'Suspend from the first report' }));
     await waitFor(() => expect(relay.bannedReads).toBe(2));
     await waitFor(() => expect(screen.queryByText('the other post')).not.toBeInTheDocument());
   });
@@ -684,10 +694,11 @@ describe('ReportDetail banned-post reads and a Suspend', () => {
   it('a Suspend finishing after the pane was closed and reopened still reads the post fresh', async () => {
     const { unmount } = await openBanned();
     const staleCompletion = completion.latest!;
+    const closedTarget = completion.target;
     unmount();
     render(pane(REPORT));
     await waitFor(() => expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument());
-    act(() => { staleCompletion({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } }); });
+    act(() => { staleCompletion({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: closedTarget }); });
     await waitFor(() => expect(relay.bannedReads).toBe(2));
     await waitFor(() => expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))?.fetchStatus).toBe('idle'));
     expect(screen.queryByText(/Checking moderation status/)).not.toBeInTheDocument();
@@ -702,6 +713,43 @@ describe('ReportDetail banned-post reads and a Suspend', () => {
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
     // The real author is suspended elsewhere: the read is refused, and the post goes.
     act(() => { suspendBannedEventReads(client, API_URL, REPORTED_PUBKEY); });
+    await waitFor(() => expect(relay.bannedReads).toBe(2));
+    await waitFor(() => expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument());
+  });
+
+  // The pane stays mounted across selections on the desktop layout, so a Suspend
+  // pending while the moderator selects another post keeps nothing when it lands,
+  // even if they came back to the same post: that is a new selection.
+  it('a Suspend pending while another post is selected keeps nothing, without the pane unmounting', async () => {
+    const { rerender } = await openBanned();
+    fireEvent.click(screen.getByRole('button', { name: 'Start suspend' }));
+    rerender(pane(REPORT_B));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 30)); });
+    rerender(pane(REPORT));
+    await waitFor(() => expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Finish suspend' }));
+    await waitFor(() => expect(relay.bannedReads).toBeGreaterThan(1));
+    await waitFor(() => expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument());
+  });
+
+  it('a Suspend finishing on the same continuously selected post keeps it, across reports on that post', async () => {
+    const { rerender } = await openBanned();
+    fireEvent.click(screen.getByRole('button', { name: 'Start suspend' }));
+    rerender(pane({ ...REPORT, id: 'e1'.repeat(32) })); // another report, same post
+    await waitFor(() => expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument());
+    fireEvent.click(screen.getByRole('button', { name: 'Finish suspend' }));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    expect(screen.getByText(POST_TEXT)).toBeInTheDocument();
+  });
+
+  // An unban that ended the suspension lets the live read work again, as an
+  // Unsuspend does; one that left it running changes nothing.
+  it('Unban that ended the suspension: drops the kept post and reads again', async () => {
+    await openBanned();
+    fireEvent.click(screen.getByRole('button', { name: 'Suspend' }));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    expect(relay.bannedReads).toBe(1);
+    fireEvent.click(screen.getByRole('button', { name: 'Unban ending suspension' }));
     await waitFor(() => expect(relay.bannedReads).toBe(2));
     await waitFor(() => expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument());
   });

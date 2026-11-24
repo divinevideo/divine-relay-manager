@@ -209,6 +209,15 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // moderator switches post, leaves, restores it or unsuspends the author.
   // (Another report on the same post keeps it too.) Everywhere else a tainted
   // read counts as not read yet, and the fresh read answers.
+  // Which uninterrupted selection of this post the pane is on. The pane stays
+  // mounted across selections on the desktop layout, so a Suspend that was
+  // started on one selection must not keep its post once another post was
+  // selected, even if the moderator came back to it. Reports on the same post
+  // are one selection.
+  const selection = useRef({ eventId: targetEventId, epoch: 0 });
+  if (selection.current.eventId !== targetEventId) {
+    selection.current = { eventId: targetEventId, epoch: selection.current.epoch + 1 };
+  }
   const mountedRef = useRef(false);
   useEffect(() => {
     mountedRef.current = true;
@@ -820,14 +829,15 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
         // account's: a report's p tag can name someone else.
         const keeps = mountedRef.current && isDisplayedEventBanned && !!bannedEvent && !!targetEventId
           && change.reportTarget?.eventId === targetEventId
+          && change.reportTarget.selection === selection.current.epoch
           && bannedEvent.pubkey?.toLowerCase() === change.pubkey.toLowerCase();
         if (keeps) setRetainedBanned({ eventId: targetEventId, event: bannedEvent });
         suspendBannedEventReads(queryClient, config.apiUrl, change.pubkey, keeps ? targetEventId : undefined);
       }
-      if (change.action === 'unsuspend') {
+      if (change.action === 'unsuspend' || (change.action === 'unban' && change.suspensionEnded)) {
         // The live read works again: drop a kept snapshot of that author's
-        // post and read the author's posts again. Not on an Unban, which can
-        // leave a running suspension in place.
+        // post and read the author's posts again. On an Unban only when it ended
+        // the suspension too: it can leave a running one in place.
         setRetainedBanned(kept => (kept?.event.pubkey?.toLowerCase() === change.pubkey.toLowerCase() ? null : kept));
         refreshBannedEventReadsAfterUnsuspend(queryClient, config.apiUrl, change.pubkey);
       }
@@ -1750,7 +1760,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               <UserActions
                 pubkey={context.reportedUser.pubkey}
                 context="report"
-                reportTarget={{ eventId: targetEventId }}
+                reportTarget={{ eventId: targetEventId, selection: selection.current.epoch }}
                 reportCategory={ageReviewCategory(report)}
                 // Pass null through. `?? undefined` handed UserActions an
                 // absent prop, which its default turned into a confirmed
