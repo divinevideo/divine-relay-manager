@@ -240,3 +240,19 @@ export function getReportTargetIds(event: { tags: string[][] }): { eventId?: str
 // trigger the fetch. Two values here would make the queue's cold-load bound
 // depend on which screen fetched last.
 export const RESOLUTION_READ_TIMEOUT_MS = 8_000;
+
+// The one exception to the bound above: the resolution-label read. Of the
+// four, only resolution-state is a D1 lookup and the banned lists are NIP-86
+// relay RPCs; this one makes the worker walk every page of labels on the
+// relay. The relay answers nothing until a page's whole query finishes and
+// keeps running it for up to 30s after the worker hangs up, so an 8s abort both
+// fails a read that was about to succeed and leaves that query running.
+//
+// 28s sits above the worker's 25s walk deadline (RELAY_WALK_DEADLINE_MS) by a
+// 3s margin, so the worker answers first, with data or a clean 502; the margin
+// is pinned by relay-read-bounds.test.ts. The read is NOT retried (see
+// Reports.tsx): a retry re-runs the whole walk, so the relay is asked once.
+// Worst case on a cold load is about 28s of skeleton, then the blocked pane and
+// its escape hatches, which key on the settled failure (errorUpdateCount), not
+// on this value.
+export const RESOLUTION_LABEL_READ_TIMEOUT_MS = 28_000;

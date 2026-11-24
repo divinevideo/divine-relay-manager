@@ -269,36 +269,6 @@ describe('Reports resolution filtering', () => {
 
     expect(await screen.findByText(pendingCount(1))).toBeInTheDocument();
   });
-
-  // The labels read is the one polling query here that retries. queryRelay
-  // gives it a hard 5s cap, so a slow relay crosses it on ordinary variance
-  // (#185 measured that on staging; the matching production timings are in
-  // this PR's description), and without a retry one slow read costs a
-  // moderator their whole resolution filter until the next poll --
-  // re-presenting handled work as pending.
-  it('recovers the resolution filter when the labels read fails once', async () => {
-    let labelCalls = 0;
-    stubFetch(() => {
-      labelCalls++;
-      if (labelCalls === 1) {
-        return new Response(JSON.stringify({ success: false, error: 'Relay query timed out before EOSE' }), {
-          status: 502,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      }
-      return jsonResponse({ success: true, targets: [RESOLVED_LABEL_TARGET], truncated: false, oldest_covered: null });
-    });
-
-    render(
-      <TestApp>
-        <Reports relayUrl="wss://relay.example" />
-      </TestApp>
-    );
-
-    // The retry lands and the resolved target is hidden again.
-    expect(await screen.findByText(pendingCount(0))).toBeInTheDocument();
-    expect(labelCalls).toBeGreaterThan(1);
-  });
 });
 
 // An old build reports CSAM as NIP-56 'illegal' and names the reason only in

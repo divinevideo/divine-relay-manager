@@ -34,11 +34,10 @@ export function useRelatedReports(
     // 400, and the key can come from a report's p tag, which the reporter wrote.
     enabled: isHex64(key),
     staleTime: 60_000,
-    // One retry, as the queue's resolution reads (labels, decisions, ban
-    // lists). The default of three would keep the card on "checking" through
-    // four attempts, and a read that times out takes the full request timeout
-    // each time.
-    retry: 1,
+    // Not retried: this is a full relay walk for the account (up to the 25s walk
+    // deadline), a retry would re-run it while the relay is still running the
+    // abandoned one, and the card's Try again is the recovery.
+    retry: false,
     // The app default is Infinity, and each entry can be a read of tens of
     // thousands of reports. Keep an account's read for a few minutes, not for
     // every account the moderator ever opened.

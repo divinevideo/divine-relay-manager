@@ -4,7 +4,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
-import { QueryClient, onlineManager } from '@tanstack/react-query';
+import { QueryClient, focusManager, onlineManager } from '@tanstack/react-query';
 import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE, resolvedPage } from '@/test/resolvedHistory';
@@ -1006,13 +1006,278 @@ describe('the cold-load wait is bounded well under the poll interval (#221)', ()
     await screen.findByText(REPORTED_NPUB);
 
     const bounds = timeoutSpy.mock.calls.map(([ms]) => ms);
-    // One per resolution source, all four shortened.
-    expect(bounds.filter(ms => ms === 8_000).length).toBeGreaterThanOrEqual(4);
+    // The three D1/list-backed sources are shortened to 8s; the label read,
+    // which walks the relay, gets 28s instead.
+    expect(bounds.filter(ms => ms === 8_000).length).toBeGreaterThanOrEqual(3);
+    expect(bounds).toContain(28_000);
     // The reports query itself is untouched, so the change stays scoped to the
     // reads that gate the queue rather than becoming an app-wide retiming.
     expect(bounds).toContain(30_000);
 
     timeoutSpy.mockRestore();
+  });
+});
+
+describe('the label read is asked once', () => {
+  // A retry re-runs the worker's whole relay walk, and the relay keeps running
+  // an abandoned query for up to 30s, so a failed label read must settle after
+  // ONE request and hand the moderator the blocked pane's Retry button.
+  it('does not retry a failed resolution-label read, and still offers Retry', async () => {
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    let labelCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/resolution-label-targets')) {
+        labelCalls += 1;
+        return jsonResponse({ success: false, error: 'relay timed out' }, 502);
+      }
+      return healthy(input, init);
+    }));
+    // Inherits React Query's default retry (TestApp's own client turns it off,
+    // which would mask the regression), so removing `retry: false` from the
+    // label query makes this go red.
+    renderReports(new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } }));
+
+    expect(await screen.findByRole('button', { name: /^retry$/i })).toBeInTheDocument();
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(labelCalls).toBe(1);
+  });
+});
+
+describe('the blocked pane Retry re-runs only what failed', () => {
+  it('does not re-walk the feed or re-ask sources that answered', async () => {
+    const fetchMock = stubFetch({ labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const user = userEvent.setup();
+    renderReports();
+
+    const retry = await screen.findByRole('button', { name: /^retry$/i });
+    const count = (needle: string) => fetchMock.mock.calls
+      .filter(([input]) => String(input instanceof Request ? input.url : input).includes(needle)).length;
+    const feed = () => fetchMock.mock.calls.filter(([input]) => {
+      const url = String(input instanceof Request ? input.url : input);
+      return url.includes('/api/reports') && !url.includes('/api/reports/resolved');
+    }).length;
+    const before = { feed: feed(), labels: count('/api/resolution-label-targets'), decisions: count('/api/resolution-state'), rpc: count('/api/relay-rpc') };
+
+    await user.click(retry);
+    await waitFor(() => expect(count('/api/resolution-label-targets')).toBe(before.labels + 1));
+
+    expect(feed()).toBe(before.feed);
+    expect(count('/api/resolution-state')).toBe(before.decisions);
+    expect(count('/api/relay-rpc')).toBe(before.rpc);
+  });
+});
+
+// The positive side of the Retry predicate: what the button DOES re-run. The
+// describe above pins that it leaves answered sources alone.
+describe('the blocked pane Retry re-runs what failed', () => {
+  // Wraps the healthy stub so a test can switch an endpoint to failing mid-run.
+  function failableFetch(state: Parameters<typeof stubFetch>[0]) {
+    stubFetch(state);
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    const failing = new Set<string>();
+    const calls: string[] = [];
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      calls.push(url);
+      for (const needle of failing) {
+        if (url.includes(needle)) return jsonResponse({ success: false, error: 'relay timed out' }, 502);
+      }
+      return healthy(input, init);
+    }));
+    const count = (needle: string) => calls.filter(u => u.includes(needle)).length;
+    const feed = () => count('needs_attention');
+    return { failing, count, feed };
+  }
+
+  it('re-runs the feed when it has no reports', async () => {
+    // A cold feed failure raises its own pane, so the resolution pane (and its
+    // Retry) only shows beside a deep link's report, which the single-target
+    // lookup supplies without the feed.
+    const linkedId = '2'.repeat(64);
+    const linked = { ...EVENT_REPORT, id: '3'.repeat(64), tags: [['e', linkedId, 'spam']] };
+    const net = failableFetch({
+      labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty',
+      targeted: { events: [linked] },
+    });
+    net.failing.add('needs_attention');
+    net.failing.add('/api/resolution-label-targets');
+    function Routed() {
+      const { pathname } = useLocation();
+      return <Reports relayUrl={RELAY_URL} selectedReportId={pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1]} />;
+    }
+    window.history.pushState({}, '', `/reports?event=${linkedId}`);
+    const user = userEvent.setup();
+    render(<TestApp queryClient={new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })}><Routed /></TestApp>);
+
+    const retry = await screen.findByRole('button', { name: /^retry$/i });
+    const before = net.feed();
+    await user.click(retry);
+    await waitFor(() => expect(net.feed()).toBe(before + 1));
+  });
+
+  it('re-runs the feed when it has reports but its last refresh errored', async () => {
+    const net = failableFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+    const user = userEvent.setup();
+    renderReports(client);
+    await screen.findByText(REPORTED_NPUB);
+
+    // The feed's next read fails (data kept, error set), and labels fail cold
+    // after a refresh so the pane is raised by a different source.
+    net.failing.add('needs_attention');
+    net.failing.add('/api/resolution-label-targets');
+    client.removeQueries({ queryKey: ['resolution-label-targets'] });
+    await act(async () => { await client.refetchQueries({ queryKey: ['reports'] }); });
+    expect(client.getQueryState(['reports', RELAY_URL])?.error).toBeTruthy();
+    expect(client.getQueryData(['reports', RELAY_URL])).toBeTruthy();
+
+    const retry = await screen.findByRole('button', { name: /^retry$/i });
+    const before = net.feed();
+    await user.click(retry);
+    await waitFor(() => expect(net.feed()).toBe(before + 1));
+  });
+
+  it('re-runs a source that has data but failed its last refresh', async () => {
+    const net = failableFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+    const user = userEvent.setup();
+    renderReports(client);
+    await screen.findByText(REPORTED_NPUB);
+
+    // Labels answered once, then their refresh fails (warm error); decisions
+    // fails cold, which is what raises the pane.
+    net.failing.add('/api/resolution-label-targets');
+    await act(async () => { await client.refetchQueries({ queryKey: ['resolution-label-targets'] }); });
+    expect(client.getQueryData(['resolution-label-targets', RELAY_URL])).toBeTruthy();
+    expect(client.getQueryState(['resolution-label-targets', RELAY_URL])?.error).toBeTruthy();
+    net.failing.add('/api/resolution-state');
+    client.removeQueries({ queryKey: ['resolution-state'] });
+    await act(async () => { await client.refetchQueries({ queryKey: ['resolution-state'] }).catch(() => {}); });
+
+    const retry = await screen.findByRole('button', { name: /^retry$/i });
+    const before = net.count('/api/resolution-label-targets');
+    await user.click(retry);
+    await waitFor(() => expect(net.count('/api/resolution-label-targets')).toBe(before + 1));
+  });
+});
+
+describe('the blocked pane Retry waits for the reads it started', () => {
+  it('is disabled while a retried read is in flight, then enabled again', async () => {
+    stubFetch({ labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let labelCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('/api/resolution-label-targets')) {
+        labelCalls += 1;
+        // The first read fails at once; the retry is held in flight.
+        if (labelCalls > 1) await gate;
+        return jsonResponse({ success: false, error: 'relay timed out' }, 502);
+      }
+      return healthy(input, init);
+    }));
+    const user = userEvent.setup();
+    renderReports(new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } }));
+
+    const retry = await screen.findByRole('button', { name: /^retry$/i });
+    expect(retry).toBeEnabled();
+    await user.click(retry);
+
+    await waitFor(() => expect(labelCalls).toBe(2));
+    const waiting = screen.getByRole('button', { name: /^retry$/i });
+    await waitFor(() => expect(waiting).toBeDisabled());
+    await user.click(waiting);
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(labelCalls).toBe(2);
+
+    await act(async () => { release(); });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^retry$/i })).toBeEnabled());
+  });
+});
+
+describe('the blocked pane Retry waits for the feed it re-ran', () => {
+  it('stays disabled while the re-run feed is in flight even after the sources settle', async () => {
+    const linkedId = '2'.repeat(64);
+    const linked = { ...EVENT_REPORT, id: '3'.repeat(64), tags: [['e', linkedId, 'spam']] };
+    stubFetch({
+      labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty',
+      targeted: { events: [linked] },
+    });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let feedCalls = 0;
+    let labelCalls = 0;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('needs_attention')) {
+        feedCalls += 1;
+        // Cold failure first; the re-run is held in flight.
+        if (feedCalls > 1) await gate;
+        return jsonResponse({ success: false, error: 'relay timed out' }, 502);
+      }
+      if (url.includes('/api/resolution-label-targets')) labelCalls += 1;
+      return healthy(input, init);
+    }));
+    function Routed() {
+      const { pathname } = useLocation();
+      return <Reports relayUrl={RELAY_URL} selectedReportId={pathname.match(/^\/reports\/([0-9a-f]{64})$/)?.[1]} />;
+    }
+    window.history.pushState({}, '', `/reports?event=${linkedId}`);
+    const user = userEvent.setup();
+    render(<TestApp queryClient={new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } })}><Routed /></TestApp>);
+
+    await user.click(await screen.findByRole('button', { name: /^retry$/i }));
+    await waitFor(() => expect(feedCalls).toBe(2));
+    // The label read it also re-ran fails at once, so only the feed is in flight.
+    await waitFor(() => expect(labelCalls).toBe(2));
+    await new Promise(resolve => setTimeout(resolve, 20));
+    expect(screen.getByRole('button', { name: /^retry$/i })).toBeDisabled();
+
+    await act(async () => { release(); });
+    await waitFor(() => expect(screen.getByRole('button', { name: /^retry$/i })).toBeEnabled());
+  });
+});
+
+describe('a window focus does not start another walk of a failed read', () => {
+  async function focusWindow() {
+    await act(async () => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  afterEach(() => focusManager.setFocused(undefined));
+
+  it('leaves an errored feed alone', async () => {
+    const fetchMock = stubFetch({ reports: 'error', labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const feed = () => fetchMock.mock.calls.filter(([i]) => {
+      const u = String(i instanceof Request ? i.url : i);
+      return u.includes('/api/reports') && !u.includes('/api/reports/resolved');
+    }).length;
+    renderReports(new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } }));
+    await waitFor(() => expect(feed()).toBeGreaterThanOrEqual(1));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    const before = feed();
+
+    await focusWindow();
+    expect(feed()).toBe(before);
+  });
+
+  it('leaves errored resolution labels alone', async () => {
+    const fetchMock = stubFetch({ labels: 'error', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const labels = () => fetchMock.mock.calls.filter(([i]) =>
+      String(i instanceof Request ? i.url : i).includes('/api/resolution-label-targets')).length;
+    renderReports(new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } }));
+    await screen.findByRole('button', { name: /^retry$/i });
+    const before = labels();
+
+    await focusWindow();
+    expect(labels()).toBe(before);
   });
 });
 

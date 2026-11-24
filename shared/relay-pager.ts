@@ -1,6 +1,12 @@
 // ABOUTME: Walks a relay back through time with an inclusive `until` cursor.
 // ABOUTME: One pager for the worker's report and label reads and the browser's history reads.
 
+// Overall deadline for one worker-side relay walk, measured from its first page
+// request. Lives here, beside the pager, because the browser's bounds must sit
+// ABOVE it (see src/lib/relay-read-bounds.test.ts): the worker has to answer
+// before the browser gives up, so a walk is never abandoned mid-flight.
+export const RELAY_WALK_DEADLINE_MS = 25000;
+
 export interface PagedEvent {
   id: string;
   created_at: number;

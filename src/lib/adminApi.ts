@@ -188,7 +188,7 @@ export class ApiError extends Error {
 // readJsonBounded (they surface the message to a moderator); the standalone
 // check-result / check-classifier / realness fetches rely on the same AbortSignal
 // aborting the body and degrade to null, so they need no copy mapping.
-const API_TIMEOUT_MS = 30_000;
+export const API_TIMEOUT_MS = 30_000;
 
 // NIP-86 read methods are a closed, known set, so derive read-vs-write from
 // membership rather than a name prefix: `getbannedevent` and `supportedmethods`

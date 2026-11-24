@@ -1,6 +1,7 @@
 // ABOUTME: Shared relay query helpers and best-effort account identity lookup.
 // ABOUTME: Extracted from index.ts so ReportWatcher and age-review can use them without a circular import.
 
+import { RELAY_WALK_DEADLINE_MS } from '../../shared/relay-pager';
 import { parseKind0Profile, type ReportedProfile } from './report-note';
 
 // Query relay for events matching a filter.
@@ -11,9 +12,16 @@ import { parseKind0Profile, type ReportedProfile } from './report-note';
 // mistake an unconfirmed read for a confirmed empty one. Every outcome still carries the events that did arrive. `complete` is
 // retained (optional, only set on EOSE) so callers that adopted the interim
 // flag-based contract keep type-checking; it is an alias of the confirmed path.
+//
+// `opts.timeoutMs` bounds connect + query + streaming together. The default
+// stays 5000 for every caller that does not ask; only the paged walks behind
+// the queue pass a longer one (RELAY_WALK_PAGE_TIMEOUT_MS).
+export const DEFAULT_QUERY_TIMEOUT_MS = 5000;
+
 export async function queryRelay(
   filter: object,
-  relayUrl: string
+  relayUrl: string,
+  opts?: { timeoutMs?: number }
 ): Promise<{ success: boolean; events?: object[]; error?: string; complete?: boolean }> {
   return new Promise((resolve) => {
     try {
@@ -39,7 +47,7 @@ export async function queryRelay(
           resolve({ success: false, events: events.slice(), error: `Relay query timed out before EOSE (${events.length} events received)` });
           closeQuietly();
         }
-      }, 5000);
+      }, opts?.timeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS);
 
       ws.addEventListener('open', () => {
         ws.send(JSON.stringify(['REQ', subId, filter]));
@@ -98,15 +106,41 @@ export async function queryRelay(
   });
 }
 
+// Per-page bound for the paged walks (report walk, resolution-label walk). The
+// relay sends nothing until its whole query finishes and keeps running it for up
+// to 30s after the client hangs up, so a slow page is waited out once and never
+// retried: a retry would double the database load for the same answer. Every
+// relayPageFetcher caller is such a walk, so the bound lives here. A timeout
+// still fails the page (#186); it never becomes a short list.
+export const RELAY_WALK_PAGE_TIMEOUT_MS = 15000;
+
+// Overall walk deadline: see shared/relay-pager.ts. Under the browser's bounds so
+// the worker answers before the client gives up; a page's timeout is clamped to
+// the time left, and once it is spent no further page is requested.
+export { RELAY_WALK_DEADLINE_MS };
+
+// Floor on the time a page is given. Below it the page is not requested at all:
+// the relay runs a query to completion even after the worker hangs up, so a
+// near-zero clamp only adds database load for an answer nobody waits for.
+export const RELAY_WALK_MIN_PAGE_MS = 3000;
+
 // One page of a relay filter, cursored by `until`. The filter's `limit` is the
 // `pageSize` the caller hands the pager, so the two cannot drift. Throws on an
 // unconfirmed read (#186): a timed-out page must never be folded in as "nothing
 // older", which would hand the queue a short list.
 export function relayPageFetcher<T>(relayUrl: string, base: Record<string, unknown>, pageSize: number) {
+  let deadline: number | undefined;
   return async (until: number | undefined): Promise<T[]> => {
+    const now = Date.now();
+    // The clock starts at the first page, so one fetcher is one walk.
+    deadline ??= now + RELAY_WALK_DEADLINE_MS;
+    const remaining = deadline - now;
+    if (remaining < RELAY_WALK_MIN_PAGE_MS) {
+      throw new Error(`Relay query timed out before EOSE (walk deadline of ${RELAY_WALK_DEADLINE_MS} ms nearly spent)`);
+    }
     const filter: Record<string, unknown> = { ...base, limit: pageSize };
     if (until !== undefined) filter.until = until;
-    const result = await queryRelay(filter, relayUrl);
+    const result = await queryRelay(filter, relayUrl, { timeoutMs: Math.min(RELAY_WALK_PAGE_TIMEOUT_MS, remaining) });
     if (!result.success) throw new Error(result.error || 'Relay query failed');
     return (result.events || []) as unknown as T[];
   };

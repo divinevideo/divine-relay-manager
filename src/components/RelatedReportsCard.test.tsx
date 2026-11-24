@@ -230,13 +230,13 @@ describe('RelatedReportsCard', () => {
     expect(screen.queryByText(/Related Reports/)).not.toBeInTheDocument();
   });
 
-  it('asks for one retry and a five-minute cache lifetime', async () => {
+  it('asks for no retry and a five-minute cache lifetime', async () => {
     fetchReportsByTarget.mockResolvedValue({ events: [userReport(1)], truncated: false });
     const { client } = renderCard();
     await screen.findByText(/Related Reports/);
 
     const query = client.getQueryCache().find({ queryKey: ['account-reports', 'https://api-a.example', USER] });
-    expect(query?.options.retry).toBe(1);
+    expect(query?.options.retry).toBe(false);
     expect(query?.options.gcTime).toBe(5 * 60_000);
   });
 
@@ -270,11 +270,10 @@ describe('RelatedReportsCard', () => {
 
   it('says the read failed, offers Try again, and does not read as zero', async () => {
     fetchReportsByTarget.mockRejectedValueOnce(new Error('boom'));
-    fetchReportsByTarget.mockRejectedValueOnce(new Error('boom'));
     fetchReportsByTarget.mockResolvedValueOnce({ events: [userReport(1)], truncated: false });
     renderCard();
 
-    // One retry (1 s backoff) before the failure shows.
+    // No automatic retry: the failure shows after the one read.
     expect(await screen.findByText(/related reports could not be loaded/i, {}, { timeout: 4000 })).toBeInTheDocument();
     expect(screen.queryByText(/more on this account and its posts/)).not.toBeInTheDocument();
 

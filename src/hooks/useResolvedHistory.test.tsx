@@ -113,3 +113,20 @@ describe('useResolvedHistory', () => {
     expect(options.refetchOnWindowFocus).toBe(false);
   });
 });
+
+// A failed read re-runs the worker's whole relay walk, and the relay keeps an
+// abandoned query running, so it is asked once; the footer's Try again is the
+// recovery. The client inherits React Query's default retry (unlike wrapper(),
+// which turns it off), so removing `retry: false` from the hook makes this go red.
+describe('useResolvedHistory does not retry a failed read', () => {
+  it('asks the worker once', async () => {
+    fetchResolvedReportsPage.mockRejectedValue(new Error('relay timed out'));
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+    const inherit = ({ children }: { children: ReactNode }) => createElement(QueryClientProvider, { client }, children);
+    const { result } = renderHook(() => useResolvedHistory(RELAY_A, true), { wrapper: inherit });
+
+    await waitFor(() => expect(result.current.isError).toBe(true));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(fetchResolvedReportsPage).toHaveBeenCalledTimes(1);
+  });
+});
