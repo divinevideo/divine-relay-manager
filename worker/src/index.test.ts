@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { finalizeEvent, generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
+import { RELAY_WALK_PAGE_TIMEOUT_MS } from './relay-profile';
 import * as ageReview from './age-review';
 import * as accountStatus from './account-status';
 import * as retention from './retention';
@@ -3289,7 +3290,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     // The filter really is the targeted one, not the bulk window.
     expect(JSON.parse(sock.sent[0])[2]['#e']).toEqual([ 'a'.repeat(64), 'A'.repeat(64) ]);
     sock.message(['EVENT', sock.subId(), EVENT_A]);
-    await vi.advanceTimersByTimeAsync(5000);
+    await vi.advanceTimersByTimeAsync(RELAY_WALK_PAGE_TIMEOUT_MS);
 
     const res = await resPromise;
     expect(res.status).toBe(502);

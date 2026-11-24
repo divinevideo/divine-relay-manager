@@ -4,7 +4,7 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { Button } from '@/components/ui/button';
-import { AlertTriangle } from 'lucide-react';
+import { AlertTriangle, Loader2 } from 'lucide-react';
 
 export interface NoticeSource {
   key: string;
@@ -31,12 +31,16 @@ export function ResolutionUnavailablePane({
   sources,
   decisionsUnavailable,
   onRetry,
+  retrying = false,
   onOverride,
   offline = false,
 }: {
   sources: NoticeSource[];
   decisionsUnavailable: boolean;
   onRetry: () => void;
+  // A read Retry would re-run is in flight. Each click starts relay walks, so
+  // the button waits for them rather than stacking more.
+  retrying?: boolean;
   onOverride: () => void;
   offline?: boolean;
 }) {
@@ -68,7 +72,10 @@ export function ResolutionUnavailablePane({
             : 'This usually clears on the next automatic refresh.'}
         </p>
         <div className="flex flex-wrap gap-2">
-          <Button onClick={onRetry}>Retry</Button>
+          <Button onClick={onRetry} disabled={retrying}>
+            {retrying && <Loader2 className="mr-1 h-4 w-4 animate-spin" />}
+            Retry
+          </Button>
           <Button variant="outline" onClick={onOverride}>
             Show the queue anyway
           </Button>

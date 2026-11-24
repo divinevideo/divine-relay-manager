@@ -30,19 +30,21 @@ export interface PagedLabelTargets {
 
 export type LabelPageFetcher = (until: number | undefined) => Promise<ResolutionLabelEvent[]>;
 
-// Sized against the client's budget, not the relay's comfort. The frontend caps
-// the whole label read at RESOLUTION_READ_TIMEOUT_MS (8s), and queryRelay opens a
-// fresh socket per page, so round trips -- not payload -- are what spend it.
-// Measured against production 2026-09-14: a 500-event page costs ~1.07s end to
-// end, while a single request returning all 2298 labels costs ~1.6s. At 500 the
-// read needed five round trips (~5.4s typical, ~6.9s tail) and gained one every
-// ~1.7 months, which crosses 8s within months; at 2000 it needs two (~2.5s) and
-// gains one every ~6.7 months.
+// Sized against the walk's budget, not the relay's comfort. Every page is a full
+// relay query (a fresh socket, and on the relay's current database about 6s
+// each), so page COUNT, not payload, is what spends the budget: the 25s walk
+// deadline (RELAY_WALK_DEADLINE_MS), under the browser's 28s label bound
+// (RESOLUTION_LABEL_READ_TIMEOUT_MS). Fewer, larger pages mean fewer queries
+// against the relay's database. Measured against production 2026-09-14, on the
+// previous database: a 500-event page cost ~1.07s end to end, while one request
+// returning all 2298 labels cost ~1.6s. At 500 the read needed five round trips
+// and gained one every ~1.7 months; at 2000 it needs two and gains one every
+// ~6.7 months.
 //
-// That budget is the reason this matters: a read that times out does not degrade
-// to partial history, it fails the source, and a failed resolution source blocks
-// the queue (#221). Raising this is cheaper and more honest than widening the
-// timeout, which would just let the queue hang longer before blocking.
+// A read that exhausts the budget does not degrade to partial history, it fails
+// the source, and a failed resolution source blocks the queue (#221). Raising
+// this is cheaper and more honest than widening the budget, which would just let
+// the queue hang longer before blocking.
 //
 // Relies on the relay treating `limit` as a maximum and returning what it has,
 // which is the NIP-01 contract and what the 500 here already assumed. Verified
