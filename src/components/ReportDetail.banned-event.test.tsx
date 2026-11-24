@@ -106,9 +106,13 @@ vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] 
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false, error: null }) }));
 
+// The latest completion callback the pane gave UserActions: a Suspend that
+// lands after the pane was closed runs the closed pane's callback.
+const completion = vi.hoisted(() => ({ latest: undefined as undefined | ((c: UserActionChange) => void) }));
 vi.mock('@/components/UserActions', () => ({
-  UserActions: ({ onActionComplete }: { onActionComplete?: (c: UserActionChange) => void }) => (
+  UserActions: ({ onActionComplete }: { onActionComplete?: (c: UserActionChange) => void }) => (completion.latest = onActionComplete, (
     <>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: '6'.repeat(64), reportTarget: { eventId: EVENT_ID } })}>Suspend p-tag account</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: false, action: 'delete-all' })}>Delete All Content</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: false })}>Age Restrict All</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Suspend</button>
@@ -116,7 +120,7 @@ vi.mock('@/components/UserActions', () => ({
       <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unsuspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Unsuspend</button>
       <button onClick={() => onActionComplete?.({ accountStatusChanged: true, action: 'unban', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } })}>Unban</button>
     </>
-  ),
+  )),
 }));
 // A recent post with a delete button, as UserProfileCard lists it.
 vi.mock('@/components/UserProfileCard', () => ({
@@ -672,6 +676,34 @@ describe('ReportDetail banned-post reads and a Suspend', () => {
     await act(async () => { release(); });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
     expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument();
+  });
+
+  // A Suspend that lands after the pane was closed and the report reopened runs
+  // the closed pane's callback. It must not hold the post back from the refetch:
+  // the closed pane keeps nothing, and the new pane would wait on "Checking".
+  it('a Suspend finishing after the pane was closed and reopened still reads the post fresh', async () => {
+    const { unmount } = await openBanned();
+    const staleCompletion = completion.latest!;
+    unmount();
+    render(pane(REPORT));
+    await waitFor(() => expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument());
+    act(() => { staleCompletion({ accountStatusChanged: true, action: 'suspend', pubkey: REPORTED_PUBKEY, reportTarget: { eventId: EVENT_ID } }); });
+    await waitFor(() => expect(relay.bannedReads).toBe(2));
+    await waitFor(() => expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))?.fetchStatus).toBe('idle'));
+    expect(screen.queryByText(/Checking moderation status/)).not.toBeInTheDocument();
+    expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument();
+  });
+
+  // The kept post must be the suspended account's. A report whose p tag names
+  // someone else suspends that account, which keeps nothing of the real author.
+  it('keeps nothing when the account suspended is not the post\'s author', async () => {
+    await openBanned({ ...REPORT, tags: [['e', EVENT_ID], ['p', '6'.repeat(64)]] });
+    fireEvent.click(screen.getByRole('button', { name: 'Suspend p-tag account' }));
+    await act(async () => { await new Promise(resolve => setTimeout(resolve, 20)); });
+    // The real author is suspended elsewhere: the read is refused, and the post goes.
+    act(() => { suspendBannedEventReads(client, API_URL, REPORTED_PUBKEY); });
+    await waitFor(() => expect(relay.bannedReads).toBe(2));
+    await waitFor(() => expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument());
   });
 
   // A Suspend by a host the pane does not hear from (the Users tab, age review)

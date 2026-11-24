@@ -209,6 +209,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // moderator switches post, leaves, restores it or unsuspends the author.
   // (Another report on the same post keeps it too.) Everywhere else a tainted
   // read counts as not read yet, and the fresh read answers.
+  const mountedRef = useRef(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   const [retainedBanned, setRetainedBanned] = useState<{ eventId: string; event: NostrEvent } | null>(null);
   useEffect(() => {
     setRetainedBanned(kept => (kept && kept.eventId !== targetEventId ? null : kept));
@@ -809,8 +814,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       if (change.action === 'suspend') {
         // Only what the pane shows is kept, and only by the report the Suspend
         // was taken from.
-        const keeps = isDisplayedEventBanned && !!bannedEvent && !!targetEventId
-          && change.reportTarget?.eventId === targetEventId;
+        // A Suspend can land after this pane was closed (a mutation outlives its
+        // component and runs its last callbacks): a reopened pane keeps nothing
+        // of it and needs its fresh read. And the post must be the suspended
+        // account's: a report's p tag can name someone else.
+        const keeps = mountedRef.current && isDisplayedEventBanned && !!bannedEvent && !!targetEventId
+          && change.reportTarget?.eventId === targetEventId
+          && bannedEvent.pubkey?.toLowerCase() === change.pubkey.toLowerCase();
         if (keeps) setRetainedBanned({ eventId: targetEventId, event: bannedEvent });
         suspendBannedEventReads(queryClient, config.apiUrl, change.pubkey, keeps ? targetEventId : undefined);
       }
