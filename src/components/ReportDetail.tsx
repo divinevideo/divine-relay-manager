@@ -30,6 +30,7 @@ import {
   bannedEventQueryKey,
   bannedEventQueryPrefix,
   isBannedEventReadTainted,
+  useBannedEventTaintVersion,
   refreshBannedEventReadsAfterUnsuspend,
   suspendBannedEventReads,
 } from "@/lib/bannedEventKey";
@@ -215,6 +216,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Read for its subscription: an answer equal to the cached one leaves `data`
   // as it was, and only a new answer clears the taint the render below checks.
   void bannedEventReadAt;
+  // A taint made elsewhere (another host's Suspend) hides the post at once.
+  useBannedEventTaintVersion();
   const retainedBannedEvent = retainedBanned && retainedBanned.eventId === targetEventId
     ? retainedBanned.event : undefined;
   const bannedEvent = retainedBannedEvent

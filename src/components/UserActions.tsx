@@ -241,7 +241,12 @@ export function UserActions({
         suspendBannedEventReads(queryClient, started.bannedEventApiUrl, variables.pubkey);
       }
     },
-    onError: (error: Error, { pubkey: target }) => {
+    onError: (error: Error, { pubkey: target }, started) => {
+      // A suspend that errored or timed out may still have applied: one re-read
+      // is the cost of guessing wrong the other way (as in age review). In every
+      // context, the report pane too, which hears nothing from a failed action
+      // and keeps no post for it.
+      if (started?.bannedEventApiUrl) suspendBannedEventReads(queryClient, started.bannedEventApiUrl, target);
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },

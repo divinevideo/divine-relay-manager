@@ -2056,15 +2056,39 @@ describe('UserActions suspend and cached banned-event reads', () => {
     expect(isBannedEventReadTainted(qc, OTHER, EVENT)).toBe(false);
   });
 
-  it('leaves the read alone when the suspend fails', async () => {
+  // A suspend that errors or times out may still have applied: one re-read is
+  // the cost of guessing wrong the other way. In every context, the report
+  // pane included, which hears nothing from a failed action.
+  it.each(['users', 'report'] as const)('marks the read even when the suspend fails, in the %s context', async (context) => {
     api.suspendPubkey.mockRejectedValue(new Error('relay down'));
     const qc = newClient();
     qc.setQueryData(bannedEventQueryKey(API, EVENT), post(PUBKEY));
-    renderInEnv(qc, <UserActions pubkey={PUBKEY} />);
+    renderInEnv(qc, <UserActions pubkey={PUBKEY} context={context} />);
 
     suspendThroughDialog();
     await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to suspend user' })));
 
-    expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(false);
+    expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(true);
+  });
+
+  it('marks the environment a failed suspend started in, even if it fails after a switch', async () => {
+    const OTHER = 'https://api.switched.fail.test';
+    let fail: (e: Error) => void = () => {};
+    api.suspendPubkey.mockImplementation(() => new Promise((_, reject) => { fail = reject; }));
+    const qc = newClient();
+    qc.setQueryData(bannedEventQueryKey(API, EVENT), post(PUBKEY));
+    qc.setQueryData(bannedEventQueryKey(OTHER, EVENT), post(PUBKEY));
+    const tree = (apiUrl: string) => (
+      <AppContext.Provider value={{ ...ctx, config: { ...ctx.config, apiUrl } }}>
+        <QueryClientProvider client={qc}><TooltipProvider><UserActions pubkey={PUBKEY} /></TooltipProvider></QueryClientProvider>
+      </AppContext.Provider>
+    );
+    const { rerender } = render(tree(API));
+    suspendThroughDialog();
+    await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
+    rerender(tree(OTHER));
+    await act(async () => { fail(new Error('timed out')); });
+    await waitFor(() => expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(true));
+    expect(isBannedEventReadTainted(qc, OTHER, EVENT)).toBe(false);
   });
 });

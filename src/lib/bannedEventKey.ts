@@ -1,7 +1,7 @@
 // ABOUTME: Cache keys for getbannedevent reads, and what a Suspend or an Unsuspend does to the cached ones.
 // ABOUTME: Scoped to the worker URL so pending actions only refresh their own environment.
 
-import { useContext } from 'react';
+import { useContext, useSyncExternalStore } from 'react';
 import type { Query, QueryClient } from '@tanstack/react-query';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { AppContext } from '@/contexts/AppContext';
@@ -17,6 +17,20 @@ export const bannedEventQueryKey = (apiUrl: string, eventId: string | undefined)
 // data version: the read's next answer (the refusal, or anything else) clears
 // it without a clock.
 const tainted = new WeakMap<Query, number>();
+
+// A taint changes nothing a pane is subscribed to, so a pane already open on a
+// tainted post would keep showing it until its read answers. Every taint bumps
+// this version, and a pane subscribes to it (useBannedEventTaintVersion) to
+// check again at once.
+let taintVersion = 0;
+const taintListeners = new Set<() => void>();
+const subscribeToTaints = (listener: () => void) => {
+  taintListeners.add(listener);
+  return () => { taintListeners.delete(listener); };
+};
+export function useBannedEventTaintVersion(): number {
+  return useSyncExternalStore(subscribeToTaints, () => taintVersion);
+}
 
 // The read holds this author's post, or has no answer yet (its author is not
 // known, and a read still out may be about to land with the post).
@@ -55,6 +69,8 @@ export function suspendBannedEventReads(
   for (const query of client.getQueryCache().findAll({ queryKey })) {
     if (query.state.data != null && forAuthor(query)) tainted.set(query, query.state.dataUpdateCount);
   }
+  taintVersion += 1;
+  taintListeners.forEach(listener => listener());
   void client.invalidateQueries({ queryKey, predicate: forAuthor, refetchType: 'none' });
   // Only the author's: another author's refresh is not re-run, so cancelling it
   // would leave its answer lost.

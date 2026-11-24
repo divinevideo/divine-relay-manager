@@ -9,7 +9,7 @@ import type { ReactElement } from 'react';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
-import { bannedEventQueryKey, isBannedEventReadTainted } from '@/lib/bannedEventKey';
+import { bannedEventQueryKey, isBannedEventReadTainted, suspendBannedEventReads } from '@/lib/bannedEventKey';
 import type { UserActionChange } from './UserActions';
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
@@ -405,6 +405,19 @@ describe('ReportDetail banned-post reads and a Suspend', () => {
     await act(async () => { release(); });
     await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
     expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument();
+  });
+
+  // A Suspend by a host the pane does not hear from (the Users tab, age review)
+  // taints the cached read without any state of this pane changing: the pane
+  // hides the post at once, not after the refetch answers.
+  it('hides an open pane\'s banned post at once when another host suspends the author', async () => {
+    await openBanned();
+    let release!: () => void;
+    relay.hold = new Promise(resolve => { release = resolve; });
+    act(() => { suspendBannedEventReads(client, API_URL, REPORTED_PUBKEY); });
+    await waitFor(() => expect(relay.bannedReads).toBe(2));
+    expect(screen.queryByText(POST_TEXT)).not.toBeInTheDocument();
+    await act(async () => { release(); });
   });
 
   // A reopen straight after a post Ban must find the read stale: the mark is
