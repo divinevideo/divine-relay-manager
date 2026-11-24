@@ -4,7 +4,8 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
-import { recordReportArrival } from './report-arrivals';
+import { reportArrivalStatement } from './report-arrivals';
+import { metaStatement, reportIndexStatements, type ReportIndexSource } from './report-index';
 import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
@@ -132,6 +133,9 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
 
+/** DO storage key: unix seconds of the last /stop, so catch-up can tell a deliberate stop from an outage. */
+const DELIBERATE_STOP_KEY = 'report-watcher-deliberate-stop';
+
 /**
  * ReportWatcher Durable Object
  *
@@ -148,6 +152,10 @@ export class ReportWatcher implements DurableObject {
   private schemaReady: boolean = false;
   private running: boolean = false;
   private ws: WebSocket | null = null;
+  // True once the catch-up window for this connection is saved (Task 1.5 sets
+  // it). Until then the health alarm must not stamp watcher_last_alive_at: a
+  // stamp taken before the window is saved would hide the gap from the next restart.
+  private catchUpPlannedForConnection = false;
   private connectedAt: number | null = null;
   private lastEventAt: number | null = null;
   private eventsProcessed: number = 0;
@@ -317,6 +325,16 @@ export class ReportWatcher implements DurableObject {
 
     this.running = false;
     this.disconnect();
+
+    // A deliberate stop is not an outage: the next start reads this marker so
+    // catch-up does not treat the stopped interval as a gap to replay.
+    // Non-critical: if the write fails, /stop still completes. A missing marker
+    // makes catch-up treat the gap as an outage, which is the safe default.
+    try {
+      await this.state.storage.put(DELIBERATE_STOP_KEY, Math.floor(Date.now() / 1000));
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to record deliberate-stop marker:', error);
+    }
 
     // Persist state
     await this.persistState();
@@ -706,6 +724,7 @@ export class ReportWatcher implements DurableObject {
     if (this.ws) {
       this.disconnect();
     }
+    this.catchUpPlannedForConnection = false;
 
     const relayUrl = this.env.RELAY_URL;
     console.log(`[ReportWatcher] Connecting to ${relayUrl}`);
@@ -870,7 +889,13 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle a kind 1984 report event
    */
-  private async handleReportEvent(event: ReportEvent): Promise<void> {
+  private async handleReportEvent(
+    event: ReportEvent,
+    // preClaimed is accepted for the catch-up caller (Task 1.5, which owns the
+    // claim); nothing here reads it yet.
+    opts: { source?: ReportIndexSource; preClaimed?: boolean; sideEffects?: boolean } = {},
+  ): Promise<void> {
+    const { source = 'live', sideEffects = true } = opts;
     this.lastEventAt = Date.now();
     this.eventsProcessed++;
 
@@ -902,14 +927,14 @@ export class ReportWatcher implements DurableObject {
       console.log('[ReportWatcher] Report e tag is not a 64-character hex id, skipping auto-hide');
     }
 
-    // Record when this report arrived: created_at is the reporter's claim and
+    // Record when this report arrived, and index it: created_at is the reporter's claim and
     // can be backdated, so "reported after the last human handling" (#324)
-    // compares this clock. Live path only: replayAdultReports does not record,
-    // and the live subscription has no `since` catch-up, so a report filed
-    // during a watcher outage has no row. A missing row falls back to
-    // created_at. Non-critical: logged, never allowed to stop auto-hide or the
-    // age review below. Only a verified event is recorded, since the relay
-    // does not vouch for the id.
+    // compares this clock. Live by default; catch-up passes its own source, and
+    // sideEffects:false makes this write the only thing done. replayAdultReports
+    // does not record. A report no path has seen has no row, and a missing row
+    // falls back to created_at. Non-critical: logged, never allowed to stop
+    // auto-hide or the age review below. Only a verified event is recorded,
+    // since the relay does not vouch for the id.
     if (this.env.DB) {
       try {
         if (!this.schemaReady) {
@@ -917,12 +942,21 @@ export class ReportWatcher implements DurableObject {
           this.schemaReady = true;
         }
         if (verifyEvent(event as unknown as NostrEvent)) {
-          await recordReportArrival(this.env.DB, event.id, Math.floor(Date.now() / 1000));
+          const now = Math.floor(Date.now() / 1000);
+          // One batch: the arrival and the index row land together or not at
+          // all. A handful of statements, far under D1's 50-per-batch limit.
+          await this.env.DB.batch([
+            reportArrivalStatement(this.env.DB, event.id, now),
+            // verifyEvent above only passes a signed event, so sig is present.
+            ...reportIndexStatements(this.env.DB, [{ ...event, sig: event.sig as string }], source, now),
+          ]);
         }
       } catch (error) {
-        console.error('[ReportWatcher] Failed to record report arrival:', error);
+        console.error('[ReportWatcher] Failed to record report arrival and index row:', error);
       }
     }
+
+    if (!sideEffects) return;
 
     // Process auto-hide if enabled and category qualifies
     if (targetEventId) {
@@ -1585,6 +1619,19 @@ export class ReportWatcher implements DurableObject {
         this.connect();
       } else {
         console.log('[ReportWatcher] Connection healthy');
+      }
+    }
+
+    // Heartbeat for restart catch-up: only a live socket whose catch-up window
+    // is already saved may advance it. Non-critical, so its own try/catch.
+    if (
+      this.running && this.catchUpPlannedForConnection && this.env.DB
+      && this.ws && this.ws.readyState === WebSocket.OPEN
+    ) {
+      try {
+        await metaStatement(this.env.DB, 'watcher_last_alive_at', Math.floor(Date.now() / 1000)).run();
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to stamp watcher heartbeat:', error);
       }
     }
 

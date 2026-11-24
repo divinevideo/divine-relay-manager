@@ -1,7 +1,7 @@
 // ABOUTME: Tests for ReportWatcher Durable Object
 // ABOUTME: Tests start/stop/status and WebSocket functionality
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 import { AUTO_HIDE_ACTION } from '../../shared/autohide';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools';
@@ -3298,11 +3298,14 @@ describe('ReportWatcher', () => {
 
     function arrivalDb(opts: { failArrival?: boolean } = {}) {
       const arrivalBinds: unknown[][] = [];
+      const metaBinds: unknown[][] = [];
+      const batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
+      const runSql: string[] = [];
       const db = {
         prepare: vi.fn().mockImplementation((sql: string) => {
           const isArrival = sql.includes('INSERT OR IGNORE INTO report_arrivals');
           const run = vi.fn().mockImplementation(async () => {
-            if (isArrival && opts.failArrival) throw new Error('d1 down');
+            runSql.push(sql);
             return { success: true, meta: { changes: 1 } };
           });
           return {
@@ -3310,12 +3313,18 @@ describe('ReportWatcher', () => {
             first: vi.fn().mockResolvedValue(null),
             bind: vi.fn().mockImplementation((...args: unknown[]) => {
               if (isArrival) arrivalBinds.push(args);
-              return { run, first: vi.fn().mockResolvedValue(null), all: vi.fn().mockResolvedValue({ results: [] }) };
+              if (sql.includes('report_index_meta')) metaBinds.push(args);
+              return { sql, args, run, first: vi.fn().mockResolvedValue(null), all: vi.fn().mockResolvedValue({ results: [] }) };
             }),
           };
         }),
+        batch: vi.fn().mockImplementation(async (statements: Array<{ sql: string; args: unknown[] }>) => {
+          batches.push(statements);
+          if (opts.failArrival) throw new Error('d1 down');
+          return statements.map(() => ({ success: true, results: [] }));
+        }),
       } as unknown as D1Database;
-      return { db, arrivalBinds };
+      return { db, arrivalBinds, metaBinds, batches, runSql };
     }
 
     function signedReport(tags: string[][]): ReportEvent {
@@ -3370,6 +3379,101 @@ describe('ReportWatcher', () => {
       expect(ageReview).toHaveBeenCalledTimes(1);
       expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/arrival/i), expect.anything());
       consoleError.mockRestore();
+    });
+
+    it('writes the arrival and the index row in one batch for a verified report', async () => {
+      const { db, batches, runSql } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await feed(w, signedReport([['p', TARGET_PK], ['report', 'spam']]));
+      const reportBatches = batches.filter(b => b.some(st => st.sql.includes('report_arrivals')));
+      expect(reportBatches).toHaveLength(1);
+      const sqls = reportBatches[0].map(st => st.sql);
+      expect(sqls.filter(q => q.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(1);
+      expect(sqls.filter(q => q.includes('report_index') && !q.includes('report_index_meta')).length).toBeGreaterThanOrEqual(1);
+      expect(runSql.filter(q => q.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(0);
+    });
+
+    it('stamps watcher_last_alive_at on the health alarm only while connected and after the catch-up window is saved', async () => {
+      const { db, metaBinds } = arrivalDb();
+      const state = createMockState();
+      const w = new ReportWatcher(state, createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as { running: boolean; ws: { readyState: number } | null; catchUpPlannedForConnection: boolean };
+      internals.running = true;
+      internals.ws = { readyState: WebSocket.OPEN };
+
+      internals.catchUpPlannedForConnection = false;
+      await w.alarm();
+      expect(metaBinds).toHaveLength(0);
+
+      internals.catchUpPlannedForConnection = true;
+      const before = Math.floor(Date.now() / 1000);
+      await w.alarm();
+      expect(metaBinds).toHaveLength(1);
+      expect(metaBinds[0][0]).toBe('watcher_last_alive_at');
+      expect(metaBinds[0][1] as number).toBeGreaterThanOrEqual(before);
+      expect(metaBinds[0][1] as number).toBeLessThan(before + 60);
+
+      // A closed socket is not a live listener; the alarm reconnects but must not stamp.
+      metaBinds.length = 0;
+      internals.ws = { readyState: WebSocket.CLOSED };
+      vi.spyOn(w as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+      await w.alarm();
+      expect(metaBinds).toHaveLength(0);
+    });
+
+    it('stop records a deliberate-stop marker', async () => {
+      const state = createMockState();
+      const w = new ReportWatcher(state, createMockEnv({ DB: arrivalDb().db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      (w as unknown as { running: boolean }).running = true;
+      const before = Math.floor(Date.now() / 1000);
+      await w.fetch(new Request('https://do/stop', { method: 'POST' }));
+      const marker = await state.storage.get<number>('report-watcher-deliberate-stop');
+      expect(marker).toBeGreaterThanOrEqual(before);
+      expect(marker).toBeLessThan(before + 60);
+    });
+
+    it('a failed marker write leaves /stop working: 200, watcher stopped, state persisted', async () => {
+      const state = createMockState();
+      const w = new ReportWatcher(state, createMockEnv({ DB: arrivalDb().db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      (w as unknown as { running: boolean }).running = true;
+      const put = state.storage.put as unknown as MockInstance<(k: string, v: unknown) => Promise<void>>;
+      const realPut = put.getMockImplementation()!;
+      put.mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'report-watcher-deliberate-stop') throw new Error('storage down');
+        return realPut(key, value);
+      });
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const res = await w.fetch(new Request('https://do/stop', { method: 'POST' }));
+      expect(res.status).toBe(200);
+      expect((w as unknown as { running: boolean }).running).toBe(false);
+      expect(await state.storage.get('report-watcher-deliberate-stop')).toBeUndefined();
+      expect(await state.storage.get('watcherState')).toMatchObject({ running: false });
+      expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/deliberate-stop/), expect.anything());
+      consoleError.mockRestore();
+    });
+
+    it('with sideEffects false records the arrival and index and skips auto-hide and age review', async () => {
+      const { db, batches } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+        handleReportEvent(e: ReportEvent, o: { sideEffects: boolean; source: string }): Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      await internals.handleReportEvent(
+        signedReport([['e', 'e5'.repeat(32)], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]),
+        { sideEffects: false, source: 'catchup' },
+      );
+      expect(batches.length).toBeGreaterThanOrEqual(1);
+      expect(autoHide).not.toHaveBeenCalled();
+      expect(ageReview).not.toHaveBeenCalled();
     });
 
     it('records nothing and does not throw without a DB binding', async () => {
