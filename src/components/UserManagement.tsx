@@ -16,6 +16,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { useToast } from "@/hooks/useToast";
 import { UserX, UserCheck, Plus, Users, Trash2, User, X, Pause, Play, CalendarClock } from "lucide-react";
 import { BannedUserCard } from "@/components/BannedUserCard";
+import { EmailUnconfirmedChipFor } from "@/components/EmailUnconfirmedChip";
 import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
@@ -484,7 +485,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               <div className="font-medium"><UserDisplayName pubkey={selectedPubkey} fallbackLength={16} linkToProfile /></div>
               <CopyableId value={selectedPubkey} type="npub" truncateStart={12} truncateEnd={8} size="xs" />
             </div>
-            <div className="flex items-center gap-2 text-sm">
+            <div className="flex flex-wrap items-center gap-2 text-sm">
               {bannedUsers?.some((u: BannedUser) => u.pubkey === selectedPubkey) ? (
                 <span className="flex items-center gap-1 text-red-600"><UserX className="h-4 w-4" />Banned</span>
               ) : suspendedUsers?.some((u: BannedPubkeyEntry) => u.pubkey === selectedPubkey) ? (
@@ -494,6 +495,10 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               ) : (
                 <span className="text-muted-foreground">No restrictions</span>
               )}
+              {/* One lookup for this one account. Not on the list cards: that would be
+                  one Keycast read per entry (prod's banned list is ~1600), the queue-wide
+                  load a batch endpoint is for. */}
+              <EmailUnconfirmedChipFor pubkey={selectedPubkey} />
             </div>
             {!allowedUsers?.some((u: AllowedUser) => u.pubkey === selectedPubkey) && (
               <Button variant="outline" size="sm" onClick={() => allowUserMutation.mutate({ pubkey: selectedPubkey })} disabled={allowUserMutation.isPending}>

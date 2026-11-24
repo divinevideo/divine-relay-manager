@@ -39,6 +39,17 @@ vi.mock('@/hooks/useEventTitles', () => ({
   },
 }));
 
+// The Banned and Suspended tabs render one card per entry (~1600 banned in prod), so a
+// card must never look up account status: that would be one Keycast read per entry.
+// UserManagement.test mocks the card out, so this pins it on the real one.
+const accountStatusLookup = vi.hoisted(() => ({ fn: vi.fn() }));
+vi.mock('@/hooks/useAccountStatus', () => ({
+  useAccountStatus: (pubkey: string | undefined) => {
+    accountStatusLookup.fn(pubkey);
+    return { data: undefined, isError: false, isLoading: false };
+  },
+}));
+
 const PUBKEY = 'a'.repeat(64);
 
 const T = 1_750_000_000;
@@ -103,12 +114,20 @@ function renderCard(props: Partial<React.ComponentProps<typeof BannedUserCard>> 
 
 beforeEach(() => {
   authorState.data = undefined;
+  accountStatusLookup.fn.mockClear();
   relayQuery.fn.mockReset();
   titleCalls.targets.length = 0;
   setAuthored(AUTHORED);
 });
 
 describe('BannedUserCard', () => {
+  it.each([[false], [true]])('makes no account-status lookup (suspended: %s)', async (suspended) => {
+    renderCard({ suspended });
+    await screen.findByRole('button', { name: /toggle details/i });
+    await act(async () => {});
+    expect(accountStatusLookup.fn).not.toHaveBeenCalled();
+  });
+
   it('queries the shared moderation-relevant kinds, not just kind 1', async () => {
     renderCard();
 

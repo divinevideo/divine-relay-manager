@@ -61,6 +61,29 @@ describe('handleAccountStatus', () => {
     });
   });
 
+  function stubKeycast(body: Record<string, unknown>) {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, status: 200, json: () => Promise.resolve(body) }));
+  }
+
+  it('serves email_unconfirmed true to the UI', async () => {
+    stubKeycast({ pubkey: VALID_PUBKEY, status: 'active', email_unconfirmed: true });
+    const body = await (await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS)).json();
+    expect(body).toMatchObject({ success: true, email_unconfirmed: true });
+  });
+
+  it('omits email_unconfirmed when Keycast does not send it', async () => {
+    stubKeycast({ pubkey: VALID_PUBKEY, status: 'active' });
+    const body = await (await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS)).json() as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect('email_unconfirmed' in body).toBe(false);
+  });
+
+  it('does not report a non-boolean email_unconfirmed as unconfirmed', async () => {
+    stubKeycast({ pubkey: VALID_PUBKEY, status: 'active', email_unconfirmed: 'true' });
+    const body = await (await handleAccountStatus(VALID_PUBKEY, makeEnv(), CORS)).json() as Record<string, unknown>;
+    expect('email_unconfirmed' in body).toBe(false);
+  });
+
   it('rejects an invalid pubkey with 400 (before calling keycast)', async () => {
     const fetchSpy = vi.fn();
     vi.stubGlobal('fetch', fetchSpy);

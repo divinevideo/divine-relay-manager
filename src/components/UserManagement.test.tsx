@@ -26,6 +26,7 @@ const api = vi.hoisted(() => ({
   // Timed suspensions (F4): the Suspended tab's end lines and Change end date.
   listTimedSuspensions: vi.fn(),
   changeSuspensionEnd: vi.fn(),
+  getAccountStatus: vi.fn(),
 }));
 const toast = vi.hoisted(() => vi.fn());
 const navigate = vi.hoisted(() => vi.fn());
@@ -100,6 +101,7 @@ function renderWithProvider(client = new QueryClient({ defaultOptions: { queries
 describe('UserManagement age-review guard wiring', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    api.getAccountStatus.mockResolvedValue({ success: true, status: 'active' });
     // Empty lists: the account is neither banned, allowed, nor suspended, so the
     // Allow button renders.
     api.callRelayRpc.mockResolvedValue([]);
@@ -1208,5 +1210,53 @@ describe('UserManagement timed suspensions', () => {
       confirmUnban();
       await waitFor(() => expect(reset).toHaveBeenCalledWith({ queryKey: TIMED_SUSPENSIONS_KEY }));
     });
+  });
+});
+
+// The chip sits on the deep-linked Selected User card only. The list cards would each
+// make a Keycast read, so the mocked BannedUserCard above can't show one either way;
+// the lookup count below is what pins that nothing but the selected account is read.
+describe('UserManagement email-not-confirmed chip (Selected User)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.callRelayRpc.mockResolvedValue([]);
+    api.getAccountStatus.mockResolvedValue({ success: true, status: 'active' });
+  });
+
+  // Lists with entries other than the selected account, so list cards really render.
+  // A chip added to a card would then read each of them from Keycast.
+  it('reads only the selected account, not one per banned or suspended list card', async () => {
+    const [B1, B2, S1] = ['1', '2', '3'].map((c) => c.repeat(64));
+    api.callRelayRpc.mockImplementation((method: string) => Promise.resolve(
+      method === 'listbannedpubkeys' ? [{ pubkey: B1, reason: 'x' }, { pubkey: B2, reason: 'y' }]
+        : method === 'listsuspendedpubkeys' ? [{ pubkey: S1, reason: 'z' }] : []));
+    api.getAccountStatus.mockResolvedValue({ success: true, status: 'active', email_unconfirmed: true });
+    renderWithProvider();
+    expect(await screen.findAllByText('card says not suspended')).toHaveLength(2);
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    expect(await screen.findByText('card says suspended')).toBeInTheDocument();
+    expect(await screen.findAllByText('Email not confirmed')).toHaveLength(1);
+    await act(async () => {});
+    expect(api.getAccountStatus.mock.calls).toEqual([[PUBKEY]]);
+  });
+
+  it('shows the chip for the selected account when Keycast says it is unconfirmed', async () => {
+    api.getAccountStatus.mockResolvedValue({ success: true, status: 'active', email_unconfirmed: true });
+    renderWithProvider();
+    expect(await screen.findByText('Email not confirmed')).toBeInTheDocument();
+    expect(api.getAccountStatus).toHaveBeenCalledTimes(1);
+    expect(api.getAccountStatus).toHaveBeenCalledWith(PUBKEY);
+  });
+
+  it.each([
+    ['absent', { success: true, status: 'active' }],
+    ['false', { success: true, status: 'active', email_unconfirmed: false }],
+    ['a failed lookup', { success: false, error: 'unavailable' }],
+  ])('shows no chip when email_unconfirmed is %s', async (_label, body) => {
+    api.getAccountStatus.mockResolvedValue(body);
+    renderWithProvider();
+    await waitFor(() => expect(api.getAccountStatus).toHaveBeenCalled());
+    await act(async () => {});
+    expect(screen.queryByText('Email not confirmed')).not.toBeInTheDocument();
   });
 });

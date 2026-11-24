@@ -1921,6 +1921,8 @@ export interface AccountStatusResponse {
   suspended_at?: string;
   verified_minor?: boolean;
   verified_minor_at?: string;
+  /** Keycast's email_unconfirmed. Only an explicit `true` means unconfirmed; absent means unknown. */
+  email_unconfirmed?: boolean;
   /** D1 protected-minor registry (#192): true for an active subject; null when unknown. */
   protected_minor?: boolean | null;
   not_found?: boolean;

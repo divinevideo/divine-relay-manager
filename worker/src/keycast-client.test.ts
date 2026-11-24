@@ -430,6 +430,47 @@ describe('keycast-client', () => {
       expect(result.verified_minor).toBe(true);
     });
 
+    // Keycast's email_unconfirmed field may not be deployed yet: only an explicit
+    // boolean passes through; anything else reads as unknown (undefined).
+    it('passes email_unconfirmed true through', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', email_unconfirmed: true }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.email_unconfirmed).toBe(true);
+    });
+
+    it('passes email_unconfirmed false through', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', email_unconfirmed: false }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.email_unconfirmed).toBe(false);
+    });
+
+    it('leaves email_unconfirmed undefined when Keycast does not send it', async () => {
+      fetchMock.mockResolvedValue({
+        ok: true,
+        json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active' }),
+      });
+      const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+      expect(result.success).toBe(true);
+      expect(result.email_unconfirmed).toBeUndefined();
+    });
+
+    it.each([['string "true"', 'true'], ['number 1', 1], ['null', null]])(
+      'does not read %s as email_unconfirmed', async (_label, value) => {
+        fetchMock.mockResolvedValue({
+          ok: true,
+          json: () => Promise.resolve({ pubkey: VALID_PUBKEY, status: 'active', email_unconfirmed: value }),
+        });
+        const result = await getUserStatus(VALID_PUBKEY, makeEnv());
+        expect(result.email_unconfirmed).toBeUndefined();
+      },
+    );
+
     it('returns verified_minor false for string "true"', async () => {
       fetchMock.mockResolvedValue({
         ok: true,
