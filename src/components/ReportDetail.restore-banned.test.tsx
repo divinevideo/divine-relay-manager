@@ -9,6 +9,7 @@ import type { ReactElement } from 'react';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
+import { bannedEventQueryKey } from '@/lib/bannedEventKey';
 import type { UserActionChange } from './UserActions';
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
@@ -21,6 +22,7 @@ const API_URL = 'https://api.a.example';
 // `post` what a normal read returns. Each is read only when its query runs, so
 // a cached answer outlives a change here.
 const relay = vi.hoisted(() => ({
+  apiUrl: undefined as string | undefined,
   banned: undefined as NostrEvent | undefined,
   post: undefined as NostrEvent | undefined,
   bannedReads: 0,
@@ -58,14 +60,14 @@ vi.mock('react-router-dom', async (orig) => ({
 }));
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({ ...api, asModerator: () => api }),
-  useApiUrl: () => API_URL,
+  useApiUrl: () => relay.apiUrl ?? API_URL,
 }));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: (t: { action?: ReactElement }) => { toasts.calls.push(t); } }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ user: { pubkey: MOD_PUBKEY }, getModeratorToken: () => 'moderator-login-token' }),
 }));
 vi.mock('@/hooks/useAppContext', () => ({
-  useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: API_URL } }),
+  useAppContext: () => ({ config: { relayUrl: 'wss://relay.example', apiUrl: relay.apiUrl ?? API_URL } }),
 }));
 vi.mock('@/hooks/useDecisionLog', () => ({
   useDecisionLog: () => ({
@@ -180,6 +182,7 @@ async function openOnBannedPost() {
 describe('ReportDetail after a restore', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    relay.apiUrl = undefined;
     relay.banned = undefined;
     relay.post = undefined;
     relay.bannedReads = 0;
@@ -249,7 +252,7 @@ describe('ReportDetail after a restore', () => {
     await waitFor(() => expect(relay.bannedReads).toBe(2));
     await act(async () => { release(); });
     expect(await screen.findByText('the reported post')).toBeInTheDocument();
-    await waitFor(() => expect(client.getQueryData(['banned-event', EVENT_ID])).toBeNull());
+    await waitFor(() => expect(client.getQueryData(bannedEventQueryKey(API_URL, EVENT_ID))).toBeNull());
   });
 
   // The restore's fresh read cached "not banned" for five minutes. A re-ban
@@ -273,11 +276,11 @@ describe('ReportDetail after a restore', () => {
   // A ban names the post it banned, which may not be the one open when it finishes.
   it('Ban of another post marks that post\'s banned-event read stale, not the open one\'s', async () => {
     await openOnBannedPost();
-    const otherBanned = ['banned-event', OTHER_ID];
+    const otherBanned = bannedEventQueryKey(API_URL, OTHER_ID);
     client.setQueryData(otherBanned, null);
     fireEvent.click(screen.getByRole('button', { name: 'Ban other post' }));
     await waitFor(() => expect(client.getQueryState(otherBanned)?.isInvalidated).toBe(true));
-    expect(client.getQueryState(['banned-event', EVENT_ID])?.isInvalidated).toBe(false);
+    expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))?.isInvalidated).toBe(false);
     // The open post's banned view and its read stand: marking the whole root would fail this.
     expect(relay.bannedReads).toBe(1);
     expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
@@ -299,7 +302,7 @@ describe('ReportDetail after a restore', () => {
     relay.banned = POST;
     relay.post = undefined;
     otherBans[name]();
-    await waitFor(() => expect(client.getQueryState(['banned-event', EVENT_ID])?.isInvalidated).toBe(true));
+    await waitFor(() => expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))?.isInvalidated).toBe(true));
     await act(async () => { await client.invalidateQueries({ queryKey: ['thread'] }); });
     expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
   });
@@ -338,7 +341,7 @@ describe('ReportDetail after a restore', () => {
     await openOnBannedPost();
     relay.post = undefined;
     fireEvent.click(screen.getByRole('button', { name: button }));
-    await waitFor(() => expect(client.getQueryState(['banned-event', EVENT_ID])?.isInvalidated).toBe(true));
+    await waitFor(() => expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))?.isInvalidated).toBe(true));
     expect(relay.bannedReads).toBe(1);
     expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
     expect(screen.getByText('the reported post')).toBeInTheDocument();
@@ -367,14 +370,14 @@ describe('ReportDetail after a restore', () => {
     await openOnBannedPost();
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Age Restrict All' })); });
     expect(recheck.fn).toHaveBeenCalledTimes(1);
-    expect(client.getQueryState(['banned-event', EVENT_ID])?.isInvalidated).toBe(false);
+    expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))?.isInvalidated).toBe(false);
     expect(relay.bannedReads).toBe(1);
   });
 
   // An Undo restores a recent post, which can be another than the report's.
   it('Undo delete of another post drops that post\'s reads, not the report\'s thread', async () => {
     await openOnBannedPost();
-    const otherBanned = ['banned-event', OTHER_ID];
+    const otherBanned = bannedEventQueryKey(API_URL, OTHER_ID);
     const otherThread = ['thread', OTHER_ID, 3, API_URL, undefined];
     client.setQueryData(otherBanned, null);
     client.setQueryData(otherThread, { event: null });
@@ -388,6 +391,34 @@ describe('ReportDetail after a restore', () => {
     // The report's own thread read was not touched, nor its banned view.
     expect(client.getQueryState(['thread', EVENT_ID, 3, API_URL, undefined])?.isInvalidated).toBe(false);
     expect(relay.reads).toBe(1);
+    expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
+  });
+
+  it('keeps the banned-event read in a new environment when an earlier Undo finishes', async () => {
+    let finishRestore!: () => void;
+    api.restoreEvent.mockReturnValue(new Promise<void>(resolve => { finishRestore = resolve; })
+      .then(() => ({ recorded: true, reconciled: true })));
+    relay.banned = POST;
+    client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const pane = () => (
+      <QueryClientProvider client={client}>
+        <TooltipProvider><ReportDetail report={REPORT} /></TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(pane());
+    expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
+    await paths['Undo delete']();
+
+    // As in RelayManager, clear the shared cache and reopen on a different relay.
+    rerender(<></>);
+    client.clear();
+    relay.apiUrl = 'https://api.b.example';
+    rerender(pane());
+    expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
+    expect(relay.bannedReads).toBe(2);
+
+    await act(async () => { finishRestore(); });
+    expect(relay.bannedReads).toBe(2);
     expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
   });
 });

@@ -26,7 +26,7 @@ import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { isRepostKind, looksLikeEventCopy, verifiedRepostedEvent } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
-import { BANNED_EVENT_KEY_ROOT, bannedEventQueryKey } from "@/lib/bannedEventKey";
+import { bannedEventQueryKey, bannedEventQueryPrefix } from "@/lib/bannedEventKey";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
@@ -248,18 +248,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     rereadPost(targetEventId);
   };
 
-  // After a restore, the post is no longer banned, but the body's banned-post
-  // view comes from a read kept for five minutes (useBannedEvent) over a thread
-  // read that holds the missing post for its own staleTime. Drop both, or the
-  // header says the post is back while the body keeps saying it is banned
-  // (#445). For the post that was restored, which an Undo can make another
-  // than the report's target. The banned-event key has no environment part.
-  // Cancel first, as rereadPost does: with no data yet (the pane's first read
-  // still out), invalidating would join that read, which started before the
-  // restore, and its answer would land as fresh.
+  // After a restore, refresh both reads for the restored post and environment
+  // (#445). Cancel any in-flight read first so a pre-restore answer can't
+  // become the fresh result.
   const rereadRestoredPost = (eventId: string | undefined) => {
     if (!eventId) return;
-    const filters: QueryFilters = { queryKey: bannedEventQueryKey(eventId), exact: true };
+    const filters: QueryFilters = { queryKey: bannedEventQueryKey(config.apiUrl, eventId), exact: true };
     void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
     rereadPost(eventId);
   };
@@ -267,7 +261,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // A read started before a ban can still answer "not banned". Cancel it and
   // refresh active reads that have no post. Keep any displayed post and its
   // media until the next normal read, since the worker can refuse a refresh.
-  const refreshBannedEventReads = (filters: QueryFilters) => {
+  const refreshBannedEventReads = (filters: Pick<QueryFilters, 'queryKey' | 'exact'>) => {
     void queryClient.cancelQueries(filters).then(() => {
       void queryClient.invalidateQueries({ ...filters, refetchType: 'none' });
       return queryClient.refetchQueries({
@@ -279,12 +273,12 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   };
 
   const markBannedEventStale = (eventId: string) => {
-    refreshBannedEventReads({ queryKey: bannedEventQueryKey(eventId), exact: true });
+    refreshBannedEventReads({ queryKey: bannedEventQueryKey(config.apiUrl, eventId), exact: true });
   };
   // Bulk jobs (BulkDeleteByKind, UserActions' Delete All Content) ban events
   // without returning their IDs to the pane.
   const markAllBannedEventsStale = () => {
-    refreshBannedEventReads({ queryKey: [BANNED_EVENT_KEY_ROOT] });
+    refreshBannedEventReads({ queryKey: bannedEventQueryPrefix(config.apiUrl) });
   };
 
   // Get decision history for this target
@@ -771,7 +765,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // refuses getbannedevent only for a suspended author). A post Ban marks
       // the post's read stale (markBannedEventStale).
       if (change.action === 'suspend') {
-        queryClient.invalidateQueries({ queryKey: [BANNED_EVENT_KEY_ROOT], refetchType: 'none' });
+        queryClient.invalidateQueries({ queryKey: bannedEventQueryPrefix(config.apiUrl), refetchType: 'none' });
       }
       if (change.action === 'unsuspend' || change.action === 'unban') {
         // Refresh the report the action started from, even after navigating away.
