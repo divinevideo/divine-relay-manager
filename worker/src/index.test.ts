@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { finalizeEvent, generateSecretKey } from 'nostr-tools';
+import { finalizeEvent, generateSecretKey, getPublicKey, nip19 } from 'nostr-tools';
 import worker from './index';
 import { LABEL_PAGE_SIZE } from './resolution-labels';
 import * as ageReview from './age-review';
@@ -15,6 +15,8 @@ const env = {
 } as never;
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
+// The key resolution labels must be signed by (the worker's own).
+const TEST_PUBKEY = getPublicKey(nip19.decode(TEST_NSEC).data as Uint8Array);
 
 const ctx = {} as ExecutionContext;
 
@@ -2915,7 +2917,7 @@ describe('GET /api/resolution-labels truncation reporting (#221)', () => {
   // ReportWatcher.test.ts, zendesk-sync.test.ts). The brief's version used
   // onmessage/onopen properties, which queryRelay never assigns, so every test
   // silently hit the outer try/catch and got `success: false` instead of events.
-  function stubRelay(events: Array<{ id: string; created_at: number }>) {
+  function stubRelay(events: Array<{ id: string; created_at: number; pubkey?: string }>) {
     class FakeWebSocket {
       private listeners: Map<string, Array<(event: unknown) => void>> = new Map();
       constructor(_url: string) {
@@ -2951,13 +2953,13 @@ describe('GET /api/resolution-labels truncation reporting (#221)', () => {
       new Request('https://api.example/api/resolution-labels', {
         headers: { 'X-Admin-Key': 'test-admin-key' },
       }),
-      { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never,
+      { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key', NOSTR_NSEC: TEST_NSEC } as never,
       ctx
     );
   }
 
   it('flags truncation when the relay fills the 500-event limit', async () => {
-    stubRelay(Array.from({ length: 500 }, (_, i) => ({ id: String(i).padStart(64, '0'), created_at: 1_760_000_000 - i })));
+    stubRelay(Array.from({ length: 500 }, (_, i) => ({ id: String(i).padStart(64, '0'), pubkey: TEST_PUBKEY, created_at: 1_760_000_000 - i })));
 
     const body = await (await getLabels()).json() as { events: unknown[]; truncated: boolean; oldest_covered: number | null };
 
@@ -2968,14 +2970,75 @@ describe('GET /api/resolution-labels truncation reporting (#221)', () => {
 
   it('does not flag truncation below the limit', async () => {
     stubRelay([
-      { id: 'a'.repeat(64), created_at: 1_760_000_000 },
-      { id: 'b'.repeat(64), created_at: 1_759_000_000 },
+      { id: 'a'.repeat(64), pubkey: TEST_PUBKEY, created_at: 1_760_000_000 },
+      { id: 'b'.repeat(64), pubkey: TEST_PUBKEY, created_at: 1_759_000_000 },
     ]);
 
     const body = await (await getLabels()).json() as { events: unknown[]; truncated: boolean; oldest_covered: number | null };
 
     expect(body.truncated).toBe(false);
     expect(body.oldest_covered).toBe(1_759_000_000);
+  });
+
+  // Resolution labels count only when the worker's own key signed them, or any
+  // account that can publish a kind 1985 could hide reports from the queue.
+  it('asks the relay only for labels signed by the worker key', async () => {
+    const filters: Array<Record<string, unknown>> = [];
+    class SpySocket {
+      private l = new Map<string, Array<(e: unknown) => void>>();
+      constructor(_u: string) { setTimeout(() => this.emit('open', {}), 0); }
+      addEventListener(t: string, f: (e: unknown) => void) { this.l.set(t, [...(this.l.get(t) ?? []), f]); }
+      send(raw: string) {
+        const [, subId, filter] = JSON.parse(raw);
+        filters.push(filter);
+        setTimeout(() => this.emit('message', { data: JSON.stringify(['EOSE', subId]) }), 0);
+      }
+      close() {}
+      private emit(t: string, e: unknown) { for (const h of this.l.get(t) ?? []) h(e); }
+    }
+    vi.stubGlobal('WebSocket', SpySocket as never);
+
+    await getLabels();
+
+    expect(filters[0].authors).toEqual([TEST_PUBKEY]);
+  });
+
+  it('reports truncation from the relay page, not from what survives the signer filter', async () => {
+    stubRelay(Array.from({ length: 500 }, (_, i) => ({ id: String(i).padStart(64, '0'), pubkey: 'f'.repeat(64), created_at: 1_760_000_000 - i })));
+    const body = await (await getLabels()).json() as { events: unknown[]; truncated: boolean; oldest_covered: number | null };
+    expect(body.events).toEqual([]);
+    expect(body.truncated).toBe(true);
+    expect(body.oldest_covered).toBe(1_760_000_000 - 499);
+  });
+
+  it('drops a label signed by another key', async () => {
+    stubRelay([
+      { id: 'a'.repeat(64), pubkey: 'f'.repeat(64), created_at: 1_760_000_000 },
+      { id: 'b'.repeat(64), pubkey: TEST_PUBKEY, created_at: 1_759_000_000 },
+    ]);
+
+    const body = await (await getLabels()).json() as { events: Array<{ id: string }> };
+
+    expect(body.events.map((e) => e.id)).toEqual(['b'.repeat(64)]);
+  });
+
+  it('fails like a failed label source, without querying the relay, when the signing key is unresolved', async () => {
+    const queried = vi.fn();
+    vi.stubGlobal('WebSocket', class { constructor() { queried(); } } as never);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const noKeyEnv = { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never;
+
+    for (const path of ['/api/resolution-labels', '/api/resolution-label-targets']) {
+      const res = await worker.fetch(
+        new Request(`https://api.example${path}`, { headers: { 'X-Admin-Key': 'test-admin-key' } }),
+        noKeyEnv,
+        ctx
+      );
+      const body = await res.json() as { success: boolean };
+      expect(res.status, path).toBe(502);
+      expect(body.success, path).toBe(false);
+    }
+    expect(queried).not.toHaveBeenCalled();
   });
 
   it('reports a null oldest_covered when the relay returns nothing', async () => {
@@ -3017,7 +3080,7 @@ describe('GET /api/resolution-label-targets pages the relay (#273)', () => {
         const page = eligible.slice(0, filter.limit ?? eligible.length);
         setTimeout(() => {
           for (const ev of page) {
-            this.emit('message', { data: JSON.stringify(['EVENT', subId, { ...ev, tags: [['e', ev.id]] }]) });
+            this.emit('message', { data: JSON.stringify(['EVENT', subId, { ...ev, pubkey: TEST_PUBKEY, tags: [['e', ev.id]] }]) });
           }
           this.emit('message', { data: JSON.stringify(['EOSE', subId]) });
         }, 0);
@@ -3040,7 +3103,7 @@ describe('GET /api/resolution-label-targets pages the relay (#273)', () => {
       new Request('https://api.example/api/resolution-label-targets', {
         headers: { 'X-Admin-Key': 'test-admin-key' },
       }),
-      { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key' } as never,
+      { ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ADMIN_API_KEY: 'test-admin-key', NOSTR_NSEC: TEST_NSEC } as never,
       ctx
     );
   }
@@ -3116,6 +3179,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     ALLOWED_ORIGINS: 'https://app.divine.video',
     RELAY_URL: 'wss://relay.example',
     ADMIN_API_KEY: 'test-admin-key',
+    NOSTR_NSEC: TEST_NSEC,
     REPORT_WATCHER: {
       idFromName: () => 'singleton',
       get: () => ({
@@ -3160,7 +3224,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
 
   const EVENT_A = { id: 'a'.repeat(64), kind: 1984, pubkey: 'b'.repeat(64), tags: [], content: '', sig: 'c'.repeat(128), created_at: 1 };
   const EVENT_B = { id: 'd'.repeat(64), kind: 1984, pubkey: 'b'.repeat(64), tags: [], content: '', sig: 'c'.repeat(128), created_at: 2 };
-  const LABEL_A = { id: 'e'.repeat(64), kind: 1985, pubkey: 'f'.repeat(64), tags: [['L', 'moderation/resolution']], content: '', sig: 'c'.repeat(128), created_at: 3 };
+  const LABEL_A = { id: 'e'.repeat(64), kind: 1985, pubkey: TEST_PUBKEY, tags: [['L', 'moderation/resolution']], content: '', sig: 'c'.repeat(128), created_at: 3 };
 
   beforeEach(() => {
     FakeRelaySocket.instances = [];

@@ -9,7 +9,7 @@ import {
   handlingByTarget, reportStatus, reportTime, REOPENED_ACTION, type HandlingEntry, type ReportStatus,
 } from '../../shared/handling';
 import { getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from './resolution-state';
-import { readResolutionLabelTargets } from './resolution-labels';
+import { readResolutionLabelTargets, SIGNER_UNAVAILABLE } from './resolution-labels';
 import { readReportArrivals } from './report-arrivals';
 import { REPORT_KIND, REPORTS_MAX_PAGES, REPORTS_PAGE_SIZE } from './reports-filter';
 
@@ -195,11 +195,12 @@ export interface PagingOptions {
 export async function readResolutionKeys(
   db: D1Database,
   relayUrl: string,
+  labelSigner: string | null,
   labelsPaging?: PagingOptions,
 ): Promise<ResolutionKeys> {
   const [autoHideStates, labels, handlingRows] = await Promise.all([
     getAutoHideStates(db),
-    readResolutionLabelTargets(relayUrl, labelsPaging),
+    readResolutionLabelTargets(relayUrl, labelSigner, labelsPaging),
     getHandlingRows(db),
   ]);
   // `automated` comes from the handling rows, which hold every row
@@ -252,11 +253,18 @@ function failure(status: number, error: unknown) {
 export async function getReportsNeedingAttention(
   db: D1Database | undefined,
   relayUrl: string,
+  // The pubkey resolution labels must be signed by, or null when it could not
+  // be resolved (no label is then trusted). See readResolutionLabelTargets.
+  labelSigner: string | null,
   opts?: { reportsPaging?: PagingOptions; labelsPaging?: PagingOptions },
 ): Promise<{ status: number; body: Record<string, unknown> }> {
   if (!db) return failure(503, 'Database not configured');
   const reportsPageSize = opts?.reportsPaging?.pageSize ?? REPORTS_PAGE_SIZE;
   const reportsMaxPages = opts?.reportsPaging?.maxPages ?? REPORTS_MAX_PAGES;
+  // No signer means no label can be verified: fail now, before any relay walk
+  // or data read whose result would be thrown away. (The route's once-per-isolate
+  // ensureSchemaOnce still runs before this.)
+  if (!labelSigner) return failure(502, SIGNER_UNAVAILABLE);
   try {
     // Arrivals need the report ids, so they follow the report walk, alongside
     // the resolution reads rather than after them.
@@ -265,7 +273,7 @@ export async function getReportsNeedingAttention(
         relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, reportsPageSize),
         { pageSize: reportsPageSize, maxPages: reportsMaxPages },
       ).then(async paged => ({ reports: paged, arrivals: await readArrivalsFor(db, paged.events) })),
-      readResolutionKeys(db, relayUrl, opts?.labelsPaging),
+      readResolutionKeys(db, relayUrl, labelSigner, opts?.labelsPaging),
     ]);
     const { events, counts, automatedTargets, handledBefore } = selectReportsNeedingAttention(
       reports.events, keys.handling, keys.pendingReview, keys.automated, arrivals,
@@ -374,6 +382,7 @@ export async function getResolvedReportsPage(
   params: URLSearchParams,
   db: D1Database | undefined,
   relayUrl: string,
+  labelSigner: string | null,
   // Test-only: lets a fixture shrink the label walk to exercise
   // resolution_truncated without a large corpus. The route never passes this.
   labelsPaging?: PagingOptions,
@@ -384,6 +393,8 @@ export async function getResolvedReportsPage(
   if (cursorParam !== null && !/^\d+$/.test(cursorParam)) {
     return failure(400, 'cursor must be a unix timestamp in seconds');
   }
+  // As in getReportsNeedingAttention: fail before any relay walk or data read.
+  if (!labelSigner) return failure(502, SIGNER_UNAVAILABLE);
   const cursor = cursorParam === null ? undefined : Number(cursorParam);
   const requested = Number.parseInt(params.get('limit') ?? '', 10);
   const limit = Number.isFinite(requested) && requested > 0
@@ -394,7 +405,7 @@ export async function getResolvedReportsPage(
     const [{ page, arrivals }, keys] = await Promise.all([
       relayPageFetcher<RelayReport>(relayUrl, { kinds: [REPORT_KIND] }, limit)(cursor)
         .then(async fetched => ({ page: fetched, arrivals: await readArrivalsFor(db, fetched) })),
-      readResolutionKeys(db, relayUrl, labelsPaging),
+      readResolutionKeys(db, relayUrl, labelSigner, labelsPaging),
     ]);
 
     const events = page.filter(report => {
