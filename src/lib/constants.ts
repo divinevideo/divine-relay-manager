@@ -224,15 +224,14 @@ export function getReportTargetIds(event: { tags: string[][] }): { eventId?: str
   };
 }
 
-// Timeout for the four resolution reads that build the reports queue's
-// resolvedTargets, replacing adminApi's 30s API_TIMEOUT_MS for these reads.
+// Timeout for the D1 resolution state and relay lists that build the reports
+// queue's resolvedTargets, replacing adminApi's 30s API_TIMEOUT_MS for these reads.
 // On a COLD load there is no error to latch onto yet, so every escape hatch the
 // queue offers sits behind the loading skeleton: a source that times out at 30s
 // and then retries strands the moderator on a bare skeleton for a minute with
-// nothing to click, and any of the four can cause it. A 30s bound buys nothing
-// here anyway, being twice the 15s poll interval that would have recovered the
-// read on its own (#221). One-shot moderation actions still want the generous
-// default.
+// nothing to click. A 30s bound is twice the 15s poll interval that would have
+// recovered the read on its own (#221). One-shot moderation actions still
+// want the generous default.
 //
 // Every read of the relay lists through useRelayBanLists uses it too, and
 // must: those reads share cache entries with the queue (`banned-pubkeys`,
@@ -241,10 +240,9 @@ export function getReportTargetIds(event: { tags: string[][] }): { eventId?: str
 // depend on which screen fetched last.
 export const RESOLUTION_READ_TIMEOUT_MS = 8_000;
 
-// The one exception to the bound above: the resolution-label read. Of the
-// four, only resolution-state is a D1 lookup and the banned lists are NIP-86
-// relay RPCs; this one makes the worker walk every page of labels on the
-// relay. The relay answers nothing until a page's whole query finishes and
+// The resolution-label read needs a larger budget because it makes the worker
+// walk every page of labels on the relay. The relay answers nothing until a
+// page's whole query finishes and
 // keeps running it for up to 30s after the worker hangs up, so an 8s abort both
 // fails a read that was about to succeed and leaves that query running.
 //
