@@ -173,7 +173,7 @@ beforeEach(() => {
   decisionLog.isPendingReview = false;
   decisionLog.isAutoHideRestoreFailed = false;
   realDecisionLog.on = false;
-  api.deleteDecisions.mockResolvedValue({ deleted: 1, labelCleanupFailed: false });
+  api.deleteDecisions.mockResolvedValue({ deleted: 1 });
   api.logDecision.mockResolvedValue(undefined);
 });
 
@@ -387,124 +387,19 @@ describe('ReportDetail reopen reporting', () => {
     expect(arg.duration).toBeGreaterThan(5000);
   });
 
-  // The label survived, so resolvedTargets still hides the target and the
-  // report does NOT come back. Claiming it did is the exact failure this flag
-  // exists to prevent. Only a worker from before #324 sets it (that worker
-  // deleted decisions and banned labels); the cases below keep a rolled-back
-  // worker reading right.
-  it('warns that the report may stay hidden when label cleanup failed', async () => {
-    api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: true });
-    renderDetail();
-    clickReopen();
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    const arg = toast.mock.calls[0][0];
-    expect(arg.variant).toBe('destructive');
-    const text = `${arg.title} ${arg.description}`;
-    expect(text).toMatch(/may stay hidden/i);
-    // One of the three causes is our own page cap, where the relay did exactly
-    // what it was asked. Naming the relay as the culprit would send a moderator
-    // chasing a relay problem that is not there.
-    expect(text).not.toMatch(/the relay did not/i);
-    // The decisions ARE deleted on this path, so hasHandlingDecisions goes false and
-    // the Reopen button unmounts. Telling a moderator to retry without giving
-    // them the means is a dead end, so the retry rides on the toast -- and it
-    // must not expire on a timer, since nothing else can reach this action
-    // afterwards. Single-use even so: ToastAction is a ToastClose, so the click
-    // that fires the retry also dismisses the toast, and only a retry that
-    // comes back still-degraded raises a replacement. These tests render the
-    // action outside a ToastProvider, so that dismissal does not run here.
-    expect(arg.action).toBeDefined();
-    expect(arg.duration).toBe(Infinity);
-  });
-
-  it('offers a working retry from the degraded toast, since the button is gone', async () => {
-    api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: true });
-    renderDetail();
-    clickReopen();
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    const callsBefore = api.deleteDecisions.mock.calls.length;
-
-    // Render the toast's action in isolation and click it: it must re-run the
-    // reopen rather than merely dismiss. Scoped to its own container, since the
-    // panel behind it already has buttons of its own.
-    const { container } = render(toast.mock.calls[0][0].action);
-    fireEvent.click(within(container).getByRole('button'));
-
-    await waitFor(() =>
-      expect(api.deleteDecisions.mock.calls.length).toBeGreaterThan(callsBefore)
-    );
-  });
-
-  // The degraded toast never expires and TOAST_LIMIT is 1, so it is still on
-  // screen after the moderator moves to another report. mutate() rebuilds the
-  // mutation from the observer's LATEST options, so a mutationFn that read the
-  // target off `context` instead of off its own variables would send this retry
-  // at the report now selected -- deleting the decisions of a report nobody
-  // asked to reopen, and then reporting it as a clean reopen.
-  it('retries the target it was raised for, not the report selected afterwards', async () => {
-    api.deleteDecisions.mockResolvedValue({ deleted: 2, labelCleanupFailed: true });
-    const { rerender } = renderDetail();
-    clickReopen();
-
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    const action = toast.mock.calls[0][0].action;
-
-    ctx.targetValue = OTHER_EVENT;
-    ctx.reportedPubkey = OTHER_PUBKEY;
-    rerender();
-    api.deleteDecisions.mockClear();
-
-    const { container } = render(action);
-    fireEvent.click(within(container).getByRole('button'));
-
-    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
-    expect(api.deleteDecisions).toHaveBeenCalledTimes(1);
-    expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
-  });
-
-  // The same when the reopen settles after the moderator moved on: onSuccess
-  // runs with the observer's latest options, so a retry built from `context`
-  // there would aim at the report now selected. It re-sends the request.
-  it('retries the target it was raised for when the reopen settles after the moderator moved on', async () => {
-    let release!: () => void;
-    api.deleteDecisions.mockReturnValueOnce(new Promise((resolve) => {
-      release = () => resolve({ deleted: 2, labelCleanupFailed: true });
-    }));
-    const { rerender } = renderDetail();
-    clickReopen();
-    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
-
-    ctx.targetValue = OTHER_EVENT;
-    ctx.reportedPubkey = OTHER_PUBKEY;
-    rerender();
-    await act(async () => { release(); });
-    await waitFor(() => expect(toast).toHaveBeenCalled());
-    api.deleteDecisions.mockClear();
-    api.deleteDecisions.mockResolvedValue({ deleted: 0, labelCleanupFailed: false });
-
-    const { container } = render(toast.mock.calls[0][0].action);
-    fireEvent.click(within(container).getByRole('button'));
-
-    await waitFor(() => expect(api.deleteDecisions).toHaveBeenCalled());
-    expect(api.deleteDecisions).toHaveBeenCalledTimes(1);
-    expect(api.deleteDecisions).toHaveBeenCalledWith(TARGET_EVENT, 'event');
-  });
-
-  // resolvedTargets is built from the worker-side projections of the labels and
-  // decisions (#273), not from the raw reads, so a reopen that does not refresh
-  // THOSE keys leaves the target hidden for a poll cycle even when the cleanup
-  // fully succeeded -- a full minute on the label source. Asserting the exact
-  // keys is the point: an invalidation of a key the queue no longer reads
-  // passes a looser check and refreshes nothing.
-  it('invalidates the resolution caches the queue filters on', async () => {
+  // The queue reads the worker-side projection of the decision log (#273), not
+  // the raw reads, so a reopen that does not refresh THAT key leaves the target
+  // hidden for a poll cycle. Asserting the exact key is the point: an
+  // invalidation of a key the queue no longer reads passes a looser check and
+  // refreshes nothing. A reopen changes no labels (#324), so it does not
+  // refresh them.
+  it('invalidates the resolution state the queue filters on, and not the labels a reopen leaves alone', async () => {
     const { invalidate } = renderDetail();
     clickReopen();
 
     await waitFor(() => expect(toast).toHaveBeenCalled());
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
     // A reopen moves the target out of resolved history and back into the
     // needs-attention feed. Both are cached.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
@@ -547,7 +442,8 @@ describe('ReportDetail reopen reporting', () => {
     // The queue's projections drive whether the target is hidden, so they go
     // stale on such a failure exactly as the decision log does.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-state'] });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
+    // A reopen changes no labels, so a failed one does not refresh them either.
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['resolution-label-targets'] });
     // A reopen moves the target out of resolved history and back into the
     // needs-attention feed. Both are cached.
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['reports'] });
@@ -695,7 +591,7 @@ describe('ReportDetail reopen keeps history', () => {
   it('words the toast by what was known at the click, not after moving to another report (#432)', async () => {
     let release!: () => void;
     api.deleteDecisions.mockReturnValue(new Promise((resolve) => {
-      release = () => resolve({ deleted: 1, labelCleanupFailed: false });
+      release = () => resolve({ deleted: 1 });
     }));
     authorBanned = null;
     const { rerender } = renderDetail();

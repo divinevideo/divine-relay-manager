@@ -7,7 +7,7 @@ import {
   humanHandledAutoHideTargets,
   SWITCH_STATE_LABELS,
 } from './sensitiveSwitch';
-import { datedHandling, queueResolution, type QueueResolution } from './reportResolution';
+import { datedHandling, queueResolution, type HandlingContext } from './reportResolution';
 
 const EVENT = 'a'.repeat(64);
 const AUTHOR = 'b'.repeat(64);
@@ -33,24 +33,18 @@ const eventTarget = {
   reports: [{ id: '3'.repeat(64), created_at: 150, tags: [['e', EVENT, 'illegal'], ['p', AUTHOR, 'illegal']], content: 'Reason: csam' }],
 };
 
-// A worker from before #324: target membership, as the switch always read it.
-function membership(handledTargets: string[] = [], bannedPubkeys: string[] = []): QueueResolution {
-  return { rule: 'membership', resolvedTargets: new Set(handledTargets), bannedPubkeys: new Set(bannedPubkeys) };
-}
-
-// A worker with the handled-before rule: dated decision rows and labels.
+// The handled-before rule: dated decision rows and labels.
 function dated(
   rows: { target_type: string; target_id: string; action: string; at: number | null; moderator_pubkey?: string }[],
   labels: { type: 'event' | 'pubkey'; value: string; at: number }[] = [],
   arrivals: Map<string, number> = new Map(),
-  extra: { bannedEvents?: Set<string>; confirmedAutoHide?: Map<string, number | null> } = {},
-): QueueResolution {
+  extra: { bannedPubkeys?: Set<string>; bannedEvents?: Set<string>; confirmedAutoHide?: Map<string, number | null> } = {},
+): HandlingContext {
   return queueResolution({
     dated: datedHandling(rows.map(r => ({ moderator_pubkey: 'd'.repeat(64), ...r })), labels),
     arrivals,
-    bannedPubkeys: new Set(),
+    bannedPubkeys: extra.bannedPubkeys ?? new Set(),
     bannedEvents: extra.bannedEvents ?? new Set(),
-    resolvedTargets: new Set(),
     confirmedAutoHide: extra.confirmedAutoHide,
   });
 }
@@ -60,7 +54,7 @@ function build(overrides: Partial<Parameters<typeof buildSwitchMembership>[0]> =
     consolidated: [],
     pendingReview: new Map(),
     humanHandled: new Map(),
-    resolution: membership(),
+    resolution: dated([]),
     ...overrides,
   });
 }
@@ -76,28 +70,13 @@ describe('buildSwitchMembership', () => {
     expect(m.size).toBe(0);
   });
 
-  it('leaves a resolved CSAM target out', () => {
-    const m = build({
-      consolidated: [profileTarget([CSAM_REPORT])],
-      resolution: membership([`pubkey:${PROFILE}`]),
-    });
-    expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
-  });
-
-  // A worker from before #324 sends no dates, so any human auto-hide row
-  // answers every report, as the switch always read it.
-  it('leaves a CSAM target a person already handled through auto-hide out', () => {
-    const m = build({
-      consolidated: [profileTarget([CSAM_REPORT])],
-      humanHandled: new Map([[`pubkey:${PROFILE}`, 100]]),
-    });
-    expect(m.has(`pubkey:${PROFILE}`)).toBe(false);
-  });
-
   it('leaves a CSAM event out once its author is banned', () => {
     // Control: the same target is in when the author is not banned.
     expect(build({ consolidated: [eventTarget] }).get(`event:${EVENT}`)).toBe('not-hidden');
-    const m = build({ consolidated: [eventTarget], resolution: membership([], [AUTHOR]) });
+    const m = build({
+      consolidated: [eventTarget],
+      resolution: dated([], [], new Map(), { bannedPubkeys: new Set([AUTHOR]) }),
+    });
     expect(m.has(`event:${EVENT}`)).toBe(false);
   });
 
@@ -358,15 +337,6 @@ describe('humanHandledAutoHideTargets', () => {
       undated,
       { target_type: 'event', target_id: EVENT, action: 'auto_hide_restored', at: 100 },
     ]).get(key)).toBe(100);
-  });
-
-  // A worker from before #324 sends rows with no `at`: the target is still
-  // handled, with no date, as the switch always read it.
-  it('dates a target null when its rows carry no date at all', () => {
-    const rows = [{ target_type: 'event', target_id: EVENT, action: 'auto_hide_confirmed' }];
-    const handled = humanHandledAutoHideTargets(rows);
-    expect(handled.has(`event:${EVENT}`)).toBe(true);
-    expect(handled.get(`event:${EVENT}`)).toBeNull();
   });
 
   it('skips a row with a malformed date rather than reading it as undated', () => {

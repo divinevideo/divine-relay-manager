@@ -49,8 +49,8 @@ const FEED = [PENDING_REPORT, OPEN_ACCOUNT_REPORT, OPEN_EVENT_REPORT, RESOLVED_R
 let feedEvents = FEED;
 
 const WAITING_STATES = [
-  { target_type: 'event', target_id: PENDING_EVENT, action: 'auto_hidden' },
-  { target_type: 'event', target_id: ORPHAN_PENDING_EVENT, action: 'auto_hidden' },
+  { target_type: 'event', target_id: PENDING_EVENT, action: 'auto_hidden', at: 1751000500 },
+  { target_type: 'event', target_id: ORPHAN_PENDING_EVENT, action: 'auto_hidden', at: 1751000500 },
 ];
 // What the decisions read says is waiting. A test empties it to model a
 // moderator handling the last auto-hide.
@@ -96,7 +96,10 @@ beforeEach(() => {
     if (url.includes('/api/resolution-state')) {
       return jsonResponse({
         success: true,
-        resolved: [{ target_type: 'event', target_id: RESOLVED_EVENT }],
+        // A person handled it after its report arrived.
+        handling_rows: [
+          { target_type: 'event', target_id: RESOLVED_EVENT, action: 'reviewed', moderator_pubkey: 'f'.repeat(64), at: 1751000900 },
+        ],
         states: autoHideStates,
       });
     }

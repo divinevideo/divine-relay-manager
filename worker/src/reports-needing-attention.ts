@@ -8,7 +8,7 @@ import { pendingReviewTargetKeys } from '../../shared/autohide';
 import {
   handlingByTarget, reportStatus, reportTime, REOPENED_ACTION, type HandlingEntry, type ReportStatus,
 } from '../../shared/handling';
-import { getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from './resolution-state';
+import { getAutoHideStates, getHandlingRows } from './resolution-state';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { readReportArrivals } from './report-arrivals';
 import { REPORT_KIND, REPORTS_MAX_PAGES, REPORTS_PAGE_SIZE } from './reports-filter';
@@ -17,43 +17,6 @@ export interface RelayReport {
   id: string;
   created_at: number;
   tags: string[][];
-}
-
-// The targets the worker can call resolved, split by who resolved them. Only
-// `automated` is read now; whether a report is handled is the dated rule in
-// shared/handling.ts (#324). `resolved` (labels and a person's decisions) is
-// what takes a target out of `automated`.
-//
-// `automated`: resolved only by decisions the worker wrote itself (today
-// age_review_case_created), with no label either. No person has looked at
-// these, so they are not handled: the needs-attention read keeps them, where
-// the sensitive switch can take a CSAM-signal one, and resolved history leaves
-// them out. Under the dated rule the queue's Hide resolved does not count them
-// either (#332). Only its membership fallback, for a pre-#324 Pages build or a
-// worker that sends no dates, still counts them as resolved.
-//
-// Other target types (media) never match a report, which is why the client's
-// resolvedTargets ignores them too.
-export function resolvedKeysFrom(
-  decisions: readonly { target_type: string; target_id: string; automated?: true }[],
-  labels: readonly { type: string; value: string }[],
-): { resolved: Set<string>; automated: Set<string> } {
-  const resolved = new Set<string>();
-  const automated = new Set<string>();
-  // Keyed as stored, not lowercased as getReportTarget keys a report: the
-  // pane's history and Reopen read records exactly, so one in another
-  // spelling leaves its report in front of a person.
-  for (const label of labels) resolved.add(`${label.type}:${label.value}`);
-  for (const decision of decisions) {
-    if (decision.target_type === 'pubkey' || decision.target_type === 'event') {
-      const key = `${decision.target_type}:${decision.target_id}`;
-      if (decision.automated) automated.add(key);
-      else resolved.add(key);
-    }
-  }
-  // A label takes a target out of here, as it takes it out of the switch.
-  for (const key of resolved) automated.delete(key);
-  return { resolved, automated };
 }
 
 // The complement invariant selectReportsNeedingAttention and
@@ -96,7 +59,6 @@ function statusOf(
 // failure handling in the queue (#221).
 //
 // A target only automation touched has no handling, so its reports are kept.
-// automatedTargets lists the kept ones that are, for the client's Hide resolved.
 //
 // counts.targets, counts.resolved and counts.handled_before are counts of
 // distinct TARGETS, never of report events. counts.resolved is the targets
@@ -108,12 +70,10 @@ export function selectReportsNeedingAttention<T extends RelayReport>(
   reports: readonly T[],
   handling: ReadonlyMap<string, HandlingEntry>,
   pendingReview: ReadonlySet<string>,
-  automated: ReadonlySet<string> = new Set(),
   arrivals: ReadonlyMap<string, number> = new Map(),
 ): {
   events: T[];
   counts: { targets: number; resolved: number; handled_before: number };
-  automatedTargets: string[];
   handledBefore: string[];
 } {
   const events: T[] = [];
@@ -144,7 +104,6 @@ export function selectReportsNeedingAttention<T extends RelayReport>(
   return {
     events,
     counts: { targets: keptTargets.size, resolved, handled_before: handledBefore.size },
-    automatedTargets: [...keptTargets].filter(key => automated.has(key)),
     handledBefore: [...handledBefore],
   };
 }
@@ -170,8 +129,6 @@ export interface ResolutionKeys {
   // When a person last handled each target, and the history behind it: the
   // dated rule's input (#324). Keyed `${type}:${id}` as stored.
   handling: Map<string, HandlingEntry>;
-  // Resolved only by decisions the worker wrote itself. See resolvedKeysFrom.
-  automated: Set<string>;
   pendingReview: Set<string>;
   labelsTruncated: boolean;
 }
@@ -185,8 +142,7 @@ export interface PagingOptions {
 }
 
 // Everything the worker knows about which targets are handled: decisions and
-// auto-hide states from D1, resolution labels from the relay. The worker's own
-// automated decisions come back apart, in `automated`.
+// auto-hide states from D1, resolution labels from the relay.
 // getAutoHideStates returns newest first, which pendingReviewTargetKeys needs.
 //
 // The handling map comes from the same handlingByTarget the screen runs over
@@ -202,13 +158,8 @@ export async function readResolutionKeys(
     readResolutionLabelTargets(relayUrl, labelsPaging),
     getHandlingRows(db),
   ]);
-  // `automated` comes from the handling rows, which hold every row
-  // getResolvedTargets reads for an event or pubkey target, in the same order,
-  // so the decision log is walked once rather than twice.
-  const { automated } = resolvedKeysFrom(resolvedTargetsFromRows(handlingRows), labels.targets);
   return {
     handling: handlingByTarget(handlingRows, labels.targets),
-    automated,
     pendingReview: pendingReviewTargetKeys(autoHideStates),
     labelsTruncated: labels.truncated,
   };
@@ -267,8 +218,8 @@ export async function getReportsNeedingAttention(
       ).then(async paged => ({ reports: paged, arrivals: await readArrivalsFor(db, paged.events) })),
       readResolutionKeys(db, relayUrl, opts?.labelsPaging),
     ]);
-    const { events, counts, automatedTargets, handledBefore } = selectReportsNeedingAttention(
-      reports.events, keys.handling, keys.pendingReview, keys.automated, arrivals,
+    const { events, counts, handledBefore } = selectReportsNeedingAttention(
+      reports.events, keys.handling, keys.pendingReview, arrivals,
     );
     // One line per build, counts only: no target or report ids. An upper
     // bound: the worker leaves relay bans and the banned-author rule to the
@@ -285,12 +236,6 @@ export async function getReportsNeedingAttention(
         events,
         // counts.handled_before is new beside targets and resolved (#324).
         counts,
-        // Keys ("pubkey:<hex>", "event:<hex>") of the returned targets that only
-        // the worker's own decisions resolved. Kept for the sensitive switch.
-        // Under the dated rule the queue's Hide resolved does not hide them
-        // (#332); only its membership fallback (a pre-#324 Pages build, or a
-        // worker that sends no dates) still does.
-        automated_targets: automatedTargets,
         // Keys of the returned targets a person handled before some of their
         // reports arrived (#324). Those reports are returned; older ones are not,
         // so the screen does not count these targets as read in full.

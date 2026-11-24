@@ -802,16 +802,12 @@ unrecognised value is logged.
 ```json
 {
   "success": true,
-  "deleted": 1,
-  "labelsDeleted": 0,
-  "labelCleanupFailed": false
+  "deleted": 1
 }
 ```
 
-`deleted` is the number of `reopened` rows written. `labelsDeleted` is always
-`0` and `labelCleanupFailed` always `false`, because no label is touched. Both
-fields are kept for older frontends, which read them. A failed write returns
-`500` with `success: false`.
+`deleted` is the number of `reopened` rows written; no label is touched. A
+failed write returns `500` with `success: false`.
 
 ---
 

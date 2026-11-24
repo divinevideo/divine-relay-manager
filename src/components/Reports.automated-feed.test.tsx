@@ -1,8 +1,7 @@
-// ABOUTME: Targets only the worker's own decisions resolved, as the needs-attention feed now carries them:
-// ABOUTME: a CSAM one goes behind the switch; any other is listed (hidden by Hide resolved only against an older worker).
+// ABOUTME: Targets only the worker's own decisions touched, as the needs-attention feed carries them:
+// ABOUTME: a CSAM one goes behind the switch; any other stays in the main list.
 
 import { act, render, screen, waitFor, within } from '@testing-library/react';
-import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
 import { QueryClient } from '@tanstack/react-query';
 import { useLocation } from 'react-router-dom';
@@ -54,36 +53,28 @@ const NPUB_CSAM = nip19.npubEncode(CSAM_PROFILE);
 const NPUB_SPAM_PROFILE = nip19.npubEncode(SPAM_PROFILE);
 const NOTE_SPAM = nip19.noteEncode(SPAM_EVENT);
 
-type Resolved = { target_type: string; target_id: string; automated?: boolean };
-
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
 
-// The worker as it now answers: the feed keeps automation-only targets and
-// names them in automated_targets; resolved history leaves them out.
+// The worker as it answers: the feed keeps automation-only targets; resolved
+// history leaves them out.
 function stubWorker({
   feed,
-  automatedTargets = [],
-  resolved = [],
   targeted = {},
-  handlingRows,
+  handlingRows = [],
 }: {
   feed: unknown[];
-  automatedTargets?: string[];
-  // What /api/resolution-state lists as resolved.
-  resolved?: Resolved[];
   // A deep link's targeted lookup, keyed by the target's hex.
   targeted?: Record<string, unknown[]>;
-  // /api/resolution-state's handling_rows, from a worker with the
-  // handled-before rule (#324). Absent: a worker from before it.
+  // /api/resolution-state's handling_rows (#324).
   handlingRows?: unknown[];
 }) {
   const calls = { history: 0 };
   vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
     const url = String(input instanceof Request ? input.url : input);
     if (url.includes('/api/reports?needs_attention=1')) {
-      return jsonResponse({ success: true, events: feed, truncated: false, automated_targets: automatedTargets });
+      return jsonResponse({ success: true, events: feed, truncated: false });
     }
     if (url.includes('/api/reports/resolved')) {
       calls.history += 1;
@@ -97,7 +88,7 @@ function stubWorker({
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
     if (url.includes('/api/resolution-state')) {
-      return jsonResponse({ success: true, resolved, states: [], ...(handlingRows ? { handling_rows: handlingRows } : {}) });
+      return jsonResponse({ success: true, states: [], handling_rows: handlingRows });
     }
     if (url.includes('/api/relay-rpc')) {
       const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
@@ -132,50 +123,16 @@ afterEach(() => {
   window.history.pushState({}, '', '/');
 });
 
-describe('a target only automation resolved, from the needs-attention feed', () => {
-  // The decisions read has not marked it yet (it lags the feed): the feed's own
-  // marker must not count as a person handling the target.
-  it('goes behind the switch when it carries a CSAM signal', async () => {
-    stubWorker({ feed: [CSAM_REPORT, SPAM_REPORT], automatedTargets: [`pubkey:${CSAM_PROFILE}`] });
-    const user = userEvent.setup();
-    render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
-
-    await screen.findByText(NOTE_SPAM);
-    expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument();
-    expect(switchLabelText()).toBe('Pending review (sensitive)1');
-
-    await user.click(screen.getByRole('switch', { name: /pending review/i }));
-    await flush();
-    expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
-  });
-
-  it('is hidden by Hide resolved otherwise, and listed from the feed, not history, with it off', async () => {
-    const calls = stubWorker({ feed: [SPAM_PROFILE_REPORT, SPAM_REPORT], automatedTargets: [`pubkey:${SPAM_PROFILE}`] });
-    const user = userEvent.setup();
-    render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
-
-    await screen.findByText(NOTE_SPAM);
-    expect(screen.queryByText(NPUB_SPAM_PROFILE)).not.toBeInTheDocument();
-    expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole('switch', { name: /hide resolved/i }));
-    // Resolved history answered with nothing, so the row is the feed's.
-    await waitFor(() => expect(calls.history).toBeGreaterThan(0));
-    expect(await screen.findByText(NPUB_SPAM_PROFILE)).toBeInTheDocument();
-  });
-});
+// The worker's own decisions: no person has looked at the target.
+const automatedRow = (pubkey: string) =>
+  ({ target_type: 'pubkey', target_id: pubkey, action: 'age_review_case_created', moderator_pubkey: 'auto', at: 1751000100 });
 
 // Under the handled-before rule (#324) only what a person did counts, so a
 // target only automation touched is not resolved (#332).
-describe('a target only automation resolved, against a worker with the handled-before rule', () => {
-  const automatedRow = (pubkey: string) =>
-    ({ target_type: 'pubkey', target_id: pubkey, action: 'age_review_case_created', moderator_pubkey: 'auto', at: 1751000100 });
-
+describe('a target only automation touched, from the needs-attention feed', () => {
   it('stays in the main list with Hide resolved on', async () => {
     stubWorker({
       feed: [SPAM_PROFILE_REPORT, SPAM_REPORT],
-      automatedTargets: [`pubkey:${SPAM_PROFILE}`],
-      resolved: [{ target_type: 'pubkey', target_id: SPAM_PROFILE, automated: true }],
       handlingRows: [automatedRow(SPAM_PROFILE)],
     });
     render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -188,8 +145,6 @@ describe('a target only automation resolved, against a worker with the handled-b
   it('still goes behind the switch when it carries a CSAM signal', async () => {
     stubWorker({
       feed: [CSAM_REPORT, SPAM_REPORT],
-      automatedTargets: [`pubkey:${CSAM_PROFILE}`],
-      resolved: [{ target_type: 'pubkey', target_id: CSAM_PROFILE, automated: true }],
       handlingRows: [automatedRow(CSAM_PROFILE)],
     });
     render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -205,7 +160,7 @@ describe('a feed poll that returns the same answer', () => {
   // reference when nothing changed. Anything else rebuilds the whole queue on
   // every poll.
   it('keeps the feed it had and groups nothing again', async () => {
-    stubWorker({ feed: [CSAM_REPORT, SPAM_REPORT], automatedTargets: [`pubkey:${CSAM_PROFILE}`] });
+    stubWorker({ feed: [CSAM_REPORT, SPAM_REPORT], handlingRows: [automatedRow(CSAM_PROFILE)] });
     const queryClient = newClient();
     render(<TestApp queryClient={queryClient}><Reports relayUrl={RELAY_URL} /></TestApp>);
     await screen.findByText(NOTE_SPAM);
@@ -221,13 +176,13 @@ describe('a feed poll that returns the same answer', () => {
   });
 });
 
-describe('a target only automation resolved, from a deep link', () => {
-  // The feed does not hold it (a worker from before automated_targets, or a feed
-  // that stopped early); the decisions read marks it automated.
+describe('a target only automation touched, from a deep link', () => {
+  // The feed does not hold it (a feed that stopped early); the decisions read
+  // shows only the worker's own row on it.
   it('opens the switch on a CSAM-signal account', async () => {
     stubWorker({
       feed: [SPAM_REPORT],
-      resolved: [{ target_type: 'pubkey', target_id: CSAM_PROFILE, automated: true }],
+      handlingRows: [automatedRow(CSAM_PROFILE)],
       targeted: { [CSAM_PROFILE]: [CSAM_REPORT] },
     });
     window.history.pushState({}, '', `/reports?pubkey=${CSAM_PROFILE}`);

@@ -3,16 +3,14 @@ import {
   consolidatedHandling,
   consolidatedStatus,
   datedHandling,
-  groupResolutionStatus,
+  bannedAuthor,
   handledBeforeBanText,
   isBanDecision,
-  isConsolidatedReportResolved,
   newestReport,
   confirmedAutoHideTargets,
   queueResolution,
   reportHandling,
   reportHandlingStatus,
-  reportResolutionStatus,
   type HandlingContext,
 } from './reportResolution';
 import { REOPENED_ACTION, type HandlingEntry, type HandlingRow } from '../../shared/handling';
@@ -21,38 +19,35 @@ const AUTHOR = 'a'.repeat(64);
 const EVENT = 'e'.repeat(64);
 const banned = new Set([AUTHOR]);
 
-describe('isConsolidatedReportResolved', () => {
-  it('resolves an event report when its author is in the banned set', () => {
+describe('bannedAuthor', () => {
+  it('names the author of an event report when the author is in the banned set', () => {
     const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: AUTHOR };
-    expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(true);
+    expect(bannedAuthor(report, banned)).toBe(AUTHOR);
   });
 
   it('cross-resolves case-insensitively when the p-tag author is uppercase', () => {
     const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: AUTHOR.toUpperCase() };
-    expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(true);
+    expect(bannedAuthor(report, banned)).toBe(AUTHOR);
   });
 
-  it('does not resolve an event report whose author is not banned', () => {
+  it('names no one for an event report whose author is not banned', () => {
     const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: 'c'.repeat(64) };
-    expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(false);
+    expect(bannedAuthor(report, banned)).toBeUndefined();
   });
 
-  it('does not cross-resolve when the event report has no known author', () => {
+  it('names no one when the event report has no known author', () => {
     const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: undefined };
-    expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(false);
+    expect(bannedAuthor(report, banned)).toBeUndefined();
   });
 
-  it('still resolves via an exact target-key match', () => {
-    const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: undefined };
-    expect(isConsolidatedReportResolved(report, new Set([`event:${EVENT}`]), new Set())).toBe(true);
-  });
-
-  it('does not cross-resolve a pubkey-target report by ban (that is the exact-key path)', () => {
+  it('does not apply to a pubkey-target report', () => {
     const report = { target: { type: 'pubkey' as const, value: AUTHOR }, authorPubkey: AUTHOR };
-    // Cross-resolution is event-only; a pubkey target resolves solely via
-    // resolvedTargets (which the caller populates from bans/decisions/labels).
-    expect(isConsolidatedReportResolved(report, new Set(), banned)).toBe(false);
-    expect(isConsolidatedReportResolved(report, new Set([`pubkey:${AUTHOR}`]), new Set())).toBe(true);
+    expect(bannedAuthor(report, banned)).toBeUndefined();
+  });
+
+  it('does not lowercase the relay side: an uppercase ban entry never banned the account', () => {
+    const report = { target: { type: 'event' as const, value: EVENT }, authorPubkey: AUTHOR };
+    expect(bannedAuthor(report, new Set([AUTHOR.toUpperCase()]))).toBeUndefined();
   });
 });
 
@@ -488,37 +483,13 @@ describe('queueResolution', () => {
     arrivals: new Map<string, number>(),
     bannedPubkeys: new Set<string>(),
     bannedEvents: new Set<string>(),
-    resolvedTargets: new Set([`pubkey:${PROFILE}`]),
   };
   const report = { id: REPORT_ID, created_at: 150, target: { type: 'pubkey' as const, value: PROFILE } };
   // The screen's two steps in one: the handling map, then the rule.
   const resolve = ({ handlingRows, labelTargets, ...rest }: typeof base & {
-    handlingRows: HandlingRow[] | undefined;
-    labelTargets: { type: 'event' | 'pubkey'; value: string; at?: number }[] | undefined;
+    handlingRows: HandlingRow[];
+    labelTargets: { type: 'event' | 'pubkey'; value: string; at: number }[];
   }) => queueResolution({ ...rest, dated: datedHandling(handlingRows, labelTargets) });
-
-  it("keeps today's membership rule against a worker that sends no handling rows", () => {
-    const resolution = resolve({ ...base, handlingRows: undefined, labelTargets: [] });
-    expect(resolution.rule).toBe('membership');
-    expect(reportResolutionStatus(report, resolution)).toBe('handled');
-    expect(groupResolutionStatus({ ...report, reports: [report] }, resolution)).toBe('handled');
-  });
-
-  it("keeps today's membership rule when the label targets carry no dates", () => {
-    const resolution = resolve({
-      ...base,
-      handlingRows: [],
-      labelTargets: [{ type: 'pubkey', value: PROFILE }],
-    });
-    expect(resolution.rule).toBe('membership');
-  });
-
-  it('never calls a report handled before under the membership rule', () => {
-    const resolution = resolve({
-      ...base, resolvedTargets: new Set(), handlingRows: undefined, labelTargets: undefined,
-    });
-    expect(reportResolutionStatus(report, resolution)).toBe('new');
-  });
 
   it('applies the dated rule when the worker sends handling rows and dated labels', () => {
     const resolution = resolve({
@@ -526,10 +497,9 @@ describe('queueResolution', () => {
       handlingRows: [{ target_type: 'pubkey', target_id: PROFILE, action: 'ban_user', moderator_pubkey: MODERATOR, at: 100 }],
       labelTargets: [],
     });
-    expect(resolution.rule).toBe('dated');
-    expect(reportResolutionStatus(report, resolution)).toBe('handled_before');
-    expect(reportResolutionStatus({ ...report, created_at: 50 }, resolution)).toBe('handled');
-    expect(groupResolutionStatus({ ...report, reports: [{ ...report, created_at: 50 }, report] }, resolution))
+    expect(reportHandlingStatus(report, resolution)).toBe('handled_before');
+    expect(reportHandlingStatus({ ...report, created_at: 50 }, resolution)).toBe('handled');
+    expect(consolidatedStatus({ ...report, reports: [{ ...report, created_at: 50 }, report] }, resolution))
       .toBe('handled_before');
   });
 
@@ -539,7 +509,7 @@ describe('queueResolution', () => {
       handlingRows: [{ target_type: 'pubkey', target_id: PROFILE, action: REOPENED_ACTION, moderator_pubkey: MODERATOR, at: 200 }],
       labelTargets: [{ type: 'pubkey', value: PROFILE, at: 100 }],
     });
-    expect(reportResolutionStatus(report, resolution)).toBe('new');
+    expect(reportHandlingStatus(report, resolution)).toBe('new');
   });
 
   it('does not count a target only automation touched (#332)', () => {
@@ -548,8 +518,8 @@ describe('queueResolution', () => {
       handlingRows: [{ target_type: 'pubkey', target_id: PROFILE, action: 'age_review_case_created', moderator_pubkey: 'auto', at: 100 }],
       labelTargets: [],
     });
-    expect(reportResolutionStatus(report, resolution)).toBe('new');
-    expect(reportResolutionStatus({ ...report, created_at: 50 }, resolution)).toBe('new');
+    expect(reportHandlingStatus(report, resolution)).toBe('new');
+    expect(reportHandlingStatus({ ...report, created_at: 50 }, resolution)).toBe('new');
   });
 
   it('compares by the arrivals it is given', () => {
@@ -559,7 +529,7 @@ describe('queueResolution', () => {
       handlingRows: [{ target_type: 'pubkey', target_id: PROFILE, action: 'ban_user', moderator_pubkey: MODERATOR, at: 100 }],
       labelTargets: [],
     });
-    expect(reportResolutionStatus({ ...report, created_at: 50 }, resolution)).toBe('handled_before');
+    expect(reportHandlingStatus({ ...report, created_at: 50 }, resolution)).toBe('handled_before');
   });
 
   it('passes the relay ban lists to the dated rule', () => {
@@ -569,7 +539,7 @@ describe('queueResolution', () => {
       handlingRows: [],
       labelTargets: [],
     });
-    expect(reportResolutionStatus(report, resolution)).toBe('handled');
+    expect(reportHandlingStatus(report, resolution)).toBe('handled');
   });
 
   // A relay ban counts as undated only when the decision log has no dated row
@@ -589,7 +559,7 @@ describe('queueResolution', () => {
         handlingRows: banThenReopen(PROFILE),
         labelTargets: [],
       });
-      expect(reportResolutionStatus(report, resolution)).toBe('new');
+      expect(reportHandlingStatus(report, resolution)).toBe('new');
       // Before the reopen, the same report was handled before the ban.
       const beforeReopen = resolve({
         ...base,
@@ -597,7 +567,7 @@ describe('queueResolution', () => {
         handlingRows: banThenReopen(PROFILE).slice(0, 1),
         labelTargets: [],
       });
-      expect(reportResolutionStatus(report, beforeReopen)).toBe('handled_before');
+      expect(reportHandlingStatus(report, beforeReopen)).toBe('handled_before');
     });
 
     it("shows a report on a post by the reopened, relay-banned author as new", () => {
@@ -607,7 +577,7 @@ describe('queueResolution', () => {
         handlingRows: banThenReopen(AUTHOR),
         labelTargets: [],
       });
-      expect(reportResolutionStatus(eventReport(150, AUTHOR), resolution)).toBe('new');
+      expect(reportHandlingStatus(eventReport(150, AUTHOR), resolution)).toBe('new');
     });
 
     it('still hides a report under a ban the decision log has no row for', () => {
@@ -618,8 +588,8 @@ describe('queueResolution', () => {
         handlingRows: banThenReopen('9'.repeat(64)),
         labelTargets: [],
       });
-      expect(reportResolutionStatus(report, resolution)).toBe('handled');
-      expect(reportResolutionStatus(eventReport(150, AUTHOR), resolution)).toBe('handled');
+      expect(reportHandlingStatus(report, resolution)).toBe('handled');
+      expect(reportHandlingStatus(eventReport(150, AUTHOR), resolution)).toBe('handled');
     });
 
     it('lets a reopened post report still be answered by its own later handling', () => {
@@ -632,20 +602,12 @@ describe('queueResolution', () => {
         ],
         labelTargets: [],
       });
-      expect(reportResolutionStatus(eventReport(150, AUTHOR), resolution)).toBe('handled');
+      expect(reportHandlingStatus(eventReport(150, AUTHOR), resolution)).toBe('handled');
     });
   });
 });
 
 describe('datedHandling', () => {
-  it('is null against a worker that sends no handling rows', () => {
-    expect(datedHandling(undefined, [])).toBeNull();
-  });
-
-  it('is null when any label target has no date', () => {
-    expect(datedHandling([], [{ type: 'pubkey', value: PROFILE, at: 1 }, { type: 'pubkey', value: AUTHOR }])).toBeNull();
-  });
-
   it('logs every target with a reopen or a dated human row, and no other', () => {
     const dated = datedHandling([
       { target_type: 'pubkey', target_id: PROFILE, action: REOPENED_ACTION, moderator_pubkey: MODERATOR, at: 200 },
@@ -655,6 +617,6 @@ describe('datedHandling', () => {
       // Automation is not a person's decision.
       { target_type: 'pubkey', target_id: 'c'.repeat(64), action: 'age_review_case_created', moderator_pubkey: 'auto', at: 100 },
     ], []);
-    expect([...dated!.logged].sort()).toEqual([`event:${EVENT}`, `pubkey:${PROFILE}`].sort());
+    expect([...dated.logged].sort()).toEqual([`event:${EVENT}`, `pubkey:${PROFILE}`].sort());
   });
 });

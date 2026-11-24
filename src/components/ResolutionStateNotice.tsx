@@ -122,7 +122,7 @@ function formatUtcDate(epochMs: number): string {
 
 // Both /api/decisions and /api/resolution-labels cap how far back they read.
 // Neither cap binds today, but when one does, a target whose only resolution
-// signal is older than the window ages out of resolvedTargets and sits in the
+// signal is older than the window ages out of the resolution and sits in the
 // queue forever with nothing explaining why (#221).
 export function TruncatedHistoryBanner({ oldestCovered }: { oldestCovered: number }) {
   const date = formatUtcDate(oldestCovered);

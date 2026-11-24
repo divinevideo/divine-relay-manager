@@ -64,7 +64,7 @@ import { AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import { isAccountRestrictedAgeReviewState, type AgeReviewState } from '../../shared/age-review';
 import { canonicalHex64 } from '../../shared/hex-id';
 import { REOPENED_ACTION } from '../../shared/handling';
-import { getResolvedTargets, getAutoHideStates, getHandlingRows } from './resolution-state';
+import { getAutoHideStates, getHandlingRows } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
 import { readResolutionLabelTargets } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
@@ -441,10 +441,6 @@ interface ApiResponse {
   recorded?: boolean;
   reconciled?: boolean;
   deleted?: number;
-  labelsDeleted?: number;
-  // Reopen's pre-#324 label cleanup fields. Reopen no longer touches labels,
-  // so it answers 0 and false; kept for a Pages build that reads them.
-  labelCleanupFailed?: boolean;
   // Realness proxy pass-through
   details?: string;
   // Zendesk parse-report responses
@@ -2522,10 +2518,9 @@ async function handleGetAllDecisions(
   }
 }
 
-// The resolution projection /api/decisions cannot give the queue: every target
-// the decisions table has ever resolved, with no row cap and so no coverage
-// boundary to disclose. /api/decisions is deliberately left as it is -- a
-// frontend deployed before this one still reads it.
+// The resolution projection /api/decisions cannot give the queue: every dated
+// handling row and auto-hide state in the decisions table, with no row cap and
+// so no coverage boundary to disclose.
 async function handleGetResolutionState(
   env: Env,
   corsHeaders: Record<string, string>
@@ -2537,18 +2532,16 @@ async function handleGetResolutionState(
 
     await ensureSchemaOnce(env.DB);
 
-    // handling_rows (#324) is new beside resolved and states, which keep their
-    // shape for a Pages build that predates it. The screen runs the same
-    // handlingByTarget over these rows and /api/resolution-label-targets as the
-    // worker feed does; raw rows, not per-target results, because the labels
-    // arrive separately and only the rows let a later Reopen cancel a label.
-    const [resolved, states, handlingRows] = await Promise.all([
-      getResolvedTargets(env.DB),
+    // The screen runs the same handlingByTarget over handling_rows and
+    // /api/resolution-label-targets as the worker feed does; raw rows, not
+    // per-target results, because the labels arrive separately and only the
+    // rows let a later Reopen cancel a label.
+    const [states, handlingRows] = await Promise.all([
       getAutoHideStates(env.DB),
       getHandlingRows(env.DB),
     ]);
 
-    return proxyJsonResponse({ success: true, resolved, states, handling_rows: handlingRows }, 200, corsHeaders);
+    return proxyJsonResponse({ success: true, states, handling_rows: handlingRows }, 200, corsHeaders);
   } catch (error) {
     console.error('Get resolution state error:', error);
     return jsonResponse(
@@ -2650,11 +2643,8 @@ async function handleGetDecisions(
 // moderation_targets.ever_human_reviewed, which keeps auto-hide off a target a
 // person has looked at.
 //
-// The path, query and response fields are unchanged for a Pages build that
-// predates this. `deleted` now counts the reopen rows written. labelsDeleted
-// and labelCleanupFailed stay as 0 and false, which is what they mean when no
-// label is touched; true would raise an older build's "labels may remain,
-// retry" toast on every reopen.
+// The path and query keep their old names. `deleted` counts the reopen rows
+// written.
 //
 // Without a type (a frontend from before targetType, added in 2026-08) the id
 // is reopened under both types, as the old delete matched target_id alone. A
@@ -2695,9 +2685,6 @@ async function handleReopenTarget(
     return jsonResponse({
       success: true,
       deleted: types.length,
-      // TODO(#409): drop labelsDeleted and labelCleanupFailed; kept only for older frontends.
-      labelsDeleted: 0,
-      labelCleanupFailed: false,
     }, 200, corsHeaders);
   } catch (error) {
     console.error('[reopen] recording the reopen failed:', error);

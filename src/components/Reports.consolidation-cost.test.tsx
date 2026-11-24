@@ -8,7 +8,7 @@ import { nip19 } from 'nostr-tools';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { consolidateReports } from '@/lib/consolidateReports';
-import { datedHandling, groupResolutionVerdict, reportResolutionVerdict } from '@/lib/reportResolution';
+import { datedHandling, consolidatedHandling, reportHandling } from '@/lib/reportResolution';
 import { Reports } from './Reports';
 
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
@@ -24,8 +24,8 @@ vi.mock('@/lib/reportResolution', async importOriginal => {
   // should rebuild.
   return {
     ...actual,
-    groupResolutionVerdict: vi.fn(actual.groupResolutionVerdict),
-    reportResolutionVerdict: vi.fn(actual.reportResolutionVerdict),
+    consolidatedHandling: vi.fn(actual.consolidatedHandling),
+    reportHandling: vi.fn(actual.reportHandling),
     datedHandling: vi.fn(actual.datedHandling),
   };
 });
@@ -66,7 +66,7 @@ beforeEach(() => {
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
-    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
   }));
@@ -104,15 +104,15 @@ describe('grouping the needs-attention feed', () => {
     renderQueue();
     expect(await screen.findByText(nip19.noteEncode(FIRST_EVENT))).toBeInTheDocument();
     expect(screen.getByText('just now')).toBeInTheDocument();
-    expect(vi.mocked(groupResolutionVerdict)).toHaveBeenCalled();
+    expect(vi.mocked(consolidatedHandling)).toHaveBeenCalled();
 
-    vi.mocked(groupResolutionVerdict).mockClear();
-    vi.mocked(reportResolutionVerdict).mockClear();
+    vi.mocked(consolidatedHandling).mockClear();
+    vi.mocked(reportHandling).mockClear();
     await act(async () => { vi.advanceTimersByTime(5000); });
 
     expect(screen.getByText('5s ago')).toBeInTheDocument();
-    expect(vi.mocked(groupResolutionVerdict)).not.toHaveBeenCalled();
-    expect(vi.mocked(reportResolutionVerdict)).not.toHaveBeenCalled();
+    expect(vi.mocked(consolidatedHandling)).not.toHaveBeenCalled();
+    expect(vi.mocked(reportHandling)).not.toHaveBeenCalled();
   });
 
   // The handled-before rule (#324) reads every decision row on record. A feed
@@ -131,7 +131,7 @@ describe('grouping the needs-attention feed', () => {
       }
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
-          success: true, resolved: [], states: [],
+          success: true, states: [],
           handling_rows: [{ target_type: 'event', target_id: SECOND_EVENT, action: 'reviewed', moderator_pubkey: 'f'.repeat(64), at: 1751000000 }],
         });
       }
@@ -144,12 +144,12 @@ describe('grouping the needs-attention feed', () => {
     expect(vi.mocked(datedHandling)).toHaveBeenCalled();
 
     vi.mocked(datedHandling).mockClear();
-    vi.mocked(groupResolutionVerdict).mockClear();
+    vi.mocked(consolidatedHandling).mockClear();
     await act(async () => { await queryClient.refetchQueries({ queryKey: ['reports', 'wss://relay.example'] }); });
 
     // The poll did land and was read: the rows were re-dated by it.
     expect(polls).toBeGreaterThan(1);
-    await waitFor(() => expect(vi.mocked(groupResolutionVerdict)).toHaveBeenCalled());
+    await waitFor(() => expect(vi.mocked(consolidatedHandling)).toHaveBeenCalled());
     expect(vi.mocked(datedHandling)).not.toHaveBeenCalled();
   });
 });

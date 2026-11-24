@@ -8,7 +8,8 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { getResolvedTargets, getAutoHideStates, getHandlingRows, resolvedTargetsFromRows } from '../src/resolution-state';
+import { getAutoHideStates, getHandlingRows } from '../src/resolution-state';
+import { handlingByTarget } from '../../shared/handling';
 import { ReportWatcher, type ReportEvent } from '../src/ReportWatcher';
 import worker from '../src/index';
 
@@ -93,7 +94,6 @@ async function resolutionState(db: D1Database = DB) {
   );
   const body = (await res.json()) as {
     success: boolean;
-    resolved: Array<{ target_type: string; target_id: string; automated?: true }>;
     states: Array<{ target_type: string; target_id: string; action: string; at: number | null }>;
     handling_rows: Array<{
       target_type: string; target_id: string; action: string; moderator_pubkey: string | null; at: number | null;
@@ -103,26 +103,26 @@ async function resolutionState(db: D1Database = DB) {
 }
 
 describe('/api/resolution-state against real D1', () => {
-  it('resolves a target whose only decision predates the /api/decisions window', async () => {
+  it('sends the handling row of a target whose only decision predates the /api/decisions window', async () => {
     const { res, body } = await resolutionState();
 
     expect(res.status).toBe(200);
     expect(body.success).toBe(true);
-    expect(body.resolved).toContainEqual({
+    expect(body.handling_rows).toContainEqual({
       target_type: 'pubkey',
       target_id: PRE_CAP_TARGET,
+      action: 'dismissed',
+      moderator_pubkey: null,
+      at: Date.UTC(2026, 0, 1, 0, 0, 0) / 1000,
     });
   });
 
-  it('does not treat an auto-hidden target as resolved', async () => {
+  it('does not send an auto-hide row as handling', async () => {
     // Auto-hidden content is waiting FOR review. Counting it as handled would
     // subtract the pending-review queue from the view built to work it.
     const { body } = await resolutionState();
 
-    expect(body.resolved).not.toContainEqual({
-      target_type: 'event',
-      target_id: PRE_CAP_HIDDEN_TARGET,
-    });
+    expect(body.handling_rows.some((r) => r.target_id === PRE_CAP_HIDDEN_TARGET)).toBe(false);
   });
 
   it('returns auto-hide state actions for a target beyond the window', async () => {
@@ -242,17 +242,16 @@ describe('resolution-state chunking against real D1', () => {
     await chunkMf?.dispose();
   });
 
-  it('returns every resolved target across chunk boundaries', async () => {
-    const all = await getResolvedTargets(chunkDB);
-    const chunked = await getResolvedTargets(chunkDB, { chunkSize: 1 });
+  it('returns every handling row across chunk boundaries', async () => {
+    const all = await getHandlingRows(chunkDB);
+    const chunked = await getHandlingRows(chunkDB, { chunkSize: 1 });
 
-    expect(chunked).toHaveLength(all.length);
-    expect(chunked).toEqual(expect.arrayContaining(all));
+    expect(chunked).toStrictEqual(all);
 
-    // Named explicitly, because the assertions above would still hold if BOTH
+    // Named explicitly, because the assertion above would still hold if BOTH
     // reads dropped the same targets.
     for (let i = 0; i < DISTINCT_TARGET_COUNT; i++) {
-      expect(chunked).toContainEqual({ target_type: 'pubkey', target_id: distinctTarget(i) });
+      expect(chunked.filter((r) => r.target_id === distinctTarget(i))).toHaveLength(1);
     }
   });
 
@@ -281,11 +280,11 @@ describe('resolution-state chunking against real D1', () => {
 });
 
 // ReportWatcher logs some decisions itself, with moderator_pubkey 'auto' --
-// today age_review_case_created on a reported account. Hide resolved still
-// counts those targets as handled, but the sensitive-reports switch must not
-// read them as a person's review, so the read marks them. Its own small
-// database, so the chunkSize: 1 reads stay fast.
-describe('resolved targets only automation has touched, against real D1', () => {
+// today age_review_case_created on a reported account. No person has looked at
+// such a target, so the rows come through getHandlingRows and handlingByTarget
+// does not count them as handling (#332). Its own small database, so the
+// chunkSize: 1 reads stay fast.
+describe('targets only automation has touched, against real D1', () => {
   let autoMf: Miniflare;
   let autoDB: D1Database;
 
@@ -327,62 +326,44 @@ describe('resolved targets only automation has touched, against real D1', () => 
     await autoMf?.dispose();
   });
 
-  async function resolvedFor(targetId: string, opts?: { chunkSize?: number }) {
-    return (await getResolvedTargets(autoDB, opts)).filter((t) => t.target_id === targetId);
+  async function handlingFor(opts?: { chunkSize?: number }) {
+    return handlingByTarget(await getHandlingRows(autoDB, opts), []);
   }
 
-  // The feed derives these targets from the handling rows rather than walking
-  // the table a second time, so the two reads must agree on every target.
-  it('gives the same targets from the handling rows as from its own walk', async () => {
-    expect(resolvedTargetsFromRows(await getHandlingRows(autoDB))).toStrictEqual(await getResolvedTargets(autoDB));
+  it('gives a target whose only decision the worker wrote itself no handling', async () => {
+    expect((await handlingFor()).has(`pubkey:${AUTO_ONLY}`)).toBe(false);
   });
 
-  // toStrictEqual, not toEqual: toEqual also accepts `automated: undefined`,
-  // and a target a person touched must carry no flag at all.
-  it('flags a target whose only decision the worker wrote itself', async () => {
-    expect(await resolvedFor(AUTO_ONLY)).toStrictEqual([
-      { target_type: 'pubkey', target_id: AUTO_ONLY, automated: true },
-    ]);
+  it('handles a target a moderator also decided on, whichever came first', async () => {
+    const handling = await handlingFor();
+    expect(handling.has(`pubkey:${AUTO_THEN_HUMAN}`)).toBe(true);
+    expect(handling.has(`pubkey:${HUMAN_THEN_AUTO}`)).toBe(true);
   });
 
-  it('does not flag a target a moderator also decided on', async () => {
-    expect(await resolvedFor(AUTO_THEN_HUMAN)).toStrictEqual([
-      { target_type: 'pubkey', target_id: AUTO_THEN_HUMAN },
-    ]);
+  it('handles a decision with no moderator recorded', async () => {
+    expect((await handlingFor()).has(`pubkey:${NULL_MODERATOR}`)).toBe(true);
   });
 
-  it('does not flag a decision with no moderator recorded', async () => {
-    expect(await resolvedFor(NULL_MODERATOR)).toStrictEqual([
-      { target_type: 'pubkey', target_id: NULL_MODERATOR },
-    ]);
+  it('reads the same across chunk boundaries', async () => {
+    expect(await handlingFor({ chunkSize: 1 })).toStrictEqual(await handlingFor());
   });
 
-  it('clears the flag when the human decision arrives in a later chunk', async () => {
-    expect(await resolvedFor(AUTO_THEN_HUMAN, { chunkSize: 1 })).toStrictEqual([
-      { target_type: 'pubkey', target_id: AUTO_THEN_HUMAN },
-    ]);
-  });
-
-  it('keeps the flag off when the automated decision arrives in a later chunk', async () => {
-    expect(await resolvedFor(HUMAN_THEN_AUTO, { chunkSize: 1 })).toStrictEqual([
-      { target_type: 'pubkey', target_id: HUMAN_THEN_AUTO },
-    ]);
-  });
-
-  it('sends the flag to the queue through /api/resolution-state', async () => {
+  it('sends the rows to the queue through /api/resolution-state', async () => {
     const { res, body } = await resolutionState(autoDB);
 
     expect(res.status).toBe(200);
-    expect(body.resolved).toContainEqual({
+    expect(body.handling_rows).toContainEqual({
       target_type: 'pubkey',
       target_id: AUTO_ONLY,
-      automated: true,
+      action: 'age_review_case_created',
+      moderator_pubkey: 'auto',
+      at: Date.UTC(2026, 2, 1, 0, 0, 0) / 1000,
     });
   });
 
   // The fixtures above write 'auto' by hand. This one lets the worker write its
-  // own row, so the writer and this read cannot drift apart unnoticed.
-  it('flags the decision the worker writes when it opens an age-review case', async () => {
+  // own row, so the writer and the rule that reads it cannot drift apart unnoticed.
+  it('reads the decision the worker writes when it opens an age-review case as no handling', async () => {
     const state = {
       // The constructor looks for unfinished quarantine jobs in a transaction.
       storage: { get: async () => undefined, put: async () => {},
@@ -404,14 +385,15 @@ describe('resolved targets only automation has touched, against real D1', () => 
 
     await watcher['createAgeReviewCase'](event, reported);
 
-    expect(await resolvedFor(reported)).toStrictEqual([
-      { target_type: 'pubkey', target_id: reported, automated: true },
-    ]);
+    const rows = (await getHandlingRows(autoDB)).filter((r) => r.target_id === reported);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].action).toBe('age_review_case_created');
+    expect(handlingByTarget(rows, []).has(`pubkey:${reported}`)).toBe(false);
   });
 });
 
 // The dated decision rows the handled-before rule reads (#324), and Reopen as
-// an old Pages build sees it through `resolved`. Its own small database.
+// handlingByTarget reads them. Its own small database.
 describe('handling rows and reopened targets, against real D1', () => {
   let rowsMf: Miniflare;
   let rowsDB: D1Database;
@@ -497,48 +479,33 @@ describe('handling rows and reopened targets, against real D1', () => {
     expect(chunked).toStrictEqual(all);
   });
 
-  // The handling rows leave out targets that are neither an event nor a
-  // pubkey (the media row here); for every other target the two agree,
-  // reopens and automated rows included.
-  it('gives the same event and pubkey targets from the handling rows as from its own walk', async () => {
-    const walked = (await getResolvedTargets(rowsDB))
-      .filter((t) => t.target_type === 'event' || t.target_type === 'pubkey');
-    expect(walked.length).toBeGreaterThan(2);
-    expect(resolvedTargetsFromRows(await getHandlingRows(rowsDB))).toStrictEqual(walked);
+  it('leaves a target without handling once it is reopened', async () => {
+    const handling = handlingByTarget(await getHandlingRows(rowsDB, { chunkSize: 1 }), []);
+
+    expect(handling.has(`pubkey:${REOPENED}`)).toBe(false);
+    expect(handling.has(`event:${HANDLED}`)).toBe(true);
   });
 
-  it('leaves a target out of resolved once it is reopened, as Reopen did by deleting its rows', async () => {
-    const resolved = await getResolvedTargets(rowsDB, { chunkSize: 1 });
+  it('handles a reopened target again when a person handles it after the reopen', async () => {
+    const handling = handlingByTarget(await getHandlingRows(rowsDB, { chunkSize: 1 }), []);
 
-    expect(resolved.some((t) => t.target_id === REOPENED)).toBe(false);
-    expect(resolved).toContainEqual({ target_type: 'event', target_id: HANDLED });
+    expect(handling.get(`event:${REOPENED_THEN_HANDLED}`)?.handledAt).toBe(MAR_1 + 10);
   });
 
-  it('resolves a reopened target again when a person handles it after the reopen', async () => {
-    const resolved = await getResolvedTargets(rowsDB, { chunkSize: 1 });
-
-    expect(resolved.filter((t) => t.target_id === REOPENED_THEN_HANDLED)).toStrictEqual([
-      { target_type: 'event', target_id: REOPENED_THEN_HANDLED },
-    ]);
-  });
-
-  it('counts only what came after the reopen: a later automated row alone is automated', async () => {
+  it('counts only what came after the reopen: a later automated row alone is no handling', async () => {
     // The person's decision before the reopen no longer counts, so the target
-    // is the worker's alone, as it would be had Reopen deleted that decision.
-    const resolved = await getResolvedTargets(rowsDB, { chunkSize: 1 });
+    // has only the worker's row.
+    const handling = handlingByTarget(await getHandlingRows(rowsDB, { chunkSize: 1 }), []);
 
-    expect(resolved.filter((t) => t.target_id === REOPENED_THEN_AUTOMATED)).toStrictEqual([
-      { target_type: 'pubkey', target_id: REOPENED_THEN_AUTOMATED, automated: true },
-    ]);
+    expect(handling.has(`pubkey:${REOPENED_THEN_AUTOMATED}`)).toBe(false);
   });
 
-  it('sends the rows through /api/resolution-state, beside the fields it already had', async () => {
+  it('sends the rows and states through /api/resolution-state', async () => {
     const { res, body } = await resolutionState(rowsDB);
 
     expect(res.status).toBe(200);
-    expect(Object.keys(body).sort()).toEqual(['handling_rows', 'resolved', 'states', 'success']);
+    expect(Object.keys(body).sort()).toEqual(['handling_rows', 'states', 'success']);
     expect(body.handling_rows).toStrictEqual(await getHandlingRows(rowsDB));
-    expect(body.resolved).toStrictEqual(await getResolvedTargets(rowsDB));
     expect(body.states).toContainEqual({
       target_type: 'event',
       target_id: AUTO_HIDDEN,

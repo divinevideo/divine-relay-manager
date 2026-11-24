@@ -1,5 +1,5 @@
-// ABOUTME: resolvedTargets is subtractive, so a resolution source that is
-// ABOUTME: missing or errored un-hides handled work rather than hiding more (#221)
+// ABOUTME: The resolution sources are subtractive, so a source that is missing
+// ABOUTME: or errored un-hides handled work rather than hiding more (#221)
 
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -65,6 +65,10 @@ function authoredEventReport(pTag: string, id = '8'.repeat(64), created_at = 175
   };
 }
 
+// When a person handled a target in the fixtures that do: after every report
+// below arrived.
+const HANDLED_AT = 1751000900;
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -97,10 +101,10 @@ interface SourceState {
   // they disagree, which must not cross-resolve (the burying case).
   secondAuthoredEventReportP?: string;
   secondAuthoredEventReportWithoutP?: boolean;
-  // A worker with the handled-before rule (#324): /api/resolution-state sends
-  // these as handling_rows, and /api/resolution-label-targets sends
-  // `datedLabels` in place of the targets `labels` would. Both absent: a
-  // worker from before it, which sends neither.
+  // The handled-before rule (#324): /api/resolution-state sends these as
+  // handling_rows, beside any `decisions` writes, and
+  // /api/resolution-label-targets sends `datedLabels` in place of the targets
+  // `labels` would.
   handlingRows?: unknown[];
   datedLabels?: unknown[];
   // The feed's report_arrivals: first-seen unix seconds by report id.
@@ -159,26 +163,32 @@ function stubFetch(state: SourceState) {
       return jsonResponse({
         success: true,
         targets: state.labels === 'resolves' || state.labels === 'resolves-uppercase'
-          ? [{ type: 'pubkey', value: state.labels === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase() }]
+          ? [{ type: 'pubkey', value: state.labels === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase(), at: HANDLED_AT }]
           : [],
         truncated: false,
         oldest_covered: null,
       });
     }
 
-    // Likewise the decisions table arrives as a projection: the resolved target
-    // set, plus the auto-hide state actions that feed pendingReviewTargets.
+    // Likewise the decisions table arrives as a projection: the dated handling
+    // rows, plus the auto-hide state actions that feed pendingReviewTargets.
     if (url.includes('/api/resolution-state')) {
       if (slow.has('decisions')) return never;
       if (state.decisionsGate) await state.decisionsGate;
       if (state.decisions === 'error') return jsonResponse({ success: false, error: 'cold start timeout' }, 500);
+      const decided = state.decisions === 'resolves' || state.decisions === 'resolves-uppercase'
+        ? [{
+          target_type: 'pubkey',
+          target_id: state.decisions === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase(),
+          action: 'reviewed',
+          moderator_pubkey: 'f'.repeat(64),
+          at: HANDLED_AT,
+        }]
+        : [];
       return jsonResponse({
         success: true,
-        resolved: state.decisions === 'resolves' || state.decisions === 'resolves-uppercase'
-          ? [{ target_type: 'pubkey', target_id: state.decisions === 'resolves' ? REPORTED_PUBKEY : REPORTED_PUBKEY.toUpperCase() }]
-          : [],
         states: [],
-        ...(state.handlingRows ? { handling_rows: state.handlingRows } : {}),
+        handling_rows: [...decided, ...(state.handlingRows ?? [])],
       });
     }
 
@@ -437,8 +447,6 @@ describe('the handled-before rule (#324)', () => {
   it('takes a target handled before its newest report out of the main list, keeps an older one hidden, and lists both with Hide resolved off', async () => {
     stubFetch({
       ...healthy,
-      // A worker with the rule still sends `resolved`, as before.
-      decisions: 'resolves',
       includeEventReport: true,
       // An unhandled post by an unhandled account: the control row.
       authoredEventReportP: 'f'.repeat(64),
@@ -477,27 +485,6 @@ describe('the handled-before rule (#324)', () => {
     renderReports();
 
     expect(await screen.findByText(REPORTED_NPUB)).toBeInTheDocument();
-  });
-
-  it("keeps today's list against a worker that sends neither handling rows nor label dates", async () => {
-    // The same label, from a worker that predates the rule: it hides the target.
-    stubFetch({ ...healthy, labels: 'resolves' });
-    renderReports();
-
-    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
-    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
-  });
-
-  it("keeps today's list when label targets come without dates, even beside handling rows", async () => {
-    stubFetch({
-      ...healthy,
-      handlingRows: [row('pubkey', REPORTED_PUBKEY, 'reopened', T - 50)],
-      datedLabels: [{ type: 'pubkey', value: REPORTED_PUBKEY }],
-    });
-    renderReports();
-
-    await waitFor(() => expect(screen.getByText(/0 pending/i)).toBeInTheDocument());
-    expect(screen.queryByText(REPORTED_NPUB)).not.toBeInTheDocument();
   });
 
   // The worker compares by when it saw a report arrive; the screen must too,
@@ -957,8 +944,8 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
         // An auto-hidden target puts the pending-review toggle on screen.
         return jsonResponse({
           success: true,
-          resolved: [],
-          states: [{ target_type: 'pubkey', target_id: REPORTED_PUBKEY, action: 'auto_hidden' }],
+          states: [{ target_type: 'pubkey', target_id: REPORTED_PUBKEY, action: 'auto_hidden', at: 1751000100 }],
+          handling_rows: [],
         });
       }
       return failing(input, init);
@@ -1423,7 +1410,7 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
   });
 
   it('shows no truncation banner for a capped LABELS read while hide-resolved is off', async () => {
-    // The labels window is only relevant when resolvedTargets is actually being
+    // The labels window is only relevant when the resolution is actually being
     // subtracted, which is what hide-resolved controls. Decisions is left
     // untruncated here so this measures the labels half on its own. No cold
     // error, so the switch is reachable directly.
@@ -1453,14 +1440,15 @@ describe('truncated resolution history is stated, not silent (#221)', () => {
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
-          resolved: [],
           // An auto-hidden, not-yet-confirmed target: what puts a row in the
           // pending-review queue and makes its toggle appear at all.
           states: [{
             target_type: 'pubkey',
             target_id: REPORTED_PUBKEY,
             action: 'auto_hidden',
+            at: 1751000100,
           }],
+          handling_rows: [],
         });
       }
       return healthy(input, init);

@@ -4,7 +4,7 @@ import { beforeAll, afterAll, describe, it, expect } from 'vitest';
 import { ensureSchema } from '../src/db';
 import { recordSexualQuarantineDecision } from '../src/sexual-quarantine-decision';
 import { hasLatestHumanRestore } from '../src/ReportWatcher';
-import { getResolvedTargets } from '../src/resolution-state';
+import { getHandlingRows } from '../src/resolution-state';
 import type { SexualCase } from '../../shared/sexual-quarantine';
 
 let mf: Miniflare;
@@ -35,7 +35,9 @@ describe('sexual quarantine human decision projection', () => {
       report_id: 'b'.repeat(64), reporter_pubkey: 'c'.repeat(64), reason: 'Synthetic human review' });
     expect(await db.prepare('SELECT * FROM moderation_targets WHERE target_id = ?').bind(eventId).first())
       .toMatchObject({ ever_human_reviewed: 1, last_human_action: 'sexual_quarantine_restore' });
-    expect(await getResolvedTargets(db)).toContainEqual({ target_type: 'event', target_id: eventId });
+    expect(await getHandlingRows(db)).toContainEqual(expect.objectContaining({
+      target_type: 'event', target_id: eventId, action: 'sexual_quarantine_restore',
+    }));
   });
   it('recognizes a scoped human Restore after a raw visibility override', async () => {
     const restored = { ...item(1), eventId: 'd'.repeat(64) };

@@ -77,7 +77,14 @@ function stubWorker(feed: Record<string, unknown>, feedStatus = 200) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
     if (url.includes('/api/resolution-state')) {
-      return jsonResponse({ success: true, resolved: [{ target_type: 'event', target_id: RESOLVED_EVENT }], states: [] });
+      // A person handled it after its report arrived.
+      return jsonResponse({
+        success: true,
+        handling_rows: [
+          { target_type: 'event', target_id: RESOLVED_EVENT, action: 'reviewed', moderator_pubkey: 'f'.repeat(64), at: 1751000900 },
+        ],
+        states: [],
+      });
     }
     if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });

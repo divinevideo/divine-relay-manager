@@ -10,7 +10,7 @@ import { finalizeEvent } from 'nostr-tools';
 import { SexualQuarantine } from '../src/sexual-quarantine';
 import { createQuarantineIO } from '../src/sexual-quarantine-io';
 import { markHumanAction, markHumanReviewed } from '../src/human-decision';
-import { getHandlingRows, getResolvedTargets } from '../src/resolution-state';
+import { getHandlingRows } from '../src/resolution-state';
 import { handlingByTarget } from '../../shared/handling';
 
 const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
@@ -393,8 +393,6 @@ describe('recorded content decisions on real D1', () => {
     const context = { waitUntil: vi.fn() } as unknown as ExecutionContext;
     const entryFor = async () =>
       handlingByTarget(await getHandlingRows(DB), []).get(`event:${eventId}`);
-    const resolved = async () =>
-      (await getResolvedTargets(DB)).some(t => t.target_type === 'event' && t.target_id === eventId);
 
     expect(await entryFor()).toBeDefined();
 
@@ -405,7 +403,7 @@ describe('recorded content decisions on real D1', () => {
       env, context,
     );
     expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ success: true, deleted: 1, labelsDeleted: 0, labelCleanupFailed: false });
+    expect(await response.json()).toEqual({ success: true, deleted: 1 });
 
     const rows = (await DB.prepare(`
       SELECT action, reason, moderator_pubkey, created_at FROM moderation_decisions
@@ -417,9 +415,8 @@ describe('recorded content decisions on real D1', () => {
     expect(rows[1]).toMatchObject({ action: 'reopened', reason: 'Reopened', moderator_pubkey: null });
     expect(rows[1].created_at).toMatch(/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/);
 
-    // The handling the reopen ended no longer counts, on either read.
+    // The handling the reopen ended no longer counts.
     expect(await entryFor()).toBeUndefined();
-    expect(await resolved()).toBe(false);
 
     // A decision after the reopen handles the target again. Dated a minute
     // ahead: the rule needs a strictly later second than the reopen.
@@ -429,7 +426,6 @@ describe('recorded content decisions on real D1', () => {
     expect(entry).toBeDefined();
     expect(entry!.handledAt).toBeGreaterThan(Math.floor(Date.now() / 1000));
     expect(entry!.history.map(h => h.action)).toEqual(['reviewed', 'reopened', 'delete_event']);
-    expect(await resolved()).toBe(true);
   });
 
   // A typeless reopen (an older frontend, or an admin-key caller) writes an
