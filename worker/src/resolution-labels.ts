@@ -83,9 +83,11 @@ export async function pageResolutionLabels(
 export const SIGNER_UNAVAILABLE = 'Worker signing key unavailable: cannot verify resolution labels';
 
 // The one relay read for resolution-label targets: kind 1985, tagged
-// `moderation/resolution`. /api/resolution-labels (the client's label source)
-// and the worker's needs-attention subtraction both call this, so the two
-// reads that decide what a label resolved cannot drift apart.
+// `moderation/resolution`. /api/resolution-label-targets (the client's label
+// source) and the worker's needs-attention and resolved-history reads (via
+// readResolutionKeys) all call this, so the reads that decide what a label
+// resolved cannot drift apart. The legacy
+// raw endpoint /api/resolution-labels queries the relay separately.
 //
 // Only labels signed by the worker's own key count (`signer`). Relay Manager
 // publishes every resolution label itself, so a label from any other account is

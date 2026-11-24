@@ -262,8 +262,8 @@ export async function getReportsNeedingAttention(
   const reportsPageSize = opts?.reportsPaging?.pageSize ?? REPORTS_PAGE_SIZE;
   const reportsMaxPages = opts?.reportsPaging?.maxPages ?? REPORTS_MAX_PAGES;
   // No signer means no label can be verified: fail now, before any relay walk
-  // or data read whose result would be thrown away. (The route's once-per-isolate
-  // ensureSchemaOnce still runs before this.)
+  // or data read whose result would be thrown away. The route checks first,
+  // ahead of its schema step; this is the backstop for direct callers.
   if (!labelSigner) return failure(502, SIGNER_UNAVAILABLE);
   try {
     // Arrivals need the report ids, so they follow the report walk, alongside
@@ -394,6 +394,7 @@ export async function getResolvedReportsPage(
     return failure(400, 'cursor must be a unix timestamp in seconds');
   }
   // As in getReportsNeedingAttention: fail before any relay walk or data read.
+  // The route checks first; this is the backstop for direct callers.
   if (!labelSigner) return failure(502, SIGNER_UNAVAILABLE);
   const cursor = cursorParam === null ? undefined : Number(cursorParam);
   const requested = Number.parseInt(params.get('limit') ?? '', 10);

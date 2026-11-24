@@ -891,8 +891,14 @@ export default {
       if (path === '/api/reports' && request.method === 'GET') {
         const mode = reportsMode(url.searchParams);
         if (mode.kind === 'needs-attention') {
+          // Signer first: a missing key is the documented 502 and must not
+          // wait on (or be turned into a 500 by) D1 setup.
+          const labelSigner = await resolveLabelSigner(env);
+          if (!labelSigner) {
+            return jsonResponse({ success: false, error: SIGNER_UNAVAILABLE }, 502, corsHeaders);
+          }
           if (env.DB) await ensureSchemaOnce(env.DB);
-          const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL, await resolveLabelSigner(env));
+          const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL, labelSigner);
           return proxyJsonResponse(body, status, corsHeaders);
         }
         if (mode.kind === 'target') {
@@ -915,8 +921,13 @@ export default {
       }
 
       if (path === '/api/reports/resolved' && request.method === 'GET') {
+        // Signer first, as on the needs-attention read above.
+        const labelSigner = await resolveLabelSigner(env);
+        if (!labelSigner) {
+          return jsonResponse({ success: false, error: SIGNER_UNAVAILABLE }, 502, corsHeaders);
+        }
         if (env.DB) await ensureSchemaOnce(env.DB);
-        const { status, body } = await getResolvedReportsPage(url.searchParams, env.DB, env.RELAY_URL, await resolveLabelSigner(env));
+        const { status, body } = await getResolvedReportsPage(url.searchParams, env.DB, env.RELAY_URL, labelSigner);
         return proxyJsonResponse(body, status, corsHeaders);
       }
 
