@@ -3,6 +3,7 @@
 
 import { pageByUntil } from '../../shared/relay-pager';
 import { relayPageFetcher } from './relay-profile';
+import { getAdminPubkey, type Nip86Env } from './nip86';
 
 export interface LabelTarget {
   type: 'event' | 'pubkey';
@@ -14,6 +15,9 @@ export interface LabelTarget {
 
 export interface ResolutionLabelEvent {
   id: string;
+  // The signer. Present on every real relay event; read only to check it
+  // against the worker's own key, never to attribute the label.
+  pubkey?: string;
   created_at: number;
   tags: string[][];
 }
@@ -63,6 +67,7 @@ export const LABEL_MAX_PAGES = 20;
 // a bounded read must never claim to be complete.
 export async function pageResolutionLabels(
   fetchPage: LabelPageFetcher,
+  signer: string,
   opts?: { pageSize?: number; maxPages?: number }
 ): Promise<PagedLabelTargets> {
   const { events, truncated, oldestCovered } = await pageByUntil(fetchPage, {
@@ -72,24 +77,39 @@ export async function pageResolutionLabels(
   // The shared pager de-duplicates by id. For labels that is redundant with
   // reduceLabelsToTargets, which keys by target; it is load-bearing for the
   // report reads that share the pager.
-  return { targets: reduceLabelsToTargets(events), truncated, oldestCovered };
+  return { targets: reduceLabelsToTargets(events, signer), truncated, oldestCovered };
 }
 
+export const SIGNER_UNAVAILABLE = 'Worker signing key unavailable: cannot verify resolution labels';
+
 // The one relay read for resolution-label targets: kind 1985, tagged
-// `moderation/resolution`. /api/resolution-labels (the client's label source)
-// and the worker's needs-attention subtraction both call this, so the two
-// reads that decide what a label resolved cannot drift apart.
-export function readResolutionLabelTargets(
+// `moderation/resolution`. /api/resolution-label-targets (the client's label
+// source) and the worker's needs-attention and resolved-history reads (via
+// readResolutionKeys) all call this, so the reads that decide what a label
+// resolved cannot drift apart. The legacy
+// raw endpoint /api/resolution-labels queries the relay separately.
+//
+// Only labels signed by the worker's own key count (`signer`). Relay Manager
+// publishes every resolution label itself, so a label from any other account is
+// not a moderator's decision, and trusting it would let anyone who can publish
+// a kind 1985 remove reports from the queue. A null signer means the key could
+// not be resolved, so no label can be verified: that is a failed label source
+// and throws like one (the routes answer 502 and the queue blocks, #221) rather
+// than reading as "nothing is resolved". No relay query is made, since its
+// result could not be used.
+export async function readResolutionLabelTargets(
   relayUrl: string,
+  signer: string | null,
   paging?: { pageSize?: number; maxPages?: number },
 ): Promise<PagedLabelTargets> {
+  if (!signer) throw new Error(SIGNER_UNAVAILABLE);
   const pageSize = paging?.pageSize ?? LABEL_PAGE_SIZE;
   const fetchPage = relayPageFetcher<ResolutionLabelEvent>(
     relayUrl,
-    { kinds: [1985], '#L': ['moderation/resolution'] },
+    { kinds: [1985], authors: [signer], '#L': ['moderation/resolution'] },
     pageSize,
   );
-  return pageResolutionLabels(fetchPage, { pageSize, maxPages: paging?.maxPages });
+  return pageResolutionLabels(fetchPage, signer, { pageSize, maxPages: paging?.maxPages });
 }
 
 // A label may name an event, an author, or both, and both count independently:
@@ -104,7 +124,14 @@ export function readResolutionLabelTargets(
 // first label seen, so it does not lean on the relay's order. A label with no
 // usable created_at dates at 0: it still names a handled target, but covers no
 // report, since hiding one is the costly mistake.
-export function reduceLabelsToTargets(events: ResolutionLabelEvent[]): LabelTarget[] {
+//
+// A label not signed by `signer` is skipped. The relay checks event signatures
+// and the filter already asks for the signer's labels only; this re-checks that
+// the relay honoured the `authors` filter, where the decision is made. It
+// compares the pubkey field, it does not verify signatures. An empty or
+// non-string signer would match an event with no pubkey, so it throws.
+export function reduceLabelsToTargets(events: ResolutionLabelEvent[], signer: string): LabelTarget[] {
+  if (typeof signer !== 'string' || signer.length === 0) throw new Error(SIGNER_UNAVAILABLE);
   const byKey = new Map<string, LabelTarget>();
 
   const add = (type: LabelTarget['type'], value: unknown, at: number) => {
@@ -116,6 +143,7 @@ export function reduceLabelsToTargets(events: ResolutionLabelEvent[]): LabelTarg
   };
 
   for (const event of events) {
+    if (event?.pubkey !== signer) continue;
     const tags = Array.isArray(event?.tags) ? event.tags : [];
     const at = Number.isFinite(event?.created_at) ? event.created_at : 0;
     add('event', tags.find((t) => t[0] === 'e')?.[1], at);
@@ -123,4 +151,24 @@ export function reduceLabelsToTargets(events: ResolutionLabelEvent[]): LabelTarg
   }
 
   return [...byKey.values()];
+}
+
+// The pubkey resolution labels must be signed by: the worker's own, derived
+// from NOSTR_NSEC the way publishing derives it (handles a Secrets Store
+// binding). Never throws; null is the answer the reads treat as a failed label
+// source (see readResolutionLabelTargets).
+//
+// Rotating NOSTR_NSEC makes every existing resolution label stop counting: they
+// are signed by the old key. A rotation therefore needs a re-label, or a
+// deliberate allowlist of the old key, or handled reports reappear in the queue.
+//
+// The failure is logged without the secret or its error text, which can echo
+// the value.
+export async function resolveLabelSigner(env: Pick<Nip86Env, 'NOSTR_NSEC'>): Promise<string | null> {
+  try {
+    return await getAdminPubkey(env);
+  } catch {
+    console.error('[resolution-labels] could not resolve the worker signing key; trusting no resolution labels');
+    return null;
+  }
 }

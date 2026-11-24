@@ -66,7 +66,7 @@ import { canonicalHex64 } from '../../shared/hex-id';
 import { REOPENED_ACTION } from '../../shared/handling';
 import { getResolvedTargets, getAutoHideStates, getHandlingRows } from './resolution-state';
 import { isHex64, isLowerHex64 } from './hex';
-import { readResolutionLabelTargets } from './resolution-labels';
+import { readResolutionLabelTargets, resolveLabelSigner, SIGNER_UNAVAILABLE } from './resolution-labels';
 import { runRetentionDisposal } from './retention';
 import { errorNameOnly } from './error-name';
 import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
@@ -891,8 +891,14 @@ export default {
       if (path === '/api/reports' && request.method === 'GET') {
         const mode = reportsMode(url.searchParams);
         if (mode.kind === 'needs-attention') {
+          // Signer first: a missing key is the documented 502 and must not
+          // wait on (or be turned into a 500 by) D1 setup.
+          const labelSigner = await resolveLabelSigner(env);
+          if (!labelSigner) {
+            return jsonResponse({ success: false, error: SIGNER_UNAVAILABLE }, 502, corsHeaders);
+          }
           if (env.DB) await ensureSchemaOnce(env.DB);
-          const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL);
+          const { status, body } = await getReportsNeedingAttention(env.DB, env.RELAY_URL, labelSigner);
           return proxyJsonResponse(body, status, corsHeaders);
         }
         if (mode.kind === 'target') {
@@ -915,8 +921,13 @@ export default {
       }
 
       if (path === '/api/reports/resolved' && request.method === 'GET') {
+        // Signer first, as on the needs-attention read above.
+        const labelSigner = await resolveLabelSigner(env);
+        if (!labelSigner) {
+          return jsonResponse({ success: false, error: SIGNER_UNAVAILABLE }, 502, corsHeaders);
+        }
         if (env.DB) await ensureSchemaOnce(env.DB);
-        const { status, body } = await getResolvedReportsPage(url.searchParams, env.DB, env.RELAY_URL);
+        const { status, body } = await getResolvedReportsPage(url.searchParams, env.DB, env.RELAY_URL, labelSigner);
         return proxyJsonResponse(body, status, corsHeaders);
       }
 
@@ -927,15 +938,27 @@ export default {
         // corpus of exactly RESOLUTION_LABEL_LIMIT over-warns by one case, which
         // is the safe direction to be wrong.
         const RESOLUTION_LABEL_LIMIT = 500;
+        // Only the worker's own labels count as resolutions (see
+        // readResolutionLabelTargets). An unresolved key means no label can be
+        // verified: a failed label source, so 502 like the others.
+        const labelSigner = await resolveLabelSigner(env);
+        if (!labelSigner) {
+          return jsonResponse({ success: false, error: SIGNER_UNAVAILABLE }, 502, corsHeaders);
+        }
         const result = await queryRelay(
-          { kinds: [1985], '#L': ['moderation/resolution'], limit: RESOLUTION_LABEL_LIMIT },
+          { kinds: [1985], authors: [labelSigner], '#L': ['moderation/resolution'], limit: RESOLUTION_LABEL_LIMIT },
           env.RELAY_URL
         );
         if (!result.success) {
           return jsonResponse({ success: false, error: result.error }, 502, corsHeaders);
         }
-        const events = (result.events || []) as Array<{ created_at?: number }>;
-        const timestamps = events
+        // Truncation is read off the relay's own page, before the signer
+        // filter: a page of 500 that the relay filled is truncated whatever
+        // survives. The relay checks signatures; the filter below re-checks
+        // that it honoured the `authors` filter.
+        const page = (result.events || []) as Array<{ created_at?: number; pubkey?: string }>;
+        const events = page.filter((e) => e.pubkey === labelSigner);
+        const timestamps = page
           .map((e) => e.created_at)
           .filter((t): t is number => typeof t === 'number');
         // Not jsonResponse(): its ApiResponse type is shared across every route,
@@ -944,8 +967,8 @@ export default {
         // without weakening jsonResponse's type guard.
         return proxyJsonResponse({
           success: true,
-          events: result.events,
-          truncated: events.length >= RESOLUTION_LABEL_LIMIT,
+          events,
+          truncated: page.length >= RESOLUTION_LABEL_LIMIT,
           oldest_covered: timestamps.length > 0 ? Math.min(...timestamps) : null,
         }, 200, corsHeaders);
       }
@@ -2575,7 +2598,7 @@ async function handleGetResolutionLabelTargets(
     // what stops a timed-out page from being folded into the result as
     // "nothing older" -- which would hand the queue a short list of resolved
     // targets and un-hide handled work (#221).
-    const { targets, truncated, oldestCovered } = await readResolutionLabelTargets(env.RELAY_URL);
+    const { targets, truncated, oldestCovered } = await readResolutionLabelTargets(env.RELAY_URL, await resolveLabelSigner(env));
 
     return proxyJsonResponse({
       success: true,
