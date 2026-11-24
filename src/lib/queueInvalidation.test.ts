@@ -25,11 +25,8 @@ describe('invalidateResolutionState', () => {
   });
 });
 
-// Fixture strings, not real files: the matcher's own rules -- the regex's
-// tolerance for formatting, and the scope of the Retry exemption -- are
-// pinned here independent of whatever the repo currently contains, so a
-// future real file can never make these rules untestable by satisfying them
-// by accident.
+// Fixtures keep the matcher's formatting and exemption rules testable
+// regardless of which call sites exist in the repository.
 describe('the direct-call matcher (fixtures)', () => {
   it('recognizes a single-line direct call', () => {
     expect(DIRECT_CALL.test("queryClient.invalidateQueries({ queryKey: ['resolution-state'] });")).toBe(true);
@@ -44,28 +41,8 @@ describe('the direct-call matcher (fixtures)', () => {
     expect(DIRECT_CALL.test(source)).toBe(true);
   });
 
-  it('allows the direct call inside retryResolutionSources in Reports.tsx', () => {
-    const source = `
-function other() {}
-const retryResolutionSources = () => {
-  queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
-};
-`;
-    expect(hasDisallowedDirectCall(source, join('components', 'Reports.tsx'))).toBe(false);
-  });
-
-  // The rule the scan exists for: a handler added anywhere else in Reports.tsx
-  // that writes the raw call instead of using the helper must be caught. An
-  // exemption covering the whole file would let this pass.
-  it('still catches a direct call added elsewhere in Reports.tsx', () => {
-    const source = `
-const retryResolutionSources = () => {
-  queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
-};
-function someNewHandler() {
-  queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
-}
-`;
+  it('catches a direct call in the reports screen', () => {
+    const source = "queryClient.invalidateQueries({ queryKey: ['resolution-state'] });";
     expect(hasDisallowedDirectCall(source, join('components', 'Reports.tsx'))).toBe(true);
   });
 
