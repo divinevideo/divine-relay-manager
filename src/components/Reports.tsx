@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, type RefetchOptions } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAppContext } from "@/hooks/useAppContext";
 import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
@@ -494,7 +494,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [searchParams] = useSearchParams();
   const { getDecisions, fetchReportsNeedingAttention, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
   const { config, updateConfig } = useAppContext();
-  const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   // The report whose target the queue has called "left", held until its
@@ -643,8 +642,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   );
 
   // The reports query itself failing is the more fundamental problem: if the
-  // relay read is down, resolution state is beside the point, and the
-  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // relay read is down, resolution state is beside the point. Report this first (#221) --
   // but only full-pane when there is nothing to show. When a REFRESH fails
   // (e.g. the worker 502s on a relay timeout), the last good list stays
   // rendered with a stale-data warning below, so one slow poll does not look
@@ -733,6 +731,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: labelsPending,
     fetchStatus: labelsFetchStatus,
     errorUpdateCount: labelsErrorUpdateCount,
+    refetch: refetchLabels,
   } = useQuery({
     queryKey: ['resolution-label-targets', relayUrl],
     queryFn: () => fetchResolutionLabelTargets({ timeoutMs: RESOLUTION_LABEL_READ_TIMEOUT_MS }),
@@ -760,6 +759,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: bannedPubkeysPending,
     fetchStatus: bannedPubkeysFetchStatus,
     errorUpdateCount: bannedPubkeysErrorUpdateCount,
+    refetch: refetchBannedPubkeys,
   } = useBannedPubkeys({
     // 0 on a deep link so an arriving report reads current ban status rather
     // than a cached one.
@@ -775,6 +775,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: bannedEventsPending,
     fetchStatus: bannedEventsFetchStatus,
     errorUpdateCount: bannedEventsErrorUpdateCount,
+    refetch: refetchBannedEvents,
   } = useBannedEvents({ refetchInterval: 15 * 1000 });
 
   // Query all moderation decisions from our D1 database.
@@ -790,6 +791,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: decisionsPending,
     fetchStatus: decisionsFetchStatus,
     errorUpdateCount: decisionsErrorUpdateCount,
+    refetch: refetchDecisions,
   } = useQuery({
     queryKey: ['resolution-state'],
     queryFn: async () => {
@@ -1072,6 +1074,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // Monotonic count of settled failures. The ONLY failure signal that survives
     // a refetch: see hasColdFailed below.
     errorUpdateCount: number;
+    refetch: (options: RefetchOptions) => Promise<unknown>;
     gatesAlways: boolean;
   }
 
@@ -1086,6 +1089,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       isPaused: labelsFetchStatus === 'paused',
       isFetching: labelsFetchStatus === 'fetching',
       errorUpdateCount: labelsErrorUpdateCount,
+      refetch: refetchLabels,
       gatesAlways: false,
     },
     {
@@ -1098,6 +1102,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       isPaused: bannedPubkeysFetchStatus === 'paused',
       isFetching: bannedPubkeysFetchStatus === 'fetching',
       errorUpdateCount: bannedPubkeysErrorUpdateCount,
+      refetch: refetchBannedPubkeys,
       gatesAlways: false,
     },
     {
@@ -1110,6 +1115,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       isPaused: bannedEventsFetchStatus === 'paused',
       isFetching: bannedEventsFetchStatus === 'fetching',
       errorUpdateCount: bannedEventsErrorUpdateCount,
+      refetch: refetchBannedEvents,
       gatesAlways: false,
     },
     {
@@ -1128,13 +1134,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       isPaused: decisionsFetchStatus === 'paused',
       isFetching: decisionsFetchStatus === 'fetching',
       errorUpdateCount: decisionsErrorUpdateCount,
+      refetch: refetchDecisions,
       gatesAlways: true,
     },
   ], [
-    labelTargets, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount,
-    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount,
-    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount,
-    resolvedDecisionTargets, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
+    labelTargets, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount, refetchLabels,
+    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount, refetchBannedPubkeys,
+    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount, refetchBannedEvents,
+    resolvedDecisionTargets, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount, refetchDecisions,
   ]);
 
   // Whether the list filter (Hide resolved on, outside the pending-review
@@ -2092,37 +2099,17 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
   };
 
-  // Shared by both the offline pane and the cold-error pane below so the two
-  // retry paths cannot drift apart.
-  //
-  // These query keys are hand-written and must match the queryKey of every
-  // source in resolutionSources. The map is exhaustive over the source keys, but
-  // nothing type-checks the strings: a renamed query leaves Retry invalidating a
-  // query that no longer exists, so the button appears to do nothing and the
-  // blocked pane never clears.
-  //
-  // Only what failed is re-run: the sources are relay walks, relay RPCs and one
-  // D1 read (decisions), and re-running a relay read that already answered is
-  // load on the relay's database for nothing. A
-  // source that failed has no data or an error; the feed re-runs only if it has
-  // no reports or is in error.
-  const RESOLUTION_QUERY_KEY: Record<ResolutionSourceKey, string> = {
-    labels: 'resolution-label-targets',
-    'banned-pubkeys': 'banned-pubkeys',
-    'banned-events': 'banned-events',
-    decisions: 'resolution-state',
-  };
+  // The offline and cold-error panes retry only sources with missing or errored
+  // data. Join a refresh already in flight, even if it starts before React
+  // renders the disabled button. The worker can keep walking after cancellation.
   const feedWouldRerun = !reports || !!error;
-  // Whether anything Retry would re-run is in flight. The button waits for it,
-  // so repeated clicks cannot stack relay walks.
+  const sourcesToRetry = resolutionSources.filter(source => !source.hasData || source.error);
   const retryingResolutionSources =
-    (feedWouldRerun && isFetching)
-    || resolutionSources.some(source => (!source.hasData || !!source.error) && source.isFetching);
+    (feedWouldRerun && isFetching) || sourcesToRetry.some(source => source.isFetching);
   const retryResolutionSources = () => {
-    if (feedWouldRerun) refetch();
-    for (const source of resolutionSources) {
-      if (source.hasData && !source.error) continue;
-      queryClient.invalidateQueries({ queryKey: [RESOLUTION_QUERY_KEY[source.key]] });
+    if (feedWouldRerun) void refetch({ cancelRefetch: false });
+    for (const source of sourcesToRetry) {
+      void source.refetch({ cancelRefetch: false });
     }
   };
 

@@ -819,8 +819,7 @@ describe('cold error blocks the queue and offers an override (#221)', () => {
   it('reports the reports-query failure, not the resolution-unavailable pane, when both fail (#221 fix 1)', async () => {
     // The relay read failing is the more fundamental problem: if reports
     // itself can't load, resolution state is beside the point, and the
-    // resolution pane's Retry can't fix it (it only invalidates the four
-    // resolution queries). The moderator should see the reports failure.
+    // moderator should see the reports failure first.
     stubFetch({ reports: 'error', labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'error' });
     renderReports();
 
@@ -1139,10 +1138,9 @@ describe('the blocked pane Retry re-runs what failed', () => {
     await waitFor(() => expect(net.feed()).toBe(before + 1));
   });
 
-  it('re-runs a source that has data but failed its last refresh', async () => {
+  it('re-runs a source with cached data only once when Retry is clicked twice before it disables', async () => {
     const net = failableFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
     const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
-    const user = userEvent.setup();
     renderReports(client);
     await screen.findByText(REPORTED_NPUB);
 
@@ -1158,7 +1156,11 @@ describe('the blocked pane Retry re-runs what failed', () => {
 
     const retry = await screen.findByRole('button', { name: /^retry$/i });
     const before = net.count('/api/resolution-label-targets');
-    await user.click(retry);
+    await act(async () => {
+      retry.click();
+      // A second click can arrive before the query observer disables the button.
+      retry.click();
+    });
     await waitFor(() => expect(net.count('/api/resolution-label-targets')).toBe(before + 1));
   });
 });
