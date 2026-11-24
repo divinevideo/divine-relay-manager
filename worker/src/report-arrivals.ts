@@ -5,12 +5,16 @@
 // one per id, so a chunk is exactly at that cap. Do not raise it.
 const READ_CHUNK = 100;
 
+/** The first-arrival write as a statement, so a caller can batch it with others. */
+export function reportArrivalStatement(db: D1Database, reportId: string, seenAt: number): D1PreparedStatement {
+  return db
+    .prepare('INSERT OR IGNORE INTO report_arrivals (report_id, first_seen_at) VALUES (?, ?)')
+    .bind(reportId, seenAt);
+}
+
 /** First arrival wins: a replayed or concurrently delivered report keeps its original time. */
 export async function recordReportArrival(db: D1Database, reportId: string, seenAt: number): Promise<void> {
-  await db
-    .prepare('INSERT OR IGNORE INTO report_arrivals (report_id, first_seen_at) VALUES (?, ?)')
-    .bind(reportId, seenAt)
-    .run();
+  await reportArrivalStatement(db, reportId, seenAt).run();
 }
 
 /**
