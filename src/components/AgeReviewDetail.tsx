@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { suspendBannedEventReads, useBannedEventApiUrl } from "@/lib/bannedEventKey";
 import { markHidden, markRestored, resetAccountContentReads, useRestoreEnvironment } from "@/lib/userStatsCache";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -138,6 +139,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
   const { getModeratorToken } = useCurrentUser();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const bannedEventApiUrl = useBannedEventApiUrl();
   const [resolutionNote, setResolutionNote] = useState(c.resolution_note ?? "");
   const pendingStateRef = useRef<string | undefined>();
   // The bulk leg's problems and notes for a person (#299). The worker keeps
@@ -181,7 +183,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
     // fire with the LATEST render's closure, so after a mid-flight case
     // switch a closure-read c would misroute every cache write below
     // (review: wrong case's keys written, the acted-on case left stale)
-    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey, environment: restoreEnvironment, priorState: c.state }),
+    onMutate: () => ({ caseId: c.id, casePubkey: c.pubkey, environment: restoreEnvironment, bannedEventApiUrl, priorState: c.state }),
     onSuccess: (data, updates, ctx) => {
       // Keep the per-case entry in step: the hand-off seeds
       // ['age-review-case', id] (30s staleTime), and a terminal action drops
@@ -375,6 +377,12 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       const relayOk = data?.enforcement?.relay === 'ok';
       const state = typeof updates.state === 'string' ? updates.state : undefined;
       const restricted = state?.startsWith('restricted_') ?? false;
+      // A restriction is a Suspend like any other: a banned-event read cached
+      // before it must not show the account's post outside the audited viewer
+      // (#445). Whatever the relay leg said: a suspend that failed or timed out
+      // may still have applied, and one re-read is the cost of guessing wrong
+      // the other way. The environment is the one the update started in.
+      if (restricted && ctx.bannedEventApiUrl) suspendBannedEventReads(queryClient, ctx.bannedEventApiUrl, subject);
       const denyBanApplied = state === 'denied_closed' && (relayOk
         || (data?.enforcement?.relay === 'failed' && data.enforcement.relayError?.startsWith('Ban applied;') === true));
       const liftedSuspension = isAccountRestrictedAgeReviewState(ctx.priorState);

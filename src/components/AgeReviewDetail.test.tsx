@@ -9,6 +9,9 @@ import { ApiError } from '@/lib/adminApi';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { accountStatusKey } from '@/lib/accountStatusCache';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
+import { bannedEventQueryKey, isBannedEventReadTainted } from '@/lib/bannedEventKey';
+import { AppContext, type AppContextType } from '@/contexts/AppContext';
+import type { NostrEvent } from '@nostrify/nostrify';
 
 // AgeReviewDetail reads relay content-presence via useUserStats (which needs a
 // NostrProvider). This unit test isolates the case-action logic, so stub it with
@@ -1726,5 +1729,72 @@ describe('AgeReviewDetail bulk notes', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Clear without approval' }));
     await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
     expect(screen.queryByRole('region', { name: /to look at/i })).not.toBeInTheDocument();
+  });
+});
+
+// A restriction suspends the account: a banned-event read cached before it must
+// not show the account's post outside the audited viewer (#445).
+describe('AgeReviewDetail and cached banned-event reads', () => {
+  const API = 'https://api.review.test';
+  const ctx = { config: { relayUrl: 'wss://relay.review.test', apiUrl: API, theme: 'light' }, updateConfig: () => {} } as AppContextType;
+  const EVENT = 'c'.repeat(64);
+  const KEY = bannedEventQueryKey(API, EVENT);
+  const post: NostrEvent = { id: EVENT, pubkey: 'a'.repeat(64), created_at: 1, kind: 1, tags: [], content: 'post', sig: 'b'.repeat(128) };
+
+  beforeEach(() => { vi.clearAllMocks(); });
+
+  const run = async (button: string, state: AgeReviewState | undefined, response: Record<string, unknown>) => {
+    updateAgeReviewCase.mockResolvedValue({ success: true, ...response });
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    queryClient.setQueryData(KEY, post);
+    render(
+      <AppContext.Provider value={ctx}>
+        <QueryClientProvider client={queryClient}><AgeReviewDetail caseData={makeCase(state ? { state } : {})} /></QueryClientProvider>
+      </AppContext.Provider>,
+    );
+    fireEvent.click(await screen.findByRole('button', { name: button }));
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+    await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+    return queryClient;
+  };
+
+  it('taints the account\'s cached post after a restriction the relay applied', async () => {
+    const queryClient = await run('Restrict Account', undefined, { enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+    await waitFor(() => expect(isBannedEventReadTainted(queryClient, API, EVENT)).toBe(true));
+    expect(queryClient.getQueryState(KEY)?.isInvalidated).toBe(true);
+  });
+
+  // A suspend whose relay call failed or timed out may still have applied:
+  // showing the post outside the audited viewer is the costly mistake, a re-read
+  // is not.
+  it('also taints it when the relay leg of the restriction failed or is uncertain', async () => {
+    const queryClient = await run('Restrict Account', undefined, { enforcementComplete: false, enforcement: { relay: 'failed', bulk: 'ok', keycast: 'ok' } });
+    await waitFor(() => expect(isBannedEventReadTainted(queryClient, API, EVENT)).toBe(true));
+  });
+
+  it('marks the environment the restriction started in, even if it lands after a switch', async () => {
+    const OTHER = 'https://api.switched.review.test';
+    let land: (v: unknown) => void = () => {};
+    updateAgeReviewCase.mockImplementation(() => new Promise(r => { land = r; }));
+    const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    queryClient.setQueryData(KEY, post);
+    queryClient.setQueryData(bannedEventQueryKey(OTHER, EVENT), post);
+    const tree = (apiUrl: string) => (
+      <AppContext.Provider value={{ ...ctx, config: { ...ctx.config, apiUrl } }}>
+        <QueryClientProvider client={queryClient}><AgeReviewDetail caseData={makeCase()} /></QueryClientProvider>
+      </AppContext.Provider>
+    );
+    const { rerender } = render(tree(API));
+    fireEvent.click(await screen.findByRole('button', { name: 'Restrict Account' }));
+    await waitFor(() => expect(updateAgeReviewCase).toHaveBeenCalled());
+    rerender(tree(OTHER));
+    await act(async () => { land({ success: true, enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } }); });
+    await waitFor(() => expect(isBannedEventReadTainted(queryClient, API, EVENT)).toBe(true));
+    expect(isBannedEventReadTainted(queryClient, OTHER, EVENT)).toBe(false);
+  });
+
+  it('leaves it alone after a clear, which unsuspends', async () => {
+    const queryClient = await run('Clear without approval', 'restricted_pending_user_response', { enforcement: { relay: 'ok', bulk: 'ok', keycast: 'ok' } });
+    expect(isBannedEventReadTainted(queryClient, API, EVENT)).toBe(false);
   });
 });

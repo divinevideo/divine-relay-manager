@@ -26,7 +26,13 @@ import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { isRepostKind, looksLikeEventCopy, verifiedRepostedEvent } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
-import { bannedEventQueryKey, bannedEventQueryPrefix } from "@/lib/bannedEventKey";
+import {
+  bannedEventQueryKey,
+  bannedEventQueryPrefix,
+  isBannedEventReadTainted,
+  refreshBannedEventReadsAfterUnsuspend,
+  suspendBannedEventReads,
+} from "@/lib/bannedEventKey";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
@@ -190,10 +196,30 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // Banned event fallback: if thread found no event and target is an event ID, try management API
   const targetEventId = context.target?.type === 'event' ? context.target.value : undefined;
   const shouldCheckBanned = !context.threadLoading && !context.thread?.event && !!targetEventId;
-  const { data: bannedEvent, isLoading: bannedEventQueryLoading } = useBannedEvent(
+  const { data: bannedEventRead, isLoading: bannedEventQueryLoading, dataUpdatedAt: bannedEventReadAt } = useBannedEvent(
     targetEventId,
     shouldCheckBanned,
   );
+  // A Suspend taints the author's cached banned-event reads
+  // (lib/bannedEventKey): the worker refuses that read for a suspended author,
+  // so a post read before it must not render outside the audited viewer. The
+  // pane the Suspend was taken from is the exception and keeps the banned post
+  // it shows, so Block Media and Age Restrict still have their files, until the
+  // moderator switches post, leaves, restores it or unsuspends the author.
+  // (Another report on the same post keeps it too.) Everywhere else a tainted
+  // read counts as not read yet, and the fresh read answers.
+  const [retainedBanned, setRetainedBanned] = useState<{ eventId: string; event: NostrEvent } | null>(null);
+  useEffect(() => {
+    setRetainedBanned(kept => (kept && kept.eventId !== targetEventId ? null : kept));
+  }, [targetEventId]);
+  // Read for its subscription: an answer equal to the cached one leaves `data`
+  // as it was, and only a new answer clears the taint the render below checks.
+  void bannedEventReadAt;
+  const retainedBannedEvent = retainedBanned && retainedBanned.eventId === targetEventId
+    ? retainedBanned.event : undefined;
+  const bannedEvent = retainedBannedEvent
+    ?? (bannedEventRead != null && isBannedEventReadTainted(queryClient, config.apiUrl, targetEventId)
+      ? undefined : bannedEventRead);
 
   // Use banned event as fallback for display
   const displayEvent = context.thread?.event || bannedEvent;
@@ -256,16 +282,24 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     const filters: QueryFilters = { queryKey: bannedEventQueryKey(config.apiUrl, eventId), exact: true };
     void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
     rereadPost(eventId);
+    // The post is not banned any more: a snapshot kept from a Suspend would
+    // keep saying it is.
+    setRetainedBanned(kept => (kept?.eventId === eventId ? null : kept));
   };
 
-  // A read started before a ban can still answer "not banned". Cancel and
-  // refresh reads that have no post. Mark displayed posts stale, and let any
-  // refresh of them that's already running finish.
+  // A read started before a ban can still answer "not banned". Cancel it and
+  // refresh active reads that have no post. Keep any displayed post and its
+  // media until the next normal read, since the worker can refuse a refresh.
   const refreshBannedEventReads = (filters: Pick<QueryFilters, 'queryKey' | 'exact'>) => {
-    const withoutPost: QueryFilters = { ...filters, predicate: query => query.state.data == null };
-    void queryClient.cancelQueries(withoutPost).then(() => {
+    // Marked stale now, so a reopen straight away finds the read stale.
+    void queryClient.invalidateQueries({ ...filters, refetchType: 'none' });
+    void queryClient.cancelQueries(filters).then(() => {
       void queryClient.invalidateQueries({ ...filters, refetchType: 'none' });
-      return queryClient.refetchQueries({ ...withoutPost, type: 'active' });
+      return queryClient.refetchQueries({
+        ...filters,
+        type: 'active',
+        predicate: query => query.state.data == null,
+      });
     });
   };
 
@@ -754,15 +788,30 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // Not after a Ban or Suspend: the re-read would find no post, and the
       // media actions (Block Media, Age Restrict, Unblock) would lose the files
       // they act on. The earlier read stays, and the header says why it's gone.
-      // After a Suspend, mark the cached banned-event reads (kept 5 minutes)
-      // stale without refetching them: the post and its media files stay on
-      // screen now, and reopening the report reads afresh, which the worker
-      // refuses for a suspended author, so the pane offers the audited viewer
-      // instead (#445). After an account Ban the read stays usable (the worker
-      // refuses getbannedevent only for a suspended author). A post Ban marks
-      // the post's read stale (markBannedEventStale).
+      // After a Suspend, the pane the Suspend was taken from keeps the banned
+      // post it shows (the media files stay for the actions on them) until the
+      // moderator leaves, switches post, restores it or unsuspends the author.
+      // The author's cached banned-event reads (kept 5 minutes) are tainted and
+      // marked stale, so reopened, none renders before the fresh read, which the
+      // worker refuses for a suspended author, and the pane offers the audited
+      // viewer instead (#445). Every other host of a Suspend does the same.
+      // After an account Ban the read stays usable (the worker refuses
+      // getbannedevent only for a suspended author). A post Ban marks the
+      // post's read stale (markBannedEventStale).
       if (change.action === 'suspend') {
-        queryClient.invalidateQueries({ queryKey: bannedEventQueryPrefix(config.apiUrl), refetchType: 'none' });
+        // Only what the pane shows is kept, and only by the report the Suspend
+        // was taken from.
+        const keeps = isDisplayedEventBanned && !!bannedEvent && !!targetEventId
+          && change.reportTarget?.eventId === targetEventId;
+        if (keeps) setRetainedBanned({ eventId: targetEventId, event: bannedEvent });
+        suspendBannedEventReads(queryClient, config.apiUrl, change.pubkey, keeps ? targetEventId : undefined);
+      }
+      if (change.action === 'unsuspend') {
+        // The live read works again: drop a kept snapshot of that author's
+        // post and read the author's posts again. Not on an Unban, which can
+        // leave a running suspension in place.
+        setRetainedBanned(kept => (kept?.event.pubkey?.toLowerCase() === change.pubkey.toLowerCase() ? null : kept));
+        refreshBannedEventReadsAfterUnsuspend(queryClient, config.apiUrl, change.pubkey);
       }
       if (change.action === 'unsuspend' || change.action === 'unban') {
         // Refresh the report the action started from, even after navigating away.

@@ -7,6 +7,8 @@ import { ApiError, BanNotConfirmedError } from '@/lib/adminApi';
 import { banFailureToast, banSuccessNote } from '@/lib/banFeedback';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
+import { bannedEventQueryKey, isBannedEventReadTainted } from '@/lib/bannedEventKey';
+import type { NostrEvent } from '@nostrify/nostrify';
 import { AppContext, type AppContextType } from '@/contexts/AppContext';
 import { TIMED_SUSPENSIONS_KEY } from '@/hooks/useTimedSuspensions';
 import { formatSuspensionEnd } from '../../shared/suspension';
@@ -1971,5 +1973,98 @@ describe('UserActions unban prompt', () => {
     clickUnban();
     await confirmUnban();
     await waitFor(() => expect(navigate).toHaveBeenCalledWith(`/age-review?pubkey=${PUBKEY}`));
+  });
+});
+
+// A Suspend from any host (the Users tab, age review, the report pane) must
+// keep a banned-event read cached before it from showing the author's post
+// outside the audited viewer (#445).
+describe('UserActions suspend and cached banned-event reads', () => {
+  const API = 'https://api.suspend.test';
+  const ctx = { config: { relayUrl: 'wss://relay.suspend.test', apiUrl: API, theme: 'light' }, updateConfig: () => {} } as AppContextType;
+  const EVENT = 'c'.repeat(64);
+  const post = (pubkey: string): NostrEvent => ({ id: EVENT, pubkey, created_at: 1, kind: 1, tags: [], content: 'post', sig: 'b'.repeat(128) });
+  const renderInEnv = (qc: QueryClient, ui: React.ReactElement) => render(
+    <AppContext.Provider value={ctx}>
+      <QueryClientProvider client={qc}><TooltipProvider>{ui}</TooltipProvider></QueryClientProvider>
+    </AppContext.Provider>,
+  );
+  const newClient = () => new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+
+  it('taints and marks stale the suspended author\'s cached post, and no one else\'s', async () => {
+    const qc = newClient();
+    qc.setQueryData(bannedEventQueryKey(API, EVENT), post(PUBKEY));
+    const strangerKey = bannedEventQueryKey(API, 'd'.repeat(64));
+    qc.setQueryData(strangerKey, { ...post('9'.repeat(64)), id: 'd'.repeat(64) });
+    renderInEnv(qc, <UserActions pubkey={PUBKEY} />);
+
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+
+    expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(true);
+    expect(qc.getQueryState(bannedEventQueryKey(API, EVENT))?.isInvalidated).toBe(true);
+    expect(isBannedEventReadTainted(qc, API, 'd'.repeat(64))).toBe(false);
+  });
+
+  // The report pane handles its own Suspends (and keeps the post it shows), so
+  // UserActions leaves it to the host there: one handling, not two.
+  it('does not mark reads itself in the report context, where the pane does', async () => {
+    const qc = newClient();
+    qc.setQueryData(bannedEventQueryKey(API, EVENT), post(PUBKEY));
+    renderInEnv(qc, <UserActions pubkey={PUBKEY} context="report" />);
+
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+
+    expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(false);
+  });
+
+  // Pubkeys differ in case between hosts and relays; the author match ignores it.
+  it.each([
+    ['an uppercase account on the action', 'A'.repeat(64), 'a'.repeat(64)],
+    ['an uppercase author on the cached post', 'a'.repeat(64), 'A'.repeat(64)],
+  ])('matches the author by pubkey regardless of case: %s', async (_name, actionPubkey, postPubkey) => {
+    const qc = newClient();
+    qc.setQueryData(bannedEventQueryKey(API, EVENT), post(postPubkey));
+    renderInEnv(qc, <UserActions pubkey={actionPubkey} />);
+
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: expect.stringMatching(/^User suspended/) })));
+
+    expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(true);
+  });
+
+  // The environment is the one the click happened in, as for the restore window.
+  it('marks the environment the suspend started in, even if it lands after a switch', async () => {
+    const OTHER = 'https://api.switched.test';
+    let land: (v: unknown) => void = () => {};
+    api.suspendPubkey.mockImplementation(() => new Promise(r => { land = r; }));
+    const qc = newClient();
+    qc.setQueryData(bannedEventQueryKey(API, EVENT), post(PUBKEY));
+    qc.setQueryData(bannedEventQueryKey(OTHER, EVENT), post(PUBKEY));
+    const tree = (apiUrl: string) => (
+      <AppContext.Provider value={{ ...ctx, config: { ...ctx.config, apiUrl } }}>
+        <QueryClientProvider client={qc}><TooltipProvider><UserActions pubkey={PUBKEY} /></TooltipProvider></QueryClientProvider>
+      </AppContext.Provider>
+    );
+    const { rerender } = render(tree(API));
+    suspendThroughDialog();
+    await waitFor(() => expect(api.suspendPubkey).toHaveBeenCalled());
+    rerender(tree(OTHER));
+    await act(async () => { land({ endsAt: threeDaysOut(), recorded: true, decisionRecorded: true }); });
+    await waitFor(() => expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(true));
+    expect(isBannedEventReadTainted(qc, OTHER, EVENT)).toBe(false);
+  });
+
+  it('leaves the read alone when the suspend fails', async () => {
+    api.suspendPubkey.mockRejectedValue(new Error('relay down'));
+    const qc = newClient();
+    qc.setQueryData(bannedEventQueryKey(API, EVENT), post(PUBKEY));
+    renderInEnv(qc, <UserActions pubkey={PUBKEY} />);
+
+    suspendThroughDialog();
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to suspend user' })));
+
+    expect(isBannedEventReadTainted(qc, API, EVENT)).toBe(false);
   });
 });

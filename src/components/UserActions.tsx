@@ -7,6 +7,7 @@ import { useAdminApi, type ModeratorApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
+import { suspendBannedEventReads, useBannedEventApiUrl } from '@/lib/bannedEventKey';
 import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from '@/lib/userStatsCache';
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from '@/lib/banFeedback';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
@@ -132,6 +133,7 @@ export function UserActions({
   const api = useAdminApi();
   const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
+  const bannedEventApiUrl = useBannedEventApiUrl();
   const restoreEnvironment = useRestoreEnvironment();
   const accountTarget: AccountActionTarget = { pubkey, reportTarget };
   // The api bound to the moderator's login at bulk-job start; a logout/switch
@@ -215,12 +217,14 @@ export function UserActions({
   // A worker that predates timed suspensions writes none; the deploy order
   // (worker before frontend) covers that (F15).
   const suspendUserMutation = useMutation({
+    // The environment the click happened in, not the one on screen when it lands.
+    onMutate: () => ({ bannedEventApiUrl }),
     mutationFn: async ({ pubkey: target, duration }: AccountActionTarget & { duration: SuspensionDuration | null }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       return runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator', duration));
     },
-    onSuccess: (outcome, variables) => {
+    onSuccess: (outcome, variables, started) => {
       // Suspend resolution comes only from the decision row, already written.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
@@ -230,6 +234,12 @@ export function UserActions({
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast(suspendToast(outcome, variables.duration));
       onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'suspend' });
+      // A banned-event read cached before this Suspend must not show the
+      // author's post outside the audited viewer, in any host (#445). The report
+      // pane does this itself, and keeps the post it shows.
+      if (context !== 'report' && started?.bannedEventApiUrl) {
+        suspendBannedEventReads(queryClient, started.bannedEventApiUrl, variables.pubkey);
+      }
     },
     onError: (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
