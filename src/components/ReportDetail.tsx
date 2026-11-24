@@ -26,6 +26,7 @@ import { ToastAction } from "@/components/ui/toast";
 import { useReportContext } from "@/hooks/useReportContext";
 import { isRepostKind, looksLikeEventCopy, verifiedRepostedEvent } from "@/lib/nip18";
 import { useBannedEvent } from "@/hooks/useBannedEvent";
+import { BANNED_EVENT_KEY_ROOT, bannedEventQueryKey } from "@/lib/bannedEventKey";
 import { useUserSummary } from "@/hooks/useUserSummary";
 import { useModerationStatus } from "@/hooks/useModerationStatus";
 import { ThreadContext } from "@/components/ThreadContext";
@@ -245,6 +246,47 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   const recheckPost = () => {
     moderationStatus.recheck();
     rereadPost(targetEventId);
+  };
+
+  // After a restore, the post is no longer banned, but the body's banned-post
+  // view comes from a read kept for five minutes (useBannedEvent) over a thread
+  // read that holds the missing post for its own staleTime. Drop both, or the
+  // header says the post is back while the body keeps saying it is banned
+  // (#445). For the post that was restored, which an Undo can make another
+  // than the report's target. The banned-event key has no environment part.
+  // Cancel first, as rereadPost does: with no data yet (the pane's first read
+  // still out), invalidating would join that read, which started before the
+  // restore, and its answer would land as fresh.
+  const rereadRestoredPost = (eventId: string | undefined) => {
+    if (!eventId) return;
+    const filters: QueryFilters = { queryKey: bannedEventQueryKey(eventId), exact: true };
+    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries(filters));
+    rereadPost(eventId);
+  };
+
+  // After a post Ban, a read cached before it, such as the "not banned" a
+  // restore just read, must not answer for the next five minutes. With a
+  // banned post in the read, it is marked stale and not fetched: while the
+  // banned view shows, a read right after the Ban can be refused (a suspended
+  // author, or suspension status unavailable) and would blank the post and its
+  // media. With no banned post in it (no data yet, or a cached "not banned"
+  // under a body that says the post is missing), it is read at once. A first
+  // read still out started before the Ban and would be joined, so it is
+  // cancelled and read again. For the post that was banned, which is not the
+  // open report's once the moderator has moved on. EventActions' Ban, Delete
+  // and Delete & Media name it (even when the media then failed), and so does
+  // the recent-post Delete below.
+  const markBannedEventStale = (eventId: string) => {
+    const filters: QueryFilters = { queryKey: bannedEventQueryKey(eventId), exact: true };
+    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries({
+      ...filters,
+      refetchType: queryClient.getQueryData(filters.queryKey!) == null ? 'active' : 'none',
+    }));
+  };
+  // Bulk jobs (BulkDeleteByKind, UserActions' Delete All Content) ban events
+  // the pane never learns the ids of: every cached read is marked stale.
+  const markAllBannedEventsStale = () => {
+    queryClient.invalidateQueries({ queryKey: [BANNED_EVENT_KEY_ROOT], refetchType: 'none' });
   };
 
   // Get decision history for this target
@@ -676,12 +718,13 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       return act.restoreEvent(eventId, 'Auto-hide reversed by moderator');
     },
-    onSuccess: async (result) => {
+    onSuccess: async (result, { eventId }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
 
       moderationStatus.recheck();
+      rereadRestoredPost(eventId);
       decisionLog.refetch();
       toast(result.recorded === true && result.reconciled !== false
         ? { title: "Content restored", description: "Auto-hide has been reversed" }
@@ -726,9 +769,11 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // stale without refetching them: the post and its media files stay on
       // screen now, and reopening the report reads afresh, which the worker
       // refuses for a suspended author, so the pane offers the audited viewer
-      // instead (#445). Not after a Ban: moderators may still view a banned post.
+      // instead (#445). After an account Ban the read stays usable (the worker
+      // refuses getbannedevent only for a suspended author). A post Ban marks
+      // the post's read stale (markBannedEventStale).
       if (change.action === 'suspend') {
-        queryClient.invalidateQueries({ queryKey: ['banned-event'], refetchType: 'none' });
+        queryClient.invalidateQueries({ queryKey: [BANNED_EVENT_KEY_ROOT], refetchType: 'none' });
       }
       if (change.action === 'unsuspend' || change.action === 'unban') {
         // Refresh the report the action started from, even after navigating away.
@@ -751,6 +796,9 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // UserActions drops the acted-on account's authored-content reads itself
       // (and opens the restore window after an unsuspend).
     } else {
+      // UserActions' bulk jobs finish here with `accountStatusChanged: false`
+      // (EventActions and BulkDeleteByKind pass nothing, and mark their own).
+      if (change) markAllBannedEventsStale();
       queryClient.invalidateQueries({ queryKey: userStatsQueryKey(config.relayUrl, context.reportedUser.pubkey) });
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.
@@ -1420,6 +1468,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
               try {
                 const act = api.asModerator(getModeratorToken()); // take the login at the click
                 await act.deleteEvent(eventId, 'Deleted from report review');
+                markBannedEventStale(eventId);
                 logAudit(act, {
                   targetType: 'event',
                   targetId: eventId,
@@ -1435,6 +1484,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                       // The undo is its own action, by whoever clicks it.
                       const undo = api.asModerator(getModeratorToken()); // take the login at the click
                       const result = await undo.restoreEvent(eventId, 'Deletion undone by moderator');
+                      rereadRestoredPost(eventId);
                       handleActionComplete();
                       toast(result.recorded === true && result.reconciled !== false
                         ? { title: "Event restored" }
@@ -1619,6 +1669,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
             {context.target?.type === 'event' && context.target.value && (
               <EventActions
                 eventId={context.target.value}
+                onEventRestored={rereadRestoredPost}
+                onEventBanned={markBannedEventStale}
                 pubkey={context.reportedUser.pubkey || ''}
                 mediaHashes={mediaHashes}
                 thumbnailHashes={thumbnailHashes}
@@ -1669,7 +1721,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
                         getModeratorToken={getModeratorToken}
                         isBanned={isUserBanned}
                         isSuspended={moderationStatus.isUserSuspendedFromList}
-                        onComplete={handleActionComplete}
+                        onComplete={() => { markAllBannedEventsStale(); handleActionComplete(); }}
                       />
                     </div>
                   </TooltipTrigger>

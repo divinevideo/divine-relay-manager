@@ -3,6 +3,7 @@
 
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { bannedEventQueryKey } from "@/lib/bannedEventKey";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 /**
@@ -14,7 +15,7 @@ export function useBannedEvent(eventId: string | undefined, enabled: boolean) {
   const { callRelayRpc } = useAdminApi();
 
   return useQuery<NostrEvent | null>({
-    queryKey: ['banned-event', eventId],
+    queryKey: bannedEventQueryKey(eventId),
     queryFn: async () => {
       if (!eventId) return null;
       try {
