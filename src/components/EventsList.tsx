@@ -1,6 +1,6 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
@@ -23,7 +23,8 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { getProfileUrl } from "@/lib/constants";
+import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
+import { VIDEO_KINDS } from "@/lib/kindNames";
 import { getCommentTarget } from "@/lib/commentActivity";
 import { parseSearchInput } from "@/lib/searchInput";
 import { useEventTitles, type ResolvedTarget } from "@/hooks/useEventTitles";
@@ -360,6 +361,13 @@ function EventCard({
   );
 }
 
+// A query with no `kinds` makes the relay merge the whole events table, so
+// "All Events" is opt-in. The plain list defaults to the app's video kinds; the
+// author view (?pubkey=) defaults to the recent-content kinds so a comment-spam
+// account's activity is not hidden behind a video-only filter (#156, #159).
+const VIDEO_KINDS_FILTER = VIDEO_KINDS.join(',');
+const RECENT_KINDS_FILTER = RECENT_CONTENT_KINDS.join(',');
+
 export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
@@ -375,7 +383,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     message: string;
   } | null>(null);
 
-  const [kindFilter, setKindFilter] = useState<string>('all');
+  const [kindFilter, setKindFilter] = useState<string | null>(null);
   const [limit, setLimit] = useState(20);
   const [customKind, setCustomKind] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<NostrEvent | null>(null);
@@ -397,13 +405,21 @@ export function EventsList({ relayUrl }: EventsListProps) {
     searchParams.get('pubkey')
   );
 
+  // "Show all kinds" is an author-view escape hatch. When the author filter
+  // changes or clears, drop it back to the context default (kinds-scoped), in
+  // the same batch as the author change so no no-kinds list query slips out.
+  const changeAuthorFilter = useCallback((pubkey: string | null) => {
+    setFilterByPubkey(pubkey);
+    setKindFilter(k => (k === 'all' ? null : k));
+  }, []);
+
   // Sync URL params with filterByPubkey state
   useEffect(() => {
     const pubkeyParam = searchParams.get('pubkey');
     if (pubkeyParam !== filterByPubkey) {
-      setFilterByPubkey(pubkeyParam);
+      changeAuthorFilter(pubkeyParam);
     }
-  }, [searchParams, filterByPubkey]);
+  }, [searchParams, filterByPubkey, changeAuthorFilter]);
 
   // #164 A: an internal parent link routes here as /events?event=<nevent|naddr>.
   // Seed the search from it (both the box and the committed value, so the clear
@@ -421,7 +437,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {
-    setFilterByPubkey(pubkey);
+    changeAuthorFilter(pubkey);
     if (pubkey) {
       setSearchParams({ pubkey });
     } else {
@@ -446,6 +462,17 @@ export function EventsList({ relayUrl }: EventsListProps) {
     setCommittedSearch('');
   };
 
+  // ?event= is seeded into the search by an effect after the first render; until
+  // then isDirectLookup is still false, which would let one list query slip out.
+  const hasPendingEventParam = !!searchParams.get('event');
+  // null = the moderator has not picked a kind, so the default follows context
+  const effectiveKindFilter = kindFilter ?? (filterByPubkey ? RECENT_KINDS_FILTER : VIDEO_KINDS_FILTER);
+  // Strict: parseInt would accept '1abc' and '-5'; range is NIP-01 0-65535. null = nothing valid yet.
+  const customKindNumber = /^\d+$/.test(customKind.trim()) && parseInt(customKind.trim(), 10) <= 65535
+    ? parseInt(customKind.trim(), 10)
+    : null; // NIP-01 kinds are 0-65535
+  const awaitingCustomKind = effectiveKindFilter === 'custom' && customKindNumber === null;
+
   // Ref for scroll viewport (infinite scroll)
   const scrollViewportRef = useRef<HTMLDivElement>(null);
 
@@ -453,15 +480,18 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const {
     data: eventsData,
     isLoading: loadingEvents,
+    isFetching: fetchingEvents,
     error: eventsError,
     refetch,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind, filterByPubkey],
-    queryFn: async ({ pageParam }) => {
-      const signal = AbortSignal.timeout(10000);
+    queryKey: ['relay-events', relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey],
+    queryFn: async ({ pageParam, signal: querySignal }) => {
+      // Never send the no-kinds shape: a custom kind that is not valid yet
+      if (awaitingCustomKind) return [];
+      const signal = AbortSignal.any([querySignal, AbortSignal.timeout(10000)]);
 
       const filter: { limit: number; kinds?: number[]; until?: number; authors?: string[] } = { limit };
 
@@ -475,18 +505,10 @@ export function EventsList({ relayUrl }: EventsListProps) {
         filter.until = pageParam;
       }
 
-      if (kindFilter !== 'all') {
-        if (kindFilter === 'custom' && customKind) {
-          const kind = parseInt(customKind);
-          if (!isNaN(kind)) {
-            filter.kinds = [kind];
-          }
-        } else if (kindFilter !== 'custom') {
-          const kinds = kindFilter.split(',').map(k => parseInt(k)).filter(k => !isNaN(k));
-          if (kinds.length > 0) {
-            filter.kinds = kinds;
-          }
-        }
+      if (effectiveKindFilter === 'custom') {
+        filter.kinds = [customKindNumber as number];
+      } else if (effectiveKindFilter !== 'all') {
+        filter.kinds = effectiveKindFilter.split(',').map(k => parseInt(k, 10));
       }
 
       const events = await nostr.query([filter], { signal });
@@ -500,9 +522,29 @@ export function EventsList({ relayUrl }: EventsListProps) {
       // Return timestamp - 1 to get events strictly before this one
       return oldestEvent.created_at - 1;
     },
-    enabled: !!relayUrl && !!nostr,
-    refetchInterval: 30000, // Refresh every 30 seconds
+    enabled: !!relayUrl && !!nostr && !isDirectLookup && !hasPendingEventParam && !awaitingCustomKind,
+    // No refetchInterval: this list is manual-refresh only (Refresh button).
+    // Polling it every 30s re-sent the relay a heavy query on a timer. Focus
+    // refetch is off too (the app default is on): with "All Events" selected
+    // every alt-tab would resend the heavy query. staleTime is the app default.
+    refetchOnWindowFocus: false,
   });
+
+  // Loading more pages is not a refresh, so it does not spin the button.
+  const refreshing = fetchingEvents && !isFetchingNextPage;
+
+  // Refresh is the only way to pull new events, so it must be cheap: drop the
+  // cached pages past the first so the refetch reloads page 1 only, instead of
+  // re-sending every scrolled page (each a list query) one after another.
+  const refreshList = () => {
+    // The list is hidden in direct-lookup mode; refetch() bypasses `enabled`
+    if (isDirectLookup || hasPendingEventParam) return;
+    queryClient.setQueriesData<InfiniteData<NostrEvent[], number | undefined>>(
+      { queryKey: ['relay-events', relayUrl] },
+      (data) => data && { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
+    );
+    void refetch();
+  };
 
   // Direct event lookup by ID (separate from infinite scroll)
   // Tries normal relay query first, then falls back to getbannedevent RPC
@@ -799,6 +841,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   const kindOptions = [
     { value: 'all', label: 'All Events' },
+    { value: VIDEO_KINDS_FILTER, label: `All Video Kinds (${VIDEO_KINDS.join(', ')})` },
+    { value: RECENT_KINDS_FILTER, label: 'Recent Content (videos, notes, comments, reposts...)' },
     // Video kinds per NIP-71
     { value: '34235', label: 'Video - Addressable (34235)' },
     { value: '34236', label: 'Short Video - Addressable (34236)' },
@@ -825,8 +869,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <h2 className="text-2xl font-bold">Events & Moderation</h2>
           <p className="text-muted-foreground">View and moderate events using NIP-86</p>
         </div>
-        <Button onClick={() => refetch()} disabled={loadingEvents}>
-          <RefreshCw className={`h-4 w-4 mr-2 ${loadingEvents ? 'animate-spin' : ''}`} />
+        <Button onClick={refreshList} disabled={refreshing}>
+          <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
       </div>
@@ -914,8 +958,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex-1 min-w-[150px]">
               <Label htmlFor="kind-filter" className="text-xs">Event Kind</Label>
-              <Select value={kindFilter} onValueChange={setKindFilter}>
-                <SelectTrigger className="mt-1 h-9">
+              <Select value={effectiveKindFilter} onValueChange={setKindFilter}>
+                <SelectTrigger id="kind-filter" className="mt-1 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -928,7 +972,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </Select>
             </div>
 
-            {kindFilter === 'custom' && (
+            {effectiveKindFilter === 'custom' && (
               <div className="w-32">
                 <Label htmlFor="custom-kind" className="text-xs">Kind #</Label>
                 <Input
@@ -939,13 +983,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
                   placeholder="Kind"
                   className="mt-1 h-9"
                 />
+                {awaitingCustomKind && (
+                  <p className="mt-1 text-xs text-muted-foreground">Enter a kind number</p>
+                )}
               </div>
             )}
 
             <div className="w-24">
               <Label htmlFor="limit" className="text-xs">Page Size</Label>
               <Select value={limit.toString()} onValueChange={(value) => setLimit(parseInt(value))}>
-                <SelectTrigger className="mt-1 h-9">
+                <SelectTrigger id="limit" className="mt-1 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -1000,6 +1047,19 @@ export function EventsList({ relayUrl }: EventsListProps) {
                 >
                   Clear
                 </Button>
+                {effectiveKindFilter === RECENT_KINDS_FILTER && (
+                  <>
+                    <span className="text-xs text-muted-foreground">Showing recent content kinds only.</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2"
+                      onClick={() => setKindFilter('all')}
+                    >
+                      Show all kinds
+                    </Button>
+                  </>
+                )}
               </div>
               <BulkDeleteByKind
                 pubkey={filterByPubkey}
