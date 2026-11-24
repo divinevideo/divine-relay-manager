@@ -19,6 +19,9 @@ const api = vi.hoisted(() => ({
 const moderatorApi = withAsModerator(api);
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
+vi.mock('@/hooks/useAppContext', () => ({
+  useAppContext: () => ({ config: { relayUrl: 'wss://relay.test', apiUrl: 'https://api.test', theme: 'light' } }),
+}));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ getModeratorToken: () => 'moderator-login-token' }),

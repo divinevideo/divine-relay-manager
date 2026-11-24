@@ -61,7 +61,7 @@ interface EventsListProps {
 }
 
 interface EventWithModeration extends NostrEvent {
-  moderationStatus?: 'pending' | 'approved' | 'banned';
+  moderationStatus?: 'banned';
   moderationReason?: string;
 }
 
@@ -167,10 +167,7 @@ function EventCard({
             </Badge>
             {event.moderationStatus && (
               <Badge
-                variant={
-                  event.moderationStatus === 'approved' ? 'default' :
-                  event.moderationStatus === 'banned' ? 'destructive' : 'secondary'
-                }
+                variant="destructive"
                 className="text-xs"
               >
                 {event.moderationStatus}
@@ -582,13 +579,6 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Query for banned events to mark them
   const { data: bannedEvents } = useBannedEvents({ enabled: !!relayUrl });
 
-  // Query for events needing moderation
-  const { data: eventsNeedingModeration } = useQuery({
-    queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
-    enabled: !!relayUrl,
-  });
-
   // Query for all reports to check which users/events have been reported
   const { data: allReports } = useQuery({
     queryKey: ['all-reports', relayUrl],
@@ -665,7 +655,6 @@ export function EventsList({ relayUrl }: EventsListProps) {
     },
     onSuccess: async ({ eventId, action, recorded, reconciled }) => {
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      queryClient.invalidateQueries({ queryKey: ['events-needing-moderation', relayUrl] });
       queryClient.invalidateQueries({ queryKey: ['relay-events', relayUrl] });
       toast({
         title: recorded && reconciled
@@ -728,12 +717,10 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Enhance a single event with moderation status
   const enhanceEvent = (event: NostrEvent): EventWithModeration => {
     const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
-    const needsModeration = eventsNeedingModeration?.some((pending: { id: string }) => pending.id === event.id);
     return {
       ...event,
-      moderationStatus: (isBanned ? 'banned' : needsModeration ? 'pending' : undefined) as "pending" | "approved" | "banned" | undefined,
-      moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason :
-                       needsModeration ? eventsNeedingModeration?.find((pending: { id: string; reason?: string }) => pending.id === event.id)?.reason : undefined,
+      moderationStatus: isBanned ? 'banned' as const : undefined,
+      moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason : undefined,
     };
   };
 
@@ -1057,11 +1044,6 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </CardTitle>
               <div className="text-sm text-muted-foreground">
                 {enhancedEvents.length} events
-                {eventsNeedingModeration && eventsNeedingModeration.length > 0 && (
-                  <Badge variant="secondary" className="ml-2 text-xs">
-                    {eventsNeedingModeration.length} pending
-                  </Badge>
-                )}
               </div>
             </div>
           </CardHeader>

@@ -11,12 +11,14 @@ import { CopyableId } from "@/components/CopyableId";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
+import { Button } from "@/components/ui/button";
+import { useEventsNeedingModeration, EVENTS_NEEDING_MODERATION_STALE_MS } from "@/hooks/useEventsNeedingModeration";
 import { getCurrentEnvironment } from "@/lib/environments";
 import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 import {
   Globe, Shield, Clock, Zap, FileText, ExternalLink,
   Server, Wifi, WifiOff, List, ShieldBan, Users,
-  AlertTriangle, Mail, Tag,
+  AlertTriangle, Mail, Tag, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AutoHideSettings, AgeReviewSettings } from "@/components/AutoHideSettings";
@@ -243,11 +245,9 @@ export function SettingsDashboard() {
   const {
     data: pendingModeration,
     isLoading: pendingLoading,
-  } = useQuery({
-    queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc<unknown[]>('listeventsneedingmoderation'),
-    enabled: !!relayUrl,
-  });
+    isFetching: pendingFetching,
+    refetch: refetchPending,
+  } = useEventsNeedingModeration(relayUrl);
 
   const {
     data: supportedMethods,
@@ -757,13 +757,26 @@ export function SettingsDashboard() {
                 <p className="text-sm text-muted-foreground">Banned Events</p>
               </div>
               <div className="text-center">
-                <div className={cn(
-                  "text-2xl font-bold",
-                  Array.isArray(pendingModeration) && pendingModeration.length > 0 && "text-orange-500"
-                )}>
+                <div className="text-2xl font-bold">
                   {pendingLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(pendingModeration) ? pendingModeration.length : 0)}
                 </div>
-                <p className="text-sm text-muted-foreground">Pending Moderation</p>
+                <p
+                  className="text-sm text-muted-foreground"
+                  title="The relay has no approval tracking, so this is recent activity, not a review queue."
+                >
+                  Recent events (newest 100, not banned)
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="ml-1 h-6 w-6 align-middle"
+                    aria-label="Refresh recent events count"
+                    title={`Refresh (cached for ${EVENTS_NEEDING_MODERATION_STALE_MS / 60_000} minutes)`}
+                    disabled={!relayUrl || pendingFetching}
+                    onClick={() => { void refetchPending(); }}
+                  >
+                    <RefreshCw className={cn("h-3 w-3", pendingFetching && "animate-spin")} />
+                  </Button>
+                </p>
               </div>
             </div>
 
