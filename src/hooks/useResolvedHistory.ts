@@ -33,8 +33,9 @@ export function useResolvedHistory(relayUrl: string, enabled: boolean) {
     // refreshes, and when this moderator's own action changes what is resolved
     // (invalidateResolutionState), which re-reads however fresh the pages are.
     refetchOnWindowFocus: false,
-    // One retry, as the queue's resolution reads (labels, decisions, ban
-    // lists): one slow relay read should not cost a Load more.
-    retry: 1,
+    // Not retried: each page runs a full label walk on the relay, a retry would
+    // re-run it while the relay is still running the abandoned one, and the
+    // footer's Try again is the recovery.
+    retry: false,
   });
 }

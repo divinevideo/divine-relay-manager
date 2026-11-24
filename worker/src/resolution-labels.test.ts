@@ -5,19 +5,21 @@ import { describe, it, expect } from 'vitest';
 import { reduceLabelsToTargets, pageResolutionLabels } from './resolution-labels';
 import type { ResolutionLabelEvent } from './resolution-labels';
 
+const SIGNER = 'a1'.repeat(32);
+
 function label(tags: string[][], createdAt = 1) {
-  return { id: Math.random().toString(36).slice(2), created_at: createdAt, tags };
+  return { id: Math.random().toString(36).slice(2), pubkey: SIGNER, created_at: createdAt, tags };
 }
 
 describe('reduceLabelsToTargets', () => {
   it('reads an event target from an e tag', () => {
-    const targets = reduceLabelsToTargets([label([['e', 'a'.repeat(64)]])]);
+    const targets = reduceLabelsToTargets([label([['e', 'a'.repeat(64)]])], SIGNER);
 
     expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64), at: 1 }]);
   });
 
   it('reads a pubkey target from a p tag', () => {
-    const targets = reduceLabelsToTargets([label([['p', 'b'.repeat(64)]])]);
+    const targets = reduceLabelsToTargets([label([['p', 'b'.repeat(64)]])], SIGNER);
 
     expect(targets).toEqual([{ type: 'pubkey', value: 'b'.repeat(64), at: 1 }]);
   });
@@ -30,7 +32,7 @@ describe('reduceLabelsToTargets', () => {
       label([['e', 'a'.repeat(64)]], 100),
       label([['e', 'a'.repeat(64)]], 300),
       label([['e', 'a'.repeat(64)]], 200),
-    ]);
+    ], SIGNER);
 
     expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64), at: 300 }]);
   });
@@ -40,9 +42,9 @@ describe('reduceLabelsToTargets', () => {
     // target a person handled, but it must not hide any report: at 0 every
     // report reads as newer and stays in front of a person.
     const targets = reduceLabelsToTargets([
-      { id: 'x', created_at: 'soon' as unknown as number, tags: [['e', 'a'.repeat(64)]] },
-      { id: 'y', created_at: Number.NaN, tags: [['p', 'b'.repeat(64)]] },
-    ]);
+      { id: 'x', pubkey: SIGNER, created_at: 'soon' as unknown as number, tags: [['e', 'a'.repeat(64)]] },
+      { id: 'y', pubkey: SIGNER, created_at: Number.NaN, tags: [['p', 'b'.repeat(64)]] },
+    ], SIGNER);
 
     expect(targets).toEqual([
       { type: 'event', value: 'a'.repeat(64), at: 0 },
@@ -54,7 +56,7 @@ describe('reduceLabelsToTargets', () => {
     const targets = reduceLabelsToTargets([
       label([['e', 'a'.repeat(64)], ['p', 'b'.repeat(64)]], 300),
       label([['p', 'b'.repeat(64)]], 400),
-    ]);
+    ], SIGNER);
 
     expect(targets).toEqual([
       { type: 'event', value: 'a'.repeat(64), at: 300 },
@@ -68,7 +70,7 @@ describe('reduceLabelsToTargets', () => {
     // every event-scoped resolution.
     const targets = reduceLabelsToTargets([
       label([['e', 'a'.repeat(64)], ['p', 'b'.repeat(64)]]),
-    ]);
+    ], SIGNER);
 
     expect(targets).toEqual([
       { type: 'event', value: 'a'.repeat(64), at: 1 },
@@ -83,13 +85,13 @@ describe('reduceLabelsToTargets', () => {
       label([['e', 'a'.repeat(64)]]),
       label([['e', 'a'.repeat(64)]]),
       label([['e', 'a'.repeat(64)]]),
-    ]);
+    ], SIGNER);
 
     expect(targets).toEqual([{ type: 'event', value: 'a'.repeat(64), at: 1 }]);
   });
 
   it('ignores a label with no e or p tag', () => {
-    const targets = reduceLabelsToTargets([label([['L', 'moderation/resolution']])]);
+    const targets = reduceLabelsToTargets([label([['L', 'moderation/resolution']])], SIGNER);
 
     expect(targets).toEqual([]);
   });
@@ -97,7 +99,7 @@ describe('reduceLabelsToTargets', () => {
   it('ignores a tag with no value', () => {
     // Relay payloads are untrusted input; a malformed tag must not become a
     // target key of 'event:undefined' that silently resolves nothing.
-    const targets = reduceLabelsToTargets([label([['e']])]);
+    const targets = reduceLabelsToTargets([label([['e']])], SIGNER);
 
     expect(targets).toEqual([]);
   });
@@ -120,6 +122,7 @@ function fakeRelay(all: ResolutionLabelEvent[], pageSize: number) {
 function labels(count: number, startAt: number): ResolutionLabelEvent[] {
   return Array.from({ length: count }, (_, i) => ({
     id: `label-${startAt - i}`,
+    pubkey: SIGNER,
     created_at: startAt - i,
     tags: [['e', String(startAt - i).padStart(64, '0')]],
   }));
@@ -129,7 +132,7 @@ describe('pageResolutionLabels', () => {
   it('returns every target when the relay answers in one short page', async () => {
     const { fetchPage, calls } = fakeRelay(labels(3, 100), 10);
 
-    const result = await pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 5 });
+    const result = await pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 5 });
 
     expect(result.targets).toHaveLength(3);
     expect(result.truncated).toBe(false);
@@ -141,7 +144,7 @@ describe('pageResolutionLabels', () => {
     // the other 15 targets silently read as unresolved, which is the bug.
     const { fetchPage, calls } = fakeRelay(labels(25, 100), 10);
 
-    const result = await pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 5 });
+    const result = await pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 5 });
 
     expect(result.targets).toHaveLength(25);
     expect(result.truncated).toBe(false);
@@ -151,7 +154,7 @@ describe('pageResolutionLabels', () => {
   it('dedups the boundary event that an inclusive until returns twice', async () => {
     const { fetchPage } = fakeRelay(labels(25, 100), 10);
 
-    const result = await pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 5 });
+    const result = await pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 5 });
 
     const values = result.targets.map((t) => t.value);
     expect(new Set(values).size).toBe(values.length);
@@ -162,7 +165,7 @@ describe('pageResolutionLabels', () => {
     // because a capped read that claims completeness un-hides handled work.
     const { fetchPage, calls } = fakeRelay(labels(500, 1000), 10);
 
-    const result = await pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 3 });
+    const result = await pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 3 });
 
     expect(calls).toHaveLength(3);
     expect(result.truncated).toBe(true);
@@ -174,7 +177,7 @@ describe('pageResolutionLabels', () => {
   it('reports the oldest created_at it actually covered', async () => {
     const { fetchPage } = fakeRelay(labels(500, 1000), 10);
 
-    const result = await pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 3 });
+    const result = await pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 3 });
 
     // 3 pages of 10 starting at 1000, with the inclusive boundary repeating:
     // 1000..991, 991..982, 982..973.
@@ -194,7 +197,7 @@ describe('pageResolutionLabels', () => {
     };
 
     await expect(
-      pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 5 })
+      pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 5 })
     ).rejects.toThrow('Relay query timed out before EOSE');
   });
 
@@ -202,7 +205,7 @@ describe('pageResolutionLabels', () => {
     // A full page followed by an empty one is exhaustion, not a cap.
     const { fetchPage } = fakeRelay(labels(10, 100), 10);
 
-    const result = await pageResolutionLabels(fetchPage, { pageSize: 10, maxPages: 5 });
+    const result = await pageResolutionLabels(fetchPage, SIGNER, { pageSize: 10, maxPages: 5 });
 
     expect(result.truncated).toBe(false);
     expect(result.targets).toHaveLength(10);

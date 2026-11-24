@@ -3,7 +3,7 @@
 
 import { useState, useMemo, useEffect, useRef, useCallback, useLayoutEffect } from "react";
 
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, type RefetchOptions } from "@tanstack/react-query";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useAppContext } from "@/hooks/useAppContext";
 import { getEnvironmentById, getCurrentEnvironment } from "@/lib/environments";
@@ -58,7 +58,7 @@ import { isLoadMoreFailure, rememberLoadMoreFailure } from "@/lib/loadMoreFailur
 import { useResolvedHistory } from "@/hooks/useResolvedHistory";
 import { useBannedPubkeys, useBannedEvents } from "@/hooks/useRelayBanLists";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
-import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
+import { HIGH_PRIORITY_CATEGORIES, RESOLUTION_LABEL_READ_TIMEOUT_MS, RESOLUTION_READ_TIMEOUT_MS, getCategoryLabel, getReportCategory, hasCsamSignal } from "@/lib/constants";
 import { categoryChips, categoryMatchesChip } from "@/lib/categoryChips";
 import { consolidateReports, reportTargetKeys, type ConsolidatedReport } from "@/lib/consolidateReports";
 import { historyCount } from "@/lib/historyCount";
@@ -492,7 +492,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   const [searchParams] = useSearchParams();
   const { getDecisions, fetchReportsNeedingAttention, fetchReportsByTarget, fetchResolutionState, fetchResolutionLabelTargets } = useAdminApi();
   const { config, updateConfig } = useAppContext();
-  const queryClient = useQueryClient();
   const isMobile = useIsMobile();
   const [selectedReport, setSelectedReport] = useState<NostrEvent | null>(null);
   // The report whose target the queue has called "left", held until its
@@ -615,6 +614,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     queryFn: fetchReportsNeedingAttention,
     refetchInterval: QUEUE_POLL_MS,
     retry: false,
+    // Each read is a full relay walk. While the blocked pane is up, focus
+    // refetches of a failed query would start another walk on every alt-tab;
+    // the poll and the pane's Retry still refresh it.
+    refetchOnWindowFocus: false,
   });
 
   // Reports a deep link found through the targeted lookup, held beside the
@@ -637,8 +640,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   );
 
   // The reports query itself failing is the more fundamental problem: if the
-  // relay read is down, resolution state is beside the point, and the
-  // resolution pane's Retry can't fix it anyway. Report this first (#221) --
+  // relay read is down, resolution state is beside the point. Report this first (#221) --
   // but only full-pane when there is nothing to show. When a REFRESH fails
   // (e.g. the worker 502s on a relay timeout), the last good list stays
   // rendered with a stale-data warning below, so one slow poll does not look
@@ -716,9 +718,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // The resolution sources are subtractive: these labels HIDE work already handled, so
   // a failed fetch makes the queue bigger and wrong rather than smaller and
-  // safe (#221). One retry, because a single slow relay read should not cost a
-  // moderator their whole resolution filter -- this is the only polling query
-  // here that retries, for that reason.
+  // safe (#221). NOT retried: a retry re-runs the worker's whole relay walk, and
+  // the relay keeps running an abandoned query for up to 30s, so retrying a slow
+  // read doubles the database load. The 60s poll and the blocked pane's Retry
+  // button are the recovery paths.
   const {
     data: labelsResult,
     error: labelsError,
@@ -726,9 +729,10 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: labelsPending,
     fetchStatus: labelsFetchStatus,
     errorUpdateCount: labelsErrorUpdateCount,
+    refetch: refetchLabels,
   } = useQuery({
     queryKey: ['resolution-label-targets', relayUrl],
-    queryFn: () => fetchResolutionLabelTargets({ timeoutMs: RESOLUTION_READ_TIMEOUT_MS }),
+    queryFn: () => fetchResolutionLabelTargets({ timeoutMs: RESOLUTION_LABEL_READ_TIMEOUT_MS }),
     // 60s, not the 15s the other sources use. This one walks every page of
     // resolution labels on the relay (two today, and one more every few
     // months), so a 15s poll opens a socket per page per tab per interval to
@@ -738,7 +742,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // actions, this query -- not because of either poll. Only another
     // moderator's label-only resolution can lag, by at most a minute.
     refetchInterval: 60 * 1000,
-    retry: 1,
+    retry: false,
+    // As for the feed: a full relay walk, so never on window focus.
+    refetchOnWindowFocus: false,
   });
   const labelTargets = labelsResult?.targets;
 
@@ -751,6 +757,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: bannedPubkeysPending,
     fetchStatus: bannedPubkeysFetchStatus,
     errorUpdateCount: bannedPubkeysErrorUpdateCount,
+    refetch: refetchBannedPubkeys,
   } = useBannedPubkeys({
     // 0 on a deep link so an arriving report reads current ban status rather
     // than a cached one.
@@ -766,6 +773,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: bannedEventsPending,
     fetchStatus: bannedEventsFetchStatus,
     errorUpdateCount: bannedEventsErrorUpdateCount,
+    refetch: refetchBannedEvents,
   } = useBannedEvents({ refetchInterval: 15 * 1000 });
 
   // Query all moderation decisions from our D1 database.
@@ -781,6 +789,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     isPending: decisionsPending,
     fetchStatus: decisionsFetchStatus,
     errorUpdateCount: decisionsErrorUpdateCount,
+    refetch: refetchDecisions,
   } = useQuery({
     queryKey: ['resolution-state'],
     queryFn: async () => {
@@ -981,9 +990,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     // true throughout a paused wait and cannot tell "loading" from "stuck
     // offline" on its own.
     isPaused: boolean;
+    // A read of this source is in flight right now (fetchStatus 'fetching').
+    isFetching: boolean;
     // Monotonic count of settled failures. The ONLY failure signal that survives
     // a refetch: see hasColdFailed below.
     errorUpdateCount: number;
+    refetch: (options: RefetchOptions) => Promise<unknown>;
     gatesAlways: boolean;
   }
 
@@ -996,7 +1008,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: labelsUpdatedAt,
       isPending: labelsPending,
       isPaused: labelsFetchStatus === 'paused',
+      isFetching: labelsFetchStatus === 'fetching',
       errorUpdateCount: labelsErrorUpdateCount,
+      refetch: refetchLabels,
       gatesAlways: false,
     },
     {
@@ -1007,7 +1021,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: bannedPubkeysUpdatedAt,
       isPending: bannedPubkeysPending,
       isPaused: bannedPubkeysFetchStatus === 'paused',
+      isFetching: bannedPubkeysFetchStatus === 'fetching',
       errorUpdateCount: bannedPubkeysErrorUpdateCount,
+      refetch: refetchBannedPubkeys,
       gatesAlways: false,
     },
     {
@@ -1018,7 +1034,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: bannedEventsUpdatedAt,
       isPending: bannedEventsPending,
       isPaused: bannedEventsFetchStatus === 'paused',
+      isFetching: bannedEventsFetchStatus === 'fetching',
       errorUpdateCount: bannedEventsErrorUpdateCount,
+      refetch: refetchBannedEvents,
       gatesAlways: false,
     },
     {
@@ -1035,14 +1053,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
       updatedAt: decisionsUpdatedAt,
       isPending: decisionsPending,
       isPaused: decisionsFetchStatus === 'paused',
+      isFetching: decisionsFetchStatus === 'fetching',
       errorUpdateCount: decisionsErrorUpdateCount,
+      refetch: refetchDecisions,
       gatesAlways: true,
     },
   ], [
-    labelTargets, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount,
-    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount,
-    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount,
-    handlingRows, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount,
+    labelTargets, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount, refetchLabels,
+    bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount, refetchBannedPubkeys,
+    bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount, refetchBannedEvents,
+    handlingRows, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount, refetchDecisions,
   ]);
 
   // Whether the list filter (Hide resolved on, outside the pending-review
@@ -1989,19 +2009,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     });
   };
 
-  // Shared by both the offline pane and the cold-error pane below so the two
-  // retry paths cannot drift apart.
-  //
-  // These keys are hand-written and must match the queryKey of every source in
-  // resolutionSources. Nothing type-checks that: a renamed key leaves Retry
-  // invalidating a query that no longer exists, so the button appears to do
-  // nothing and the blocked pane never clears.
+  // The offline and cold-error panes retry only sources with missing or errored
+  // data. Join a refresh already in flight, even if it starts before React
+  // renders the disabled button. The worker can keep walking after cancellation.
+  const feedWouldRerun = !reports || !!error;
+  const sourcesToRetry = resolutionSources.filter(source => !source.hasData || source.error);
+  const retryingResolutionSources =
+    (feedWouldRerun && isFetching) || sourcesToRetry.some(source => source.isFetching);
   const retryResolutionSources = () => {
-    refetch();
-    queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
-    queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-    queryClient.invalidateQueries({ queryKey: ['resolution-state'] });
+    if (feedWouldRerun) void refetch({ cancelRefetch: false });
+    for (const source of sourcesToRetry) {
+      void source.refetch({ cancelRefetch: false });
+    }
   };
 
   // Purely offline-blocked (a gating source is paused, not merely slow) and
@@ -2019,6 +2038,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         sources={blockingLoadPaused.map(s => ({ key: s.key, label: s.label }))}
         decisionsUnavailable={decisionsUnavailable}
         onRetry={retryResolutionSources}
+        retrying={retryingResolutionSources}
         onOverride={() => acknowledgeBlockedSources(blockingLoadPaused)}
       />
     );
@@ -2091,6 +2111,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         sources={blockingErrors.map(s => ({ key: s.key, label: s.label }))}
         decisionsUnavailable={decisionsUnavailable}
         onRetry={retryResolutionSources}
+        retrying={retryingResolutionSources}
         onOverride={() => acknowledgeBlockedSources(blockingErrors)}
       />
     );

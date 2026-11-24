@@ -2,7 +2,7 @@
 // ABOUTME: Mocks the WebSocket rather than the module, so the real queryRelay is exercised.
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { fetchAccountIdentity, queryRelay } from './relay-profile';
+import { fetchAccountIdentity, queryRelay, relayPageFetcher, RELAY_WALK_PAGE_TIMEOUT_MS, RELAY_WALK_DEADLINE_MS, RELAY_WALK_MIN_PAGE_MS } from './relay-profile';
 
 /**
  * Mirrors mockRelay in bulk-moderate.test.ts. We stub the socket, not the module:
@@ -357,5 +357,193 @@ describe('queryRelay partial reads and late frames', () => {
     expect(res.success).toBe(false);
     expect(res.error).toBe('WebSocket error');
     expect(res.events).toEqual([EVENT_A]);
+  });
+});
+
+// The relay answers nothing until its whole query finishes, and keeps running it
+// for up to 30s after we hang up, so a slow page is waited out once, never
+// retried. Only the paged walks behind the queue get the longer bound.
+describe('relay read patience', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function settle(ms: number) {
+    await vi.advanceTimersByTimeAsync(ms);
+  }
+
+  it('keeps the 5000 ms default for a plain queryRelay call', async () => {
+    vi.useFakeTimers();
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await settle(0);
+    await relay.ready;
+    await settle(4999);
+    relay.message(['EOSE', relay.subId]);
+    expect((await pending).success).toBe(true);
+
+    const relay2 = scriptedRelay();
+    const pending2 = queryRelay({ kinds: [1985] }, 'wss://relay.test');
+    await settle(0);
+    await relay2.ready;
+    await settle(5000);
+    const res = await pending2;
+    expect(res.success).toBe(false);
+    expect(res.error).toMatch(/timed out before EOSE/);
+  });
+
+  it('honours a per-call timeout override', async () => {
+    vi.useFakeTimers();
+    const relay = scriptedRelay();
+    const pending = queryRelay({ kinds: [1985] }, 'wss://relay.test', { timeoutMs: 15000 });
+    await settle(0);
+    await relay.ready;
+    await settle(6000);
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    relay.message(['EOSE', relay.subId]);
+    const res = await pending;
+    expect(res).toMatchObject({ success: true, complete: true });
+    expect(res.events).toEqual([EVENT_A]);
+  });
+
+  it('a walked page that answers after 6s succeeds', async () => {
+    vi.useFakeTimers();
+    const relay = scriptedRelay();
+    const pending = relayPageFetcher<object>('wss://relay.test', { kinds: [1984] }, 2000)(undefined);
+    await settle(0);
+    await relay.ready;
+    await settle(6000);
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    relay.message(['EOSE', relay.subId]);
+    expect(await pending).toEqual([EVENT_A]);
+  });
+
+  it('a walked page that never answers still fails at the walk bound, once', async () => {
+    vi.useFakeTimers();
+    const sockets = vi.spyOn(globalThis, 'WebSocket');
+    const relay = scriptedRelay();
+    const settled = relayPageFetcher<object>('wss://relay.test', { kinds: [1984] }, 2000)(undefined)
+      .then(() => 'resolved', (e: Error) => e.message);
+    await settle(0);
+    await relay.ready;
+    await settle(RELAY_WALK_PAGE_TIMEOUT_MS - 1);
+    relay.message(['EVENT', relay.subId, EVENT_A]);
+    await settle(1);
+    expect(await settled).toMatch(/Relay query timed out before EOSE \(1 events received\)/);
+    // No retry: the relay is asked exactly once, however long we waited.
+    await settle(60_000);
+    expect(sockets).toHaveBeenCalledTimes(1);
+  });
+
+  it('the walk bound is 15000 ms', () => {
+    expect(RELAY_WALK_PAGE_TIMEOUT_MS).toBe(15000);
+  });
+
+  // A walk has a deadline under the browser's 30s abort, so the worker answers
+  // (502) rather than starting relay queries nobody will read. The last page's
+  // timeout is clamped to the time left.
+  describe('walk deadline', () => {
+    const PAGE = [{ id: 'p1', created_at: 100 }];
+
+    it('is 25000 ms, under the 30s client bound', () => {
+      expect(RELAY_WALK_DEADLINE_MS).toBe(25000);
+    });
+
+    it('two slow pages fail at the deadline and no third request is issued', async () => {
+      vi.useFakeTimers();
+      const sockets = vi.spyOn(globalThis, 'WebSocket');
+      const fetchPage = relayPageFetcher<{ id: string; created_at: number }>('wss://relay.test', { kinds: [1984] }, 1);
+
+      const relay1 = scriptedRelay();
+      const first = fetchPage(undefined);
+      await settle(0);
+      await relay1.ready;
+      await settle(14000);
+      relay1.message(['EVENT', relay1.subId, PAGE[0]]);
+      relay1.message(['EOSE', relay1.subId]);
+      expect(await first).toEqual(PAGE);
+
+      // 11s left: the second page is clamped from 15s to 11s.
+      const relay2 = scriptedRelay();
+      const second = fetchPage(100).then(() => 'resolved', (e: Error) => e.message);
+      await settle(0);
+      await relay2.ready;
+      await settle(10999);
+      let early = false;
+      void second.then(() => { early = true; });
+      await settle(0);
+      expect(early).toBe(false);
+      await settle(1);
+      expect(await second).toMatch(/timed out before EOSE/);
+
+      // Past the deadline a further page never reaches the relay.
+      const calls = sockets.mock.calls.length;
+      await expect(fetchPage(99)).rejects.toThrow(/timed out/);
+      expect(sockets.mock.calls.length).toBe(calls);
+    });
+
+    // Minimum relay load: a page given almost no time would start a query the
+    // worker cannot wait for, which the relay then runs to completion anyway.
+    describe('walk floor', () => {
+      it('is 3000 ms', () => {
+        expect(RELAY_WALK_MIN_PAGE_MS).toBe(3000);
+      });
+
+      // Spends the walk's first two pages (14s, then `secondAt`) so that
+      // 25000 - 14000 - secondAt is what is left for the third.
+      async function spendTo(fetchPage: (until: number | undefined) => Promise<unknown>, secondAt: number) {
+        for (const [at, until] of [[14000, undefined], [secondAt, 100]] as const) {
+          const relay = scriptedRelay();
+          const p = fetchPage(until);
+          await settle(0);
+          await relay.ready;
+          await settle(at);
+          relay.message(['EVENT', relay.subId, PAGE[0]]);
+          relay.message(['EOSE', relay.subId]);
+          await p;
+        }
+      }
+
+      it('opens no socket when under 3000 ms are left (2.9s)', async () => {
+        vi.useFakeTimers();
+        const sockets = vi.spyOn(globalThis, 'WebSocket');
+        const fetchPage = relayPageFetcher<{ id: string; created_at: number }>('wss://relay.test', { kinds: [1984] }, 1);
+        await spendTo(fetchPage, 8100);
+        const opened = sockets.mock.calls.length;
+        await expect(fetchPage(99)).rejects.toThrow(/timed out before EOSE/);
+        expect(sockets.mock.calls.length).toBe(opened);
+      });
+
+      it('sends a request clamped to the time left when 3100 ms are left', async () => {
+        vi.useFakeTimers();
+        const fetchPage = relayPageFetcher<{ id: string; created_at: number }>('wss://relay.test', { kinds: [1984] }, 1);
+        await spendTo(fetchPage, 7900);
+        const relay = scriptedRelay();
+        const third = fetchPage(99).then(() => 'resolved', (e: Error) => e.message);
+        await settle(0);
+        await relay.ready; // REQ sent
+        let early = false;
+        void third.then(() => { early = true; });
+        await settle(3099);
+        expect(early).toBe(false);
+        await settle(1);
+        expect(await third).toMatch(/timed out before EOSE/);
+      });
+    });
+
+    it('a walk that finishes under the deadline is unaffected', async () => {
+      vi.useFakeTimers();
+      const fetchPage = relayPageFetcher<{ id: string; created_at: number }>('wss://relay.test', { kinds: [1984] }, 1);
+      for (const at of [10000, 10000]) {
+        const relay = scriptedRelay();
+        const p = fetchPage(undefined);
+        await settle(0);
+        await relay.ready;
+        await settle(at);
+        relay.message(['EVENT', relay.subId, PAGE[0]]);
+        relay.message(['EOSE', relay.subId]);
+        expect(await p).toEqual(PAGE);
+      }
+    });
   });
 });

@@ -189,10 +189,9 @@ function buildReadApi(apiUrl: string, relayUrl: string) {
     // Info
     getWorkerInfo: () => adminApi.getWorkerInfo(apiUrl),
 
-    // opts threads a per-call timeout through. The reports queue's resolution
-    // reads, and every read of the relay lists through useRelayBanLists, pass
-    // RESOLUTION_READ_TIMEOUT_MS; other callers omit it and keep the default
-    // (#221).
+    // useRelayBanLists passes RESOLUTION_READ_TIMEOUT_MS for the queue and
+    // other screens sharing these cache entries. Callers without an override
+    // keep the API default (#221).
     listBannedPubkeys: (opts?: { timeoutMs?: number }) =>
       adminApi.listBannedPubkeys(apiUrl, opts),
     listBannedEvents: (opts?: { timeoutMs?: number }) =>

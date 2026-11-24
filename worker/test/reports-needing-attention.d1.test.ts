@@ -3,6 +3,7 @@
 // through injected inputs; this is the only place the relay filter's `limit`,
 // the pager, the D1 projections and the label walk meet.
 import { Miniflare } from 'miniflare';
+import { getPublicKey, nip19 } from 'nostr-tools';
 import { describe, it, expect, beforeAll, afterAll, beforeEach, afterEach, vi } from 'vitest';
 import { ensureSchema } from '../src/db';
 import worker from '../src/index';
@@ -39,8 +40,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-type RelayEvent = { id: string; created_at: number; kind: number; tags: string[][] };
-type SeenFilter = { kinds?: number[]; limit?: number; until?: number; '#e'?: string[]; '#p'?: string[] };
+type RelayEvent = { id: string; pubkey?: string; created_at: number; kind: number; tags: string[][] };
+type SeenFilter = { kinds?: number[]; authors?: string[]; limit?: number; until?: number; '#e'?: string[]; '#p'?: string[] };
 
 // A relay honouring kinds, #e, #p, limit and until (inclusive) over a fixed
 // corpus, recording every filter it was sent. `closeKind` makes every read of
@@ -67,6 +68,7 @@ function stubRelay(corpus: RelayEvent[], opts: { closeKind?: number } = {}) {
       }
       const matches = sorted.filter(e =>
         (!filter.kinds || filter.kinds.includes(e.kind))
+        && (!filter.authors || (e.pubkey !== undefined && filter.authors.includes(e.pubkey)))
         && (filter.until === undefined || e.created_at <= filter.until)
         && (!filter['#e'] || e.tags.some(t => t[0] === 'e' && filter['#e']!.includes(t[1])))
         && (!filter['#p'] || e.tags.some(t => t[0] === 'p' && filter['#p']!.includes(t[1]))));
@@ -85,10 +87,13 @@ function stubRelay(corpus: RelayEvent[], opts: { closeKind?: number } = {}) {
   return filters;
 }
 
+// The worker's own key: only labels it signed count as resolutions.
+const TEST_NSEC = 'nsec1vl029mgpspedva04g90vltkh6fvh240zqtv9k0t9af8935ke9laqsnlfe5';
+const LABEL_SIGNER = getPublicKey(nip19.decode(TEST_NSEC).data as Uint8Array);
 const id = (n: number) => n.toString(16).padStart(64, '0');
 const report = (n: number, createdAt: number, tags: string[][]): RelayEvent => ({ id: id(n), created_at: createdAt, kind: 1984, tags });
-const label = (n: number, createdAt: number, target: string[]): RelayEvent => ({
-  id: id(1_000_000 + n), created_at: createdAt, kind: 1985,
+const label = (n: number, createdAt: number, target: string[], signer = LABEL_SIGNER): RelayEvent => ({
+  id: id(1_000_000 + n), pubkey: signer, created_at: createdAt, kind: 1985,
   tags: [['L', 'moderation/resolution'], ['l', 'resolved', 'moderation/resolution'], target],
 });
 
@@ -110,17 +115,18 @@ async function arrived(reportId: string, seenAt: number) {
   await DB.prepare('INSERT INTO report_arrivals (report_id, first_seen_at) VALUES (?, ?)').bind(reportId, seenAt).run();
 }
 
-function env(withDb = true) {
+function env(withDb = true, withKey = true) {
   return {
     ALLOWED_ORIGINS: 'https://app.divine.video',
     RELAY_URL: 'wss://relay.divine.video',
     ADMIN_API_KEY: 'test-admin-key',
+    ...(withKey ? { NOSTR_NSEC: TEST_NSEC } : {}),
     ...(withDb ? { DB } : {}),
   } as never;
 }
 
-async function get(path: string, withDb = true) {
-  return worker.fetch(new Request(`https://api.example${path}`, { headers: { 'X-Admin-Key': 'test-admin-key' } }), env(withDb), ctx);
+async function get(path: string, withDb = true, withKey = true) {
+  return worker.fetch(new Request(`https://api.example${path}`, { headers: { 'X-Admin-Key': 'test-admin-key' } }), env(withDb, withKey), ctx);
 }
 
 const E = (n: number) => 'e'.repeat(63) + n.toString(16);
@@ -245,11 +251,11 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
           .bind('event', E(1), 'reviewed', 'f'.repeat(64), DECIDED_AT).run();
         await brokenDb.exec('DROP TABLE report_arrivals');
 
-        const feed = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video');
+        const feed = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video', LABEL_SIGNER);
         expect(feed.status).toBe(502);
         expect(feed.body).not.toHaveProperty('events');
 
-        const history = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video');
+        const history = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video', LABEL_SIGNER);
         expect(history.status).toBe(502);
         expect(history.body).not.toHaveProperty('events');
       } finally {
@@ -319,6 +325,33 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     expect(res.status).toBe(502);
   });
 
+  // Without the worker's key no label can be verified. That is a failed label
+  // source, so it fails the request like one (#221) rather than answering with
+  // no resolutions.
+  it('fails the request when the worker signing key cannot be resolved', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const filters = stubRelay([report(1, 100, [['e', E(1)]])]);
+    const res = await get('/api/reports?needs_attention=1', true, false);
+    expect(res.status).toBe(502);
+    expect((await res.json() as { success: boolean }).success).toBe(false);
+    // Fails before any relay walk or D1 read: no work for an answer that is
+    // known. Let a socket opened by a late walk send before checking.
+    await new Promise(r => setTimeout(r, 20));
+    expect(filters).toHaveLength(0);
+  });
+
+  // The relay is asked for the worker's labels only; this also holds against a
+  // relay that hands back a foreign one (the stub honours `authors`, and the
+  // reducer re-checks, so the case is covered at both layers).
+  it('keeps a report in the queue when its target carries a resolution label from another key', async () => {
+    stubRelay([
+      report(1, 100, [['e', E(1)]]),
+      label(1, 150, ['e', E(1)], 'f'.repeat(64)),
+    ]);
+    const body = await (await get('/api/reports?needs_attention=1')).json() as { events: RelayEvent[] };
+    expect(body.events.map(e => e.id)).toEqual([id(1)]);
+  });
+
   it('refuses to answer without the database rather than returning an unfiltered set', async () => {
     stubRelay([report(1, 100, [['e', E(1)]])]);
     const res = await get('/api/reports?needs_attention=1', false);
@@ -352,6 +385,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
           ALLOWED_ORIGINS: 'https://app.divine.video',
           RELAY_URL: 'wss://relay.divine.video',
           ADMIN_API_KEY: 'test-admin-key',
+          NOSTR_NSEC: TEST_NSEC,
           DB: freshDb,
         } as never,
         ctx,
@@ -382,7 +416,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
       await ensureSchema(brokenDb);
       await brokenDb.exec('DROP TABLE moderation_decisions');
 
-      const { status, body } = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video');
+      const { status, body } = await getReportsNeedingAttention(brokenDb, 'wss://relay.divine.video', LABEL_SIGNER);
       expect(status).not.toBe(200);
       expect((body as { success: boolean }).success).toBe(false);
       expect(body).not.toHaveProperty('events');
@@ -404,7 +438,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
       },
     });
 
-    const { status } = await getReportsNeedingAttention(counting, 'wss://relay.divine.video');
+    const { status } = await getReportsNeedingAttention(counting, 'wss://relay.divine.video', LABEL_SIGNER);
 
     expect(status).toBe(200);
     expect(sql.filter(q => /FROM moderation_decisions/.test(q) && /action NOT IN/.test(q))).toHaveLength(1);
@@ -420,7 +454,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
         report(3, 98, [['e', E(3)]]),
       ]);
 
-      const { body } = await getReportsNeedingAttention(DB, 'wss://relay.divine.video', {
+      const { body } = await getReportsNeedingAttention(DB, 'wss://relay.divine.video', LABEL_SIGNER, {
         reportsPaging: { pageSize: 2, maxPages: 1 },
       });
 
@@ -437,7 +471,7 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
         label(2, 49, ['e', E(3)]),
       ]);
 
-      const { body } = await getReportsNeedingAttention(DB, 'wss://relay.divine.video', {
+      const { body } = await getReportsNeedingAttention(DB, 'wss://relay.divine.video', LABEL_SIGNER, {
         labelsPaging: { pageSize: 1, maxPages: 1 },
       });
 
@@ -543,6 +577,14 @@ describe('GET /api/reports single-target lookups', () => {
 });
 
 describe('GET /api/reports/resolved', () => {
+  it('fails the request, before any relay query, when the worker signing key cannot be resolved', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const filters = stubRelay([report(1, 100, [['e', E(1)]])]);
+    expect((await get('/api/reports/resolved', true, false)).status).toBe(502);
+    await new Promise(r => setTimeout(r, 20));
+    expect(filters).toHaveLength(0);
+  });
+
   it('returns only reports the worker resolved, and a cursor when the page was full', async () => {
     stubRelay([
       report(1, 100, [['e', E(1)]]),   // resolved by a decision
@@ -649,7 +691,7 @@ describe('GET /api/reports/resolved', () => {
       await ensureSchema(brokenDb);
       await brokenDb.exec('DROP TABLE moderation_decisions');
 
-      const { status, body } = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video');
+      const { status, body } = await getResolvedReportsPage(new URLSearchParams(), brokenDb, 'wss://relay.divine.video', LABEL_SIGNER);
       expect(status).not.toBe(200);
       expect((body as { success: boolean }).success).toBe(false);
       expect(body).not.toHaveProperty('events');
@@ -718,7 +760,7 @@ describe('GET /api/reports/resolved', () => {
     ]);
 
     const { body } = await getResolvedReportsPage(
-      new URLSearchParams(), DB, 'wss://relay.divine.video', { pageSize: 1, maxPages: 1 },
+      new URLSearchParams(), DB, 'wss://relay.divine.video', LABEL_SIGNER, { pageSize: 1, maxPages: 1 },
     );
 
     expect((body as { resolution_truncated: boolean }).resolution_truncated).toBe(true);
