@@ -1245,6 +1245,57 @@ describe('the blocked pane Retry waits for the feed it re-ran', () => {
   });
 });
 
+describe('a second Retry joins the feed walk already running', () => {
+  it('issues no new feed request while one is in flight', async () => {
+    // A cancelRefetch restart only applies to a query that has data, so the feed
+    // here has reports and a failed refresh (a warm error), which Retry re-runs.
+    stubFetch({ labels: 'empty', bannedPubkeys: 'empty', bannedEvents: 'empty', decisions: 'empty' });
+    const healthy = globalThis.fetch as unknown as typeof fetch;
+    let release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    let feedCalls = 0;
+    let labelsFail = false;
+    vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = String(input instanceof Request ? input.url : input);
+      if (url.includes('needs_attention')) {
+        feedCalls += 1;
+        // 1: healthy first read. 2: the refresh that fails. 3+: Retry, held.
+        if (feedCalls === 2) return jsonResponse({ success: false, error: 'relay timed out' }, 502);
+        if (feedCalls >= 3) { await gate; return jsonResponse({ success: false, error: 'relay timed out' }, 502); }
+      }
+      if (labelsFail && url.includes('/api/resolution-label-targets')) {
+        return jsonResponse({ success: false, error: 'relay timed out' }, 502);
+      }
+      return healthy(input, init);
+    }));
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+    renderReports(client);
+    await screen.findByText(REPORTED_NPUB);
+
+    labelsFail = true;
+    client.removeQueries({ queryKey: ['resolution-label-targets'] });
+    await act(async () => { await client.refetchQueries({ queryKey: ['reports'] }); });
+    expect(client.getQueryData(['reports', RELAY_URL])).toBeTruthy();
+    expect(client.getQueryState(['reports', RELAY_URL])?.error).toBeTruthy();
+
+    const retry = await screen.findByRole('button', { name: /^retry$/i });
+    await act(async () => { retry.click(); });
+    await waitFor(() => expect(feedCalls).toBe(3));
+    await waitFor(() => expect(retry).toBeDisabled());
+
+    // A second Retry that gets past the disabled button (a click queued before
+    // React rendered it disabled): call the handler itself. It must join the
+    // feed walk in flight rather than cancel it and start another.
+    const propsKey = Object.keys(retry).find(key => key.startsWith('__reactProps'))!;
+    const onClick = (retry as unknown as Record<string, { onClick: () => void }>)[propsKey].onClick;
+    await act(async () => { onClick(); });
+    await new Promise(resolve => setTimeout(resolve, 20));
+
+    expect(feedCalls).toBe(3);
+    await act(async () => { release(); });
+  });
+});
+
 describe('a window focus does not start another walk of a failed read', () => {
   async function focusWindow() {
     await act(async () => {
