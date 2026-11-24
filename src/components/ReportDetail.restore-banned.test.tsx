@@ -379,7 +379,12 @@ describe('ReportDetail after a restore', () => {
     fireEvent.click(screen.getByRole('button', { name: button }));
     await waitFor(() => expect(relay.bannedReads).toBe(3));
     await act(async () => { release(); });
-    expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
+    await waitFor(() => expect(client.getQueryState(bannedEventQueryKey(API_URL, EVENT_ID))).toMatchObject({
+      data: POST,
+      fetchStatus: 'idle',
+      isInvalidated: false,
+    }));
+    expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
   });
 
   it('finishes refreshing a restored post when a bulk delete of another kind completes', async () => {
