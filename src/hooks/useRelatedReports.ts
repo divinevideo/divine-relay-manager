@@ -38,6 +38,8 @@ export function useRelatedReports(
     // deadline), a retry would re-run it while the relay is still running the
     // abandoned one, and the card's Try again is the recovery.
     retry: false,
+    // Preserve focus refresh for stale counts, but leave a failed walk alone.
+    refetchOnWindowFocus: query => query.state.status !== 'error',
     // The app default is Infinity, and each entry can be a read of tens of
     // thousands of reports. Keep an account's read for a few minutes, not for
     // every account the moderator ever opened.

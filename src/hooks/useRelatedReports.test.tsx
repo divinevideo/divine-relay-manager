@@ -1,10 +1,10 @@
 // ABOUTME: Pins that the Related Reports split is not recomputed when only the identity of
 // ABOUTME: the target object changes: the pane rebuilds it on every render.
 
-import { renderHook, waitFor } from '@testing-library/react';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, renderHook, waitFor } from '@testing-library/react';
+import { QueryClient, QueryClientProvider, focusManager } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useRelatedReports } from './useRelatedReports';
 
 const split = vi.hoisted(() => vi.fn());
@@ -27,12 +27,12 @@ vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { apiUrl: 'https://api.example' } }),
 }));
 
-describe('useRelatedReports', () => {
-  beforeEach(() => {
-    fetchByTarget.mockReset();
-    fetchByTarget.mockResolvedValue({ events: [], truncated: false });
-  });
+beforeEach(() => {
+  fetchByTarget.mockReset();
+  fetchByTarget.mockResolvedValue({ events: [], truncated: false });
+});
 
+describe('useRelatedReports', () => {
   it('does not split the read again for an equal target that is a new object', async () => {
     const client = new QueryClient();
     const wrapper = ({ children }: { children: ReactNode }) => (
@@ -57,9 +57,11 @@ describe('useRelatedReports', () => {
 // recovery. The client inherits React Query's default retry, so removing
 // `retry: false` from the hook makes this go red.
 describe('useRelatedReports does not retry a failed read', () => {
-  it('asks the worker once', async () => {
+  afterEach(() => focusManager.setFocused(undefined));
+
+  it('asks the worker once, even when the tab regains focus', async () => {
     fetchByTarget.mockRejectedValue(new Error('relay timed out'));
-    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0 } } });
+    const client = new QueryClient({ defaultOptions: { queries: { retryDelay: 0, refetchOnWindowFocus: true } } });
     const wrapper = ({ children }: { children: ReactNode }) => (
       <QueryClientProvider client={client}>{children}</QueryClientProvider>
     );
@@ -68,9 +70,12 @@ describe('useRelatedReports does not retry a failed read', () => {
       { wrapper },
     );
     await waitFor(() => expect(result.current.status).toBe('error'));
-    await new Promise(resolve => setTimeout(resolve, 50));
-    // Only this test's account: an earlier test's client can still be settling.
-    const mine = fetchByTarget.mock.calls.filter(([t]) => t.pubkey === 'e'.repeat(64));
-    expect(mine).toHaveLength(1);
+    expect(fetchByTarget).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      focusManager.setFocused(false);
+      focusManager.setFocused(true);
+    });
+    expect(fetchByTarget).toHaveBeenCalledTimes(1);
   });
 });
