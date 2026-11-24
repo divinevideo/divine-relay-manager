@@ -258,17 +258,14 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     rereadPost(eventId);
   };
 
-  // A read started before a ban can still answer "not banned". Cancel it and
-  // refresh active reads that have no post. Keep any displayed post and its
-  // media until the next normal read, since the worker can refuse a refresh.
+  // A read started before a ban can still answer "not banned". Cancel and
+  // refresh reads that have no post. Mark displayed posts stale, and let any
+  // refresh of them that's already running finish.
   const refreshBannedEventReads = (filters: Pick<QueryFilters, 'queryKey' | 'exact'>) => {
-    void queryClient.cancelQueries(filters).then(() => {
+    const withoutPost: QueryFilters = { ...filters, predicate: query => query.state.data == null };
+    void queryClient.cancelQueries(withoutPost).then(() => {
       void queryClient.invalidateQueries({ ...filters, refetchType: 'none' });
-      return queryClient.refetchQueries({
-        ...filters,
-        type: 'active',
-        predicate: query => query.state.data == null,
-      });
+      return queryClient.refetchQueries({ ...withoutPost, type: 'active' });
     });
   };
 

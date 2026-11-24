@@ -347,6 +347,20 @@ describe('ReportDetail after a restore', () => {
     expect(screen.getByText('the reported post')).toBeInTheDocument();
   });
 
+  it.each(['Ban Event', 'Delete All Content', 'Bulk delete by kind'])('%s lets an existing refresh of the banned post finish', async (button) => {
+    await openOnBannedPost();
+    let release!: () => void;
+    relay.hold = new Promise(resolve => { release = resolve; });
+    const queryKey = bannedEventQueryKey(API_URL, EVENT_ID);
+    const refresh = client.refetchQueries({ queryKey });
+    await waitFor(() => expect(relay.bannedReads).toBe(2));
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: button })); });
+    await act(async () => { release(); await refresh; });
+    expect(client.getQueryData(queryKey)).toBeNull();
+    await waitFor(() => expect(screen.queryByText(BANNED_VIEW)).not.toBeInTheDocument());
+  });
+
   // A first read still out when the Ban finishes started before it. It is
   // replaced, not joined, so its "not banned" does not land as the answer.
   it.each(['Ban Event', 'Delete All Content', 'Bulk delete by kind'])('%s replaces a first banned-event read still out', async (button) => {
