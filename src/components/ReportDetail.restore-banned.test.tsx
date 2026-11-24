@@ -9,6 +9,7 @@ import type { ReactElement } from 'react';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 import { moderationStatusMock } from '@/test/moderationStatusMock';
+import type { UserActionChange } from './UserActions';
 
 const REPORTED_PUBKEY = 'd'.repeat(64);
 const MOD_PUBKEY = 'e'.repeat(64);
@@ -103,10 +104,12 @@ vi.mock('@/hooks/useMediaStatus', () => ({ useMediaStatus: () => ({ results: [] 
 vi.mock('@/hooks/useAuthor', () => ({ useAuthor: () => ({ data: undefined, isLoading: false }) }));
 vi.mock('@/hooks/useUserStats', () => ({ useUserStats: () => ({ data: undefined, isLoading: false, error: null }) }));
 
-// A bulk job finishing, as UserActions reports it: no account status changed.
 vi.mock('@/components/UserActions', () => ({
-  UserActions: ({ onActionComplete }: { onActionComplete?: (c: { accountStatusChanged: false }) => void }) => (
-    <button onClick={() => onActionComplete?.({ accountStatusChanged: false })}>Delete All Content</button>
+  UserActions: ({ onActionComplete }: { onActionComplete?: (c: UserActionChange) => void }) => (
+    <>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: false, action: 'delete-all' })}>Delete All Content</button>
+      <button onClick={() => onActionComplete?.({ accountStatusChanged: false })}>Age Restrict All</button>
+    </>
   ),
 }));
 // A recent post with a delete button, as UserProfileCard lists it.
@@ -316,7 +319,7 @@ describe('ReportDetail after a restore', () => {
   // A restore whose thread read still misses leaves the body on "missing", with
   // the fresh "not banned" cached. A re-Ban reads it again at once: the cached
   // null is no banned view that a refused read could blank.
-  it('Restore Event then Ban, with the thread still missing the post: the banned view comes back at once', async () => {
+  it.each(['Ban Event', 'Delete All Content', 'Bulk delete by kind'])('Restore Event then %s: the banned view comes back even if the thread still misses the post', async (button) => {
     await openOnBannedPost();
     relay.post = undefined;
     fireEvent.click(screen.getByRole('button', { name: 'Restore Event' }));
@@ -324,7 +327,7 @@ describe('ReportDetail after a restore', () => {
     await waitFor(() => expect(screen.queryByText(BANNED_VIEW)).not.toBeInTheDocument());
 
     relay.banned = POST;
-    fireEvent.click(screen.getByRole('button', { name: 'Ban Event' }));
+    fireEvent.click(screen.getByRole('button', { name: button }));
     expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
     expect(relay.bannedReads).toBe(3);
   });
@@ -335,7 +338,7 @@ describe('ReportDetail after a restore', () => {
     await openOnBannedPost();
     relay.post = undefined;
     fireEvent.click(screen.getByRole('button', { name: button }));
-    await act(async () => { await new Promise(resolve => setTimeout(resolve, 50)); });
+    await waitFor(() => expect(client.getQueryState(['banned-event', EVENT_ID])?.isInvalidated).toBe(true));
     expect(relay.bannedReads).toBe(1);
     expect(screen.getByText(BANNED_VIEW)).toBeInTheDocument();
     expect(screen.getByText('the reported post')).toBeInTheDocument();
@@ -343,7 +346,7 @@ describe('ReportDetail after a restore', () => {
 
   // A first read still out when the Ban finishes started before it. It is
   // replaced, not joined, so its "not banned" does not land as the answer.
-  it('Ban: replaces a first banned-event read still out', async () => {
+  it.each(['Ban Event', 'Delete All Content', 'Bulk delete by kind'])('%s replaces a first banned-event read still out', async (button) => {
     let release!: () => void;
     relay.hold = new Promise(resolve => { release = resolve; });
     client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
@@ -354,10 +357,18 @@ describe('ReportDetail after a restore', () => {
     );
     await waitFor(() => expect(relay.bannedReads).toBe(1));
     relay.banned = POST;
-    fireEvent.click(screen.getByRole('button', { name: 'Ban Event' }));
+    fireEvent.click(screen.getByRole('button', { name: button }));
     await waitFor(() => expect(relay.bannedReads).toBe(2));
     await act(async () => { release(); });
     expect(await screen.findByText(BANNED_VIEW)).toBeInTheDocument();
+  });
+
+  it('Age Restrict All leaves the banned-event read fresh', async () => {
+    await openOnBannedPost();
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Age Restrict All' })); });
+    expect(recheck.fn).toHaveBeenCalledTimes(1);
+    expect(client.getQueryState(['banned-event', EVENT_ID])?.isInvalidated).toBe(false);
+    expect(relay.bannedReads).toBe(1);
   });
 
   // An Undo restores a recent post, which can be another than the report's.

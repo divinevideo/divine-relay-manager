@@ -264,29 +264,27 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
     rereadPost(eventId);
   };
 
-  // After a post Ban, a read cached before it, such as the "not banned" a
-  // restore just read, must not answer for the next five minutes. With a
-  // banned post in the read, it is marked stale and not fetched: while the
-  // banned view shows, a read right after the Ban can be refused (a suspended
-  // author, or suspension status unavailable) and would blank the post and its
-  // media. With no banned post in it (no data yet, or a cached "not banned"
-  // under a body that says the post is missing), it is read at once. A first
-  // read still out started before the Ban and would be joined, so it is
-  // cancelled and read again. For the post that was banned, which is not the
-  // open report's once the moderator has moved on. EventActions' Ban, Delete
-  // and Delete & Media name it (even when the media then failed), and so does
-  // the recent-post Delete below.
+  // A read started before a ban can still answer "not banned". Cancel it and
+  // refresh active reads that have no post. Keep any displayed post and its
+  // media until the next normal read, since the worker can refuse a refresh.
+  const refreshBannedEventReads = (filters: QueryFilters) => {
+    void queryClient.cancelQueries(filters).then(() => {
+      void queryClient.invalidateQueries({ ...filters, refetchType: 'none' });
+      return queryClient.refetchQueries({
+        ...filters,
+        type: 'active',
+        predicate: query => query.state.data == null,
+      });
+    });
+  };
+
   const markBannedEventStale = (eventId: string) => {
-    const filters: QueryFilters = { queryKey: bannedEventQueryKey(eventId), exact: true };
-    void queryClient.cancelQueries(filters).then(() => queryClient.invalidateQueries({
-      ...filters,
-      refetchType: queryClient.getQueryData(filters.queryKey!) == null ? 'active' : 'none',
-    }));
+    refreshBannedEventReads({ queryKey: bannedEventQueryKey(eventId), exact: true });
   };
   // Bulk jobs (BulkDeleteByKind, UserActions' Delete All Content) ban events
-  // the pane never learns the ids of: every cached read is marked stale.
+  // without returning their IDs to the pane.
   const markAllBannedEventsStale = () => {
-    queryClient.invalidateQueries({ queryKey: [BANNED_EVENT_KEY_ROOT], refetchType: 'none' });
+    refreshBannedEventReads({ queryKey: [BANNED_EVENT_KEY_ROOT] });
   };
 
   // Get decision history for this target
@@ -746,8 +744,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
 
   // Every action in the pane lands here. Only UserActions' ban, unban, suspend
   // and unsuspend change the account's status, and it says so. The rest (post,
-  // media and bulk content actions, through EventActions, BulkDeleteByKind,
-  // UserActions' bulk jobs and the delete below) call it with no change.
+  // media and bulk content actions) preserve the account status. Delete All
+  // Content identifies itself so the pane can refresh banned-event reads.
   const handleActionComplete = (change?: UserActionChange) => {
     queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
@@ -796,9 +794,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // UserActions drops the acted-on account's authored-content reads itself
       // (and opens the restore window after an unsuspend).
     } else {
-      // UserActions' bulk jobs finish here with `accountStatusChanged: false`
-      // (EventActions and BulkDeleteByKind pass nothing, and mark their own).
-      if (change) markAllBannedEventsStale();
+      if (change?.action === 'delete-all') markAllBannedEventsStale();
       queryClient.invalidateQueries({ queryKey: userStatsQueryKey(config.relayUrl, context.reportedUser.pubkey) });
       // A content action leaves the account status as it was, so the previous
       // answer stands while the check runs.

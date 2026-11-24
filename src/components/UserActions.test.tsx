@@ -983,11 +983,20 @@ describe('UserActions', () => {
       await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: true, pubkey: PUBKEY, action: 'unban' }));
     });
 
-    it('after a bulk content action, which leaves the account as it was', async () => {
+    it('after Age Restrict All, which leaves the account as it was', async () => {
       const onActionComplete = vi.fn();
       renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
       fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
       await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: false }));
+    });
+
+    it('reports Delete All Content even when some deletions failed', async () => {
+      api.getBulkJobStatus.mockResolvedValue(doneJob('delete-all', { failures: ['event:relay down'] }));
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+      fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: false, action: 'delete-all' }));
     });
   });
 

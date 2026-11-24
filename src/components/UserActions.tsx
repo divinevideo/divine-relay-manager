@@ -93,7 +93,8 @@ interface AccountActionTarget {
  * unban, suspend or unsuspend; the bulk content actions leave the account's
  * status as it was, and so does a Change end date the worker refused because
  * the account is banned or no longer suspended (sent so the host re-reads the
- * status it shows). `pubkey` is the account the action was taken on and
+ * status it shows). Delete All Content also identifies itself so callers can
+ * refresh event ban status. `pubkey` is the account the action was taken on and
  * `reportTarget` the report it was taken from, both captured when it started:
  * TanStack hands a pending mutation the latest render's callbacks, so a value
  * read at completion is whatever is on screen by then, not the one acted on.
@@ -109,7 +110,7 @@ interface AccountActionTarget {
 // usually purged the posts, so "posts can take a few minutes to reappear"
 // would mislead.
 export type UserActionChange =
-  | { accountStatusChanged: false }
+  | { accountStatusChanged: false; action?: 'delete-all' }
   | (AccountActionTarget & { accountStatusChanged: true; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' });
 
 // Only the account and report a change reports, not the action's other
@@ -386,7 +387,9 @@ export function UserActions({
           reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
         }))
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
-      onActionComplete?.({ accountStatusChanged: false });
+      onActionComplete?.(job.action === 'delete-all'
+        ? { accountStatusChanged: false, action: 'delete-all' }
+        : { accountStatusChanged: false });
     },
     onError: (error, target) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
