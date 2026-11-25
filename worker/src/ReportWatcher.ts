@@ -102,6 +102,12 @@ export interface ReportWatcherStatus {
   eventsAutoHidden: number;
   autoHideEnabled: boolean;
   reconnectAttempts: number;
+  /**
+   * Epoch milliseconds (like connectedAt) of the last explicit /stop, or null if the watcher was never
+   * deliberately stopped (or has been started since). Lets the health check
+   * tell a deliberate stop from a watcher that was never started.
+   */
+  deliberatelyStoppedAt: number | null;
 }
 
 /**
@@ -144,14 +150,18 @@ export class ReportWatcher implements DurableObject {
   private state: DurableObjectState;
   private env: ReportWatcherEnv;
 
+  // Persisted across restarts (watcherState in storage): running, deliberatelyStoppedAt,
+  // eventsProcessed, eventsAutoHidden.
+  private running: boolean = false;
+  private deliberatelyStoppedAt: number | null = null;
+  private eventsProcessed: number = 0;
+  private eventsAutoHidden: number = 0;
+
   // Runtime state (not persisted across restarts)
   private schemaReady: boolean = false;
-  private running: boolean = false;
   private ws: WebSocket | null = null;
   private connectedAt: number | null = null;
   private lastEventAt: number | null = null;
-  private eventsProcessed: number = 0;
-  private eventsAutoHidden: number = 0;
   private reconnectAttempts: number = 0;
   private reconnectDelay: number = INITIAL_RECONNECT_DELAY_MS;
   private subscriptionId: string = 'auto-hide-reports';
@@ -171,10 +181,12 @@ export class ReportWatcher implements DurableObject {
         running: boolean;
         eventsProcessed: number;
         eventsAutoHidden: number;
+        deliberatelyStoppedAt?: number | null;
       }>('watcherState');
 
       if (stored) {
         this.running = stored.running;
+        this.deliberatelyStoppedAt = stored.deliberatelyStoppedAt ?? null;
         this.eventsProcessed = stored.eventsProcessed;
         this.eventsAutoHidden = stored.eventsAutoHidden || 0;
 
@@ -278,6 +290,7 @@ export class ReportWatcher implements DurableObject {
     }
 
     this.running = true;
+    this.deliberatelyStoppedAt = null;
 
     // Persist state
     await this.persistState();
@@ -305,6 +318,12 @@ export class ReportWatcher implements DurableObject {
    */
   private async handleStop(): Promise<Response> {
     if (!this.running) {
+      // Stopping an already-stopped watcher is still a deliberate stop (e.g. it
+      // was never started), but keep the original time if one is recorded.
+      if (this.deliberatelyStoppedAt === null) {
+        this.deliberatelyStoppedAt = Date.now();
+        await this.persistState();
+      }
       return new Response(JSON.stringify({
         success: true,
         message: 'Already stopped',
@@ -316,6 +335,7 @@ export class ReportWatcher implements DurableObject {
     }
 
     this.running = false;
+    this.deliberatelyStoppedAt = Date.now();
     this.disconnect();
 
     // Persist state
@@ -685,6 +705,7 @@ export class ReportWatcher implements DurableObject {
       eventsAutoHidden: this.eventsAutoHidden,
       autoHideEnabled: this.autoHideConfig?.enabled ?? false,
       reconnectAttempts: this.reconnectAttempts,
+      deliberatelyStoppedAt: this.deliberatelyStoppedAt,
     };
   }
 
@@ -696,6 +717,7 @@ export class ReportWatcher implements DurableObject {
       running: this.running,
       eventsProcessed: this.eventsProcessed,
       eventsAutoHidden: this.eventsAutoHidden,
+      deliberatelyStoppedAt: this.deliberatelyStoppedAt,
     });
   }
 

@@ -2,9 +2,34 @@
 #
 # Polls staging and production ReportWatcher Durable Objects every 15 min and,
 # on repeated failure, notifies two ways (matching the sibling
-# minor-review-endpoint-health workflow): it fails the run so GitHub emails the
-# watchers, and it posts to #divine-alerts via Slack (same channel as GKE
+# minor-review-endpoint-health workflow): it fails the run so GitHub emails
+# the user who last modified this workflow's cron schedule (GitHub's rule for
+# scheduled-workflow failures), and it posts to #divine-alerts via Slack (same channel as GKE
 # alerting). Its job is reliable detection, diagnosis, and alerting.
+#
+# A deliberate stop sticks. /stop (the engineer's way to halt report intake and
+# auto-hide; the DO's alarm still runs sexual-quarantine case recovery while
+# stopped) makes the DO record deliberatelyStoppedAt (epoch milliseconds) in its
+# status. When that is set and running is false, this workflow does
+# not POST /start and does not count the check as a failure; the run only logs a
+# ::notice:: with the environment and stop time (UTC), except for the email
+# reminders described next. It stays that way until someone POSTs /start, which
+# clears the marker. A watcher that is not running
+# with no marker (never started) is still treated as unhealthy, and a status
+# without the field (older worker) counts as not deliberately stopped.
+#
+# In production only, a forgotten stop is surfaced by email, not Slack: the run
+# goes red (GitHub emails the person who last edited this workflow's schedule,
+# per GitHub's scheduled-workflow notification rule;
+# wider routing is a separate follow-up) the first time a given
+# stop is seen, identified by its
+# deliberatelyStoppedAt value, and again once every 24 h while that same stop
+# persists. Every other run during the stop passes with the ::notice::. The
+# state is one repo variable (RW_STOP_ALERTED_PRODUCTION,
+# "<stoppedAtMs>:<alertedAtMs>", same PAT as RW_FAILS_*), superseded by a new stop and deleted once the watcher is seen
+# running. Staging never fails the run or writes a reminder variable over a
+# deliberate stop; it only emits the ::notice::. A stop never counts toward the
+# consecutive-failure Slack alert.
 #
 # Recovery is best-effort only. On an unhealthy check it POSTs /start, but the
 # DO's /start is a no-op when it already believes it is running (the common
@@ -56,6 +81,8 @@
 #   2. Repo variables (Settings > Secrets and variables > Actions > Variables):
 #      - RW_FAILS_STAGING        -- created automatically on first run
 #      - RW_FAILS_PRODUCTION     -- created automatically on first run
+#      - RW_STOP_ALERTED_PRODUCTION -- deliberate-stop reminder state, created
+#        on the first stop and deleted when it ends (production only)
 #   3. To test manually: Actions tab > "ReportWatcher Health Check" > Run workflow
 
 name: ReportWatcher Health Check
@@ -99,6 +126,7 @@ jobs:
           - name: production
             url: https://api-relay-prod.divine.video
             fails_var: RW_FAILS_PRODUCTION
+            stop_var: RW_STOP_ALERTED_PRODUCTION
 
     steps:
       - name: Check the relay is up
@@ -181,18 +209,96 @@ jobs:
             exit 0
           }
 
-          if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
+          # A deliberate /stop halts report intake and auto-hide, so it is not a
+          # failure and must not be undone by the /start nudge. The DO records the
+          # stop time in epoch milliseconds; a missing or non-numeric field (older
+          # worker) means "not deliberately stopped". Only running exactly false
+          # counts: null or missing running stays unhealthy.
+          STOPPED_AT=$(echo "$BODY" | jq -r 'if (.status.deliberatelyStoppedAt | type) == "number" then (.status.deliberatelyStoppedAt / 1000 | floor | todate) else empty end' 2>/dev/null) || STOPPED_AT=""
+          echo "running=$RUNNING" >> "$GITHUB_OUTPUT"
+          if [ "$RUNNING" = "false" ] && [ -n "$STOPPED_AT" ]; then
+            echo "healthy=true" >> "$GITHUB_OUTPUT"
+            echo "stopped_at_ms=$(echo "$BODY" | jq -r '.status.deliberatelyStoppedAt | floor')" >> "$GITHUB_OUTPUT"
+            echo "stopped_at_utc=$STOPPED_AT" >> "$GITHUB_OUTPUT"
+            echo "::notice::ReportWatcher ${{ matrix.env.name }} was deliberately stopped at $STOPPED_AT; not restarting and not counting it as a failure. POST /api/report-watcher/start to resume."
+          elif [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
             echo "healthy=true" >> "$GITHUB_OUTPUT"
           else
             echo "healthy=false" >> "$GITHUB_OUTPUT"
           fi
           echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
 
+      # --- Remind people about a deliberate stop (fails the run, no Slack) ---
+      # A deliberate stop is not a failure and never feeds the consecutive-failure
+      # Slack alert, but a forgotten one leaves auto-hiding and automatic age-review intake off. So the
+      # run is made red (GitHub emails the person who last edited the schedule) the first time a given stop
+      # (identified by its deliberatelyStoppedAt value) is seen, and again once
+      # every 24 h while that same stop persists. Other runs just log the notice.
+      # State is one repo variable per environment holding
+      # "<stoppedAtMs>:<alertedAtMs>". A new stop value supersedes it, and the
+      # variable is deleted once a check sees the watcher running again. Without
+      # RW_HEALTH_VARS_TOKEN nothing can be tracked, so the reminder is skipped
+      # (emailing every 15 min would be noise).
+
+      - name: Track deliberate stop reminder
+        id: stop
+        if: always() && matrix.env.stop_var != '' && steps.check.outputs.running != ''
+        # Reminder bookkeeping must never block the restart nudge or the failure
+        # counting for a real outage. Kept in place (rather than moved after
+        # "Update failure count") so the decision sits next to the check it reads.
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.RW_HEALTH_VARS_TOKEN }}
+          STOP_VAR: ${{ matrix.env.stop_var }}
+          RUNNING: ${{ steps.check.outputs.running }}
+          STOPPED_AT_MS: ${{ steps.check.outputs.stopped_at_ms }}
+          STOPPED_AT_UTC: ${{ steps.check.outputs.stopped_at_utc }}
+        run: |
+          ALERT=false
+          trap 'echo "alert=$ALERT" >> "$GITHUB_OUTPUT"' EXIT
+          if [ -z "$GH_TOKEN" ]; then
+            [ -n "$STOPPED_AT_MS" ] && echo "::warning::RW_HEALTH_VARS_TOKEN not configured; cannot track the deliberate-stop reminder"
+            exit 0
+          fi
+          # Only "not found" means "no record yet" (gh 2.105 prints exactly
+          # "variable <NAME> was not found"). Any other failure (rate limit, 5xx,
+          # expired token) would look like first sight and send an early reminder
+          # that resets the 24 h clock, so skip the decision this run instead.
+          if STORED=$(gh variable get "$STOP_VAR" --repo "$GITHUB_REPOSITORY" 2>/tmp/rw-stop-err.txt); then
+            :
+          elif grep -qF "variable $STOP_VAR was not found" /tmp/rw-stop-err.txt; then
+            STORED=""
+          else
+            echo "::warning::could not read $STOP_VAR ($(tail -1 /tmp/rw-stop-err.txt)); skipping the deliberate-stop reminder this run"
+            exit 0
+          fi
+
+          if [ -z "$STOPPED_AT_MS" ]; then
+            # Only a watcher seen running clears the record; a blip or a
+            # never-started watcher must not re-arm the reminder.
+            if [ "$RUNNING" = "true" ] && [ -n "$STORED" ]; then
+              gh variable delete "$STOP_VAR" --repo "$GITHUB_REPOSITORY" || echo "::warning::failed to clear $STOP_VAR"
+            fi
+            exit 0
+          fi
+
+          NOW_MS=$(( $(date +%s) * 1000 ))
+          LAST_STOP="${STORED%%:*}"
+          LAST_ALERT="${STORED##*:}"
+          [[ "$LAST_ALERT" =~ ^[0-9]+$ ]] || LAST_ALERT=0
+          if [ "$LAST_STOP" = "$STOPPED_AT_MS" ] && [ $(( NOW_MS - LAST_ALERT )) -lt 86400000 ]; then
+            exit 0
+          fi
+          if ! gh variable set "$STOP_VAR" --repo "$GITHUB_REPOSITORY" --body "$STOPPED_AT_MS:$NOW_MS"; then
+            echo "::warning::failed to persist $STOP_VAR (check RW_HEALTH_VARS_TOKEN has Variables: read/write); the reminder may repeat every run"
+          fi
+          ALERT=true
+
       # --- Best-effort restart nudge before alerting ---
       # POSTs /start, but the DO's /start is a no-op when it already believes it
       # is running, which is the common unhealthy state. Any recovery seen in the
       # re-check window is usually the DO's own alarm reconnect. Kept because it
-      # is harmless and occasionally helps (a genuinely stopped watcher); the
+      # is harmless and occasionally helps (a watcher that is down but was not deliberately stopped); the
       # real value of this step is the post-nudge re-check that decides alerting.
 
       - name: Best-effort restart nudge
@@ -393,10 +499,29 @@ jobs:
         run: |
           echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered on re-check (best-effort /start nudge or the DO's own reconnect)"
 
+      # --- Fail the run so GitHub emails about a deliberate stop ---
+      # Red only for the first sight of a stop and once per 24 h after (see the
+      # "Track deliberate stop reminder" step). Not counted toward the Slack alert.
+      - name: Fail the run to remind about a deliberate stop
+        if: always() && steps.stop.outputs.alert == 'true'
+        env:
+          ENV_NAME: ${{ matrix.env.name }}
+          STOPPED_AT_UTC: ${{ steps.check.outputs.stopped_at_utc }}
+        run: |
+          MSG="ReportWatcher on $ENV_NAME has been deliberately stopped since $STOPPED_AT_UTC. Auto-hiding and automatic age-review intake are off until someone POSTs /api/report-watcher/start."
+          echo "::error::$MSG"
+          {
+            echo "### ReportWatcher deliberately stopped ($ENV_NAME)"
+            echo "$MSG"
+            echo
+            echo "This run is red only to remind you: on the first check that sees this stop and once every 24 hours after. It is not counted as a failure for the Slack alert."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+
       # --- Fail the run so GitHub notifies, matching the sibling health check ---
       # Red on the same condition as the Slack alert: a repeated outage (>=2
       # consecutive) or the monitor's own persistence being broken. Not on a
-      # single transient blip, so watchers are not emailed on noise.
+      # single transient blip, so there is no email on noise.
       - name: Fail the run so GitHub notifies
         if: always() && (steps.counts.outputs.alert == 'true' || steps.counts.outputs.persist_broken == 'true')
         run: exit 1

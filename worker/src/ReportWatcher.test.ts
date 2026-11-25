@@ -1202,6 +1202,71 @@ describe('ReportWatcher', () => {
     });
   });
 
+  describe('deliberate stop marker', () => {
+    const post = (path: string) => new Request(`https://do${path}`, { method: 'POST' });
+    const status = async (w: ReportWatcher) =>
+      ((await (await w.fetch(new Request('https://do/status'))).json()) as { status: ReportWatcherStatus }).status;
+    const reload = async () => {
+      const w = new ReportWatcher(mockState, mockEnv);
+      await new Promise(r => setTimeout(r, 10)); // let the constructor's storage load finish
+      return w;
+    };
+
+    afterEach(() => vi.restoreAllMocks());
+
+    it('is null for a watcher that was never started', async () => {
+      expect((await status(watcher)).deliberatelyStoppedAt).toBeNull();
+    });
+
+    it('records the stop time in milliseconds (like connectedAt) on /stop', async () => {
+      await watcher.fetch(post('/start'));
+      vi.spyOn(Date, 'now').mockReturnValue(1_795_595_801_234);
+      await watcher.fetch(post('/stop'));
+      expect((await status(watcher)).deliberatelyStoppedAt).toBe(1_795_595_801_234);
+    });
+
+    it('records a /stop sent to a watcher that was never started, and it survives a reload', async () => {
+      vi.spyOn(Date, 'now').mockReturnValue(1_795_595_801_234);
+      const res = await watcher.fetch(post('/stop'));
+      expect(((await res.json()) as { message: string }).message).toBe('Already stopped');
+      expect((await status(watcher)).deliberatelyStoppedAt).toBe(1_795_595_801_234);
+      const s = await status(await reload());
+      expect(s.running).toBe(false);
+      expect(s.deliberatelyStoppedAt).toBe(1_795_595_801_234);
+    });
+
+    it('keeps the original stop time when /stop is repeated', async () => {
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_795_595_801_000);
+      await watcher.fetch(post('/start'));
+      await watcher.fetch(post('/stop'));
+      now.mockReturnValue(1_795_595_999_000);
+      await watcher.fetch(post('/stop'));
+      expect((await status(watcher)).deliberatelyStoppedAt).toBe(1_795_595_801_000);
+    });
+
+    it('clears the marker on /start', async () => {
+      await watcher.fetch(post('/start'));
+      await watcher.fetch(post('/stop'));
+      await watcher.fetch(post('/start'));
+      expect((await status(watcher)).deliberatelyStoppedAt).toBeNull();
+    });
+
+    it('survives a reload of the Durable Object', async () => {
+      await watcher.fetch(post('/start'));
+      await watcher.fetch(post('/stop'));
+      const at = (await status(watcher)).deliberatelyStoppedAt;
+      expect(at).not.toBeNull();
+      const s = await status(await reload());
+      expect(s.running).toBe(false);
+      expect(s.deliberatelyStoppedAt).toBe(at);
+    });
+
+    it('treats legacy stored state without the field as not deliberately stopped', async () => {
+      await mockState.storage.put('watcherState', { running: false, eventsProcessed: 0, eventsAutoHidden: 0 });
+      expect((await status(await reload())).deliberatelyStoppedAt).toBeNull();
+    });
+  });
+
   describe('fetch /stop', () => {
     it('should stop the watcher', async () => {
       // First start it
