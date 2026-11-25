@@ -19,7 +19,10 @@
 # without the field (older worker) counts as not deliberately stopped. A stop
 # saved by a worker that predates the marker carries over: on its first load the
 # DO stamps it (with the load time, the original is unknown) and persists it, so
-# nobody needs to re-send /stop after a deploy.
+# nobody needs to re-send /stop after a deploy. If the first /status read fails,
+# a stop confirmed by the re-check, or by the /recover response refusing to
+# restart, is handled the same way: not counted, no Slack, and the production
+# reminder below still applies.
 #
 # In production only, a forgotten stop is surfaced by email, not Slack: the run
 # goes red (GitHub emails the person who last edited this workflow's schedule,
@@ -112,6 +115,11 @@ jobs:
   health-check:
     runs-on: ubuntu-latest
     timeout-minutes: 10
+
+    env:
+      STOP_FIELDS_FILTER: >-
+        .status | select(.running == false) | .deliberatelyStoppedAt |
+        select(type == "number") | [floor, (. / 1000 | floor | todate)] | @tsv
 
     # Serialize per environment so a slow run cannot read-modify-write the same
     # RW_FAILS_* variable as the next scheduled run. Queue rather than cancel;
@@ -223,11 +231,12 @@ jobs:
           # stop time in epoch milliseconds; a missing or non-numeric field (older
           # worker) means "not deliberately stopped". Only running exactly false
           # counts: null or missing running stays unhealthy.
-          STOPPED_AT=$(echo "$BODY" | jq -r 'if (.status.deliberatelyStoppedAt | type) == "number" then (.status.deliberatelyStoppedAt / 1000 | floor | todate) else empty end' 2>/dev/null) || STOPPED_AT=""
+          STOP_FIELDS=$(jq -r "$STOP_FIELDS_FILTER" <<< "$BODY" 2>/dev/null) || STOP_FIELDS=""
+          IFS=$'\t' read -r STOPPED_AT_MS STOPPED_AT <<< "$STOP_FIELDS"
           echo "running=$RUNNING" >> "$GITHUB_OUTPUT"
-          if [ "$RUNNING" = "false" ] && [ -n "$STOPPED_AT" ]; then
+          if [ -n "$STOPPED_AT_MS" ]; then
             echo "healthy=true" >> "$GITHUB_OUTPUT"
-            echo "stopped_at_ms=$(echo "$BODY" | jq -r '.status.deliberatelyStoppedAt | floor')" >> "$GITHUB_OUTPUT"
+            echo "stopped_at_ms=$STOPPED_AT_MS" >> "$GITHUB_OUTPUT"
             echo "stopped_at_utc=$STOPPED_AT" >> "$GITHUB_OUTPUT"
             echo "::notice::ReportWatcher ${{ matrix.env.name }} was deliberately stopped at $STOPPED_AT; not restarting and not counting it as a failure. POST /api/report-watcher/start to resume."
           elif [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
@@ -236,6 +245,94 @@ jobs:
             echo "healthy=false" >> "$GITHUB_OUTPUT"
           fi
           echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
+
+      # --- Best-effort restart nudge before alerting ---
+      # POSTs /recover (a /start that the DO refuses when a deliberate stop is
+      # recorded, even if /status could not be read above). Like /start it is a
+      # no-op when the DO already believes it is running, which is the common
+      # unhealthy state. Any recovery seen in the
+      # re-check window is usually the DO's own alarm reconnect. Kept because it
+      # is harmless and occasionally helps (a watcher that is down but was not deliberately stopped); the
+      # real value of this step is the post-nudge re-check that decides alerting.
+
+      - name: Best-effort restart nudge
+        id: recover
+        if: steps.check.outputs.healthy == 'false' && steps.check.outputs.http_code != '302' && steps.check.outputs.http_code != '401' && steps.check.outputs.http_code != '403'
+        env:
+          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
+          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
+          API_URL: ${{ matrix.env.url }}
+          INITIAL_FAILURE: ${{ steps.check.outputs.payload }}
+        run: |
+          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}; sending best-effort /recover (no-op if already running or deliberately stopped) and re-checking..."
+          echo "Initial failure: $INITIAL_FAILURE"
+
+          RESTART_CODE=$(curl -s -o /tmp/rw-nudge.json -w '%{http_code}' --max-time 15 -X POST \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$API_URL/api/report-watcher/recover" 2>/dev/null) || RESTART_CODE="transport_error"
+          echo "Restart response: $RESTART_CODE"
+
+          echo "Waiting 30s for reconnection..."
+          sleep 30
+
+          HTTP_CODE=$(curl -s -o /tmp/rw-recover.json -w '%{http_code}' --max-time 10 \
+            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
+            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
+            "$API_URL/api/report-watcher/status" 2>/dev/null) || HTTP_CODE="transport_error"
+
+          BODY=""
+          RUNNING=""
+          if [ "$HTTP_CODE" = "200" ]; then
+            BODY=$(cat /tmp/rw-recover.json)
+            RUNNING=$(jq -r '.status.running | booleans' <<< "$BODY" 2>/dev/null) || RUNNING=""
+          fi
+
+          # A readable recheck supersedes the nudge response. If it is
+          # unreadable, /recover can still confirm a deliberate stop. Its
+          # response cannot establish that the watcher is connected.
+          STOP_BODY="$BODY"
+          if [ -z "$RUNNING" ] && [ "$RESTART_CODE" = "200" ]; then
+            STOP_BODY=$(cat /tmp/rw-nudge.json)
+          fi
+          STOP_FIELDS=$(jq -r "$STOP_FIELDS_FILTER" <<< "$STOP_BODY" 2>/dev/null) || STOP_FIELDS=""
+          IFS=$'\t' read -r STOPPED_AT_MS STOPPED_AT <<< "$STOP_FIELDS"
+          if [ -n "$STOPPED_AT_MS" ]; then
+            echo "running=false" >> "$GITHUB_OUTPUT"
+            echo "stopped_at_ms=$STOPPED_AT_MS" >> "$GITHUB_OUTPUT"
+            echo "stopped_at_utc=$STOPPED_AT" >> "$GITHUB_OUTPUT"
+            echo "recovered=true" >> "$GITHUB_OUTPUT"
+            echo "deliberate_stop=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::ReportWatcher ${{ matrix.env.name }} was deliberately stopped at $STOPPED_AT; not restarting and not counting it as a failure. POST /api/report-watcher/start to resume."
+            exit 0
+          fi
+
+          if [ "$HTTP_CODE" = "transport_error" ]; then
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=transport_error after restart" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=http_error after restart: HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$RUNNING" ]; then
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=parse_error: .status.running not readable after restart" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          CONNECTED=$(jq -r '.status.connected' <<< "$BODY" 2>/dev/null) || CONNECTED=""
+          echo "running=$RUNNING" >> "$GITHUB_OUTPUT"
+          if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
+            echo "recovered=true" >> "$GITHUB_OUTPUT"
+            echo "ReportWatcher recovered after restart"
+          else
+            echo "recovered=false" >> "$GITHUB_OUTPUT"
+            echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
+            echo "ReportWatcher still unhealthy after restart"
+          fi
 
       # --- Remind people about a deliberate stop (fails the run, no Slack) ---
       # A deliberate stop is not a failure and never feeds the consecutive-failure
@@ -251,17 +348,15 @@ jobs:
 
       - name: Track deliberate stop reminder
         id: stop
-        if: always() && matrix.env.stop_var != '' && steps.check.outputs.running != ''
+        if: always() && matrix.env.stop_var != '' && (steps.recover.outputs.running != '' || steps.check.outputs.running != '')
         # Reminder bookkeeping must never block the restart nudge or the failure
-        # counting for a real outage. Kept in place (rather than moved after
-        # "Update failure count") so the decision sits next to the check it reads.
+        # counting for a real outage.
         continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.RW_HEALTH_VARS_TOKEN }}
           STOP_VAR: ${{ matrix.env.stop_var }}
-          RUNNING: ${{ steps.check.outputs.running }}
-          STOPPED_AT_MS: ${{ steps.check.outputs.stopped_at_ms }}
-          STOPPED_AT_UTC: ${{ steps.check.outputs.stopped_at_utc }}
+          RUNNING: ${{ steps.recover.outputs.running || steps.check.outputs.running }}
+          STOPPED_AT_MS: ${{ steps.recover.outputs.stopped_at_ms || steps.check.outputs.stopped_at_ms }}
         run: |
           ALERT=false
           trap 'echo "alert=$ALERT" >> "$GITHUB_OUTPUT"' EXIT
@@ -302,72 +397,6 @@ jobs:
             echo "::warning::failed to persist $STOP_VAR (check RW_HEALTH_VARS_TOKEN has Variables: read/write); the reminder may repeat every run"
           fi
           ALERT=true
-
-      # --- Best-effort restart nudge before alerting ---
-      # POSTs /recover (a /start that the DO refuses when a deliberate stop is
-      # recorded, even if /status could not be read above). Like /start it is a
-      # no-op when the DO already believes it is running, which is the common
-      # unhealthy state. Any recovery seen in the
-      # re-check window is usually the DO's own alarm reconnect. Kept because it
-      # is harmless and occasionally helps (a watcher that is down but was not deliberately stopped); the
-      # real value of this step is the post-nudge re-check that decides alerting.
-
-      - name: Best-effort restart nudge
-        id: recover
-        if: steps.check.outputs.healthy == 'false' && steps.check.outputs.http_code != '302' && steps.check.outputs.http_code != '401' && steps.check.outputs.http_code != '403'
-        env:
-          CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
-          CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
-          API_URL: ${{ matrix.env.url }}
-          INITIAL_FAILURE: ${{ steps.check.outputs.payload }}
-        run: |
-          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}; sending best-effort /recover (no-op if already running or deliberately stopped) and re-checking..."
-          echo "Initial failure: $INITIAL_FAILURE"
-
-          RESTART_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
-            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/recover" 2>/dev/null) || RESTART_CODE="transport_error"
-          echo "Restart response: $RESTART_CODE"
-
-          echo "Waiting 30s for reconnection..."
-          sleep 30
-
-          HTTP_CODE=$(curl -s -o /tmp/rw-recover.json -w '%{http_code}' --max-time 10 \
-            -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
-            -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/status" 2>/dev/null) || {
-            echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "payload=transport_error after restart" >> "$GITHUB_OUTPUT"
-            exit 0
-          }
-
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "payload=http_error after restart: HTTP $HTTP_CODE" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          BODY=$(cat /tmp/rw-recover.json)
-          CONNECTED=$(echo "$BODY" | jq -r '.status.connected' 2>/dev/null)
-          RUNNING=$(echo "$BODY" | jq -r '.status.running' 2>/dev/null)
-          # Same deliberate-stop test as the first check (running exactly false
-          # plus a numeric marker): the first read can fail and the re-check be
-          # the one that sees the stop. Not a failure, so it resets the count
-          # like a recovery; the reminder step picks the stop up on the next run.
-          STOPPED_AT=$(echo "$BODY" | jq -r 'if (.status.deliberatelyStoppedAt | type) == "number" then (.status.deliberatelyStoppedAt / 1000 | floor | todate) else empty end' 2>/dev/null) || STOPPED_AT=""
-          if [ "$RUNNING" = "false" ] && [ -n "$STOPPED_AT" ]; then
-            echo "recovered=true" >> "$GITHUB_OUTPUT"
-            echo "deliberate_stop=true" >> "$GITHUB_OUTPUT"
-            echo "::notice::ReportWatcher ${{ matrix.env.name }} was deliberately stopped at $STOPPED_AT; not restarting and not counting it as a failure. POST /api/report-watcher/start to resume."
-          elif [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
-            echo "recovered=true" >> "$GITHUB_OUTPUT"
-            echo "ReportWatcher recovered after restart"
-          else
-            echo "recovered=false" >> "$GITHUB_OUTPUT"
-            echo "payload=$(echo "$BODY" | jq -c '.status')" >> "$GITHUB_OUTPUT"
-            echo "ReportWatcher still unhealthy after restart"
-          fi
 
       # --- Failure counting via repo variables (not cache) ---
       # Uses GitHub Actions repository variables for persistence.
@@ -526,7 +555,7 @@ jobs:
         if: always() && steps.stop.outputs.alert == 'true'
         env:
           ENV_NAME: ${{ matrix.env.name }}
-          STOPPED_AT_UTC: ${{ steps.check.outputs.stopped_at_utc }}
+          STOPPED_AT_UTC: ${{ steps.recover.outputs.stopped_at_utc || steps.check.outputs.stopped_at_utc }}
         run: |
           MSG="ReportWatcher on $ENV_NAME has been deliberately stopped since $STOPPED_AT_UTC. Auto-hiding and automatic age-review intake are off until someone POSTs /api/report-watcher/start."
           echo "::error::$MSG"
