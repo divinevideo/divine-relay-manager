@@ -161,9 +161,11 @@ const READ_ONLY_POSTS = new Set(['/api/summarize-user', '/api/moderate-media/lif
 
 // POST routes that change state but are not moderation actions, so nothing
 // goes unattributed by leaving them alone. The ReportWatcher health workflow
-// restarts a stopped watcher with the Access service token alone (no login, no
-// admin key), and /start is an idempotent nudge. Exact paths only.
-const OPERATIONAL_POSTS = new Set(['/api/report-watcher/start']);
+// nudges a watcher that is down with /recover (a /start that leaves a
+// deliberate stop alone), using the Access service token alone (no login, no
+// admin key); both routes are idempotent. /start stays exempt so a manual
+// start still resumes watching. Exact paths only.
+const OPERATIONAL_POSTS = new Set(['/api/report-watcher/start', '/api/report-watcher/recover']);
 
 // NIP-86 reads: list* and get* methods, plus supportedmethods. Exact lowercase
 // names only; anything else is treated as a write.
