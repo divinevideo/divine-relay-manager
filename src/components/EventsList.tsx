@@ -716,11 +716,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   // Enhance a single event with moderation status
   const enhanceEvent = (event: NostrEvent): EventWithModeration => {
-    const isBanned = bannedEvents?.some((banned: { id: string }) => banned.id === event.id);
+    const ban = bannedEvents?.find(entry => entry.id === event.id);
     return {
       ...event,
-      moderationStatus: isBanned ? 'banned' as const : undefined,
-      moderationReason: isBanned ? bannedEvents?.find((banned: { id: string; reason?: string }) => banned.id === event.id)?.reason : undefined,
+      moderationStatus: ban ? 'banned' : undefined,
+      moderationReason: ban?.reason,
     };
   };
 

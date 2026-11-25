@@ -1,8 +1,8 @@
 // ABOUTME: listeventsneedingmoderation is a full relay scan that records no approvals, so
-// ABOUTME: EventsList must never call it and must show no pending count, badge or refresh
+// ABOUTME: EventsList must skip the scan on load and refresh while hiding banned events
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
 import { EventsList } from './EventsList';
@@ -30,6 +30,8 @@ vi.mock('@/hooks/useEventTitles', () => ({ useEventTitles: () => ({ titles: new 
 
 const METHOD = 'listeventsneedingmoderation';
 const scanCalls = () => rpc.fn.mock.calls.filter(c => c[0] === METHOD).length;
+const visibleId = 'e'.repeat(64);
+const bannedId = 'd'.repeat(64);
 
 function mount(client: QueryClient) {
   return render(
@@ -46,20 +48,35 @@ beforeEach(() => {
   relayQuery.fn.mockReset();
   relayQuery.fn.mockResolvedValue([]);
   rpc.fn.mockReset();
-  rpc.fn.mockImplementation(async (m: string) => (m === METHOD ? [{ id: 'e'.repeat(64) }] : []));
+  rpc.fn.mockImplementation(async (method: string) => {
+    if (method === METHOD) return [{ id: visibleId }];
+    if (method === 'listbannedevents') return [{ id: bannedId, reason: 'banned by a moderator' }];
+    return [];
+  });
 });
 
 describe('EventsList does not use the needs-moderation scan', () => {
-  it('never calls listeventsneedingmoderation and shows no pending badge', async () => {
-    relayQuery.fn.mockResolvedValue([
-      { id: 'e'.repeat(64), pubkey: 'b'.repeat(64), kind: 1, content: 'hello world', tags: [], created_at: 1_750_000_000, sig: 'f'.repeat(128) },
-    ]);
-    const client = createQueryClient();
-    mount(client);
-    await screen.findByText(/hello world/);
-    await new Promise(r => setTimeout(r, 50));
+  it('loads and refreshes ordinary events without scanning for pending events', async () => {
+    const note = { pubkey: 'b'.repeat(64), kind: 1, tags: [], created_at: 1_750_000_000, sig: 'f'.repeat(128) };
+    let visibleContent = 'hello world';
+    relayQuery.fn.mockImplementation(async ([filter]: [{ until?: number }]) => {
+      if (filter.until !== undefined) return [];
+      return [
+        { ...note, id: visibleId, content: visibleContent },
+        { ...note, id: bannedId, content: 'banned content' },
+      ];
+    });
+
+    mount(createQueryClient());
+    expect(await screen.findByText('hello world')).toBeInTheDocument();
+    expect(await screen.findByText('1 events')).toBeInTheDocument();
+    expect(screen.queryByText('banned content')).toBeNull();
     expect(scanCalls()).toBe(0);
     expect(screen.queryByText(/pending/i)).toBeNull();
-    expect(screen.queryByRole('button', { name: /refresh pending/i })).toBeNull();
+
+    visibleContent = 'updated event feed';
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(await screen.findByText('updated event feed')).toBeInTheDocument();
+    expect(scanCalls()).toBe(0);
   });
 });
