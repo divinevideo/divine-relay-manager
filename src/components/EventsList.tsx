@@ -500,7 +500,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   } = useInfiniteQuery({
     queryKey: listQueryKey,
     queryFn: async ({ pageParam, signal: querySignal }) => {
-      // Never send the no-kinds shape: a custom kind that is not valid yet
+      // An incomplete custom filter cannot issue a list request.
       if (awaitingCustomKind) return [];
       const signal = AbortSignal.any([querySignal, AbortSignal.timeout(10000)]);
 
@@ -516,13 +516,17 @@ export function EventsList({ relayUrl }: EventsListProps) {
         filter.until = pageParam;
       }
 
-      if (effectiveKindFilter === 'custom') {
-        filter.kinds = [customKindNumber as number];
+      if (customKindNumber !== null) {
+        filter.kinds = [customKindNumber];
       } else if (effectiveKindFilter !== 'all') {
         filter.kinds = effectiveKindFilter.split(',').map(k => parseInt(k, 10));
       }
 
       const events = await nostr.query([filter], { signal });
+      // The pool returns partial results on timeout. Profile reads fan out to
+      // multiple relays, so keep any profiles that answered while others stalled.
+      const hasPartialProfiles = filter.kinds?.length === 1 && filter.kinds[0] === 0 && events.length > 0;
+      if (!hasPartialProfiles) signal.throwIfAborted();
       return events.sort((a, b) => b.created_at - a.created_at);
     },
     initialPageParam: undefined as number | undefined,
@@ -539,6 +543,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     staleTime: Infinity,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
+    retry: false,
   });
 
   // Loading more pages is not a refresh, so it does not spin the button.
@@ -1141,6 +1146,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <CardContent className="p-0 flex-1 min-h-0">
             <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
               <div className="p-3 pr-4">
+                {listEnabled && eventsError && (
+                  <Alert>
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>Failed to load events: {eventsError.message}</AlertDescription>
+                  </Alert>
+                )}
                 {isDirectLookup ? (
                   // Direct lookup mode (event id or addressable coordinate)
                   isLoadingDirectEvent ? (
@@ -1206,18 +1217,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
                       <Skeleton key={i} className="h-20 w-full" />
                     ))}
                   </div>
-                ) : eventsError ? (
-                  <Alert>
-                    <AlertTriangle className="h-4 w-4" />
-                    <AlertDescription>
-                      Failed to load events: {eventsError.message}
-                    </AlertDescription>
-                  </Alert>
-                ) : !enhancedEvents || enhancedEvents.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No events found</p>
-                  </div>
+                ) : enhancedEvents.length === 0 ? (
+                  !eventsError && (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No events found</p>
+                    </div>
+                  )
                 ) : (
                   <>
                     {enhancedEvents.map((event) => (
@@ -1233,7 +1239,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
                     {!hasNextPage && <p className="py-4 text-center text-xs text-muted-foreground">End of events</p>}
                   </>
                 )}
-                {canLoadOlder && !eventsError && (
+                {canLoadOlder && (
                   <div className="py-4 text-center">
                     <Button variant="ghost" size="sm" onClick={loadOlderEvents} disabled={fetchingEvents}>
                       {isFetchingNextPage && <RefreshCw className="h-4 w-4 animate-spin" />}

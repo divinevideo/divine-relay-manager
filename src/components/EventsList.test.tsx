@@ -144,12 +144,6 @@ function LocationProbe() {
 }
 
 function renderEvents(initialEntry: string, client = createQueryClient()) {
-  // The app's own defaults (focus refetch on, 60s staleTime) so a missing
-  // per-query override shows up here the way it would in the app.
-  client.setDefaultOptions({
-    ...client.getDefaultOptions(),
-    queries: { ...client.getDefaultOptions().queries, retry: false },
-  });
   const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[initialEntry]}>
@@ -493,6 +487,72 @@ describe('EventsList list query cost', () => {
     const signal = relayQuery.fn.mock.calls[0][1]?.signal as AbortSignal;
     await pickKind('All Events');
     await waitFor(() => expect(signal.aborted).toBe(true));
+  });
+
+  it('shows a timeout on the initial list read and can retry when reopening the tab', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      relayQuery.fn.mockImplementation(async (_filters, { signal }: { signal: AbortSignal }) =>
+        new Promise(resolve => signal.addEventListener('abort', () => resolve([]), { once: true })));
+      const firstView = renderEvents('/events');
+      await waitFor(() => expect(listFilters()).toHaveLength(1));
+      clock.abort(new DOMException('Relay read timed out', 'TimeoutError'));
+      expect(await screen.findByText('Failed to load events: Relay read timed out')).toBeInTheDocument();
+      expect(screen.queryByText('No events found')).not.toBeInTheDocument();
+      firstView.unmount();
+
+      timeout.mockRestore();
+      setRelay({ list: [video()] });
+      renderEvents('/events', firstView.client);
+      expect(await screen.findByText('a video')).toBeInTheDocument();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('keeps loaded rows visible when an older page times out and allows retry', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[], { signal }: { signal: AbortSignal }) =>
+        filter.until
+          ? new Promise(resolve => signal.addEventListener('abort', () => resolve([]), { once: true }))
+          : [video()]);
+      renderEvents('/events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await waitFor(() => expect(listFilters()).toHaveLength(2));
+      clock.abort(new DOMException('Relay read timed out', 'TimeoutError'));
+      expect(await screen.findByText('Failed to load events: Relay read timed out')).toBeInTheDocument();
+      expect(screen.getByText('a video')).toBeInTheDocument();
+
+      timeout.mockRestore();
+      relayQuery.fn.mockResolvedValue([olderVideo()]);
+      fireEvent.click(screen.getByRole('button', { name: 'Load older events' }));
+      expect(await screen.findByText('older')).toBeInTheDocument();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('keeps profiles from indexers that answer before the timeout', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      const profile = event({ kind: 0, content: '{"display_name":"Found profile"}' });
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[], { signal }: { signal: AbortSignal }) =>
+        filter.kinds?.includes(0)
+          ? new Promise(resolve => signal.addEventListener('abort', () => resolve([profile]), { once: true }))
+          : [video()]);
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('Profiles (0)');
+      await waitFor(() => expect(listFilters().some(f => f.kinds?.includes(0))).toBe(true));
+      clock.abort(new DOMException('Relay read timed out', 'TimeoutError'));
+      expect(await screen.findByText('Found profile')).toBeInTheDocument();
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it('does not run the list query in direct-lookup mode', async () => {
