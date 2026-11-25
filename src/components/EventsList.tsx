@@ -1,11 +1,11 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
-import { useQuery, useInfiniteQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useInfiniteQuery, useMutation, useQueryClient, type InfiniteData } from "@tanstack/react-query";
 import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
-import { getKindInfo, getKindCategory } from "@/lib/kindNames";
+import { getKindInfo, getKindCategory, VIDEO_KINDS } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -23,7 +23,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
-import { getProfileUrl } from "@/lib/constants";
+import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
 import { getCommentTarget } from "@/lib/commentActivity";
 import { parseSearchInput } from "@/lib/searchInput";
 import { useEventTitles, type ResolvedTarget } from "@/hooks/useEventTitles";
@@ -357,6 +357,12 @@ function EventCard({
   );
 }
 
+// A query with no `kinds` makes the relay merge the whole events table, so
+// "All Events" is opt-in. The plain list defaults to the app's video kinds; the
+// author view (?pubkey=) also shows activity like comments, reposts and reactions.
+const VIDEO_KINDS_FILTER = VIDEO_KINDS.join(',');
+const RECENT_ACTIVITY_FILTER = [...RECENT_CONTENT_KINDS, 7].join(',');
+
 export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
   const { toast } = useToast();
@@ -372,7 +378,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     message: string;
   } | null>(null);
 
-  const [kindFilter, setKindFilter] = useState<string>('all');
+  const [kindFilter, setKindFilter] = useState<string | null>(null);
   const [limit, setLimit] = useState(20);
   const [customKind, setCustomKind] = useState('');
   const [selectedEvent, setSelectedEvent] = useState<NostrEvent | null>(null);
@@ -394,13 +400,21 @@ export function EventsList({ relayUrl }: EventsListProps) {
     searchParams.get('pubkey')
   );
 
+  // "Show all kinds" is an author-view escape hatch. When the author filter
+  // changes or clears, drop it back to the context default (kinds-scoped), in
+  // the same batch as the author change so no no-kinds list query slips out.
+  const changeAuthorFilter = useCallback((pubkey: string | null) => {
+    setFilterByPubkey(pubkey);
+    setKindFilter(k => (k === 'all' ? null : k));
+  }, []);
+
   // Sync URL params with filterByPubkey state
   useEffect(() => {
     const pubkeyParam = searchParams.get('pubkey');
     if (pubkeyParam !== filterByPubkey) {
-      setFilterByPubkey(pubkeyParam);
+      changeAuthorFilter(pubkeyParam);
     }
-  }, [searchParams, filterByPubkey]);
+  }, [searchParams, filterByPubkey, changeAuthorFilter]);
 
   // #164 A: an internal parent link routes here as /events?event=<nevent|naddr>.
   // Seed the search from it (both the box and the committed value, so the clear
@@ -418,7 +432,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   // Update URL when filterByPubkey changes
   const updatePubkeyFilter = (pubkey: string | null) => {
-    setFilterByPubkey(pubkey);
+    changeAuthorFilter(pubkey);
     if (pubkey) {
       setSearchParams({ pubkey });
     } else {
@@ -443,6 +457,30 @@ export function EventsList({ relayUrl }: EventsListProps) {
     setCommittedSearch('');
   };
 
+  // ?event= is seeded into the search by an effect after the first render; until
+  // then isDirectLookup is still false, which would let one list query slip out.
+  const hasPendingEventParam = !!searchParams.get('event');
+  // null = the moderator has not picked a kind, so the default follows context
+  const effectiveKindFilter = kindFilter ?? (filterByPubkey ? RECENT_ACTIVITY_FILTER : VIDEO_KINDS_FILTER);
+  const isCustomKind = effectiveKindFilter === 'custom';
+  // Strict: parseInt would accept '1abc' and '-5'; range is NIP-01 0-65535. null = nothing valid yet.
+  const customKindNumber = isCustomKind && /^\d+$/.test(customKind.trim()) && parseInt(customKind.trim(), 10) <= 65535
+    ? parseInt(customKind.trim(), 10)
+    : null; // NIP-01 kinds are 0-65535
+  const awaitingCustomKind = isCustomKind && customKindNumber === null;
+  const listHidden = isDirectLookup || hasPendingEventParam;
+  const listEnabled = !!relayUrl && !!nostr && !listHidden && !awaitingCustomKind;
+  const listQueryKey = useMemo(
+    () => ['relay-events', relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey] as const,
+    [relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey],
+  );
+
+  useEffect(() => {
+    // Disabling a query stops new automatic fetches. Cancel a refetch already
+    // in progress so it can't request older pages during a direct lookup.
+    if (listHidden) void queryClient.cancelQueries({ queryKey: listQueryKey, exact: true });
+  }, [listHidden, listQueryKey, queryClient]);
+
   // Ref for scroll viewport (infinite scroll)
   const scrollViewportRef = useRef<HTMLDivElement>(null);
 
@@ -450,15 +488,18 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const {
     data: eventsData,
     isLoading: loadingEvents,
+    isFetching: fetchingEvents,
     error: eventsError,
     refetch,
     fetchNextPage,
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['relay-events', relayUrl, kindFilter, limit, customKind, filterByPubkey],
-    queryFn: async ({ pageParam }) => {
-      const signal = AbortSignal.timeout(10000);
+    queryKey: listQueryKey,
+    queryFn: async ({ pageParam, signal: querySignal }) => {
+      // An incomplete custom filter cannot issue a list request.
+      if (awaitingCustomKind) return [];
+      const signal = AbortSignal.any([querySignal, AbortSignal.timeout(10000)]);
 
       const filter: { limit: number; kinds?: number[]; until?: number; authors?: string[] } = { limit };
 
@@ -472,21 +513,17 @@ export function EventsList({ relayUrl }: EventsListProps) {
         filter.until = pageParam;
       }
 
-      if (kindFilter !== 'all') {
-        if (kindFilter === 'custom' && customKind) {
-          const kind = parseInt(customKind);
-          if (!isNaN(kind)) {
-            filter.kinds = [kind];
-          }
-        } else if (kindFilter !== 'custom') {
-          const kinds = kindFilter.split(',').map(k => parseInt(k)).filter(k => !isNaN(k));
-          if (kinds.length > 0) {
-            filter.kinds = kinds;
-          }
-        }
+      if (customKindNumber !== null) {
+        filter.kinds = [customKindNumber];
+      } else if (effectiveKindFilter !== 'all') {
+        filter.kinds = effectiveKindFilter.split(',').map(k => parseInt(k, 10));
       }
 
       const events = await nostr.query([filter], { signal });
+      // The pool returns partial results on timeout. Profile reads fan out to
+      // multiple relays, so keep any profiles that answered while others stalled.
+      const hasPartialProfiles = filter.kinds?.length === 1 && filter.kinds[0] === 0 && events.length > 0;
+      if (!hasPartialProfiles) signal.throwIfAborted();
       return events.sort((a, b) => b.created_at - a.created_at);
     },
     initialPageParam: undefined as number | undefined,
@@ -497,9 +534,30 @@ export function EventsList({ relayUrl }: EventsListProps) {
       // Return timestamp - 1 to get events strictly before this one
       return oldestEvent.created_at - 1;
     },
-    enabled: !!relayUrl && !!nostr,
-    refetchInterval: 30000, // Refresh every 30 seconds
+    enabled: listEnabled,
+    // Reopening a cached view should not reload every page. Explicit refresh
+    // and invalidation after a moderation action still update the list.
+    staleTime: Infinity,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
   });
+
+  // Loading more pages is not a refresh, so it does not spin the button.
+  const refreshing = fetchingEvents && !isFetchingNextPage;
+
+  // Keep the first page visible during Refresh and discard older pages only
+  // for the current filter so they are not refetched one by one.
+  const refreshList = () => {
+    // Manual fetches bypass the query's enabled option.
+    if (!listEnabled) return;
+    if (scrollViewportRef.current) scrollViewportRef.current.scrollTop = 0;
+    queryClient.setQueryData<InfiniteData<NostrEvent[], number | undefined>>(
+      listQueryKey,
+      (data) => data && { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
+    );
+    void refetch();
+  };
 
   // Direct event lookup by ID (separate from infinite scroll)
   // Tries normal relay query first, then falls back to getbannedevent RPC
@@ -557,24 +615,27 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Flatten all pages into a single events array
   const events = useMemo(() => eventsData?.pages.flat() ?? [], [eventsData?.pages]);
 
-  // Auto-load more when scrolling near bottom of the scroll area
+  const canLoadOlder = listEnabled && hasNextPage;
+  const loadOlderEvents = useCallback(() => {
+    if (canLoadOlder && !fetchingEvents) void fetchNextPage({ cancelRefetch: false });
+  }, [canLoadOlder, fetchingEvents, fetchNextPage]);
+
+  // Load older events on scroll. The button also works when the visible rows
+  // are too short to scroll, including after a refresh or client-side filter.
   useEffect(() => {
     const viewport = scrollViewportRef.current;
-    if (!viewport) return;
+    if (!canLoadOlder || !viewport) return;
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = viewport;
-      if (scrollHeight - scrollTop - clientHeight < 200 && hasNextPage && !isFetchingNextPage) {
-        fetchNextPage();
+      if (scrollTop > 0 && scrollHeight - scrollTop - clientHeight < 200) {
+        loadOlderEvents();
       }
     };
 
     viewport.addEventListener('scroll', handleScroll);
-    // Check immediately in case content is shorter than viewport
-    handleScroll();
-
     return () => viewport.removeEventListener('scroll', handleScroll);
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [canLoadOlder, loadOlderEvents]);
 
   // Query for banned events to mark them
   const { data: bannedEvents } = useBannedEvents({ enabled: !!relayUrl });
@@ -786,6 +847,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
 
   const kindOptions = [
     { value: 'all', label: 'All Events' },
+    { value: VIDEO_KINDS_FILTER, label: `All Video Kinds (${VIDEO_KINDS.join(', ')})` },
+    { value: RECENT_ACTIVITY_FILTER, label: 'Recent Activity' },
     // Video kinds per NIP-71
     { value: '34235', label: 'Video - Addressable (34235)' },
     { value: '34236', label: 'Short Video - Addressable (34236)' },
@@ -812,8 +875,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <h2 className="text-2xl font-bold">Events & Moderation</h2>
           <p className="text-muted-foreground">View and moderate events using NIP-86</p>
         </div>
-        <Button onClick={() => refetch()} disabled={loadingEvents}>
-          <RefreshCw className={`h-4 w-4 mr-2 ${loadingEvents ? 'animate-spin' : ''}`} />
+        <Button onClick={refreshList} disabled={!listEnabled || refreshing}>
+          <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
       </div>
@@ -901,8 +964,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <div className="flex flex-wrap items-end gap-3">
             <div className="flex-1 min-w-[150px]">
               <Label htmlFor="kind-filter" className="text-xs">Event Kind</Label>
-              <Select value={kindFilter} onValueChange={setKindFilter}>
-                <SelectTrigger className="mt-1 h-9">
+              <Select value={effectiveKindFilter} onValueChange={setKindFilter}>
+                <SelectTrigger id="kind-filter" className="mt-1 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -915,7 +978,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </Select>
             </div>
 
-            {kindFilter === 'custom' && (
+            {effectiveKindFilter === 'custom' && (
               <div className="w-32">
                 <Label htmlFor="custom-kind" className="text-xs">Kind #</Label>
                 <Input
@@ -926,13 +989,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
                   placeholder="Kind"
                   className="mt-1 h-9"
                 />
+                {awaitingCustomKind && (
+                  <p className="mt-1 text-xs text-muted-foreground">Enter a kind number</p>
+                )}
               </div>
             )}
 
             <div className="w-24">
               <Label htmlFor="limit" className="text-xs">Page Size</Label>
               <Select value={limit.toString()} onValueChange={(value) => setLimit(parseInt(value))}>
-                <SelectTrigger className="mt-1 h-9">
+                <SelectTrigger id="limit" className="mt-1 h-9">
                   <SelectValue />
                 </SelectTrigger>
                 <SelectContent>
@@ -987,10 +1053,22 @@ export function EventsList({ relayUrl }: EventsListProps) {
                 >
                   Clear
                 </Button>
+                {effectiveKindFilter === RECENT_ACTIVITY_FILTER && (
+                  <>
+                    <span className="text-xs text-muted-foreground">Showing recent activity kinds only.</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 px-2"
+                      onClick={() => setKindFilter('all')}
+                    >
+                      Show all kinds
+                    </Button>
+                  </>
+                )}
               </div>
               <BulkDeleteByKind
                 pubkey={filterByPubkey}
-                onComplete={() => refetch()}
                 getModeratorToken={getModeratorToken}
               />
             </div>
@@ -1050,6 +1128,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <CardContent className="p-0 flex-1 min-h-0">
             <ScrollArea className="h-full" viewportRef={scrollViewportRef}>
               <div className="p-3 pr-4">
+                {listEnabled && eventsError && (
+                  <Alert>
+                    <AlertTriangle className="h-4 w-4" />
+                    <AlertDescription>Failed to load events: {eventsError.message}</AlertDescription>
+                  </Alert>
+                )}
                 {isDirectLookup ? (
                   // Direct lookup mode (event id or addressable coordinate)
                   isLoadingDirectEvent ? (
@@ -1115,18 +1199,13 @@ export function EventsList({ relayUrl }: EventsListProps) {
                       <Skeleton key={i} className="h-20 w-full" />
                     ))}
                   </div>
-                ) : eventsError ? (
-                  <Alert>
-                    <AlertTriangle className="h-4 w-4" />
-                    <AlertDescription>
-                      Failed to load events: {eventsError.message}
-                    </AlertDescription>
-                  </Alert>
-                ) : !enhancedEvents || enhancedEvents.length === 0 ? (
-                  <div className="text-center py-8 text-muted-foreground">
-                    <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
-                    <p className="text-sm">No events found</p>
-                  </div>
+                ) : enhancedEvents.length === 0 ? (
+                  !eventsError && (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <FileText className="h-8 w-8 mx-auto mb-2 opacity-50" />
+                      <p className="text-sm">No events found</p>
+                    </div>
+                  )
                 ) : (
                   <>
                     {enhancedEvents.map((event) => (
@@ -1139,24 +1218,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         parentLink={parentTitles.get(getCommentTarget(event) ?? '')}
                       />
                     ))}
-                    {/* Infinite scroll status */}
-                    <div className="py-4 text-center">
-                      {isFetchingNextPage ? (
-                        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                          Loading older events...
-                        </div>
-                      ) : hasNextPage ? (
-                        <p className="text-xs text-muted-foreground">
-                          Scroll for more
-                        </p>
-                      ) : events.length > 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          End of events
-                        </p>
-                      ) : null}
-                    </div>
+                    {!hasNextPage && <p className="py-4 text-center text-xs text-muted-foreground">End of events</p>}
                   </>
+                )}
+                {canLoadOlder && (
+                  <div className="py-4 text-center">
+                    <Button variant="ghost" size="sm" onClick={loadOlderEvents} disabled={fetchingEvents}>
+                      {isFetchingNextPage && <RefreshCw className="h-4 w-4 animate-spin" />}
+                      {isFetchingNextPage ? 'Loading older events...' : 'Load older events'}
+                    </Button>
+                  </div>
                 )}
               </div>
             </ScrollArea>
@@ -1176,6 +1247,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
               }}
               onSelectPubkey={(pubkey) => {
                 updatePubkeyFilter(pubkey);
+                clearSearch();
                 setSelectedEvent(null);
               }}
             />

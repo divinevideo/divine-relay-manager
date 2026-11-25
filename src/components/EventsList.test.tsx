@@ -2,14 +2,16 @@
 // ABOUTME: ?event= internal nav, naddr lookup, banned id-fallback, parent links
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
-import { MemoryRouter, useLocation } from 'react-router-dom';
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
+import { QueryClientProvider, focusManager, onlineManager } from '@tanstack/react-query';
+import { createQueryClient } from '@/lib/queryClient';
 import { nip19 } from 'nostr-tools';
 import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
 import { EventsList } from './EventsList';
 import { parseSearchInput } from '@/lib/searchInput';
-import { RELAY_PROFILE_BADGE } from '@/lib/constants';
+import { RELAY_PROFILE_BADGE, RECENT_CONTENT_KINDS } from '@/lib/constants';
+import { VIDEO_KINDS } from '@/lib/kindNames';
 import { tokensFor, withAsModerator } from '@/test/adminApiMock';
 
 const PK = 'b'.repeat(64);
@@ -90,7 +92,11 @@ vi.mock('@/hooks/useToast', () => ({
 }));
 
 // Heavy children irrelevant to lookup/nav behavior
-vi.mock('@/components/EventDetail', () => ({ EventDetail: () => null }));
+vi.mock('@/components/EventDetail', () => ({
+  EventDetail: ({ event, onSelectPubkey }: { event: NostrEvent; onSelectPubkey: (pubkey: string) => void }) => (
+    <button onClick={() => onSelectPubkey(event.pubkey)}>View All by User</button>
+  ),
+}));
 vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
 
 // The batched parent-title hook is mocked so comment-row links are
@@ -123,20 +129,22 @@ function setRelay({ byId = [], byAddress = [], list = [] }: {
     if (f.ids) return [...byId];
     if (f['#d']) return [...byAddress];
     if (f.until) return []; // pagination: pages after the first are empty
-    return [...list];
+    return list.filter(row =>
+      (!f.kinds || f.kinds.includes(row.kind)) && (!f.authors || f.authors.includes(row.pubkey)));
   });
 }
 
 // Probe MemoryRouter's current query string so tests can pin param consumption
 const location = { search: '' };
+const navigation = { go: (() => {}) as (delta: number) => void };
 function LocationProbe() {
   location.search = useLocation().search;
+  navigation.go = useNavigate();
   return null;
 }
 
-function renderEvents(initialEntry: string) {
-  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  return render(
+function renderEvents(initialEntry: string, client = createQueryClient()) {
+  const view = render(
     <QueryClientProvider client={client}>
       <MemoryRouter initialEntries={[initialEntry]}>
         <EventsList relayUrl="wss://relay.test" />
@@ -144,6 +152,18 @@ function renderEvents(initialEntry: string) {
       </MemoryRouter>
     </QueryClientProvider>
   );
+  return { ...view, client };
+}
+
+function eventListViewport(container: HTMLElement): HTMLElement {
+  const viewport = container.querySelector<HTMLElement>('[data-radix-scroll-area-viewport]');
+  if (!viewport) throw new Error('Missing event list viewport');
+  return viewport;
+}
+
+async function pickKind(name: string) {
+  fireEvent.click(screen.getByLabelText('Event Kind'));
+  fireEvent.click(await screen.findByRole('option', { name }));
 }
 
 beforeEach(() => {
@@ -224,7 +244,7 @@ describe('EventsList internal navigation (#164 A)', () => {
     rpc.fn.mockImplementation(async (method: string) =>
       method === 'listbannedevents' ? [{ id: bannedId }] : []);
 
-    renderEvents('/events');
+    renderEvents(`/events?pubkey=${PK}`);
 
     const link = await screen.findByRole('link', { name: /on Parent Video/ });
     expect(link).toHaveAttribute('href', '/events?event=nevent1parent');
@@ -239,7 +259,7 @@ describe('EventsList internal navigation (#164 A)', () => {
 
 describe('EventsList recorded moderation', () => {
   it('routes an approved event through allow_event instead of raw relay RPC', async () => {
-    const target = event({ id: 'd'.repeat(64), content: 'review me' });
+    const target = event({ id: 'd'.repeat(64), kind: 34236, content: 'review me' });
     setRelay({ list: [target] });
     renderEvents('/events');
 
@@ -268,7 +288,7 @@ describe('EventsList no-relay-profile globe', () => {
   const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
 
   it('shows no globe while the author lookup has not answered', async () => {
-    setRelay({ list: [event({ id: 'd'.repeat(64), content: 'listed event' })] });
+    setRelay({ list: [event({ id: 'd'.repeat(64), kind: 34236, content: 'listed event' })] });
     renderEvents('/events');
     await screen.findByText('listed event');
     expect(globe()).not.toBeInTheDocument();
@@ -276,7 +296,7 @@ describe('EventsList no-relay-profile globe', () => {
 
   it('shows the globe once the lookup answers that the relay has no profile', async () => {
     authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false };
-    setRelay({ list: [event({ id: 'd'.repeat(64), content: 'listed event' })] });
+    setRelay({ list: [event({ id: 'd'.repeat(64), kind: 34236, content: 'listed event' })] });
     renderEvents('/events');
     await screen.findByText('listed event');
     expect(globe()).toBeInTheDocument();
@@ -286,18 +306,19 @@ describe('EventsList no-relay-profile globe', () => {
 // Kind 0 content is whatever the profile's author published, so a field can
 // hold any JSON value and the content need not be an object at all.
 describe('EventsList profile row', () => {
-  function renderProfileRow(content: string) {
+  async function renderProfileRow(content: string) {
     setRelay({ list: [event({ id: 'd'.repeat(64), kind: 0, content })] });
     renderEvents('/events');
+    await pickKind('Profiles (0)');
   }
 
   it('shows the name and about when they are text', async () => {
-    renderProfileRow(JSON.stringify({ display_name: 'Synthetic Name', about: 'synthetic about' }));
+    await renderProfileRow(JSON.stringify({ display_name: 'Synthetic Name', about: 'synthetic about' }));
     expect(await screen.findByText('Synthetic Name — synthetic about')).toBeInTheDocument();
   });
 
   it('leaves out fields that are not text', async () => {
-    renderProfileRow(JSON.stringify({
+    await renderProfileRow(JSON.stringify({
       display_name: { nested: true },
       about: ['about-as-a-list', 'second-item'],
       nip05: 'synthetic@example.test',
@@ -308,13 +329,13 @@ describe('EventsList profile row', () => {
   });
 
   it('says "Profile update" when no field is text', async () => {
-    renderProfileRow(JSON.stringify({ display_name: 4205, about: { a: 1 }, nip05: ['n'] }));
+    await renderProfileRow(JSON.stringify({ display_name: 4205, about: { a: 1 }, nip05: ['n'] }));
     expect(await screen.findByText('Profile update')).toBeInTheDocument();
     expect(screen.queryByText(/4205/)).not.toBeInTheDocument();
   });
 
   it('shows the content as written when it is JSON but not an object', async () => {
-    renderProfileRow('["not","a","profile"]');
+    await renderProfileRow('["not","a","profile"]');
     expect(await screen.findByText('["not","a","profile"]')).toBeInTheDocument();
   });
 });
@@ -326,8 +347,8 @@ describe('EventsList "Has reports" filter', () => {
     ['lowercase (control)', (id: string) => id],
     ['uppercase', (id: string) => id.toUpperCase()],
   ])('counts a report that spells the event in %s', async (_label, spell) => {
-    const reported = event({ id: 'ab'.repeat(32), pubkey: 'cd'.repeat(32), content: 'reported post' });
-    const quiet = event({ id: '12'.repeat(32), pubkey: '34'.repeat(32), content: 'quiet post' });
+    const reported = event({ id: 'ab'.repeat(32), pubkey: 'cd'.repeat(32), kind: 34236, content: 'reported post' });
+    const quiet = event({ id: '12'.repeat(32), pubkey: '34'.repeat(32), kind: 34236, content: 'quiet post' });
     const report = event({ id: '9'.repeat(64), kind: 1984, pubkey: '5'.repeat(64), tags: [['e', spell(reported.id), 'spam']] });
     relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
       const f = filters[0] ?? {};
@@ -345,5 +366,448 @@ describe('EventsList "Has reports" filter', () => {
     // reported row to come back rather than for the quiet one to go.
     expect(await screen.findByText('reported post')).toBeInTheDocument();
     expect(screen.queryByText('quiet post')).not.toBeInTheDocument();
+  });
+});
+
+// The unfiltered `{ limit }` query is the relay's most expensive shape (no
+// kinds -> full-table merge), so the tab must not send it by default, on a
+// timer, or by accident. Paged (`until`) requests count: they are list queries.
+describe('EventsList list query cost', () => {
+  const listFilters = () =>
+    relayQuery.fn.mock.calls
+      .map(args => args[0]?.[0] as NostrFilter | undefined)
+      .filter((f): f is NostrFilter => !!f && !f.ids && !f['#d'] && f.limit !== 500);
+  const video = () => event({ kind: 34236, content: 'a video' });
+  const olderVideo = () => event({ id: 'd'.repeat(64), kind: 34236, content: 'older', created_at: 1_700_000_000 });
+
+  it('defaults every list request, paged ones included, to the video kinds', async () => {
+    relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) =>
+      filters[0]?.until ? [olderVideo()] : [video()]);
+    const { container } = renderEvents('/events');
+    await screen.findByText('a video');
+    const viewport = eventListViewport(container);
+    Object.defineProperties(viewport, { scrollHeight: { value: 800 }, clientHeight: { value: 300 } });
+    fireEvent.scroll(viewport, { target: { scrollTop: 480 } });
+    expect(await screen.findByText('older')).toBeInTheDocument();
+    const filters = listFilters();
+    expect(filters.some(f => f.until)).toBe(true);
+    for (const f of filters) expect(f.kinds).toEqual([...VIDEO_KINDS]);
+  });
+
+  it('does not refetch the list on a timer', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    try {
+      setRelay({ list: [video()] });
+      renderEvents('/events');
+      await vi.advanceTimersByTimeAsync(100);
+      const before = listFilters().length;
+      expect(before).toBeGreaterThan(0);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(listFilters().length).toBe(before);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not refetch the list when the window regains focus', async () => {
+    try {
+      setRelay({ list: [video()] });
+      const { client } = renderEvents('/events');
+      await screen.findByText('a video');
+      await client.invalidateQueries({ queryKey: ['relay-events'], refetchType: 'none' });
+      relayQuery.fn.mockClear();
+      await act(async () => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      expect(listFilters()).toEqual([]);
+    } finally {
+      focusManager.setFocused(undefined);
+    }
+  });
+
+  it('does not refetch stale All Events results when the network reconnects', async () => {
+    try {
+      setRelay({ list: [video()] });
+      const { client } = renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('All Events');
+      await screen.findByText('a video');
+      expect(listFilters().some(f => !f.kinds)).toBe(true);
+      await client.invalidateQueries({ queryKey: ['relay-events'], refetchType: 'none' });
+      relayQuery.fn.mockClear();
+      await act(async () => {
+        onlineManager.setOnline(false);
+        onlineManager.setOnline(true);
+      });
+      expect(listFilters()).toEqual([]);
+    } finally {
+      onlineManager.setOnline(true);
+    }
+  });
+
+  it('reuses cached pages after reopening the tab and reloads an invalidated list', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      setRelay({ list: [video()] });
+      const firstView = renderEvents('/events');
+      await screen.findByText('a video');
+      firstView.unmount();
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000);
+      relayQuery.fn.mockClear();
+
+      const reopenedView = renderEvents('/events', firstView.client);
+      expect(screen.getByText('a video')).toBeInTheDocument();
+      expect(listFilters()).toEqual([]);
+      reopenedView.unmount();
+
+      await firstView.client.invalidateQueries({ queryKey: ['relay-events'] });
+      setRelay({ list: [event({ kind: 34236, content: 'updated video' })] });
+      renderEvents('/events', firstView.client);
+      expect(await screen.findByText('updated video')).toBeInTheDocument();
+      expect(listFilters()).toEqual([{ limit: 20, kinds: [...VIDEO_KINDS] }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('sends no kinds once "All Events" is chosen explicitly', async () => {
+    setRelay({ list: [video()] });
+    renderEvents('/events');
+    await screen.findByText('a video');
+    expect(listFilters().every(f => f.kinds)).toBe(true);
+    await pickKind('All Events');
+    await waitFor(() => expect(listFilters().some(f => f.kinds === undefined)).toBe(true));
+  });
+
+  it('aborts the in-flight list request when the kind filter changes', async () => {
+    relayQuery.fn.mockImplementation(() => new Promise(() => {})); // never answers
+    renderEvents('/events');
+    await waitFor(() => expect(relayQuery.fn).toHaveBeenCalled());
+    const signal = relayQuery.fn.mock.calls[0][1]?.signal as AbortSignal;
+    await pickKind('All Events');
+    await waitFor(() => expect(signal.aborted).toBe(true));
+  });
+
+  it('shows a timeout on the initial list read and can retry when reopening the tab', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      relayQuery.fn.mockImplementation(async (_filters, { signal }: { signal: AbortSignal }) =>
+        new Promise(resolve => signal.addEventListener('abort', () => resolve([]), { once: true })));
+      const firstView = renderEvents('/events');
+      await waitFor(() => expect(listFilters()).toHaveLength(1));
+      clock.abort(new DOMException('Relay read timed out', 'TimeoutError'));
+      expect(await screen.findByText('Failed to load events: Relay read timed out')).toBeInTheDocument();
+      expect(screen.queryByText('No events found')).not.toBeInTheDocument();
+      firstView.unmount();
+
+      timeout.mockRestore();
+      setRelay({ list: [video()] });
+      renderEvents('/events', firstView.client);
+      expect(await screen.findByText('a video')).toBeInTheDocument();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('keeps loaded rows visible when an older page times out and allows retry', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[], { signal }: { signal: AbortSignal }) =>
+        filter.until
+          ? new Promise(resolve => signal.addEventListener('abort', () => resolve([]), { once: true }))
+          : [video()]);
+      renderEvents('/events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await waitFor(() => expect(listFilters()).toHaveLength(2));
+      clock.abort(new DOMException('Relay read timed out', 'TimeoutError'));
+      expect(await screen.findByText('Failed to load events: Relay read timed out')).toBeInTheDocument();
+      expect(screen.getByText('a video')).toBeInTheDocument();
+
+      timeout.mockRestore();
+      relayQuery.fn.mockResolvedValue([olderVideo()]);
+      fireEvent.click(screen.getByRole('button', { name: 'Load older events' }));
+      expect(await screen.findByText('older')).toBeInTheDocument();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('keeps profiles from indexers that answer before the timeout', async () => {
+    const clock = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(clock.signal);
+    try {
+      const profile = event({ kind: 0, content: '{"display_name":"Found profile"}' });
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[], { signal }: { signal: AbortSignal }) =>
+        filter.kinds?.includes(0)
+          ? new Promise(resolve => signal.addEventListener('abort', () => resolve([profile]), { once: true }))
+          : [video()]);
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('Profiles (0)');
+      await waitFor(() => expect(listFilters().some(f => f.kinds?.includes(0))).toBe(true));
+      clock.abort(new DOMException('Relay read timed out', 'TimeoutError'));
+      expect(await screen.findByText('Found profile')).toBeInTheDocument();
+    } finally {
+      timeout.mockRestore();
+    }
+  });
+
+  it('does not run the list query in direct-lookup mode', async () => {
+    // Not on the relay and not banned. The shared rpc mock answers `[]`, which is
+    // truthy, so the lookup would take it for a banned event with no pubkey and
+    // crash EventCard; a real miss is an RPC error (the lookup's catch turns it
+    // into "not found").
+    rpc.fn.mockImplementation(async (method: string) => {
+      if (method === 'getbannedevent') throw new Error('Event not found or not banned');
+      return [];
+    });
+    renderEvents(`/events?event=${nip19.neventEncode({ id: 'c'.repeat(64) })}`);
+    expect(await screen.findByText('No event found on relay', { selector: 'span' })).toBeInTheDocument();
+    expect(listFilters()).toEqual([]);
+  });
+
+  it('does not fetch another page while scrolling a direct lookup after using the list', async () => {
+    const id = 'c'.repeat(64);
+    setRelay({ list: [video()], byId: [event({ id, content: 'looked up' })] });
+    const { container } = renderEvents('/events');
+    const viewport = eventListViewport(container);
+    Object.defineProperties(viewport, { scrollHeight: { value: 800 }, clientHeight: { value: 300 } });
+    await screen.findByText('a video');
+
+    const search = screen.getByPlaceholderText(/Search by event ID/);
+    fireEvent.change(search, { target: { value: id } });
+    fireEvent.keyDown(search, { key: 'Enter' });
+    await screen.findByText('Event found');
+    relayQuery.fn.mockClear();
+    fireEvent.scroll(viewport, { target: { scrollTop: 480 } });
+    expect(listFilters()).toEqual([]);
+  });
+
+  it('can open the author activity from a direct lookup', async () => {
+    const id = 'c'.repeat(64);
+    setRelay({ list: [video()], byId: [event({ id, content: 'looked up' })] });
+    renderEvents(`/events?event=${nip19.neventEncode({ id })}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'View All by User' }));
+
+    expect(await screen.findByText('a video')).toBeInTheDocument();
+    expect(screen.queryByText('Event found')).not.toBeInTheDocument();
+    expect(listFilters().every(f => f.authors?.[0] === PK)).toBe(true);
+  });
+
+  it('cancels an in-flight list refetch when a direct lookup opens', async () => {
+    const id = 'c'.repeat(64);
+    const firstPage = video();
+    const olderPage = olderVideo();
+    let reloadSignal: AbortSignal | undefined;
+    let releaseReload = () => {};
+    let holdReload = false;
+    relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[], { signal }: { signal: AbortSignal }) => {
+      if (filter.ids) return [event({ id, content: 'looked up' })];
+      if (filter.until) return [olderPage];
+      if (!holdReload) return [firstPage];
+      reloadSignal = signal;
+      return new Promise<NostrEvent[]>(resolve => { releaseReload = () => resolve([firstPage]); });
+    });
+    const { client } = renderEvents('/events');
+    await screen.findByText('a video');
+    await pickKind('All Events');
+    fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+    await screen.findByText('older');
+
+    holdReload = true;
+    relayQuery.fn.mockClear();
+    const reload = client.invalidateQueries({ queryKey: ['relay-events'] });
+    await waitFor(() => expect(reloadSignal).toBeDefined());
+    const search = screen.getByPlaceholderText(/Search by event ID/);
+    fireEvent.change(search, { target: { value: id } });
+    fireEvent.keyDown(search, { key: 'Enter' });
+    await screen.findByText('Event found');
+    expect(reloadSignal?.aborted).toBe(true);
+    releaseReload();
+    await reload;
+    expect(listFilters()).toEqual([{ limit: 20 }]);
+  });
+
+  describe('Refresh', () => {
+    it('does not run the hidden list query in direct-lookup mode', async () => {
+      setRelay({ byId: [event({ id: 'c'.repeat(64), kind: 1, content: 'looked up' })] });
+      renderEvents(`/events?event=${nip19.neventEncode({ id: 'c'.repeat(64) })}`);
+      await screen.findByText('Event found');
+      relayQuery.fn.mockClear();
+      expect(screen.getByRole('button', { name: /Refresh/ })).toBeDisabled();
+      expect(listFilters()).toEqual([]);
+    });
+
+    it('spins and disables while a refresh is in flight', async () => {
+      setRelay({ list: [video()] });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      let release: () => void = () => {};
+      relayQuery.fn.mockImplementation(() => new Promise(r => { release = () => r([video()]); }));
+      const button = screen.getByRole('button', { name: /Refresh/ });
+      fireEvent.click(button);
+      await waitFor(() => expect(button).toBeDisabled());
+      release();
+      await waitFor(() => expect(button).not.toBeDisabled());
+    });
+
+    it('refreshes only the first page even when it does not fill the viewport', async () => {
+      let newest = video();
+      relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
+        const until = filters[0]?.until;
+        if (!until) return [newest];
+        return until > olderVideo().created_at ? [olderVideo()] : [];
+      });
+      renderEvents('/events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await screen.findByText('older');
+      await waitFor(() => expect(screen.getByRole('button', { name: /Refresh/ })).toBeEnabled());
+      newest = event({ id: 'c'.repeat(64), kind: 34236, content: 'fresh video' });
+      relayQuery.fn.mockClear();
+      fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
+      await screen.findByText('fresh video');
+      expect(listFilters()).toEqual([{ limit: 20, kinds: [...VIDEO_KINDS] }]);
+      expect(screen.queryByText('older')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Load older events' }));
+      expect(await screen.findByText('older')).toBeInTheDocument();
+    });
+
+    it('preserves cached older pages from another kind filter', async () => {
+      relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
+        const filter = filters[0];
+        if (!filter.until) return [video()];
+        return !filter.kinds && filter.until > olderVideo().created_at ? [olderVideo()] : [];
+      });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('All Events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await screen.findByText('older');
+
+      await pickKind(`All Video Kinds (${VIDEO_KINDS.join(', ')})`);
+      const refresh = screen.getByRole('button', { name: /Refresh/ });
+      await waitFor(() => expect(refresh).toBeEnabled());
+      relayQuery.fn.mockClear();
+      fireEvent.click(refresh);
+      await waitFor(() => expect(refresh).toBeEnabled());
+      expect(listFilters()).toEqual([{ limit: 20, kinds: [...VIDEO_KINDS] }]);
+      relayQuery.fn.mockClear();
+      await pickKind('All Events');
+      expect(await screen.findByText('older')).toBeInTheDocument();
+      expect(listFilters()).toEqual([]);
+    });
+  });
+
+  describe('author view', () => {
+    it('requests and displays both comments and reactions in recent author activity', async () => {
+      const activity = [
+        event({ kind: 1111, content: 'spam comment' }),
+        event({ id: 'd'.repeat(64), kind: 7, content: 'author reaction' }),
+      ];
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[]) =>
+        activity.filter(row => filter.authors?.includes(row.pubkey) && filter.kinds?.includes(row.kind)));
+      renderEvents(`/events?pubkey=${PK}`);
+      expect(await screen.findByText('spam comment')).toBeInTheDocument();
+      expect(screen.getByText('author reaction')).toBeInTheDocument();
+      const filters = listFilters();
+      expect(filters.length).toBeGreaterThan(0);
+      for (const f of filters) {
+        expect(f.authors).toEqual([PK]);
+        expect(f.kinds).toEqual([...RECENT_CONTENT_KINDS, 7]);
+      }
+    });
+
+    it('says which kinds are shown and offers one click to show all', async () => {
+      setRelay({ list: [event({ kind: 1111, content: 'spam comment' })] });
+      renderEvents(`/events?pubkey=${PK}`);
+      await screen.findByText('spam comment');
+      expect(screen.getByText(/Showing recent activity kinds/)).toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: /Show all kinds/ }));
+      await waitFor(() => expect(listFilters().some(f => f.authors && f.kinds === undefined)).toBe(true));
+    });
+
+    it('returns to kinds-scoped queries once the author filter is cleared after Show all kinds', async () => {
+      setRelay({ list: [event({ kind: 1111, content: 'spam comment' })] });
+      renderEvents(`/events?pubkey=${PK}`);
+      await screen.findByText('spam comment');
+      fireEvent.click(screen.getByRole('button', { name: /Show all kinds/ }));
+      await waitFor(() => expect(listFilters().some(f => f.authors && f.kinds === undefined)).toBe(true));
+      relayQuery.fn.mockClear();
+      fireEvent.click(screen.getByRole('button', { name: 'Clear' }));
+      await waitFor(() => expect(listFilters().length).toBeGreaterThan(0));
+      await new Promise(r => setTimeout(r, 50));
+      for (const f of listFilters()) expect(f.kinds).toEqual([...VIDEO_KINDS]);
+    });
+
+    it('returns to kinds-scoped queries when browser Back leaves the author view after Show all kinds', async () => {
+      setRelay({ list: [event({ kind: 1111, content: 'spam comment' })] });
+      renderEvents('/events');
+      const box = screen.getByPlaceholderText(/Search by event ID/);
+      fireEvent.change(box, { target: { value: nip19.npubEncode(PK) } });
+      fireEvent.keyDown(box, { key: 'Enter' }); // pushes ?pubkey=
+      await screen.findByRole('button', { name: /Show all kinds/ });
+      fireEvent.click(screen.getByRole('button', { name: /Show all kinds/ }));
+      await waitFor(() => expect(listFilters().some(f => f.authors && f.kinds === undefined)).toBe(true));
+      relayQuery.fn.mockClear();
+      act(() => navigation.go(-1));
+      await waitFor(() => expect(location.search).not.toContain('pubkey'));
+      expect(screen.getByLabelText('Event Kind')).toHaveTextContent('All Video Kinds');
+      act(() => navigation.go(1));
+      await screen.findByRole('button', { name: 'Show all kinds' });
+      expect(listFilters().every(f => f.kinds)).toBe(true);
+    });
+
+    it('keeps the plain list on the video kinds', async () => {
+      setRelay({ list: [video()] });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      expect(screen.queryByText(/Showing recent activity kinds/)).not.toBeInTheDocument();
+    });
+  });
+
+  describe('Custom Kind', () => {
+    it('keeps the cached All Events pages after using a custom kind', async () => {
+      const older = olderVideo();
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[]) => {
+        if (filter.kinds?.includes(1111)) return [event({ kind: 1111, content: 'custom comment' })];
+        return filter.until ? [older] : [video()];
+      });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('All Events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await screen.findByText('older');
+
+      await pickKind('Custom Kind');
+      fireEvent.change(screen.getByLabelText('Kind #'), { target: { value: '1111' } });
+      await screen.findByText('custom comment');
+      relayQuery.fn.mockClear();
+      await pickKind('All Events');
+      expect(await screen.findByText('older')).toBeInTheDocument();
+      expect(listFilters()).toEqual([]);
+    });
+
+    it('sends nothing until a valid kind number is entered, then scopes to it', async () => {
+      setRelay({ list: [video()] });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      relayQuery.fn.mockClear();
+      await pickKind('Custom Kind');
+      expect(await screen.findByText('Enter a kind number')).toBeInTheDocument();
+      const input = screen.getByLabelText('Kind #');
+      fireEvent.change(input, { target: { value: '-5' } });
+      await new Promise(r => setTimeout(r, 50));
+      expect(listFilters()).toEqual([]);
+      fireEvent.change(input, { target: { value: '70000' } }); // above NIP-01's 65535
+      expect(screen.getByRole('button', { name: /Refresh/ })).toBeDisabled();
+      await new Promise(r => setTimeout(r, 50));
+      expect(listFilters()).toEqual([]);
+      fireEvent.change(input, { target: { value: '1111' } });
+      await waitFor(() => expect(listFilters().some(f => f.kinds?.[0] === 1111)).toBe(true));
+      expect(listFilters().every(f => f.kinds)).toBe(true);
+    });
   });
 });
