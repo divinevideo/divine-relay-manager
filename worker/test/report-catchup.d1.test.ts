@@ -1070,6 +1070,78 @@ describe('catch-up when the listener connects', () => {
     expect(relay.live!.socket.readyState).toBe(FakeSocket.OPEN);
   });
 
+  it('the heartbeat waits for the live subscription\'s EOSE, then stamps', async () => {
+    const readHeartbeat = async () =>
+      (await DB.prepare("SELECT value FROM report_index_meta WHERE key = 'watcher_last_alive_at'").first<{ value: number }>())?.value;
+    relay.liveReply = 'none';
+    const w = await newWatcher();
+    await w.post('/start');
+    await settle(w.pending);
+    // Connected and planned, but the relay has not acknowledged the REQ.
+    const stale = nowSec() - 500;
+    await seedHeartbeat(stale);
+    await w.watcher.alarm();
+    expect(await readHeartbeat()).toBe(stale);
+
+    const live = relay.live!;
+    live.socket.emit('message', { data: JSON.stringify(['EOSE', live.subId]) });
+    await settle(w.pending);
+    await w.watcher.alarm();
+    expect(await readHeartbeat()).toBeGreaterThan(stale);
+    await w.post('/stop');
+  });
+
+  it('an EOSE on a replaced socket does not let the new socket stamp the heartbeat', async () => {
+    const readHeartbeat = async () =>
+      (await DB.prepare("SELECT value FROM report_index_meta WHERE key = 'watcher_last_alive_at'").first<{ value: number }>())?.value;
+    const w = await newWatcher();
+    await w.post('/start');
+    await settle(w.pending);
+    const old = relay.live!;
+    // The new socket's REQ is never acknowledged.
+    relay.liveReply = 'none';
+    (w.watcher as unknown as { connect(): void }).connect();
+    await settle(w.pending);
+    expect(relay.live!.socket).not.toBe(old.socket);
+    const stale = nowSec() - 500;
+    await seedHeartbeat(stale);
+    await w.watcher.alarm();
+    expect(await readHeartbeat()).toBe(stale);
+
+    // A late EOSE from the replaced socket counts for nothing either.
+    old.socket.readyState = FakeSocket.OPEN;
+    old.socket.emit('message', { data: JSON.stringify(['EOSE', old.subId]) });
+    await settle(w.pending);
+    await w.watcher.alarm();
+    expect(await readHeartbeat()).toBe(stale);
+    await w.post('/stop');
+  });
+
+  it('a report filed while the live subscription never acknowledged is caught up after the socket drops', async () => {
+    const T0 = nowSec();
+    await seedHeartbeat(T0 - 60);
+    // The relay accepts the socket and the REQ but never answers the REQ.
+    relay.liveReply = 'none';
+    const w = await newWatcher();
+    await w.post('/start');
+    await settle(w.pending);
+    // Filed during the stall: the dead live subscription never delivers it.
+    const target = hex(0xe05e);
+    relay.corpus = [minorsReport(target, T0 + 30)];
+    // 25 minutes on, the socket is still open and the health alarm runs. It
+    // must not move the heartbeat past the report.
+    const real = Date.now.bind(Date);
+    const clock = vi.spyOn(Date, 'now').mockImplementation(() => real() + 1_500_000);
+    await w.watcher.alarm();
+    // The socket finally drops; the reconnect's subscription is healthy.
+    relay.liveReply = 'eose';
+    relay.sockets[0].close();
+    await w.watcher.alarm();
+    await settle(w.pending);
+    clock.mockRestore();
+    expect(bansFor(target)).toHaveLength(1);
+  });
+
   it('a window a connect adds while a pass saves its cursor is not lost', async () => {
     const base = nowSec() - 3000;
     const first: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };

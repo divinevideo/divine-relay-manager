@@ -11,6 +11,7 @@ import {
   CATCHUP_STOPPED_PERIODS_KEY,
   CATCHUP_WINDOWS_KEY,
   addPendingWindow,
+  addStoppedPeriod,
   pruneStoppedPeriods,
   type StoppedPeriod,
   planCatchUpWindow,
@@ -148,6 +149,11 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
 
+// How long the live REQ may go without EOSE before its socket is dropped.
+// Funnelcake ends every REQ with EOSE, CLOSED or a dropped socket within about
+// 35 s, so this never fires against a healthy relay.
+const LIVE_EOSE_TIMEOUT_MS = 60000;
+
 /** DO storage key: unix seconds of the last /stop, so catch-up can tell a deliberate stop from an outage. */
 const DELIBERATE_STOP_KEY = 'report-watcher-deliberate-stop';
 
@@ -176,6 +182,12 @@ export class ReportWatcher implements DurableObject {
   // health alarm must not stamp watcher_last_alive_at: a stamp taken before the
   // window is saved would hide the gap from the next restart.
   private catchUpPlannedForConnection = false;
+  // True once this connection's live subscription has reached EOSE. Until then
+  // the relay has not acknowledged the REQ, so the socket may be receiving
+  // nothing and the health alarm must not stamp watcher_last_alive_at either.
+  private liveSubscriptionAcked = false;
+  // Closes the socket if its live REQ never reaches EOSE (see armEoseWatchdog).
+  private eoseWatchdog: ReturnType<typeof setTimeout> | null = null;
   // A plan is running (from the connect, or a retry from the alarm).
   private catchUpPlanInFlight = false;
   // Every report id the live path or catch-up has taken in this instance, so a
@@ -768,6 +780,7 @@ export class ReportWatcher implements DurableObject {
       this.disconnect();
     }
     this.catchUpPlannedForConnection = false;
+    this.liveSubscriptionAcked = false;
 
     const relayUrl = this.env.RELAY_URL;
     console.log(`[ReportWatcher] Connecting to ${relayUrl}`);
@@ -777,6 +790,10 @@ export class ReportWatcher implements DurableObject {
       this.ws = socket;
 
       this.ws.addEventListener('open', () => {
+        // A replaced or orphaned socket's late open must not subscribe, arm a
+        // watchdog or plan catch-up: only the tracked socket of a running
+        // watcher does.
+        if (!this.running || this.ws !== socket) return;
         console.log('[ReportWatcher] WebSocket connected');
         this.connectedAt = Date.now();
         // The backoff is reset on the live subscription's EOSE, not here: a
@@ -791,7 +808,15 @@ export class ReportWatcher implements DurableObject {
           this.subscriptionId,
           { kinds: [1984], limit: 0 }
         ]);
-        this.ws?.send(subscription);
+        // Armed before the send: if the send throws, the watchdog still drops
+        // this socket, which would otherwise sit open with no live REQ.
+        this.armEoseWatchdog(socket);
+        try {
+          socket.send(subscription);
+        } catch (error) {
+          console.error('[ReportWatcher] Failed to send the live REQ; the EOSE watchdog will drop the socket:', error);
+          return;
+        }
         console.log('[ReportWatcher] Subscribed to kind 1984 reports');
 
         // After the live REQ, so nothing filed from here on is missed: plan the
@@ -819,6 +844,7 @@ export class ReportWatcher implements DurableObject {
         if (this.ws !== socket) return;
         this.ws = null;
         this.connectedAt = null;
+        this.clearEoseWatchdog();
 
         // Reconnect if still supposed to be running
         if (this.running) {
@@ -911,8 +937,10 @@ export class ReportWatcher implements DurableObject {
             // The stopped period is kept apart from the windows, so catch-up
             // runs no handler on a report created in it whichever window finds
             // it (see runPendingCatchUp).
-            const added = stopMarker < nowSec ? [...periods, { after: stopMarker, until: nowSec }] : periods;
-            await tx.put(CATCHUP_STOPPED_PERIODS_KEY, pruneStoppedPeriods(added, windows));
+            const kept = stopMarker < nowSec
+              ? addStoppedPeriod(periods, { after: stopMarker, until: nowSec }, windows)
+              : pruneStoppedPeriods(periods, windows);
+            await tx.put(CATCHUP_STOPPED_PERIODS_KEY, kept);
             await tx.delete(DELIBERATE_STOP_KEY);
           }
           return disabled;
@@ -997,22 +1025,61 @@ export class ReportWatcher implements DurableObject {
    * Disconnect from relay
    */
   private disconnect(): void {
+    this.clearEoseWatchdog();
     const ws = this.ws;
     if (ws) {
       // Untracked before closing, so its close event (sync or late) is
       // ignored by the close listener's identity check.
       this.ws = null;
       this.connectedAt = null;
-      // Unsubscribe before closing
+      // Unsubscribe before closing. Separate try blocks: a send that throws
+      // must not leave the socket open.
       try {
         if (ws.readyState === WebSocket.OPEN) {
           ws.send(JSON.stringify(['CLOSE', this.subscriptionId]));
         }
+      } catch {
+        // Ignore errors during cleanup
+      }
+      try {
         ws.close();
       } catch {
         // Ignore errors during cleanup
       }
     }
+  }
+
+  /**
+   * Drops `socket` if its live subscription has not reached EOSE in
+   * LIVE_EOSE_TIMEOUT_MS. A relay that accepts the socket but never answers the
+   * REQ would otherwise leave the watcher on a subscription that delivers
+   * nothing, with no heartbeat to show for it. The watchdog disconnects and
+   * schedules the backoff reconnect itself rather than waiting for the close
+   * event, which a hung peer may never send; disconnect() untracks the socket
+   * first, so a late close event is ignored and cannot schedule a second
+   * reconnect. The backoff is not reset (only EOSE resets it), so repeated
+   * stalls back off. The reconnect resubscribes and plans the gap. Cleared on
+   * EOSE, on close and on disconnect.
+   */
+  private armEoseWatchdog(socket: WebSocket): void {
+    // A replaced socket's late open must not disarm the tracked socket's watchdog.
+    if (this.ws !== socket) return;
+    this.clearEoseWatchdog();
+    this.eoseWatchdog = setTimeout(() => {
+      this.eoseWatchdog = null;
+      // Only the socket it was armed for, never one that replaced it.
+      if (this.ws !== socket) return;
+      console.error(`[ReportWatcher] Live subscription had no EOSE after ${LIVE_EOSE_TIMEOUT_MS} ms; dropping the socket to reconnect`);
+      // disconnect() catches its own send/close errors.
+      this.disconnect();
+      if (this.running) this.scheduleReconnect();
+    }, LIVE_EOSE_TIMEOUT_MS);
+  }
+
+  private clearEoseWatchdog(): void {
+    if (this.eoseWatchdog === null) return;
+    clearTimeout(this.eoseWatchdog);
+    this.eoseWatchdog = null;
   }
 
   /**
@@ -1079,10 +1146,13 @@ export class ReportWatcher implements DurableObject {
 
         case 'EOSE': {
           console.log('[ReportWatcher] End of stored events');
-          // The live subscription is healthy: only now is the backoff reset.
-          if (rest[0] === this.subscriptionId) {
+          // The live subscription is healthy: only now is the backoff reset,
+          // and only now may the health alarm stamp the heartbeat.
+          if (rest[0] === this.subscriptionId && this.ws === socket) {
             this.reconnectAttempts = 0;
             this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+            this.liveSubscriptionAcked = true;
+            this.clearEoseWatchdog();
           }
           break;
         }
@@ -1893,9 +1963,12 @@ export class ReportWatcher implements DurableObject {
     }
 
     // Heartbeat for restart catch-up: only a live socket whose catch-up window
-    // is already saved may advance it. Non-critical, so its own try/catch.
+    // is already saved and whose live subscription has reached EOSE may
+    // advance it. Without EOSE the relay may be delivering nothing, and a stamp
+    // would move the next catch-up window past reports filed meanwhile.
+    // Non-critical, so its own try/catch.
     if (
-      this.running && this.catchUpPlannedForConnection && this.env.DB
+      this.running && this.catchUpPlannedForConnection && this.liveSubscriptionAcked && this.env.DB
       && this.ws && this.ws.readyState === WebSocket.OPEN
     ) {
       try {

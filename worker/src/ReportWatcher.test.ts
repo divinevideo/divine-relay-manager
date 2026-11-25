@@ -1300,6 +1300,172 @@ describe('ReportWatcher', () => {
     });
   });
 
+  // A relay that accepts the socket but never acknowledges the live REQ would
+  // leave the watcher on a dead subscription: nothing arrives and, without
+  // EOSE, the heartbeat must not move. The watchdog drops that socket so the
+  // backoff reconnect resubscribes and catch-up plans the gap.
+  describe('live subscription EOSE watchdog', () => {
+    const LIVE_EOSE_TIMEOUT_MS = 60_000;
+    const eose = (ws: MockWebSocket) => ws.simulateMessage(JSON.stringify(['EOSE', 'auto-hide-reports']));
+    const status = async () =>
+      ((await (await watcher.fetch(new Request('https://do/status'))).json()) as { status: ReportWatcherStatus }).status;
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    const reconnectDelay = async () => (await mockState.storage.getAlarm())! - Date.now();
+
+    it('closes a socket whose live subscription has no EOSE 60 s after the REQ', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS - 1);
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+    });
+
+    it('repeated stalls keep growing the reconnect backoff', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+      const first = await reconnectDelay();
+
+      // The reconnect alarm opens a new socket, whose REQ also gets no EOSE.
+      await watcher.alarm();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getLastMockWebSocket()!.readyState).toBe(MockWebSocket.OPEN);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 2 });
+      const second = await reconnectDelay();
+      expect(first).toBeLessThanOrEqual(1000);
+      expect(second).toBeGreaterThan(1500);
+    });
+
+    it('schedules the reconnect itself when the hung peer never answers the close', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      // A black-holed relay: close() starts the handshake, no close event comes.
+      ws.close = () => { ws.readyState = MockWebSocket.CLOSING; };
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+      expect(await reconnectDelay()).toBeLessThanOrEqual(1000);
+      // The subscription is closed before the socket.
+      expect(ws.send).toHaveBeenCalledWith(JSON.stringify(['CLOSE', 'auto-hide-reports']));
+
+      // The close event finally arrives: no second reconnect.
+      ws.simulateClose(1006, 'late');
+      expect(await status()).toMatchObject({ reconnectAttempts: 1 });
+    });
+
+    it('arms before sending the REQ, so a send that throws still gets the socket dropped', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      const ws = getLastMockWebSocket()!;
+      ws.send.mockImplementation(() => { throw new Error('send failed'); });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+    });
+
+    it('a replaced socket\'s late open sends no REQ on either socket', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const old = getLastMockWebSocket()!;
+      (watcher as unknown as { connect(): void }).connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const tracked = getLastMockWebSocket()!;
+      const reqs = (ws: MockWebSocket) => ws.send.mock.calls.filter(([data]) => String(data).startsWith('["REQ"')).length;
+      expect(reqs(old)).toBe(1);
+      expect(reqs(tracked)).toBe(1);
+
+      old.emit('open', {});
+      expect(reqs(old)).toBe(1);
+      expect(reqs(tracked)).toBe(1);
+    });
+
+    it('does not fire once the live subscription has reached EOSE', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      await vi.advanceTimersByTimeAsync(10_000);
+      eose(ws);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS * 2);
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+    });
+
+    it('an EOSE for another subscription id does not disarm it', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      ws.simulateMessage(JSON.stringify(['EOSE', 'some-other-sub']));
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('an old socket\'s watchdog never closes the socket that replaced it', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const old = getLastMockWebSocket()!;
+      await vi.advanceTimersByTimeAsync(30_000);
+      (watcher as unknown as { connect(): void }).connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const tracked = getLastMockWebSocket()!;
+      expect(tracked).not.toBe(old);
+
+      // The old socket's 60 s passes; the new one is 30 s into its own.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(tracked.readyState).toBe(MockWebSocket.OPEN);
+      // Its own watchdog still runs.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(tracked.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('a replaced socket\'s late open does not disarm the tracked socket\'s watchdog', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const old = getLastMockWebSocket()!;
+      (watcher as unknown as { connect(): void }).connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const tracked = getLastMockWebSocket()!;
+      await vi.advanceTimersByTimeAsync(10_000);
+      old.emit('open', {});
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS - 10_000);
+      expect(tracked.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('is cleared by a stop', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      await watcher.fetch(new Request('https://do/stop', { method: 'POST' }));
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('is cleared when its socket closes', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      getLastMockWebSocket()!.simulateClose(1006, 'dropped');
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  });
+
   describe('message handling', () => {
     it('should process report events', async () => {
       await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
@@ -3431,20 +3597,29 @@ describe('ReportWatcher', () => {
       consoleError.mockRestore();
     });
 
-    it('stamps watcher_last_alive_at on the health alarm only while connected and after the catch-up window is saved', async () => {
+    it('stamps watcher_last_alive_at on the health alarm only while connected, after the catch-up window is saved and the live subscription reached EOSE', async () => {
       const { db, metaBinds } = arrivalDb();
       const state = createMockState();
       const w = new ReportWatcher(state, createMockEnv({ DB: db }));
       await new Promise(resolve => setTimeout(resolve, 10));
-      const internals = w as unknown as { running: boolean; ws: { readyState: number } | null; catchUpPlannedForConnection: boolean };
+      const internals = w as unknown as {
+        running: boolean; ws: { readyState: number } | null; catchUpPlannedForConnection: boolean; liveSubscriptionAcked: boolean;
+      };
       internals.running = true;
       internals.ws = { readyState: WebSocket.OPEN };
+      internals.liveSubscriptionAcked = true;
 
       internals.catchUpPlannedForConnection = false;
       await w.alarm();
       expect(metaBinds).toHaveLength(0);
 
+      // Planned, but the live subscription has not reached EOSE yet.
       internals.catchUpPlannedForConnection = true;
+      internals.liveSubscriptionAcked = false;
+      await w.alarm();
+      expect(metaBinds).toHaveLength(0);
+
+      internals.liveSubscriptionAcked = true;
       const before = Math.floor(Date.now() / 1000);
       await w.alarm();
       expect(metaBinds).toHaveLength(1);
