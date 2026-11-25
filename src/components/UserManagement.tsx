@@ -98,16 +98,35 @@ function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: st
   const [query, setQueryState] = useState('');
   const [applied, setApplied] = useState('');
   const [page, setPage] = useState(0);
+  const [names, setNames] = useState<Map<string, string>>();
+  const filtering = applied.trim() !== '';
   useEffect(() => {
     if (query === applied) return;
-    const timer = setTimeout(() => { setApplied(query); setPage(0); }, SEARCH_DEBOUNCE_MS);
+    const timer = setTimeout(() => {
+      setNames(query.trim() ? cachedNames(queryClient) : undefined);
+      setApplied(query);
+      setPage(0);
+    }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [query, applied]);
+  }, [query, applied, queryClient]);
+  useEffect(() => {
+    if (!filtering) return;
+    const refreshNames = () => setNames(cachedNames(queryClient));
+    const unsubscribe = queryClient.getQueryCache().subscribe(event => {
+      if (event.query.queryKey[0] !== 'author') return;
+      if (event.type === 'removed'
+        || (event.type === 'updated' && ['success', 'setState'].includes(event.action.type))) {
+        refreshNames();
+      }
+    });
+    // A profile can finish between the initial filter render and subscribing.
+    refreshNames();
+    return unsubscribe;
+  }, [filtering, queryClient]);
   const filtered = useMemo(() => {
-    if (!list) return undefined;
-    if (!applied.trim()) return list;
-    return list.filter(matcher(applied, cachedNames(queryClient)));
-  }, [list, applied, queryClient]);
+    if (!list || !filtering || !names) return list;
+    return list.filter(matcher(applied, names));
+  }, [list, applied, filtering, names]);
   const total = filtered?.length ?? 0;
   const current = clampPage(total, page);
 
@@ -120,11 +139,12 @@ function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: st
     setPage(0);
     setQueryState('');
     setApplied('');
+    setNames(undefined);
   }, [environment]);
 
   return {
     query,
-    filtering: applied.trim() !== '',
+    filtering,
     setQuery: setQueryState,
     page: current,
     setPage,

@@ -1530,6 +1530,23 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       await waitFor(() => expect(pubkeysShown()).toEqual([hex(2)]));
     });
 
+    it('updates active name results when a profile arrives in the cache', async () => {
+      serve(entries(3));
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      renderWithProvider(client);
+      await screen.findAllByTestId('user-card');
+      type(search(), 'zebra');
+      await screen.findByText('No accounts match');
+      const calls = api.callRelayRpc.mock.calls.length;
+
+      act(() => {
+        client.setQueryData(['author', hex(2), ''], { metadata: { display_name: 'Zebra Fan' }, isFunnelcakeUser: true });
+      });
+
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(2)]));
+      expect(api.callRelayRpc.mock.calls).toHaveLength(calls);
+    });
+
     it('finds a legacy npub row by hex or cached name without changing its action target', async () => {
       const legacy = npubOf(77);
       serve(entries(3), [{ pubkey: legacy }, { pubkey: hex(2) }]);
