@@ -1,5 +1,5 @@
 // ABOUTME: Uncapped resolution-state projections over moderation_decisions --
-// ABOUTME: the dated handling rows and auto-hide states the queue reads.
+// ABOUTME: every handling row and auto-hide state the queue reads.
 
 import { AUTO_HIDE_ACTIONS, AUTO_HIDE_STATE_ACTIONS } from '../../shared/autohide';
 import type { HandlingRow } from '../../shared/handling';
@@ -20,7 +20,7 @@ export interface AutoHideStateRow {
 // query. Chunk boundaries are invisible in the result.
 const ROW_CHUNK_SIZE = 1000;
 
-// The dated decision rows the handled-before rule reads (#324): every event and
+// The decision rows the handled-before rule reads (#324): every event and
 // pubkey row except auto-hide actions, with automated and `reopened` rows
 // included, because handlingByTarget (shared/handling.ts) is the one place that
 // decides which of them count. The worker feed and the screen both pass these

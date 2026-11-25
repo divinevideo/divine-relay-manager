@@ -2541,9 +2541,9 @@ async function handleGetAllDecisions(
   }
 }
 
-// The resolution projection /api/decisions cannot give the queue: every dated
-// handling row and auto-hide state in the decisions table, with no row cap and
-// so no coverage boundary to disclose.
+// The resolution projection /api/decisions cannot give the queue: every
+// handling row (dated, or `at: null` for an older row) and auto-hide state in
+// the decisions table, with no row cap and so no coverage boundary to disclose.
 async function handleGetResolutionState(
   env: Env,
   corsHeaders: Record<string, string>

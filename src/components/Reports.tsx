@@ -183,8 +183,8 @@ const QUEUE_POLL_MS = 60 * 1000;
 
 const NO_REPORTS: NostrEvent[] = [];
 
-// The four polled reads the queue's resolution rests on. Named at module scope so the
-// acknowledged-override state can be keyed by it.
+// The four polled reads the queue's resolution rests on. Named at module scope
+// so the acknowledged-override state can be keyed by it.
 type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
 
 // Category priority for sorting
@@ -716,12 +716,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     history.fetchNextPage();
   };
 
-  // The resolution sources are subtractive: these labels HIDE work already handled, so
-  // a failed fetch makes the queue bigger and wrong rather than smaller and
-  // safe (#221). NOT retried: a retry re-runs the worker's whole relay walk, and
-  // the relay keeps running an abandoned query for up to 30s, so retrying a slow
-  // read doubles the database load. The 60s poll and the blocked pane's Retry
-  // button are the recovery paths.
+  // The resolution sources are subtractive: these labels HIDE work already
+  // handled, so a failed fetch makes the queue bigger and wrong rather than
+  // smaller and safe (#221). NOT retried: a retry re-runs the worker's whole
+  // relay walk, and the relay keeps running an abandoned query for up to 30s,
+  // so retrying a slow read doubles the database load. The 60s poll and the
+  // blocked pane's Retry button are the recovery paths.
   const {
     data: labelsResult,
     error: labelsError,
@@ -930,8 +930,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // worker's own handlingByTarget, so the screen dates every target as the
   // feed does. Empty until the reads land. The decisions read gates every view
   // below; labels and ban lists gate all but pending review, where a label that
-  // has not landed only keeps a target behind the switch. Kept apart from `resolution` so feed and ban-list
-  // polls do not rebuild it over the whole decision log.
+  // has not landed only keeps a target behind the switch. Kept apart from
+  // `resolution` so feed and ban-list polls do not rebuild it over the whole
+  // decision log.
   const handlingRows = decisionsResult?.handlingRows;
   const dated = useMemo(
     () => datedHandling(handlingRows ?? [], labelTargets ?? []),
@@ -946,7 +947,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [autoHideStates, handlingRows],
   );
 
-  // Which rule decides whether a report is handled, and what it reads.
+  // What the dated rule reads to decide whether a report is handled.
   const resolution = useMemo(() => queueResolution({
     dated,
     arrivals,
@@ -1066,8 +1067,8 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   ]);
 
   // Whether the list filter (Hide resolved on, outside the pending-review
-  // view) subtracts what the resolution sources handled. Only the label truncation bound below
-  // still keys on it.
+  // view) subtracts what the resolution sources handled. Only the label
+  // truncation bound below still keys on it.
   const resolvedFilterActive = hideResolved && !showPendingReview;
   // Labels and the ban lists gate every view but pending review. The default
   // view subtracts them from the list; the history view counts resolved rows
@@ -1216,12 +1217,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Each listed target's standing, by `resolution`: 'new' (no one has handled
   // it), 'handled' (every report predates the latest handling) or
-  // 'handled_before' (a person handled it, and a report has come since; only
-  // the dated rule answers this). With Hide resolved on, the main list keeps
-  // only 'new' targets. The 'handled_before' ones outside the switch are the
-  // targets the queue sets apart as already handled; switch members keep their
-  // place behind the switch, whatever their standing. Kept as the whole
-  // verdict: a handled-before row also shows and sorts by its ban.
+  // 'handled_before' (a person handled it, and a report has come since). With
+  // Hide resolved on, the main list keeps only 'new' targets. The
+  // 'handled_before' ones outside the switch are the targets the queue sets
+  // apart as already handled; switch members keep their place behind the
+  // switch, whatever their standing. Kept as the whole verdict: a
+  // handled-before row also shows and sorts by its ban.
   const groupVerdictByTarget = useMemo(
     () => new Map<string, HandlingVerdict>(
       allConsolidated.map(c => [reportTargetKey(c.target), consolidatedHandling(c, resolution)]),
@@ -2045,9 +2046,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }
 
   // Wait for reports AND every gating resolution source. A source that has not
-  // landed contributes nothing to what is subtracted, so rendering here would show
-  // handled work as pending, and would show auto-hidden content in the default
-  // view (#221).
+  // landed contributes nothing to what is subtracted, so rendering here would
+  // show handled work as pending, and would show auto-hidden content in the
+  // default view (#221).
   if ((isLoading && !queueFailedCold) || blockingLoadStillBlocking.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
