@@ -129,6 +129,7 @@ function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: st
   }, [list, applied, filtering, names]);
   const total = filtered?.length ?? 0;
   const current = clampPage(total, page);
+  const start = current * USERS_PAGE_SIZE;
 
   useEffect(() => { setPage(p => clampPage(total, p)); }, [total]);
   // A different environment is a different list.
@@ -149,17 +150,15 @@ function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: st
     page: current,
     setPage,
     total,
-    items: filtered?.slice(current * USERS_PAGE_SIZE, (current + 1) * USERS_PAGE_SIZE) ?? [],
+    range: total > USERS_PAGE_SIZE ? `${start + 1}-${Math.min(total, start + USERS_PAGE_SIZE)} of ${total}` : '',
+    items: filtered?.slice(start, start + USERS_PAGE_SIZE) ?? [],
   };
 }
 
-function AccountSearch({ label, value, onChange, filtering, total }: {
-  label: string; value: string; onChange: (value: string) => void; filtering: boolean; total: number;
+function AccountSearch({ label, value, onChange }: {
+  label: string; value: string; onChange: (value: string) => void;
 }) {
-  // Above one page the pager's range line says the count; this covers the rest.
-  const status = !filtering || total > USERS_PAGE_SIZE ? '' : total === 0 ? 'No accounts match' : `${total} match${total === 1 ? '' : 'es'}`;
   return (
-    <>
     <Input
       type="search"
       role="searchbox"
@@ -169,18 +168,16 @@ function AccountSearch({ label, value, onChange, filtering, total }: {
       onChange={e => onChange(e.target.value)}
       className="mb-3"
     />
-    <p role="status" className={status === 'No accounts match' ? 'text-center py-6 text-muted-foreground' : 'sr-only'}>{status}</p>
-    </>
   );
 }
 
-function Pager({ label, total, page, onPage, listRef }: {
-  label: string; total: number; page: number; onPage: (page: number) => void; listRef: React.RefObject<HTMLElement>;
+function Pager({ label, total, page, onPage, listRef, range, filtering }: {
+  label: string; total: number; page: number; onPage: (page: number) => void;
+  listRef: React.RefObject<HTMLElement>; range: string; filtering: boolean;
 }) {
   const prevRef = useRef<HTMLButtonElement>(null);
   const nextRef = useRef<HTMLButtonElement>(null);
-  const current = clampPage(total, page);
-  const last = clampPage(total, Infinity);
+  const last = Math.ceil(total / USERS_PAGE_SIZE) - 1;
   // Set by a Previous or Next click, so a page reset from typing in the search
   // box does not scroll the box out of view.
   const clicked = useRef(false);
@@ -195,23 +192,26 @@ function Pager({ label, total, page, onPage, listRef }: {
     if (refocus.current === 'prev') prevRef.current?.focus({ preventScroll: true });
     if (refocus.current === 'next') nextRef.current?.focus({ preventScroll: true });
     refocus.current = null;
-  }, [current, listRef]);
-  if (total <= USERS_PAGE_SIZE) return null;
-  const from = current * USERS_PAGE_SIZE + 1;
-  const to = Math.min(total, from + USERS_PAGE_SIZE - 1);
+  }, [page, listRef]);
   const go = (target: number) => {
     clicked.current = true;
     refocus.current = target >= last ? 'prev' : target <= 0 ? 'next' : null;
     onPage(target);
   };
+  // Keep one live region mounted while filtering adds or removes the buttons.
+  const noMatches = filtering && total === 0;
+  const status = range || (filtering ? (noMatches ? 'No accounts match' : `${total} match${total === 1 ? '' : 'es'}`) : '');
+  const statusClass = range ? 'text-sm text-muted-foreground' : noMatches ? 'text-center py-6 text-muted-foreground' : 'sr-only';
   return (
-    <nav aria-label={label} className="flex items-center justify-between pt-2">
-      <span aria-live="polite" className="text-sm text-muted-foreground">{from}-{to} of {total}</span>
-      <div className="flex gap-2">
-        <Button ref={prevRef} type="button" variant="outline" size="sm" disabled={current === 0} onClick={() => go(current - 1)}>Previous</Button>
-        <Button ref={nextRef} type="button" variant="outline" size="sm" disabled={current >= last} onClick={() => go(current + 1)}>Next</Button>
-      </div>
-    </nav>
+    <div role={range ? 'navigation' : undefined} aria-label={range ? label : undefined} className={range ? 'flex items-center justify-between pt-2' : undefined}>
+      <p role="status" className={statusClass}>{status}</p>
+      {range && (
+        <div className="flex gap-2">
+          <Button ref={prevRef} type="button" variant="outline" size="sm" disabled={page === 0} onClick={() => go(page - 1)}>Previous</Button>
+          <Button ref={nextRef} type="button" variant="outline" size="sm" disabled={page >= last} onClick={() => go(page + 1)}>Next</Button>
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -739,7 +739,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <AccountSearch label="Search banned users" value={bannedView.query} onChange={bannedView.setQuery} filtering={bannedView.filtering} total={bannedView.total} />
+                  <AccountSearch label="Search banned users" value={bannedView.query} onChange={bannedView.setQuery} />
                   <div ref={bannedListRef} tabIndex={-1} className="space-y-3 outline-none">
                   {bannedView.items.map((user: BannedUser) => (
                     <BannedUserCard
@@ -750,7 +750,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                     />
                   ))}
                   </div>
-                  <Pager label="Banned users pages" total={bannedView.total} page={bannedView.page} onPage={bannedView.setPage} listRef={bannedListRef} />
+                  <Pager label="Banned users pages" total={bannedView.total} page={bannedView.page} onPage={bannedView.setPage} listRef={bannedListRef} range={bannedView.range} filtering={bannedView.filtering} />
                 </div>
               )}
             </CardContent>
@@ -794,7 +794,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                 </div>
               ) : (
                 <div className="space-y-3">
-                  <AccountSearch label="Search suspended users" value={suspendedView.query} onChange={suspendedView.setQuery} filtering={suspendedView.filtering} total={suspendedView.total} />
+                  <AccountSearch label="Search suspended users" value={suspendedView.query} onChange={suspendedView.setQuery} />
                   <div ref={suspendedListRef} tabIndex={-1} className="space-y-3 outline-none">
                   {suspendedView.items.map((user: BannedPubkeyEntry) => {
                     // The relay keeps legacy rows by their exact spelling. Those rows can
@@ -837,7 +837,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
                     );
                   })}
                   </div>
-                  <Pager label="Suspended users pages" total={suspendedView.total} page={suspendedView.page} onPage={suspendedView.setPage} listRef={suspendedListRef} />
+                  <Pager label="Suspended users pages" total={suspendedView.total} page={suspendedView.page} onPage={suspendedView.setPage} listRef={suspendedListRef} range={suspendedView.range} filtering={suspendedView.filtering} />
                 </div>
               )}
             </CardContent>

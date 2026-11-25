@@ -1431,7 +1431,7 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       const nav = screen.getByRole('navigation', { name: /banned users pages/i });
       expect(within(nav).getByRole('button', { name: /^Next$/ })).toHaveAttribute('type', 'button');
       expect(within(nav).getByRole('button', { name: /^Previous$/ })).toHaveAttribute('type', 'button');
-      expect(within(nav).getByText('1-50 of 120')).toHaveAttribute('aria-live', 'polite');
+      expect(within(nav).getByRole('status')).toHaveTextContent('1-50 of 120');
     });
 
     it('labels the Suspended pager separately', async () => {
@@ -1675,7 +1675,7 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       expect(scrollIntoView).not.toHaveBeenCalled();
     });
 
-    it('announces the match count, and when nothing matches, outside the pager', async () => {
+    it('keeps the live status as filtering adds and removes the pager buttons', async () => {
       serve([
         ...Array.from({ length: 60 }, (_, i) => ({ pubkey: hex(i + 1), reason: 'spam' })),
         { pubkey: hex(500), reason: 'other' },
@@ -1683,15 +1683,15 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       renderWithProvider();
       await screen.findAllByTestId('user-card');
       const status = screen.getByRole('status');
-      expect(status).toBeEmptyDOMElement();
-
-      // Over a page of matches the pager's range line speaks; this line stays quiet.
-      type(search(), 'spam');
-      expect(await screen.findByText('1-50 of 60')).toBeInTheDocument();
-      expect(status).toBeEmptyDOMElement();
+      expect(status).toHaveTextContent(/^1-50 of 61$/);
 
       type(search(), hex(30).slice(-4));
       await waitFor(() => expect(status).toHaveTextContent(/^1 match$/));
+
+      type(search(), 'spam');
+      await waitFor(() => expect(status).toHaveTextContent(/^1-50 of 60$/));
+      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+      expect(status).toHaveTextContent(/^51-60 of 60$/);
 
       type(search(), 'nomatchanywhere');
       await waitFor(() => expect(status).toHaveTextContent('No accounts match'));
