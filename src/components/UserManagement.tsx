@@ -34,6 +34,7 @@ import { SuspensionDurationDialog } from "@/components/SuspensionDurationDialog"
 import { UnbanSuspensionDialog } from "@/components/UnbanSuspensionDialog";
 import { canonicalHex64 } from "../../shared/hex-id";
 import type { UnbanSuspensionChoice } from "../../shared/suspension";
+import { accountProfilePubkey } from "@/lib/searchInput";
 
 interface UserManagementProps {
   selectedPubkey?: string;
@@ -66,23 +67,21 @@ function cachedNames(queryClient: QueryClient): Map<string, string> {
     const pubkey = key[1];
     const m = data?.metadata;
     const name = [m?.display_name, m?.name].filter(Boolean).join(' ');
-    if (typeof pubkey === 'string' && name) names.set(pubkey, name.toLowerCase());
+    if (typeof pubkey === 'string' && name) names.set(pubkey.toLowerCase(), name.toLowerCase());
   }
   return names;
 }
 
 function matcher(query: string, names: Map<string, string>) {
-  // A hex or npub fragment, or a whole npub, is found as text: the npub is
-  // re-encoded from each pubkey, so no decoding of the query is needed.
+  // Search both spellings regardless of how the relay stored the account.
   const q = query.trim().toLowerCase();
   return (entry: BannedPubkeyEntry): boolean => {
-    const pubkey = entry.pubkey.toLowerCase();
-    if (pubkey.includes(q)) return true;
-    try {
-      if (nip19.npubEncode(pubkey).includes(q)) return true;
-    } catch { /* a legacy spelling that is not hex has no npub */ }
+    const stored = entry.pubkey.toLowerCase();
+    const pubkey = accountProfilePubkey(stored);
+    if (stored.includes(q) || pubkey.includes(q)) return true;
+    if (canonicalHex64(pubkey) && nip19.npubEncode(pubkey).includes(q)) return true;
     if (entry.reason?.toLowerCase().includes(q)) return true;
-    return !!names.get(entry.pubkey)?.includes(q);
+    return !!names.get(pubkey)?.includes(q);
   };
 }
 

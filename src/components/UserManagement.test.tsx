@@ -1530,6 +1530,27 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       await waitFor(() => expect(pubkeysShown()).toEqual([hex(2)]));
     });
 
+    it('finds a legacy npub row by hex or cached name without changing its action target', async () => {
+      const legacy = npubOf(77);
+      serve(entries(3), [{ pubkey: legacy }, { pubkey: hex(2) }]);
+      const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      client.setQueryData(['author', hex(77), ''], { metadata: { display_name: 'Zebra Fan' }, isFunnelcakeUser: true });
+      renderWithProvider(client);
+      fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+      await screen.findAllByTestId('user-card');
+      const suspendedSearch = screen.getByRole('searchbox', { name: /search suspended users/i });
+
+      type(suspendedSearch, hex(77).slice(-4));
+      await waitFor(() => expect(pubkeysShown()).toEqual([legacy]));
+      type(suspendedSearch, 'no matching account');
+      await screen.findByText('No accounts match');
+      type(suspendedSearch, 'zebra');
+      await waitFor(() => expect(pubkeysShown()).toEqual([legacy]));
+
+      fireEvent.click(screen.getByRole('button', { name: /^Unsuspend$/ }));
+      await waitFor(() => expect(api.unsuspendPubkey).toHaveBeenCalledExactlyOnceWith(legacy));
+    });
+
     it('makes no list request, and pages the filtered result', async () => {
       const list = [
         ...Array.from({ length: 60 }, (_, i) => ({ pubkey: hex(i + 1), reason: 'spam' })),
