@@ -597,6 +597,8 @@ describe('catch-up when the listener connects', () => {
     expect(pushed).toBe(true);
     expect(bansFor(liveFirstTarget)).toHaveLength(1);
     expect(bansFor(catchUpFirstTarget)).toHaveLength(1);
+    const status = await w.watcher.fetch(new Request('https://do/status'));
+    expect(await status.json()).toMatchObject({ status: { eventsProcessed: 2 } });
   });
 
   it('does not hand catch-up a report the live path handled but failed to record', async () => {
