@@ -1288,17 +1288,42 @@ describe('UserManagement paged Banned and Suspended lists', () => {
     expect(pubkeysShown()).toEqual(entries(70).slice(50).map(e => e.pubkey));
   });
 
-  it('unbans the account on a later page, not the one at the same index on page one', async () => {
-    serve(entries(60));
+  it('unbans exactly the selected account on the second page of search results', async () => {
+    const list = entries(120).map((entry, index) => ({ ...entry, reason: index % 2 === 0 ? 'spam' : 'other' }));
+    serve(list);
     renderWithProvider();
     await screen.findAllByTestId('user-card');
+    fireEvent.change(screen.getByRole('searchbox', { name: /search banned users/i }), { target: { value: 'spam' } });
+    await screen.findByText('1-50 of 60');
     fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledWith('listsuspendedpubkeys'));
-    await act(async () => {});
 
     fireEvent.click(screen.getAllByRole('button', { name: /^Unban$/ })[0]);
 
-    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledWith(hex(51)));
+    await waitFor(() => expect(api.unbanPubkey).toHaveBeenCalledExactlyOnceWith(hex(101)));
+  });
+
+  it('changes the end date and unsuspends the selected account on the second page of search results', async () => {
+    const list = entries(120).map((entry, index) => ({ ...entry, reason: index % 2 === 0 ? 'spam' : 'other' }));
+    serve([], list);
+    api.changeSuspensionEnd.mockResolvedValue({ endsAt: new Date(Date.now() + 86_400_000).toISOString(), decisionRecorded: true });
+    renderWithProvider();
+    fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
+    const search = await screen.findByRole('searchbox', { name: /search suspended users/i });
+    fireEvent.change(search, { target: { value: 'spam' } });
+    await screen.findByText('1-50 of 60');
+    fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
+    const card = within(screen.getAllByTestId('user-card')[0]);
+
+    fireEvent.click(card.getByRole('button', { name: 'Change end date' }));
+    const dialog = within(screen.getByRole('dialog'));
+    fireEvent.change(dialog.getByRole('combobox', { name: 'Unit' }), { target: { value: 'hours' } });
+    fireEvent.change(dialog.getByLabelText('Length'), { target: { value: '12' } });
+    fireEvent.click(dialog.getByRole('button', { name: 'Change end date' }));
+    await waitFor(() => expect(api.changeSuspensionEnd).toHaveBeenCalledExactlyOnceWith(hex(101), { value: 12, unit: 'hours' }));
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
+
+    fireEvent.click(card.getByRole('button', { name: 'Unsuspend' }));
+    await waitFor(() => expect(api.unsuspendPubkey).toHaveBeenCalledExactlyOnceWith(hex(101)));
   });
 
   it('steps back a page when the last account on the last page is removed', async () => {
@@ -1614,13 +1639,13 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       await waitFor(() => expect(pubkeysShown()).toEqual([hex(10)]));
     });
     it('matches an uppercase hex pubkey and an uppercase reason', async () => {
-      serve([{ pubkey: hex(171), reason: 'comment spam' }, { pubkey: hex(2), reason: 'other' }]);
+      serve([{ pubkey: hex(171), reason: 'other' }, { pubkey: hex(2), reason: 'comment spam' }]);
       renderWithProvider();
       await screen.findAllByTestId('user-card');
       type(search(), '  ' + hex(171).slice(-4).toUpperCase() + ' ');
       await waitFor(() => expect(pubkeysShown()).toEqual([hex(171)]));
       type(search(), 'SPAM');
-      await waitFor(() => expect(pubkeysShown()).toEqual([hex(171)]));
+      await waitFor(() => expect(pubkeysShown()).toEqual([hex(2)]));
     });
 
     it('waits for typing to pause before it swaps the cards', async () => {
