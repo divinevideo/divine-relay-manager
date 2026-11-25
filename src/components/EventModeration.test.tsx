@@ -19,6 +19,9 @@ const api = vi.hoisted(() => ({
 const moderatorApi = withAsModerator(api);
 
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => moderatorApi }));
+vi.mock('@/hooks/useAppContext', () => ({
+  useAppContext: () => ({ config: { relayUrl: 'wss://relay.test', apiUrl: 'https://api.test', theme: 'light' } }),
+}));
 vi.mock('@/hooks/useToast', () => ({ useToast: () => ({ toast: vi.fn() }) }));
 vi.mock('@/hooks/useCurrentUser', () => ({
   useCurrentUser: () => ({ getModeratorToken: () => 'moderator-login-token' }),
@@ -37,7 +40,7 @@ beforeEach(() => {
 describe('EventModeration approve', () => {
   // Report detail and the event viewer read a post's ban status from this
   // list; without a re-read they keep calling an approved post banned.
-  it('re-reads the banned-events list after approving an event', async () => {
+  it('re-reads the banned-events list and the recent events after approving an event', async () => {
     const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
     const invalidate = vi.spyOn(qc, 'invalidateQueries');
     render(
@@ -50,5 +53,6 @@ describe('EventModeration approve', () => {
 
     await waitFor(() => expect(api.restoreEvent).toHaveBeenCalled());
     await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] }));
+    await waitFor(() => expect(api.callRelayRpc).toHaveBeenCalledTimes(2));
   });
 });

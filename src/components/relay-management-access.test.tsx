@@ -164,7 +164,7 @@ describe('relay management surfaces, signed out (CF Access is the gate)', () => 
     expect(await screen.findByText(/Kind 0 — Metadata/)).toBeInTheDocument();
   });
 
-  it('EventsList fetches the banned/needs-moderation markers', async () => {
+  it('EventsList fetches the banned markers and skips the needs-moderation scan', async () => {
     render(
       <TestApp>
         <EventsList relayUrl='wss://relay.example.test' />
@@ -172,9 +172,8 @@ describe('relay management surfaces, signed out (CF Access is the gate)', () => 
     );
 
     await waitFor(() => {
-      expect(rpcMethodsCalled()).toEqual(
-        expect.arrayContaining(['listbannedevents', 'listeventsneedingmoderation']),
-      );
+      expect(rpcMethodsCalled()).toContain('listbannedevents');
     });
+    expect(rpcMethodsCalled()).not.toContain('listeventsneedingmoderation');
   });
 });

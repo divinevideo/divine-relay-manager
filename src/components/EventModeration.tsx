@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,13 +14,10 @@ import { useToast } from "@/hooks/useToast";
 import { Shield, ShieldCheck, ShieldX, Plus, AlertTriangle, CheckCircle, XCircle, Loader2 } from "lucide-react";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
+import { useEventsNeedingModeration, type EventNeedingModeration } from "@/hooks/useEventsNeedingModeration";
+import { useAppContext } from "@/hooks/useAppContext";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { EventActions } from "@/components/EventActions";
-
-interface EventNeedingModeration {
-  id: string;
-  reason?: string;
-}
 
 interface BannedEvent {
   id: string;
@@ -31,7 +28,8 @@ export function EventModeration() {
   const { toast } = useToast();
   const queryClient = useQueryClient();
   const api = useAdminApi();
-  const { callRelayRpc, verifyEventDeleted } = api;
+  const { verifyEventDeleted } = api;
+  const { config } = useAppContext();
   const { getModeratorToken } = useCurrentUser();
   const [newEventId, setNewEventId] = useState("");
   const [newReason, setNewReason] = useState("");
@@ -44,10 +42,12 @@ export function EventModeration() {
   } | null>(null);
 
   // Query for events needing moderation
-  const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useQuery({
-    queryKey: ['events-needing-moderation'],
-    queryFn: () => callRelayRpc<EventNeedingModeration[]>('listeventsneedingmoderation'),
-  });
+  const {
+    data: eventsNeedingModeration,
+    isLoading: loadingPending,
+    error: pendingError,
+    refetch: refetchPending,
+  } = useEventsNeedingModeration(config.relayUrl);
 
   // Query for banned events
   const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useBannedEvents();
@@ -59,7 +59,7 @@ export function EventModeration() {
       return act.restoreEvent(eventId, reason || 'Allowed from moderation queue');
     },
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      if (config.relayUrl) void refetchPending();
       // An approve is a restore. Report detail reads a post's ban status from
       // the banned-events list, so re-read it, as after a ban, or a report
       // opened soon after keeps calling the approved post banned and offering
@@ -91,7 +91,7 @@ export function EventModeration() {
       return eventId;
     },
     onSuccess: async (eventId) => {
-      queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      if (config.relayUrl) void refetchPending();
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       toast({ title: "Event banned", description: "Verifying..." });
       setIsAddDialogOpen(false);

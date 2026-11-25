@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
+import { useEventsNeedingModeration } from "@/hooks/useEventsNeedingModeration";
 import type { BannedPubkeyEntry } from "@/lib/adminApi";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -59,11 +60,7 @@ export function RelayStats({ relayUrl }: RelayStatsProps) {
   const { data: bannedEvents, isLoading: loadingBannedEvents } = useBannedEvents({ enabled: !!relayUrl });
 
   // Query for events needing moderation
-  const { data: eventsNeedingModeration, isLoading: loadingPending } = useQuery({
-    queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc<Array<{ id: string; reason?: string }>>('listeventsneedingmoderation'),
-    enabled: !!relayUrl,
-  });
+  const { data: eventsNeedingModeration, isLoading: loadingPending } = useEventsNeedingModeration(relayUrl);
 
   // Query for allowed kinds
   const { data: allowedKinds, isLoading: loadingKinds } = useQuery({

@@ -11,12 +11,14 @@ import { CopyableId } from "@/components/CopyableId";
 import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
+import { Button } from "@/components/ui/button";
+import { useEventsNeedingModeration } from "@/hooks/useEventsNeedingModeration";
 import { getCurrentEnvironment } from "@/lib/environments";
 import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 import {
   Globe, Shield, Clock, Zap, FileText, ExternalLink,
   Server, Wifi, WifiOff, List, ShieldBan, Users,
-  AlertTriangle, Mail, Tag,
+  AlertTriangle, Mail, Tag, RefreshCw,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { AutoHideSettings, AgeReviewSettings } from "@/components/AutoHideSettings";
@@ -241,13 +243,13 @@ export function SettingsDashboard() {
   } = useBannedEvents({ enabled: !!relayUrl });
 
   const {
-    data: pendingModeration,
-    isLoading: pendingLoading,
-  } = useQuery({
-    queryKey: ['events-needing-moderation', relayUrl],
-    queryFn: () => callRelayRpc<unknown[]>('listeventsneedingmoderation'),
-    enabled: !!relayUrl,
-  });
+    data: recentEvents,
+    isLoading: recentEventsLoading,
+    isFetching: recentEventsFetching,
+    isError: recentEventsError,
+    refetch: refetchRecentEvents,
+  } = useEventsNeedingModeration(relayUrl);
+  const recentEventsCount = Array.isArray(recentEvents) ? recentEvents.length : undefined;
 
   const {
     data: supportedMethods,
@@ -757,13 +759,31 @@ export function SettingsDashboard() {
                 <p className="text-sm text-muted-foreground">Banned Events</p>
               </div>
               <div className="text-center">
-                <div className={cn(
-                  "text-2xl font-bold",
-                  Array.isArray(pendingModeration) && pendingModeration.length > 0 && "text-orange-500"
-                )}>
-                  {pendingLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(pendingModeration) ? pendingModeration.length : 0)}
+                <div className="text-2xl font-bold">
+                  {recentEventsLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : recentEventsCount ?? '—'}
                 </div>
-                <p className="text-sm text-muted-foreground">Pending Moderation</p>
+                <p
+                  className="text-sm text-muted-foreground"
+                  title="Excludes banned events and posts from banned, suspended, or deactivated accounts. The relay has no approval tracking."
+                >
+                  Recent events (up to 100)
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="ml-1 h-6 w-6 align-middle"
+                    aria-label="Refresh recent events count"
+                    title="Refresh recent events count"
+                    disabled={!relayUrl || recentEventsFetching}
+                    onClick={() => { void refetchRecentEvents(); }}
+                  >
+                    <RefreshCw className={cn("h-3 w-3", recentEventsFetching && "animate-spin")} />
+                  </Button>
+                </p>
+                {recentEventsError && (
+                  <p className="text-sm text-destructive" role="status">
+                    {recentEventsCount === undefined ? "Recent events count unavailable." : "Refresh failed. Showing the last count."}
+                  </p>
+                )}
               </div>
             </div>
 
