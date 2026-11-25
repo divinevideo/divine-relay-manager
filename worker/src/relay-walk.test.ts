@@ -102,6 +102,7 @@ describe('walkRelayEvents', () => {
     const { result, got } = await collect(opts(fetchPage));
     expect(result.truncated).toBe(true);
     expect(result.complete).toBe(false);
+    expect(result.stopReason).toBe('saturated_second');
     expect(requests.length).toBeLessThanOrEqual(2);
     expect(got.length).toBeGreaterThan(0);
   });
@@ -109,7 +110,7 @@ describe('walkRelayEvents', () => {
   it('stops truncated at maxPages', async () => {
     const { fetchPage } = relayOver(series(40));
     const { result } = await collect(opts(fetchPage, { maxPages: 3 }));
-    expect(result).toMatchObject({ complete: false, truncated: true, pages: 3 });
+    expect(result).toMatchObject({ complete: false, truncated: true, pages: 3, stopReason: 'page_cap' });
     expect(fetchPage).toHaveBeenCalledTimes(3);
   });
 
@@ -160,6 +161,13 @@ describe('walkRelayEvents', () => {
     const { result } = await collect(opts(fetchPage));
     expect(result.truncated).toBe(true);
     expect(result.complete).toBe(false);
+    expect(result.stopReason).toBe('evidenced_cap');
+  });
+
+  it('stops truncated with no cursor when a page carries no usable timestamps', async () => {
+    const fetchPage = vi.fn(async () => [{ id: 'f'.repeat(64), kind: 1984 }]);
+    const { result } = await collect(opts(fetchPage));
+    expect(result).toMatchObject({ complete: false, truncated: true, pages: 1, stopReason: 'no_cursor' });
   });
 
   it('does not read a plain end as truncated when a page was merely short', async () => {

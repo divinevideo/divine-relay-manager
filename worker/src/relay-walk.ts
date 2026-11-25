@@ -23,11 +23,19 @@ export interface WalkOptions {
   fetchPage?: (filter: Record<string, unknown>) => Promise<unknown[]>;
 }
 
+/**
+ * Why a walk stopped truncated. Only `page_cap` can be resumed from its
+ * cursor; the others mean the cursor cannot move below the second it ended on.
+ */
+export type WalkStopReason = 'page_cap' | 'saturated_second' | 'evidenced_cap' | 'no_cursor';
+
 export interface WalkResult {
   complete: boolean;
   truncated: boolean;
   pages: number;
   rejected: number;
+  /** Set only when truncated. */
+  stopReason?: WalkStopReason;
 }
 
 // Never retries: the relay keeps running an abandoned query for up to 30s, so a
@@ -124,24 +132,24 @@ export async function walkRelayEvents<T extends { id: string; created_at: number
     if (newIds === 0) {
       const lies = batch.length > 0 && until !== undefined && batch.every((e) => (e as { created_at?: unknown } | null)?.created_at === until);
       if (lies && evidencedCap > 0 && batch.length >= evidencedCap) {
-        return { complete: false, truncated: true, pages, rejected };
+        return { complete: false, truncated: true, pages, rejected, stopReason: 'evidenced_cap' };
       }
       return { complete: true, truncated: false, pages, rejected };
     }
 
     // No usable cursor: cannot continue without risking a loop or a gap.
-    if (oldest === Infinity) return { complete: false, truncated: true, pages, rejected };
+    if (oldest === Infinity) return { complete: false, truncated: true, pages, rejected, stopReason: 'no_cursor' };
 
     await onPage(fresh, oldest);
 
     // A full page entirely inside one second: rows beyond the page share that
     // second and the cursor cannot reach them.
     if (batch.length >= opts.pageSize && oldest === newest) {
-      return { complete: false, truncated: true, pages, rejected };
+      return { complete: false, truncated: true, pages, rejected, stopReason: 'saturated_second' };
     }
 
     prevShort = batch.length < opts.pageSize ? { length: batch.length, oldest } : null;
     until = oldest;
   }
-  return { complete: false, truncated: true, pages, rejected };
+  return { complete: false, truncated: true, pages, rejected, stopReason: 'page_cap' };
 }

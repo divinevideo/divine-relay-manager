@@ -5,7 +5,20 @@ import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
 import { reportArrivalStatement } from './report-arrivals';
-import { metaStatement, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource } from './report-index';
+import { metaStatement, readMeta, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource } from './report-index';
+import {
+  CATCHUP_MAX_PENDING_WINDOWS,
+  CATCHUP_STOPPED_PERIODS_KEY,
+  CATCHUP_WINDOWS_KEY,
+  addPendingWindow,
+  pruneStoppedPeriods,
+  type StoppedPeriod,
+  planCatchUpWindow,
+  runPendingCatchUp,
+  type CatchUpSummary,
+  type CatchUpWindow,
+} from './report-catchup';
+import { sendReportIndexAlert } from './report-index-alerts';
 import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
@@ -37,6 +50,8 @@ export interface ReportWatcherEnv extends Nip86Env, KeycastEnv, SexualQuarantine
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
   TRUSTED_CLIENTS?: string;
+  SLACK_WEBHOOK_URL?: string;
+  ENVIRONMENT?: string;
 }
 
 export async function hasLatestHumanRestore(db: D1Database, targetEventId: string): Promise<boolean> {
@@ -136,6 +151,11 @@ const HEALTH_CHECK_INTERVAL_MS = 30000;
 /** DO storage key: unix seconds of the last /stop, so catch-up can tell a deliberate stop from an outage. */
 const DELIBERATE_STOP_KEY = 'report-watcher-deliberate-stop';
 
+/** Report ids claimed by the live path or catch-up, kept in insertion order up to this many. */
+const CLAIMED_REPORT_IDS_CAP = 5000;
+
+const IDLE_CATCHUP: CatchUpSummary = { ran: false, found: 0, handled: 0, autoHidden: 0, complete: false };
+
 /**
  * ReportWatcher Durable Object
  *
@@ -152,10 +172,22 @@ export class ReportWatcher implements DurableObject {
   private schemaReady: boolean = false;
   private running: boolean = false;
   private ws: WebSocket | null = null;
-  // True once the catch-up window for this connection is saved (Task 1.5 sets
-  // it). Until then the health alarm must not stamp watcher_last_alive_at: a
-  // stamp taken before the window is saved would hide the gap from the next restart.
+  // True once the catch-up window for this connection is saved. Until then the
+  // health alarm must not stamp watcher_last_alive_at: a stamp taken before the
+  // window is saved would hide the gap from the next restart.
   private catchUpPlannedForConnection = false;
+  // A plan is running (from the connect, or a retry from the alarm).
+  private catchUpPlanInFlight = false;
+  // Every report id the live path or catch-up has taken in this instance, so a
+  // report found both ways is handled once. In memory only: after a restart,
+  // report_arrivals and report_index carry the same guarantee.
+  private claimedReportIds = new Map<string, number>();
+  // One catch-up pass at a time: the connect and the cron can both ask.
+  private catchUpInFlight: Promise<CatchUpSummary> | null = null;
+  // While a catch-up pass runs: report ids that took an automated hide action
+  // (a legacy hide or a quarantine hide trigger), so the pass counts exactly
+  // its own auto actions for the burst alert. Null outside a pass.
+  private autoActionedReportIds: Set<string> | null = null;
   private connectedAt: number | null = null;
   private lastEventAt: number | null = null;
   private eventsProcessed: number = 0;
@@ -237,6 +269,12 @@ export class ReportWatcher implements DurableObject {
       if (path === '/internal/sexual-quarantine-maintenance' && request.method === 'POST') {
         await this.ensureSexualRecoveryAlarm();
         return this.handleStatus();
+      }
+
+      // Same caller and the same refusal as above: the cron resumes pending
+      // restart catch-up windows here.
+      if (path === '/internal/report-catchup' && request.method === 'POST') {
+        return Response.json(await this.runCatchUp());
       }
 
       if (path === '/config' && request.method === 'GET') {
@@ -730,7 +768,8 @@ export class ReportWatcher implements DurableObject {
     console.log(`[ReportWatcher] Connecting to ${relayUrl}`);
 
     try {
-      this.ws = new WebSocket(relayUrl);
+      const socket = new WebSocket(relayUrl);
+      this.ws = socket;
 
       this.ws.addEventListener('open', () => {
         console.log('[ReportWatcher] WebSocket connected');
@@ -747,6 +786,11 @@ export class ReportWatcher implements DurableObject {
         ]);
         this.ws?.send(subscription);
         console.log('[ReportWatcher] Subscribed to kind 1984 reports');
+
+        // After the live REQ, so nothing filed from here on is missed: plan the
+        // gap since the last heartbeat, then walk it in the background. The
+        // claim keeps a report seen both ways to one handling.
+        this.state.waitUntil(this.planAndRunCatchUp(socket));
       });
 
       this.ws.addEventListener('message', (event) => {
@@ -777,6 +821,159 @@ export class ReportWatcher implements DurableObject {
         this.scheduleReconnect();
       }
     }
+  }
+
+  /**
+   * Saves this connection's catch-up windows, then runs a pass.
+   *
+   * D1 (schema, heartbeat) is read before blockConcurrencyWhile: a slow D1
+   * there could hold the gate past 30 s, which resets the object. Reading the
+   * heartbeat outside the gate is safe: only this connection's plan can make
+   * the alarm stamp it, and that has not happened yet. The pending list and
+   * the stop marker are read and written inside the gate, so nothing else
+   * touches them between the read and the write. Every failure inside the
+   * callback is caught there (a throw resets the object). A failed plan leaves
+   * catchUpPlannedForConnection false, so the heartbeat stays where it was;
+   * the health alarm retries the plan while the socket stays open, and the
+   * next connection plans the same gap otherwise.
+   */
+  private async planAndRunCatchUp(socket: WebSocket): Promise<void> {
+    const db = this.env.DB;
+    // One plan at a time (the connect, or an alarm retry). The flag covers only
+    // the plan, not the pass after it, so a reconnect during a long pass still
+    // plans its own gap.
+    if (!db || this.catchUpPlanInFlight) return;
+    this.catchUpPlanInFlight = true;
+    let planned = false;
+    try {
+      planned = await this.planCatchUp(db, socket);
+    } finally {
+      this.catchUpPlanInFlight = false;
+    }
+    if (planned) await this.runCatchUp();
+  }
+
+  /** Saves this connection's windows; true once they are saved. Never throws. */
+  private async planCatchUp(db: D1Database, socket: WebSocket): Promise<boolean> {
+    // A newer connection replaced this one; it plans for itself.
+    if (this.ws !== socket) return false;
+    let lastAliveAt: number | undefined;
+    try {
+      if (!this.schemaReady) {
+        await ensureSchema(db);
+        this.schemaReady = true;
+      }
+      lastAliveAt = (await readMeta(db)).watcher_last_alive_at;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to read the heartbeat for restart catch-up; plan retried by the health alarm:', error);
+      return false;
+    }
+    let disabledMerge: CatchUpWindow[] = [];
+    const planned = await this.state.blockConcurrencyWhile(async () => {
+      if (this.ws !== socket) return false;
+      try {
+        const stopMarker = await this.state.storage.get<number>(DELIBERATE_STOP_KEY);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const fresh = planCatchUpWindow(lastAliveAt, nowSec, stopMarker);
+        const writes: Promise<unknown>[] = [];
+        // Every read first: the writes below are issued with no await between
+        // them, so the storage layer commits them together.
+        let windows = (await this.state.storage.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
+        const periods = (await this.state.storage.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+        if (fresh.length > 0) {
+          for (const window of fresh) {
+            const added = addPendingWindow(windows, window);
+            windows = added.windows;
+            if (added.merged) console.warn('[ReportWatcher] Catch-up windows over the cap; merged the two oldest');
+            if (added.handlerDisabled) disabledMerge.push(...added.mergedWindows.filter(w => !w.handlerEnabled));
+          }
+          writes.push(this.state.storage.put(CATCHUP_WINDOWS_KEY, windows));
+        }
+        if (stopMarker !== undefined) {
+          // The stopped period is kept apart from the windows, so catch-up
+          // runs no handler on a report created in it whichever window finds
+          // it (see runPendingCatchUp).
+          const added = stopMarker < nowSec ? [...periods, { after: stopMarker, until: nowSec }] : periods;
+          writes.push(this.state.storage.put(CATCHUP_STOPPED_PERIODS_KEY, pruneStoppedPeriods(added, windows)));
+          // Committed with the window and period writes: the marker is
+          // consumed exactly when what it describes is saved.
+          writes.push(this.state.storage.delete(DELIBERATE_STOP_KEY));
+        }
+        await Promise.all(writes);
+        this.catchUpPlannedForConnection = true;
+        return true;
+      } catch (error) {
+        disabledMerge = [];
+        console.error('[ReportWatcher] Failed to plan restart catch-up; heartbeat held for the next connection:', error);
+        return false;
+      }
+    });
+    if (!planned) return false;
+    // Outside the concurrency gate, so the webhook never holds it.
+    if (disabledMerge.length > 0) {
+      const spans = disabledMerge.map(w => `${w.since}..${w.until}`).join(', ');
+      await sendReportIndexAlert(
+        this.env,
+        `Restart catch-up has more than ${CATCHUP_MAX_PENDING_WINDOWS} pending windows; merging took auto-hide and age review away from reports in ${spans}. `
+        + 'They will be indexed only. Check why earlier catch-up windows are not finishing.',
+      );
+    }
+    return true;
+  }
+
+  /** One catch-up pass, unless one is already running or the watcher is stopped. Never throws. */
+  private async runCatchUp(): Promise<CatchUpSummary> {
+    const db = this.env.DB;
+    // Stopped means no automated actions: pending windows wait for the next start.
+    if (!db || !this.running || this.catchUpInFlight) return { ...IDLE_CATCHUP };
+    const autoActioned = new Set<string>();
+    this.autoActionedReportIds = autoActioned;
+    const pass = (async (): Promise<CatchUpSummary> => {
+      try {
+        return await runPendingCatchUp({
+          db,
+          relayUrl: this.env.RELAY_URL,
+          storage: this.state.storage,
+          claim: (id) => this.claimReport(id),
+          handle: async (report, handlerEnabled) => {
+            await this.handleReportEvent(report, {
+              source: 'catchup',
+              preClaimed: true,
+              sideEffects: handlerEnabled,
+            });
+            return autoActioned.delete(canonicalHex64(report.id) ?? report.id);
+          },
+          isRunning: () => this.running,
+          alert: (text) => sendReportIndexAlert(this.env, text),
+          nowMs: () => Date.now(),
+        });
+      } catch (error) {
+        console.error('[ReportWatcher] Restart catch-up pass failed:', error);
+        return { ...IDLE_CATCHUP };
+      } finally {
+        this.catchUpInFlight = null;
+        this.autoActionedReportIds = null;
+      }
+    })();
+    this.catchUpInFlight = pass;
+    return pass;
+  }
+
+  /** Records an automated hide action for a report while a catch-up pass is counting. */
+  private noteAutoAction(reportId: string): void {
+    this.autoActionedReportIds?.add(canonicalHex64(reportId) ?? reportId);
+  }
+
+  /** True the first time an id is claimed in this instance. */
+  private claimReport(id: string): boolean {
+    const key = canonicalHex64(id) ?? String(id);
+    if (this.claimedReportIds.has(key)) return false;
+    this.claimedReportIds.set(key, Date.now());
+    if (this.claimedReportIds.size > CLAIMED_REPORT_IDS_CAP) {
+      const oldest = this.claimedReportIds.keys().next().value;
+      if (oldest !== undefined) this.claimedReportIds.delete(oldest);
+    }
+    return true;
   }
 
   /**
@@ -891,11 +1088,16 @@ export class ReportWatcher implements DurableObject {
    */
   private async handleReportEvent(
     event: ReportEvent,
-    // preClaimed is accepted for the catch-up caller (Task 1.5, which owns the
-    // claim); nothing here reads it yet.
+    // preClaimed: catch-up already claimed this id.
     opts: { source?: ReportIndexSource; preClaimed?: boolean; sideEffects?: boolean } = {},
   ): Promise<void> {
-    const { source = 'live', sideEffects = true } = opts;
+    const { source = 'live', sideEffects = true, preClaimed = false } = opts;
+    // The live path claims before any await, so a report catch-up is handling
+    // (or has handled) in this instance is not handled again.
+    if (!preClaimed && !this.claimReport(event.id)) {
+      console.log('[ReportWatcher] Report already claimed in this instance, skipping');
+      return;
+    }
     this.lastEventAt = Date.now();
     this.eventsProcessed++;
 
@@ -1098,6 +1300,7 @@ export class ReportWatcher implements DurableObject {
       // Once activated, video admission rollback must not resume base bans:
       // those cannot be released by this stream's named-hold Restore.
       if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true') return;
+      let hideTriggered = false;
       const admitted = await this.state.blockConcurrencyWhile(async () => {
         // Decided cases still retain incoming evidence. admit() keeps their
         // human intent final, so this cannot re-hide a restored event. Other
@@ -1107,12 +1310,17 @@ export class ReportWatcher implements DurableObject {
           const human = await this.hasBlockingHumanResolution(targetEventId, false);
           if (human !== false) return false;
         }
-        await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
+        const before = currentCase?.goal;
+        const admittedCase = await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
           source: JSON.parse(JSON.stringify(wire)) as object }, // A legacy fractional threshold means the next whole reporter count.
           Math.max(2, Math.ceil(videoTier.threshold)), snapshot);
+        // This report is the one that sent the case to a hide: an automated
+        // hide action, counted like a legacy hide.
+        hideTriggered = before !== 'hide' && admittedCase?.goal === 'hide';
         return true;
       });
       if (!admitted) return;
+      if (hideTriggered) this.noteAutoAction(event.id);
       await this.scheduleHealthCheck();
       if (advanceNow) await q.advance(targetEventId);
       return;
@@ -1374,6 +1582,7 @@ export class ReportWatcher implements DurableObject {
 
       console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
       this.eventsAutoHidden++;
+      this.noteAutoAction(event.id);
       await this.persistState();
 
       await this.logDecision({
@@ -1636,6 +1845,13 @@ export class ReportWatcher implements DurableObject {
       } else {
         console.log('[ReportWatcher] Connection healthy');
       }
+    }
+
+    // A connection whose plan failed (D1 down at connect) retries it here, in
+    // the background like the connect does, while its socket stays open.
+    if (this.running && !this.catchUpPlannedForConnection && this.env.DB
+      && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.state.waitUntil(this.planAndRunCatchUp(this.ws));
     }
 
     // Heartbeat for restart catch-up: only a live socket whose catch-up window
