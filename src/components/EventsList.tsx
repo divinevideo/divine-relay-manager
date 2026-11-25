@@ -473,6 +473,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     : null; // NIP-01 kinds are 0-65535
   const awaitingCustomKind = effectiveKindFilter === 'custom' && customKindNumber === null;
   const listEnabled = !!relayUrl && !!nostr && !isDirectLookup && !hasPendingEventParam && !awaitingCustomKind;
+  const listQueryKey = ['relay-events', relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey] as const;
 
   // Ref for scroll viewport (infinite scroll)
   const scrollViewportRef = useRef<HTMLDivElement>(null);
@@ -488,7 +489,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     hasNextPage,
     isFetchingNextPage,
   } = useInfiniteQuery({
-    queryKey: ['relay-events', relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey],
+    queryKey: listQueryKey,
     queryFn: async ({ pageParam, signal: querySignal }) => {
       // Never send the no-kinds shape: a custom kind that is not valid yet
       if (awaitingCustomKind) return [];
@@ -534,14 +535,14 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Loading more pages is not a refresh, so it does not spin the button.
   const refreshing = fetchingEvents && !isFetchingNextPage;
 
-  // Refresh is the only way to pull new events, so it must be cheap: drop the
-  // cached pages past the first so the refetch reloads page 1 only, instead of
-  // re-sending every scrolled page (each a list query) one after another.
+  // Keep the first page visible during Refresh and discard older pages only
+  // for the current filter so they are not refetched one by one.
   const refreshList = () => {
     // Manual fetches bypass the query's enabled option.
     if (!listEnabled) return;
-    queryClient.setQueriesData<InfiniteData<NostrEvent[], number | undefined>>(
-      { queryKey: ['relay-events', relayUrl] },
+    if (scrollViewportRef.current) scrollViewportRef.current.scrollTop = 0;
+    queryClient.setQueryData<InfiniteData<NostrEvent[], number | undefined>>(
+      listQueryKey,
       (data) => data && { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
     );
     void refetch();
@@ -603,24 +604,27 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Flatten all pages into a single events array
   const events = useMemo(() => eventsData?.pages.flat() ?? [], [eventsData?.pages]);
 
-  // Auto-load more when scrolling near bottom of the scroll area
+  const canLoadOlder = listEnabled && hasNextPage;
+  const loadOlderEvents = useCallback(() => {
+    if (canLoadOlder && !fetchingEvents) void fetchNextPage({ cancelRefetch: false });
+  }, [canLoadOlder, fetchingEvents, fetchNextPage]);
+
+  // Load older events on scroll. The button also works when the visible rows
+  // are too short to scroll, including after a refresh or client-side filter.
   useEffect(() => {
     const viewport = scrollViewportRef.current;
-    if (!listEnabled || !viewport) return;
+    if (!canLoadOlder || !viewport) return;
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = viewport;
-      if (scrollHeight - scrollTop - clientHeight < 200 && hasNextPage && !isFetchingNextPage) {
-        fetchNextPage();
+      if (scrollTop > 0 && scrollHeight - scrollTop - clientHeight < 200) {
+        loadOlderEvents();
       }
     };
 
     viewport.addEventListener('scroll', handleScroll);
-    // Check immediately in case content is shorter than viewport
-    handleScroll();
-
     return () => viewport.removeEventListener('scroll', handleScroll);
-  }, [listEnabled, hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [canLoadOlder, loadOlderEvents]);
 
   // Query for banned events to mark them
   const { data: bannedEvents } = useBannedEvents({ enabled: !!relayUrl });
@@ -1217,24 +1221,16 @@ export function EventsList({ relayUrl }: EventsListProps) {
                         parentLink={parentTitles.get(getCommentTarget(event) ?? '')}
                       />
                     ))}
-                    {/* Infinite scroll status */}
-                    <div className="py-4 text-center">
-                      {isFetchingNextPage ? (
-                        <div className="flex items-center justify-center gap-2 text-sm text-muted-foreground">
-                          <RefreshCw className="h-4 w-4 animate-spin" />
-                          Loading older events...
-                        </div>
-                      ) : hasNextPage ? (
-                        <p className="text-xs text-muted-foreground">
-                          Scroll for more
-                        </p>
-                      ) : events.length > 0 ? (
-                        <p className="text-xs text-muted-foreground">
-                          End of events
-                        </p>
-                      ) : null}
-                    </div>
+                    {!hasNextPage && <p className="py-4 text-center text-xs text-muted-foreground">End of events</p>}
                   </>
+                )}
+                {canLoadOlder && !eventsError && (
+                  <div className="py-4 text-center">
+                    <Button variant="ghost" size="sm" onClick={loadOlderEvents} disabled={fetchingEvents}>
+                      {isFetchingNextPage && <RefreshCw className="h-4 w-4 animate-spin" />}
+                      {isFetchingNextPage ? 'Loading older events...' : 'Load older events'}
+                    </Button>
+                  </div>
                 )}
               </div>
             </ScrollArea>

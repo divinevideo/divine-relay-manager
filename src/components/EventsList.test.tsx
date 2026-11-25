@@ -376,8 +376,9 @@ describe('EventsList list query cost', () => {
   const listFilters = () =>
     relayQuery.fn.mock.calls
       .map(args => args[0]?.[0] as NostrFilter | undefined)
-      .filter((f): f is NostrFilter => !!f && !f.ids && !f['#d'] && !f.kinds?.includes(1984));
+      .filter((f): f is NostrFilter => !!f && !f.ids && !f['#d'] && f.limit !== 500);
   const video = () => event({ kind: 34236, content: 'a video' });
+  const olderVideo = () => event({ id: 'd'.repeat(64), kind: 34236, content: 'older', created_at: 1_700_000_000 });
   const pickKind = async (name: string) => {
     fireEvent.click(screen.getByLabelText('Event Kind'));
     fireEvent.click(await screen.findByRole('option', { name }));
@@ -385,8 +386,12 @@ describe('EventsList list query cost', () => {
 
   it('defaults every list request, paged ones included, to the video kinds', async () => {
     relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) =>
-      filters[0]?.until ? [event({ kind: 34236, content: 'older', created_at: 1_700_000_000 })] : [video()]);
-    renderEvents('/events');
+      filters[0]?.until ? [olderVideo()] : [video()]);
+    const { container } = renderEvents('/events');
+    await screen.findByText('a video');
+    const viewport = eventListViewport(container);
+    Object.defineProperties(viewport, { scrollHeight: { value: 800 }, clientHeight: { value: 300 } });
+    fireEvent.scroll(viewport, { target: { scrollTop: 480 } });
     expect(await screen.findByText('older')).toBeInTheDocument();
     const filters = listFilters();
     expect(filters.some(f => f.until)).toBe(true);
@@ -493,15 +498,6 @@ describe('EventsList list query cost', () => {
       expect(listFilters()).toEqual([]);
     });
 
-    it('refetches the list when clicked', async () => {
-      setRelay({ list: [video()] });
-      renderEvents('/events');
-      await screen.findByText('a video');
-      const before = listFilters().length;
-      fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
-      await waitFor(() => expect(listFilters().length).toBeGreaterThan(before));
-    });
-
     it('spins and disables while a refresh is in flight', async () => {
       setRelay({ list: [video()] });
       renderEvents('/events');
@@ -515,19 +511,50 @@ describe('EventsList list query cost', () => {
       await waitFor(() => expect(button).not.toBeDisabled());
     });
 
-    it('reloads from the first page instead of every loaded page', async () => {
+    it('refreshes only the first page even when it does not fill the viewport', async () => {
+      let newest = video();
       relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
         const until = filters[0]?.until;
-        if (!until) return [video()];
-        return until > 1_700_000_000 ? [event({ kind: 34236, content: 'older', created_at: 1_700_000_000 })] : [];
+        if (!until) return [newest];
+        return until > olderVideo().created_at ? [olderVideo()] : [];
       });
-      const { client } = renderEvents('/events');
+      renderEvents('/events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
       await screen.findByText('older');
-      const pagesOf = () =>
-        (client.getQueriesData<{ pages: unknown[] }>({ queryKey: ['relay-events'] })[0][1])?.pages.length ?? 0;
-      expect(pagesOf()).toBeGreaterThan(1);
+      await waitFor(() => expect(screen.getByRole('button', { name: /Refresh/ })).toBeEnabled());
+      newest = event({ id: 'c'.repeat(64), kind: 34236, content: 'fresh video' });
+      relayQuery.fn.mockClear();
       fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
-      expect(pagesOf()).toBe(1); // synchronously after the click, before the refetch lands
+      await screen.findByText('fresh video');
+      expect(listFilters()).toEqual([{ limit: 20, kinds: [...VIDEO_KINDS] }]);
+      expect(screen.queryByText('older')).not.toBeInTheDocument();
+      fireEvent.click(screen.getByRole('button', { name: 'Load older events' }));
+      expect(await screen.findByText('older')).toBeInTheDocument();
+    });
+
+    it('preserves cached older pages from another kind filter', async () => {
+      relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
+        const filter = filters[0];
+        if (!filter.until) return [video()];
+        return !filter.kinds && filter.until > olderVideo().created_at ? [olderVideo()] : [];
+      });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('All Events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await screen.findByText('older');
+
+      await pickKind(`All Video Kinds (${VIDEO_KINDS.join(', ')})`);
+      const refresh = screen.getByRole('button', { name: /Refresh/ });
+      await waitFor(() => expect(refresh).toBeEnabled());
+      relayQuery.fn.mockClear();
+      fireEvent.click(refresh);
+      await waitFor(() => expect(refresh).toBeEnabled());
+      expect(listFilters()).toEqual([{ limit: 20, kinds: [...VIDEO_KINDS] }]);
+      relayQuery.fn.mockClear();
+      await pickKind('All Events');
+      expect(await screen.findByText('older')).toBeInTheDocument();
+      expect(listFilters()).toEqual([]);
     });
   });
 
@@ -578,9 +605,10 @@ describe('EventsList list query cost', () => {
       relayQuery.fn.mockClear();
       act(() => navigation.go(-1));
       await waitFor(() => expect(location.search).not.toContain('pubkey'));
-      await waitFor(() => expect(listFilters().length).toBeGreaterThan(0));
-      await new Promise(r => setTimeout(r, 50));
-      for (const f of listFilters()) expect(f.kinds ?? f.authors).toBeTruthy();
+      expect(screen.getByLabelText('Event Kind')).toHaveTextContent('All Video Kinds');
+      act(() => navigation.go(1));
+      await screen.findByRole('button', { name: 'Show all kinds' });
+      expect(listFilters().every(f => f.kinds)).toBe(true);
     });
 
     it('keeps the plain list on the video kinds', async () => {
