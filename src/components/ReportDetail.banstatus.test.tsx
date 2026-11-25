@@ -333,10 +333,8 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
-  // The queue polls the banned-events list only once a minute, so a post action
-  // (delete, restore, media) must invalidate it itself or the handled post stays
-  // in the queue until the next poll. Asserted on our call, not on React Query.
-  it('invalidates the banned-events list when a post action completes', () => {
+  // The report pane owns this refresh when it hosts the by-kind dialog.
+  it('invalidates the banned-events list when bulk delete by kind completes', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();

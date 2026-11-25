@@ -195,9 +195,6 @@ export function BulkDeleteByKind({ pubkey, onComplete, reportId, getModeratorTok
       queryClient.invalidateQueries({ queryKey: ["bulk-kind-counts", pubkey] });
       queryClient.invalidateQueries({ queryKey: ["user-stats"] });
       queryClient.invalidateQueries({ queryKey: ["relay-events"] });
-      // Every deleted post is banned on the relay; the reports queue reads that
-      // list on a one-minute poll, so mark it stale here.
-      queryClient.invalidateQueries({ queryKey: ["banned-events"] });
       if (outcome.clean) {
         setReason("");
         setDialogOpen(false);

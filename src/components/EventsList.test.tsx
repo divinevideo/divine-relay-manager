@@ -97,7 +97,11 @@ vi.mock('@/components/EventDetail', () => ({
     <button onClick={() => onSelectPubkey(event.pubkey)}>View All by User</button>
   ),
 }));
-vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
+vi.mock('@/components/BulkDeleteByKind', () => ({
+  BulkDeleteByKind: ({ onComplete }: { onComplete: () => void }) => (
+    <button onClick={onComplete}>Complete bulk delete</button>
+  ),
+}));
 
 // The batched parent-title hook is mocked so comment-row links are
 // deterministic; calls are recorded to assert what resolution was requested
@@ -180,6 +184,16 @@ beforeEach(() => {
   eventModeration.verifyDeleted.mockReset();
   titleCalls.targets.length = 0;
   setRelay({});
+});
+
+it('reloads the banned-events list after bulk delete by kind', async () => {
+  renderEvents(`/events?pubkey=${PK}`);
+  const bannedEventReads = () => rpc.fn.mock.calls.filter(([method]) => method === 'listbannedevents').length;
+  await waitFor(() => expect(bannedEventReads()).toBe(1));
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Complete bulk delete' }));
+
+  await waitFor(() => expect(bannedEventReads()).toBe(2));
 });
 
 describe('EventsList internal navigation (#164 A)', () => {

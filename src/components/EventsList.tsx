@@ -1069,6 +1069,11 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </div>
               <BulkDeleteByKind
                 pubkey={filterByPubkey}
+                onComplete={() => {
+                  // The dialog refreshes the event listing. Refresh the bans
+                  // here as well so Reports sees the deletions on return.
+                  queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+                }}
                 getModeratorToken={getModeratorToken}
               />
             </div>
