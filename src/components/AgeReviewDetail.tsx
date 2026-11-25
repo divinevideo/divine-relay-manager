@@ -339,21 +339,19 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       const conflict = error instanceof ApiError && error.code === 'version_conflict';
       if (updates.state === undefined && !conflict) return;
       void invalidateAccountStatus(queryClient, ctx.casePubkey);
-      // A deny bans the account and may purge its posts, so the queue's
-      // ban-list reads (a one-minute poll) are stale. Settled, like the rest:
-      // a lost response can follow a ban that committed.
+      // The viewer uses the relay's suspended list (#437). A deny can also
+      // ban the account and purge its posts, even if the response is lost.
+      const relayLists = [['suspended-pubkeys']];
       if (updates.state === 'denied_closed') {
-        void queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-        void queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+        relayLists.push(['banned-pubkeys'], ['banned-events']);
       }
-      // The viewer uses the relay's suspended list (#437). Cancel the old read
-      // first because invalidating alone reuses an in-flight read when the
-      // cache has no result yet. Funnelcake deletes an unsuspended account from
-      // the table this list reads; the five-minute lag noted on unsuspendPubkey
-      // is in its content reads (markRestored), not here.
-      const suspendedListKey = ['suspended-pubkeys'];
-      await queryClient.cancelQueries({ queryKey: suspendedListKey, exact: true });
-      void queryClient.invalidateQueries({ queryKey: suspendedListKey, exact: true });
+      // Cancel pre-decision reads first. React Query would otherwise reuse a
+      // pending read on a cold cache, leaving Reports waiting until its poll.
+      const listFilters = relayLists.map((queryKey) => ({ queryKey, exact: true }));
+      await Promise.all(listFilters.map((filter) => queryClient.cancelQueries(filter)));
+      for (const filter of listFilters) {
+        void queryClient.invalidateQueries(filter);
+      }
       const subject = ctx.casePubkey.toLowerCase();
       // Restrict suspends the account, clear unsuspends it and deny bans it,
       // so the shared authored-content reads describe the other state
