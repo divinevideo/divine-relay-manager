@@ -145,15 +145,12 @@ function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: st
 
   useEffect(() => { setPage(p => clampPage(total, p)); }, [total]);
   // A different environment is a different list.
-  const lastEnvironment = useRef(environment);
   useEffect(() => {
-    if (lastEnvironment.current === environment) return;
-    lastEnvironment.current = environment;
     setPage(0);
     setQueryState('');
     setApplied('');
     setNames(undefined);
-  }, [environment]);
+  }, [environment, apiUrl]);
 
   return {
     query,

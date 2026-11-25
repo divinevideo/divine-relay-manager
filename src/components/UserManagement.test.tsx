@@ -50,7 +50,11 @@ vi.mock('@/hooks/useCurrentUser', () => ({
 vi.mock('@nostrify/react', () => ({
   useNostr: () => ({ nostr: { query: vi.fn().mockResolvedValue([]) } }),
 }));
-vi.mock('@/hooks/useAppContext', () => ({ useAppContext: () => ({ config: {}, updateConfig: vi.fn() }) }));
+vi.mock('@/hooks/useAppContext', () => ({
+  useAppContext: function useAppContext() {
+    return React.useContext(AppContext) ?? { config: {}, updateConfig: vi.fn() };
+  },
+}));
 // Children are irrelevant here and drag in their own dependencies.
 const userActionsProps = vi.hoisted(() => ({ last: null as Record<string, unknown> | null }));
 vi.mock('@/components/UserActions', () => ({
@@ -1227,6 +1231,7 @@ describe('UserManagement timed suspensions', () => {
 describe('UserManagement paged Banned and Suspended lists', () => {
   const hex = (i: number) => i.toString(16).padStart(64, '0');
   const entries = (n: number) => Array.from({ length: n }, (_, i) => ({ pubkey: hex(i + 1), reason: `r${i}` }));
+  const mixedReasonEntries = () => entries(120).map((entry, index) => ({ ...entry, reason: index % 2 === 0 ? 'spam' : 'other' }));
   const pubkeysShown = () => screen.getAllByTestId('user-card').map(c => c.getAttribute('data-pubkey'));
 
   function serve(banned: unknown[], suspended: unknown[] = []) {
@@ -1289,8 +1294,7 @@ describe('UserManagement paged Banned and Suspended lists', () => {
   });
 
   it('unbans exactly the selected account on the second page of search results', async () => {
-    const list = entries(120).map((entry, index) => ({ ...entry, reason: index % 2 === 0 ? 'spam' : 'other' }));
-    serve(list);
+    serve(mixedReasonEntries());
     renderWithProvider();
     await screen.findAllByTestId('user-card');
     fireEvent.change(screen.getByRole('searchbox', { name: /search banned users/i }), { target: { value: 'spam' } });
@@ -1303,8 +1307,7 @@ describe('UserManagement paged Banned and Suspended lists', () => {
   });
 
   it('changes the end date and unsuspends the selected account on the second page of search results', async () => {
-    const list = entries(120).map((entry, index) => ({ ...entry, reason: index % 2 === 0 ? 'spam' : 'other' }));
-    serve([], list);
+    serve([], mixedReasonEntries());
     api.changeSuspensionEnd.mockResolvedValue({ endsAt: new Date(Date.now() + 86_400_000).toISOString(), decisionRecorded: true });
     renderWithProvider();
     fireEvent.mouseDown(await screen.findByRole('tab', { name: /Suspended Users/i }));
@@ -1416,25 +1419,27 @@ describe('UserManagement paged Banned and Suspended lists', () => {
     expect(await screen.findByText('51-100 of 101')).toBeInTheDocument();
   });
 
-  it('returns to page one when the environment changes', async () => {
-    serve(entries(120));
+  it.each([
+    ['relay', 'wss://two.test', 'https://one.test'],
+    ['API', 'wss://one.test', 'https://two.test'],
+  ])('clears search and returns to page one when the environment changes %s URL', async (_, relayUrl, apiUrl) => {
+    serve(mixedReasonEntries());
     const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
-    const tree = (relayUrl: string) => (
-      <AppContext.Provider value={{ config: { relayUrl } as never, updateConfig: vi.fn() }}>
+    const tree = (relayUrl: string, apiUrl: string) => (
+      <AppContext.Provider value={{ config: { relayUrl, apiUrl, theme: 'system' }, updateConfig: vi.fn() }}>
         <QueryClientProvider client={client}>
           <TooltipProvider><UserManagement selectedPubkey={PUBKEY} /></TooltipProvider>
         </QueryClientProvider>
       </AppContext.Provider>
     );
-    const { rerender } = render(tree('wss://one.test'));
+    const { rerender } = render(tree('wss://one.test', 'https://one.test'));
     await screen.findAllByTestId('user-card');
+    fireEvent.change(screen.getByRole('searchbox', { name: /search banned users/i }), { target: { value: 'spam' } });
+    await screen.findByText('1-50 of 60');
     fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-    expect(screen.getByText('51-100 of 120')).toBeInTheDocument();
-    fireEvent.change(screen.getByRole('searchbox', { name: /search banned users/i }), { target: { value: hex(77).slice(-4) } });
-    await waitFor(() => expect(screen.getAllByTestId('user-card')).toHaveLength(1));
-    expect(screen.queryByText(/of 120/)).not.toBeInTheDocument();
+    expect(screen.getByText('51-60 of 60')).toBeInTheDocument();
 
-    rerender(tree('wss://two.test'));
+    rerender(tree(relayUrl, apiUrl));
 
     expect(await screen.findByText('1-50 of 120')).toBeInTheDocument();
     expect(screen.getByRole('searchbox', { name: /search banned users/i })).toHaveValue('');
