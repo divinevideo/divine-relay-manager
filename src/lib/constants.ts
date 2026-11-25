@@ -229,9 +229,10 @@ export function getReportTargetIds(event: { tags: string[][] }): { eventId?: str
 // On a COLD load there is no error to latch onto yet, so every escape hatch the
 // queue offers sits behind the loading skeleton: a source that times out at 30s
 // and then retries strands the moderator on a bare skeleton for a minute with
-// nothing to click. A 30s bound is twice the 15s poll interval that would have
-// recovered the read on its own (#221). One-shot moderation actions still
-// want the generous default.
+// nothing to click. A 30s bound is twice resolution-state's 15s poll interval
+// (a D1 read), which would have recovered that read on its own (#221). The two
+// relay ban lists poll every minute and recover on that, or on Retry. One-shot
+// moderation actions still want the generous default.
 //
 // Every read of the relay lists through useRelayBanLists uses it too, and
 // must: those reads share cache entries with the queue (`banned-pubkeys`,

@@ -97,7 +97,11 @@ vi.mock('@/components/EventDetail', () => ({
     <button onClick={() => onSelectPubkey(event.pubkey)}>View All by User</button>
   ),
 }));
-vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
+vi.mock('@/components/BulkDeleteByKind', () => ({
+  BulkDeleteByKind: ({ onComplete }: { onComplete: () => void }) => (
+    <button onClick={onComplete}>Complete bulk delete</button>
+  ),
+}));
 
 // The batched parent-title hook is mocked so comment-row links are
 // deterministic; calls are recorded to assert what resolution was requested
@@ -182,6 +186,20 @@ beforeEach(() => {
   setRelay({});
 });
 
+it('replaces a pending first banned-events read after bulk delete by kind', async () => {
+  const bannedEventReads = () => rpc.fn.mock.calls.filter(([method]) => method === 'listbannedevents').length;
+  rpc.fn.mockImplementation((method: string) =>
+    method === 'listbannedevents' && bannedEventReads() === 1
+      ? new Promise(() => {})
+      : Promise.resolve([]));
+  renderEvents(`/events?pubkey=${PK}`);
+  await waitFor(() => expect(bannedEventReads()).toBe(1));
+
+  fireEvent.click(await screen.findByRole('button', { name: 'Complete bulk delete' }));
+
+  await waitFor(() => expect(bannedEventReads()).toBe(2));
+});
+
 describe('EventsList internal navigation (#164 A)', () => {
   it('consumes ?event=<naddr> into an address lookup with the kind+author+d filter', async () => {
     const naddr = nip19.naddrEncode({ kind: 34236, pubkey: PK, identifier: 'vid1' });
@@ -258,12 +276,14 @@ describe('EventsList internal navigation (#164 A)', () => {
 });
 
 describe('EventsList recorded moderation', () => {
-  it('routes an approved event through allow_event instead of raw relay RPC', async () => {
+  it('restores an event through the worker and replaces a pending ban-list read', async () => {
     const target = event({ id: 'd'.repeat(64), kind: 34236, content: 'review me' });
     setRelay({ list: [target] });
-    renderEvents('/events');
+    rpc.fn.mockReturnValueOnce(new Promise(() => {}));
+    const { client } = renderEvents('/events');
 
     await screen.findByText('review me');
+    expect(client.getQueryState(['banned-events'])?.fetchStatus).toBe('fetching');
     const actions = screen.getByRole('button', { name: 'Event actions' });
     actions.focus();
     fireEvent.keyDown(actions, { key: 'Enter', code: 'Enter' });
@@ -281,6 +301,7 @@ describe('EventsList recorded moderation', () => {
     expect(eventModeration.hide).not.toHaveBeenCalled();
     // Through asModerator(token) (#178).
     expect(tokensFor(moderatorApi, 'restoreEvent')).toEqual([MOD_TOKEN]);
+    await waitFor(() => expect(client.getQueryData(['banned-events'])).toEqual([]));
   });
 });
 

@@ -1,32 +1,27 @@
-// ABOUTME: Pins the options the reports queue passes to the shared ban-list reads.
+// ABOUTME: Checks the reports queue's ban-list requests and deep-link freshness.
 // ABOUTME: The queue polls both lists, and a deep link reads the banned accounts fresh.
 
-import { render, waitFor } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MockInstance } from 'vitest';
 import TestApp from '@/test/TestApp';
 import { EMPTY_RESOLVED_PAGE } from '@/test/resolvedHistory';
 import { Reports } from './Reports';
-import { useBannedEvents, useBannedPubkeys } from '@/hooks/useRelayBanLists';
+import { useBannedPubkeys } from '@/hooks/useRelayBanLists';
 
-// useRelayBanLists.test.ts pins that the hooks forward these options. Nothing
-// else notices when the queue stops passing them: without the poll, handled
-// posts stay in the queue until something else refetches the list, and
-// without the deep-link staleTime, an arriving report reads a cached ban
-// status up to 30s old. So spy on the real hooks and check what the queue asks.
+// Keep the real hooks for the polling test. The spy checks which freshness
+// policy the queue requests when it is opened from a deep link.
 vi.mock('@/hooks/useRelayBanLists', async (orig) => {
   const actual = await orig<typeof import('@/hooks/useRelayBanLists')>();
   return {
     ...actual,
     useBannedPubkeys: vi.fn(actual.useBannedPubkeys),
-    useBannedEvents: vi.fn(actual.useBannedEvents),
   };
 });
 
 vi.mock('@/components/ReportDetail', () => ({ ReportDetail: () => null }));
 
 const TARGET_PUBKEY = 'd'.repeat(64);
-const BAN_LIST_POLL_MS = 15 * 1000;
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), {
@@ -66,14 +61,6 @@ afterEach(() => {
 });
 
 describe('Reports ban-list reads', () => {
-  it('polls both ban lists', async () => {
-    renderQueue();
-
-    await waitFor(() => expect(useBannedEvents).toHaveBeenCalled());
-    expect(useBannedEvents).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: BAN_LIST_POLL_MS }));
-    expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ refetchInterval: BAN_LIST_POLL_MS }));
-  });
-
   it('reads the banned accounts with the default 30s staleTime without a deep link', async () => {
     renderQueue();
 
@@ -89,5 +76,30 @@ describe('Reports ban-list reads', () => {
 
     await waitFor(() => expect(useBannedPubkeys).toHaveBeenCalled());
     expect(useBannedPubkeys).toHaveBeenCalledWith(expect.objectContaining({ staleTime: 0 }));
+  });
+
+  describe('over time', () => {
+    const rpcCalls = (method: string) =>
+      (fetch as unknown as MockInstance).mock.calls.filter(([input, init]) => {
+        const url = String(input instanceof Request ? input.url : input);
+        return url.includes('/api/relay-rpc') && String(init?.body ?? '').includes(`"${method}"`);
+      }).length;
+
+    afterEach(() => vi.useRealTimers());
+
+    it('waits a minute before re-requesting either ban list', async () => {
+      vi.useFakeTimers();
+      await act(async () => { renderQueue(); });
+      expect(rpcCalls('listbannedpubkeys')).toBe(1);
+      expect(rpcCalls('listbannedevents')).toBe(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(59_999); });
+      expect(rpcCalls('listbannedpubkeys')).toBe(1);
+      expect(rpcCalls('listbannedevents')).toBe(1);
+
+      await act(async () => { await vi.advanceTimersByTimeAsync(1); });
+      expect(rpcCalls('listbannedpubkeys')).toBe(2);
+      expect(rpcCalls('listbannedevents')).toBe(2);
+    });
   });
 });

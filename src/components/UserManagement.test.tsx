@@ -570,8 +570,35 @@ describe('UserManagement drops cached authored-content reads after an account ac
     }
   });
 
+  it('invalidates the banned-events list after Delete All Content', async () => {
+    const client = clientWithStats();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+
+    renderWithProvider(client);
+    await waitFor(() => expect(userActionsProps.last).not.toBeNull());
+    const onActionComplete = userActionsProps.last?.onActionComplete as (c: UserActionChange) => void;
+    await act(async () => { onActionComplete({ accountStatusChanged: false, action: 'delete-all' }); });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true });
+  });
+
+  it('refreshes the account list after Ban User without refreshing event bans', async () => {
+    const client = clientWithStats();
+    client.setQueryData(['banned-events'], []);
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
+
+    renderWithProvider(client);
+    await waitFor(() => expect(userActionsProps.last).not.toBeNull());
+    const onActionComplete = userActionsProps.last?.onActionComplete as (c: UserActionChange) => void;
+    await act(async () => { onActionComplete({ accountStatusChanged: true, action: 'ban', pubkey: PUBKEY }); });
+
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
+    expect(client.getQueryState(['banned-events'])?.isInvalidated).toBe(false);
+  });
+
   it('keeps them after a content action that leaves the account status as it was', async () => {
     const client = clientWithStats();
+    const invalidate = vi.spyOn(client, 'invalidateQueries');
 
     renderWithProvider(client);
     await waitFor(() => expect(userActionsProps.last).not.toBeNull());
@@ -579,6 +606,7 @@ describe('UserManagement drops cached authored-content reads after an account ac
     await act(async () => { onActionComplete({ accountStatusChanged: false }); });
 
     expect(client.getQueryData(STATS_KEY)).toEqual({ postCount: 0 });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true });
   });
 });
 

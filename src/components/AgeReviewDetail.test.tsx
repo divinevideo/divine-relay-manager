@@ -1,5 +1,5 @@
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
-import { focusManager, QueryClient, QueryClientProvider } from '@tanstack/react-query';
+import { focusManager, QueryClient, QueryClientProvider, QueryObserver } from '@tanstack/react-query';
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 import { AgeReviewDetail } from './AgeReviewDetail';
@@ -366,6 +366,44 @@ describe('AgeReviewDetail', () => {
     });
     // the toast covers the conflict; the inline error must not also fire for it
     expect(screen.queryByText(/Failed to update/)).not.toBeInTheDocument();
+  });
+
+  // The reports queue reads the relay's ban lists on a one-minute poll, and a
+  // deny bans the account (and may purge its posts), so the deny itself must
+  // mark both lists stale rather than leave handled reports in the queue.
+  describe('the relay ban lists after a deny', () => {
+    it.each(['banned-pubkeys', 'banned-events'])('replaces an in-flight first read of %s after a deny', async (list) => {
+      const before = makeCase({ pubkey: 'a'.repeat(64) });
+      const after = makeCase({ pubkey: 'a'.repeat(64), state: 'denied_closed', version: 1 });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, case: after, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      const queryFn = vi.fn()
+        .mockReturnValueOnce(new Promise(() => {}))
+        .mockResolvedValueOnce(['post-deny result']);
+      const unsubscribe = new QueryObserver(queryClient, { queryKey: [list], queryFn })
+        .subscribe(() => {});
+      try {
+        expect(queryClient.getQueryState([list])?.fetchStatus).toBe('fetching');
+
+        fireEvent.click(screen.getByRole('button', { name: /Deny.*Close/ }));
+
+        await waitFor(() => expect(queryClient.getQueryData([list])).toEqual(['post-deny result']));
+      } finally {
+        unsubscribe();
+      }
+    });
+
+    it('leaves the banned lists alone for a restrict', async () => {
+      const before = makeCase({ pubkey: 'a'.repeat(64), suspected_age_band: 'age_13_15' });
+      const after = makeCase({ pubkey: 'a'.repeat(64), suspected_age_band: 'age_13_15', state: 'restricted_pending_parental_consent', version: 1 });
+      updateAgeReviewCase.mockResolvedValueOnce({ success: true, case: after, enforcementComplete: true });
+      const { queryClient } = renderDetail(before);
+      const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
+      fireEvent.click(screen.getByRole('button', { name: 'Restrict Account' }));
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['suspended-pubkeys'], exact: true }));
+      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'], exact: true });
+      expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true });
+    });
   });
 
   // The active-case route matches the pubkey exactly (#313), so a case's own

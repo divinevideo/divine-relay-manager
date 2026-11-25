@@ -677,11 +677,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return act.restoreEvent(eventId, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
 
-      moderationStatus.recheck();
+      moderationStatus.recheckAfterContentAction();
       decisionLog.refetch();
       toast(result.recorded === true && result.reconciled !== false
         ? { title: "Content restored", description: "Auto-hide has been reversed" }
@@ -706,7 +705,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // media and bulk content actions, through EventActions, BulkDeleteByKind,
   // UserActions' bulk jobs and the delete below) call it with no change.
   const handleActionComplete = (change?: UserActionChange) => {
-    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     invalidateResolutionState(queryClient);
@@ -756,7 +754,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // answer stands while the check runs.
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
-      moderationStatus.recheck();
+      moderationStatus.recheckAfterContentAction();
     }
     decisionLog.refetch();
   };

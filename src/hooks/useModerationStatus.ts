@@ -1,10 +1,11 @@
 // ABOUTME: Unified moderation status hook - checks ban lists + WebSocket event verification
-// ABOUTME: Auto-runs on report load; recheck re-runs it, recheckAfterAction after an account action
+// ABOUTME: Auto-runs on report load and keeps post-action list refreshes current.
 
 import { useState, useEffect, useCallback, useRef } from "react";
 import { useQueryClient, type Query, type QueryClient } from "@tanstack/react-query";
 import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
 import { useBannedPubkeys, useBannedEvents, useSuspendedPubkeys, listMembership } from "@/hooks/useRelayBanLists";
+import { invalidateBannedEvents } from "@/lib/queueInvalidation";
 import { suspensionAfterRestore } from "@/lib/suspensionAfterRestore";
 import { useSuspendedListReadAtRestore } from "@/lib/userStatsCache";
 
@@ -81,15 +82,15 @@ export interface ModerationStatus {
   checkedAt: Date | null;
   /**
    * Re-run all checks (ban lists + WebSocket verification). For a Re-check
-   * button, the check when a report opens, or the check after an action on a
-   * post or its media: the previous answer stands until the new one lands, so
-   * a routine check does not flicker.
+   * button or the check when a report opens. The previous answer stands until
+   * the new one lands, so a routine check does not flicker.
    */
   recheck: () => void;
+  /** Refresh event bans immediately while the live check runs after a content action. */
+  recheckAfterContentAction: () => void;
   /**
    * The check to run once an action that changes the account's status (ban,
-   * unban, suspend, unsuspend) has succeeded. A post action leaves the account
-   * status as it was and uses recheck. Until its live check answers, nothing
+   * unban, suspend, unsuspend) has succeeded. Until its live check answers, nothing
    * from before the action counts as confirmed: the previous answer no longer
    * outranks the lists, and the lists re-read at once and are current only
    * when they answer after this call.
@@ -161,8 +162,8 @@ function sinceReRead(
   // regains focus, and after a failure no newer read is on its way. One comes
   // from the next check, from a refetch when the window regains focus once the
   // copy is stale (30s by default), or, for the banned list only, from the
-  // reports queue's 15s poll while the queue is mounted. The suspended list is
-  // never polled.
+  // reports queue's one-minute poll while the queue is mounted. The suspended
+  // list is never polled.
   return { current: false, rereading: query.fetchStatus === 'fetching' };
 }
 
@@ -261,7 +262,7 @@ export function useModerationStatus(
   const banListsLoading = bannedPubkeys.isLoading || bannedEvents.isLoading || suspendedPubkeys.isLoading;
 
   // WebSocket + fresh ban list verification
-  const runCheck = useCallback(async ({ afterAction }: { afterAction: boolean }) => {
+  const runCheck = useCallback(async (reason: 'routine' | 'account-action' | 'content-action') => {
     const generation = ++generationRef.current;
     const isCurrent = () => generation === generationRef.current;
     // A read already in flight when a check asks for a re-read is JOINED, not
@@ -285,8 +286,9 @@ export function useModerationStatus(
       suspended: successfulReads(queryClient, SUSPENDED_PUBKEYS_KEY),
     });
     setWsResult(prev => ({ ...prev, isChecking: true }));
+    if (reason === 'content-action') void invalidateBannedEvents(queryClient);
     try {
-      if (afterAction) {
+      if (reason === 'account-action') {
         // The lists on screen and the previous check's answer both predate the
         // account action. Drop the answer, so it no longer outranks the lists,
         // and re-read the lists now rather than after the live check: a read
@@ -344,7 +346,7 @@ export function useModerationStatus(
       // should not wait on it.
       markAccountLists();
       bannedPubkeys.refetch();
-      bannedEvents.refetch();
+      if (reason !== 'content-action') bannedEvents.refetch();
       suspendedPubkeys.refetch();
     } catch (error) {
       console.error('Moderation status check failed:', error);
@@ -353,14 +355,15 @@ export function useModerationStatus(
     }
   }, [pubkey, eventId, verifyPubkeyBanned, verifyEventDeleted, bannedPubkeys, bannedEvents, suspendedPubkeys, queryClient]);
   // Take no arguments, so a button can pass either as its onClick.
-  const recheck = useCallback(() => { void runCheck({ afterAction: false }); }, [runCheck]);
+  const recheck = useCallback(() => { void runCheck('routine'); }, [runCheck]);
+  const recheckAfterContentAction = useCallback(() => { void runCheck('content-action'); }, [runCheck]);
   // The check after an account action stands in for this report's auto-check:
   // the pane's re-read after an Unsuspend or Unban can find the post missing,
   // and this check is already answering that.
   const autoCheckKey = `${eventId || ''}:${pubkey || ''}`;
   const recheckAfterAction = useCallback(() => {
     autoCheckedRef.current = autoCheckKey;
-    void runCheck({ afterAction: true });
+    void runCheck('account-action');
   }, [runCheck, autoCheckKey]);
 
   // Reset when the report or the environment changes. Declared BEFORE the
@@ -386,7 +389,7 @@ export function useModerationStatus(
 
     if (shouldAutoCheck) {
       autoCheckedRef.current = autoCheckKey;
-      void runCheck({ afterAction: false });
+      void runCheck('routine');
     }
   }, [autoCheckKey, eventNotFound, eventId, pubkey, banListsLoading, wsResult.isChecking, runCheck]);
 
@@ -472,6 +475,7 @@ export function useModerationStatus(
     isChecking: wsResult.isChecking,
     checkedAt: wsResult.checkedAt,
     recheck,
+    recheckAfterContentAction,
     recheckAfterAction,
   };
 }

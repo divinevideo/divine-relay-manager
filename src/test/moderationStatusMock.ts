@@ -29,6 +29,7 @@ export function moderationStatusMock(overrides: Partial<ModerationStatus> = {}):
     isChecking: false,
     checkedAt: null,
     recheck: vi.fn(),
+    recheckAfterContentAction: vi.fn(),
     recheckAfterAction: vi.fn(),
     ...overrides,
   };

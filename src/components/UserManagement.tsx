@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { invalidateBannedEvents } from "@/lib/queueInvalidation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -682,7 +683,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               isBanned={bannedListAnswered ? listHas(bannedUsers, selectedPubkey) : null}
               isSuspended={suspendedListAnswered ? listHas(suspendedUsers, selectedPubkey) : null}
               statusPending={loadingSuspended || loadingBanned}
-              onActionComplete={invalidateUserQueries}
+              onActionComplete={(change) => {
+                invalidateUserQueries();
+                if (change.action === 'delete-all') {
+                  void invalidateBannedEvents(queryClient);
+                }
+              }}
             />
           </CardContent>
         </Card>

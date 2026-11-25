@@ -989,6 +989,19 @@ describe('UserActions', () => {
       fireEvent.click(screen.getByRole('button', { name: /Age Restrict All/i }));
       await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({ accountStatusChanged: false }));
     });
+
+    it('identifies Delete All Content even when the job stops partway through', async () => {
+      api.getBulkJobStatus.mockResolvedValue(doneJob('delete-all', { status: 'failed', eventsProcessed: 1 }));
+      const onActionComplete = vi.fn();
+      renderWithProvider(<UserActions pubkey={PUBKEY} onActionComplete={onActionComplete} />);
+
+      fireEvent.click(screen.getByRole('button', { name: /Delete All Content/i }));
+      fireEvent.click(await screen.findByRole('button', { name: /Confirm Delete/i }));
+
+      await waitFor(() => expect(onActionComplete).toHaveBeenCalledWith({
+        accountStatusChanged: false, action: 'delete-all',
+      }));
+    });
   });
 
 });

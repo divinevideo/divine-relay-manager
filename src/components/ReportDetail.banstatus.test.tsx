@@ -316,7 +316,7 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
-  it('runs a plain check, re-reading the account lists, when a content action completes', () => {
+  it('rechecks event bans and the account lists when bulk delete by kind completes', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
@@ -324,7 +324,7 @@ describe('ReportDetail user ban-status panel', () => {
 
       onComplete();
 
-      expect(status.value.recheck).toHaveBeenCalledTimes(1);
+      expect(status.value.recheckAfterContentAction).toHaveBeenCalledTimes(1);
       expect(status.value.recheckAfterAction).not.toHaveBeenCalled();
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['suspended-pubkeys'] });
@@ -341,13 +341,13 @@ describe('ReportDetail user ban-status panel', () => {
     expect(bulkDeleteProps.last).toMatchObject({ isBanned: true, isSuspended: null });
   });
 
-  it('runs a plain check when a bulk content action from UserActions completes', () => {
+  it('runs a content check when a bulk job from UserActions completes', () => {
     renderDetail();
     const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
 
     onActionComplete({ accountStatusChanged: false });
 
-    expect(status.value.recheck).toHaveBeenCalledTimes(1);
+    expect(status.value.recheckAfterContentAction).toHaveBeenCalledTimes(1);
     expect(status.value.recheckAfterAction).not.toHaveBeenCalled();
   });
 

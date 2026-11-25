@@ -1724,6 +1724,23 @@ describe('useModerationStatus', () => {
     await new Promise(resolve => setTimeout(resolve, 60));
   });
 
+  it('replaces a pending event-ban read once after a content action', async () => {
+    listBannedEvents.mockImplementationOnce(hang).mockResolvedValue([{ id: EVENT_ID }]);
+    verifyPubkeyBanned.mockResolvedValue(false);
+    let finishLiveCheck!: (gone: boolean) => void;
+    verifyEventDeleted.mockReturnValue(new Promise<boolean>(resolve => { finishLiveCheck = resolve; }));
+    const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper });
+    await waitFor(() => expect(listBannedEvents).toHaveBeenCalledTimes(1));
+
+    await act(async () => { result.current.recheckAfterContentAction(); });
+
+    await waitFor(() => expect(result.current.isEventBanned).toBe(true));
+    expect(result.current.isChecking).toBe(true);
+    await act(async () => { finishLiveCheck(true); });
+    await waitFor(() => expect(result.current.isChecking).toBe(false));
+    expect(listBannedEvents).toHaveBeenCalledTimes(2);
+  });
+
   it('shows a pre-Unban ban as last known while the live check after the Unban runs', async () => {
     listBannedPubkeys.mockResolvedValueOnce([{ pubkey: PUBKEY }]);
     const { result } = renderHook(() => useModerationStatus(PUBKEY, EVENT_ID, false), { wrapper });
