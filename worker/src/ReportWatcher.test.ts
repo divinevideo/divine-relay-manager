@@ -1264,6 +1264,60 @@ describe('ReportWatcher', () => {
       expect(s.deliberatelyStoppedAt).toBe(at);
     });
 
+    describe('/recover (the health check nudge)', () => {
+      it('leaves a deliberately stopped watcher stopped, and says so', async () => {
+        vi.spyOn(Date, 'now').mockReturnValue(1_795_595_801_234);
+        await watcher.fetch(post('/start'));
+        await watcher.fetch(post('/stop'));
+        const res = await watcher.fetch(post('/recover'));
+        expect(res.status).toBe(200);
+        const body = await res.json() as { success: boolean; message: string; status: ReportWatcherStatus };
+        expect(body.success).toBe(true);
+        expect(body.message).toMatch(/deliberately stopped/i);
+        expect(body.message).toContain('2026-11-25T08:36:41.234Z');
+        expect(body.status.running).toBe(false);
+        expect(body.status.deliberatelyStoppedAt).toBe(1_795_595_801_234);
+        expect(getLastMockWebSocket()?.readyState).toBe(MockWebSocket.CLOSED);
+      });
+
+      it('keeps the stop across a reload', async () => {
+        await watcher.fetch(post('/start'));
+        await watcher.fetch(post('/stop'));
+        const at = (await status(watcher)).deliberatelyStoppedAt;
+        const reloaded = await reload();
+        await reloaded.fetch(post('/recover'));
+        const s = await status(reloaded);
+        expect(s.running).toBe(false);
+        expect(s.deliberatelyStoppedAt).toBe(at);
+      });
+
+      it('starts a watcher that was never started, like /start', async () => {
+        const body = await (await watcher.fetch(post('/recover'))).json() as { message: string; status: ReportWatcherStatus };
+        expect(body.message).toBe('Started');
+        expect(body.status.running).toBe(true);
+        expect(getLastMockWebSocket()).not.toBeNull();
+      });
+
+      it('is a no-op on a running watcher', async () => {
+        await watcher.fetch(post('/start'));
+        const body = await (await watcher.fetch(post('/recover'))).json() as { message: string };
+        expect(body.message).toBe('Already running');
+      });
+
+      it('/start still resumes a deliberately stopped watcher and clears the marker', async () => {
+        await watcher.fetch(post('/start'));
+        await watcher.fetch(post('/stop'));
+        await watcher.fetch(post('/recover'));
+        const body = await (await watcher.fetch(post('/start'))).json() as { status: ReportWatcherStatus };
+        expect(body.status.running).toBe(true);
+        expect(body.status.deliberatelyStoppedAt).toBeNull();
+      });
+
+      it('only answers POST', async () => {
+        expect((await watcher.fetch(new Request('https://do/recover'))).status).toBe(404);
+      });
+    });
+
     it('treats legacy stored state without the field as not deliberately stopped', async () => {
       await mockState.storage.put('watcherState', { running: false, eventsProcessed: 0, eventsAutoHidden: 0 });
       expect((await status(await reload())).deliberatelyStoppedAt).toBeNull();

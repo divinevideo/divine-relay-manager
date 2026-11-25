@@ -152,6 +152,11 @@ describe('REQUIRE_MODERATOR_LOGIN on', () => {
     const res = await call({ url: 'https://api.test/api/report-watcher/start', body: {}, headers: await browser() });
     expect(res.code).not.toBe('moderator_login_required');
   });
+
+  it('leaves the health check nudge POST /api/report-watcher/recover alone', async () => {
+    const res = await call({ url: 'https://api.test/api/report-watcher/recover', body: {}, headers: await browser() });
+    expect(res.code).not.toBe('moderator_login_required');
+  });
 });
 
 describe('REQUIRE_MODERATOR_LOGIN off', () => {
@@ -197,6 +202,16 @@ describe('needsModeratorLogin: which requests are writes', () => {
   it('POST /api/report-watcher/start needs no login', async () => {
     const path = '/api/report-watcher/start';
     expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(false);
+  });
+
+  it('POST /api/report-watcher/recover needs no login', async () => {
+    const path = '/api/report-watcher/recover';
+    expect(await needsModeratorLogin(req('POST', path, '{}'), path)).toBe(false);
+  });
+
+  it.each(['PUT', 'PATCH', 'DELETE'])('%s /api/report-watcher/recover still needs a login', async (method) => {
+    const path = '/api/report-watcher/recover';
+    expect(await needsModeratorLogin(req(method, path, '{}'), path)).toBe(true);
   });
 
   it.each(['PUT', 'PATCH', 'DELETE'])('%s /api/report-watcher/start still needs a login', async (method) => {

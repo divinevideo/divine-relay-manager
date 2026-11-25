@@ -11,7 +11,7 @@
 # auto-hide; the DO's alarm still runs sexual-quarantine case recovery while
 # stopped) makes the DO record deliberatelyStoppedAt (epoch milliseconds) in its
 # status. When that is set and running is false, this workflow does
-# not POST /start and does not count the check as a failure; the run only logs a
+# not nudge it and does not count the check as a failure; the run only logs a
 # ::notice:: with the environment and stop time (UTC), except for the email
 # reminders described next. It stays that way until someone POSTs /start, which
 # clears the marker. A watcher that is not running
@@ -20,7 +20,10 @@
 #
 # In production only, a forgotten stop is surfaced by email, not Slack: the run
 # goes red (GitHub emails the person who last edited this workflow's schedule,
-# per GitHub's scheduled-workflow notification rule;
+# per GitHub's scheduled-workflow notification rule; delivery also depends on
+# that person's GitHub notification settings, and disabling and re-enabling the
+# schedule can change who receives it, see
+# https://docs.github.com/en/actions/concepts/workflows-and-actions/notifications-for-workflow-runs ;
 # wider routing is a separate follow-up) the first time a given
 # stop is seen, identified by its
 # deliberatelyStoppedAt value, and again once every 24 h while that same stop
@@ -31,8 +34,11 @@
 # deliberate stop; it only emits the ::notice::. A stop never counts toward the
 # consecutive-failure Slack alert.
 #
-# Recovery is best-effort only. On an unhealthy check it POSTs /start, but the
-# DO's /start is a no-op when it already believes it is running (the common
+# Recovery is best-effort only. On an unhealthy check it POSTs /recover, which
+# behaves like /start except that the DO itself refuses to override a recorded
+# deliberate stop (so an unreadable /status, a timeout or a 5xx, cannot undo a
+# stop). /start stays the explicit way to resume. Like /start, /recover is a
+# no-op when the DO already believes it is running (the common
 # "running:true, connected:false" case, e.g. a dropped relay socket), and the
 # DO already self-heals via its own alarm-driven reconnect. So treat any
 # recovery inside the re-check window as the DO healing itself, not this
@@ -210,7 +216,7 @@ jobs:
           }
 
           # A deliberate /stop halts report intake and auto-hide, so it is not a
-          # failure and must not be undone by the /start nudge. The DO records the
+          # failure and must not be undone by the /recover nudge. The DO records the
           # stop time in epoch milliseconds; a missing or non-numeric field (older
           # worker) means "not deliberately stopped". Only running exactly false
           # counts: null or missing running stays unhealthy.
@@ -295,8 +301,10 @@ jobs:
           ALERT=true
 
       # --- Best-effort restart nudge before alerting ---
-      # POSTs /start, but the DO's /start is a no-op when it already believes it
-      # is running, which is the common unhealthy state. Any recovery seen in the
+      # POSTs /recover (a /start that the DO refuses when a deliberate stop is
+      # recorded, even if /status could not be read above). Like /start it is a
+      # no-op when the DO already believes it is running, which is the common
+      # unhealthy state. Any recovery seen in the
       # re-check window is usually the DO's own alarm reconnect. Kept because it
       # is harmless and occasionally helps (a watcher that is down but was not deliberately stopped); the
       # real value of this step is the post-nudge re-check that decides alerting.
@@ -310,13 +318,13 @@ jobs:
           API_URL: ${{ matrix.env.url }}
           INITIAL_FAILURE: ${{ steps.check.outputs.payload }}
         run: |
-          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}; sending best-effort /start (no-op if already running) and re-checking..."
+          echo "ReportWatcher unhealthy on ${{ matrix.env.name }}; sending best-effort /recover (no-op if already running or deliberately stopped) and re-checking..."
           echo "Initial failure: $INITIAL_FAILURE"
 
           RESTART_CODE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -X POST \
             -H "CF-Access-Client-Id: $CF_ACCESS_CLIENT_ID" \
             -H "CF-Access-Client-Secret: $CF_ACCESS_CLIENT_SECRET" \
-            "$API_URL/api/report-watcher/start" 2>/dev/null) || RESTART_CODE="transport_error"
+            "$API_URL/api/report-watcher/recover" 2>/dev/null) || RESTART_CODE="transport_error"
           echo "Restart response: $RESTART_CODE"
 
           echo "Waiting 30s for reconnection..."
@@ -340,7 +348,16 @@ jobs:
           BODY=$(cat /tmp/rw-recover.json)
           CONNECTED=$(echo "$BODY" | jq -r '.status.connected' 2>/dev/null)
           RUNNING=$(echo "$BODY" | jq -r '.status.running' 2>/dev/null)
-          if [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
+          # Same deliberate-stop test as the first check (running exactly false
+          # plus a numeric marker): the first read can fail and the re-check be
+          # the one that sees the stop. Not a failure, so it resets the count
+          # like a recovery; the reminder step picks the stop up on the next run.
+          STOPPED_AT=$(echo "$BODY" | jq -r 'if (.status.deliberatelyStoppedAt | type) == "number" then (.status.deliberatelyStoppedAt / 1000 | floor | todate) else empty end' 2>/dev/null) || STOPPED_AT=""
+          if [ "$RUNNING" = "false" ] && [ -n "$STOPPED_AT" ]; then
+            echo "recovered=true" >> "$GITHUB_OUTPUT"
+            echo "deliberate_stop=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::ReportWatcher ${{ matrix.env.name }} was deliberately stopped at $STOPPED_AT; not restarting and not counting it as a failure. POST /api/report-watcher/start to resume."
+          elif [ "$CONNECTED" = "true" ] && [ "$RUNNING" = "true" ]; then
             echo "recovered=true" >> "$GITHUB_OUTPUT"
             echo "ReportWatcher recovered after restart"
           else
@@ -495,9 +512,9 @@ jobs:
       # --- Quiet log when self-healing worked (no alert, just visibility) ---
 
       - name: Log recovery
-        if: always() && steps.counts.outputs.self_healed == 'true'
+        if: always() && steps.counts.outputs.self_healed == 'true' && steps.recover.outputs.deliberate_stop != 'true'
         run: |
-          echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered on re-check (best-effort /start nudge or the DO's own reconnect)"
+          echo "::notice::ReportWatcher ${{ matrix.env.name }} was unhealthy but recovered on re-check (best-effort /recover nudge or the DO's own reconnect)"
 
       # --- Fail the run so GitHub emails about a deliberate stop ---
       # Red only for the first sight of a stop and once per 24 h after (see the

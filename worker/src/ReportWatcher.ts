@@ -232,6 +232,10 @@ export class ReportWatcher implements DurableObject {
         return this.handleStop();
       }
 
+      if (path === '/recover' && request.method === 'POST') {
+        return this.handleRecover();
+      }
+
       if (path === '/status' && request.method === 'GET') {
         return this.handleStatus();
       }
@@ -311,6 +315,26 @@ export class ReportWatcher implements DurableObject {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
     });
+  }
+
+  /**
+   * Health check nudge: like /start, except it never overrides a deliberate
+   * stop. The marker is read here, inside the DO, so the caller does not need
+   * to have read /status successfully first (a timeout or 5xx on /status must
+   * not be able to undo a stop). /start stays the explicit way to resume.
+   */
+  private async handleRecover(): Promise<Response> {
+    if (!this.running && this.deliberatelyStoppedAt !== null) {
+      return new Response(JSON.stringify({
+        success: true,
+        message: `Deliberately stopped since ${new Date(this.deliberatelyStoppedAt).toISOString()}; not restarting (POST /start to resume)`,
+        status: this.getStatus(),
+      }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    return this.handleStart();
   }
 
   /**
