@@ -2,7 +2,7 @@
 // ABOUTME: refreshed only by an explicit button, and that button is off without a relay
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createQueryClient } from '@/lib/queryClient';
 import { SettingsDashboard } from './SettingsDashboard';
@@ -45,15 +45,28 @@ describe('SettingsDashboard pending moderation', () => {
     expect(screen.getByTitle(/no approval tracking/i)).toBeInTheDocument();
   });
 
-  it('does not rescan when the tab is remounted inside the cache window', async () => {
+  it('does not rescan on remount after the cached count has aged', async () => {
     const first = mount();
-    await waitFor(() => expect(scanCalls()).toBe(1));
+    await waitFor(() => expect(refreshButton()).toBeEnabled());
+    expect(scanCalls()).toBe(1);
     first.unmount();
-    // Past the app's 1 minute default staleTime, inside the 10 minute window.
-    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 5 * 60_000 });
-    mount(first.client);
-    vi.useRealTimers();
-    await new Promise(r => setTimeout(r, 50));
+    const later = Date.now() + 11 * 60_000;
+    const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
+    try {
+      mount(first.client);
+    } finally {
+      clock.mockRestore();
+    }
+    expect(scanCalls()).toBe(1);
+  });
+
+  it('does not rescan when the count query is invalidated', async () => {
+    const { client } = mount();
+    await waitFor(() => expect(refreshButton()).toBeEnabled());
+    expect(scanCalls()).toBe(1);
+    await act(async () => {
+      await client.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+    });
     expect(scanCalls()).toBe(1);
   });
 
@@ -67,8 +80,7 @@ describe('SettingsDashboard pending moderation', () => {
 
   it('disables refresh and makes no call without a relayUrl', async () => {
     cfg.relayUrl = '';
-    mount();
-    await new Promise(r => setTimeout(r, 50));
+    await act(async () => { mount(); });
     expect(scanCalls()).toBe(0);
     expect(refreshButton()).toBeDisabled();
   });

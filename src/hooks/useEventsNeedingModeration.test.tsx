@@ -1,12 +1,12 @@
 // ABOUTME: useEventsNeedingModeration wraps a full-table relay scan, so it must stay cheap:
-// ABOUTME: off without an environment, cached 10 minutes, no retry/focus/reconnect refetch
+// ABOUTME: off without an environment, with subsequent reads requested explicitly
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { renderHook, waitFor } from '@testing-library/react';
+import { act, renderHook, waitFor } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import type { ReactNode } from 'react';
 import { createQueryClient } from '@/lib/queryClient';
-import { useEventsNeedingModeration, EVENTS_NEEDING_MODERATION_STALE_MS } from './useEventsNeedingModeration';
+import { useEventsNeedingModeration } from './useEventsNeedingModeration';
 
 const rpc = vi.hoisted(() => ({ fn: vi.fn() }));
 vi.mock('@/hooks/useAdminApi', () => ({ useAdminApi: () => ({ callRelayRpc: rpc.fn }) }));
@@ -16,8 +16,7 @@ beforeEach(() => {
   rpc.fn.mockResolvedValue([]);
 });
 
-function setup(relayUrl: string | undefined) {
-  const client = createQueryClient();
+function setup(relayUrl: string | undefined, client = createQueryClient()) {
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
   );
@@ -25,11 +24,10 @@ function setup(relayUrl: string | undefined) {
 }
 
 describe('useEventsNeedingModeration', () => {
-  it('does not call the relay without a relayUrl', async () => {
+  it('does not call the relay without a relayUrl', () => {
     const { result } = setup(undefined);
-    await new Promise(r => setTimeout(r, 30));
-    expect(rpc.fn).not.toHaveBeenCalled();
     expect(result.current.fetchStatus).toBe('idle');
+    expect(rpc.fn).not.toHaveBeenCalled();
   });
 
   it('calls the relay once with a relayUrl', async () => {
@@ -38,15 +36,19 @@ describe('useEventsNeedingModeration', () => {
     expect(rpc.fn).toHaveBeenCalledWith('listeventsneedingmoderation');
   });
 
-  it('is cached 10 minutes, with no retry, focus or reconnect refetch', async () => {
-    const { client } = setup('wss://relay.test');
-    await waitFor(() => expect(rpc.fn).toHaveBeenCalled());
-    const o = client.getQueryCache().find({ queryKey: ['events-needing-moderation', 'wss://relay.test'] })!.observers[0].options;
-    expect(o.staleTime).toBeGreaterThanOrEqual(10 * 60_000);
-    expect(EVENTS_NEEDING_MODERATION_STALE_MS).toBeGreaterThanOrEqual(10 * 60_000);
-    expect(o.retry).toBe(false);
-    expect(o.refetchOnWindowFocus).toBe(false);
-    expect(o.refetchOnReconnect).toBe(false);
-    expect(o.refetchInterval).toBe(false);
+  it('retries a failed first load only when explicitly refreshed', async () => {
+    rpc.fn.mockRejectedValueOnce(new Error('Relay unavailable'));
+    const first = setup('wss://relay.test');
+    await waitFor(() => expect(first.result.current.isError).toBe(true));
+    expect(rpc.fn).toHaveBeenCalledTimes(1);
+    first.unmount();
+
+    const next = setup('wss://relay.test', first.client);
+    expect(next.result.current.isError).toBe(true);
+    expect(rpc.fn).toHaveBeenCalledTimes(1);
+
+    await act(async () => { await next.result.current.refetch(); });
+    await waitFor(() => expect(next.result.current.isSuccess).toBe(true));
+    expect(rpc.fn).toHaveBeenCalledTimes(2);
   });
 });

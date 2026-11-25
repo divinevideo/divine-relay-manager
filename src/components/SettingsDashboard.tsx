@@ -12,7 +12,7 @@ import { useAppContext } from "@/hooks/useAppContext";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
 import { Button } from "@/components/ui/button";
-import { useEventsNeedingModeration, EVENTS_NEEDING_MODERATION_STALE_MS } from "@/hooks/useEventsNeedingModeration";
+import { useEventsNeedingModeration } from "@/hooks/useEventsNeedingModeration";
 import { getCurrentEnvironment } from "@/lib/environments";
 import { normalizeAllowedKinds, type AllowedKindEntry } from "@/lib/allowedKinds";
 import {
@@ -770,7 +770,7 @@ export function SettingsDashboard() {
                     size="icon"
                     className="ml-1 h-6 w-6 align-middle"
                     aria-label="Refresh recent events count"
-                    title={`Refresh (cached for ${EVENTS_NEEDING_MODERATION_STALE_MS / 60_000} minutes)`}
+                    title="Refresh recent events count"
                     disabled={!relayUrl || pendingFetching}
                     onClick={() => { void refetchPending(); }}
                   >

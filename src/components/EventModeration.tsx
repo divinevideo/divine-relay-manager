@@ -42,7 +42,12 @@ export function EventModeration() {
   } | null>(null);
 
   // Query for events needing moderation
-  const { data: eventsNeedingModeration, isLoading: loadingPending, error: pendingError } = useEventsNeedingModeration(config.relayUrl);
+  const {
+    data: eventsNeedingModeration,
+    isLoading: loadingPending,
+    error: pendingError,
+    refetch: refetchPending,
+  } = useEventsNeedingModeration(config.relayUrl);
 
   // Query for banned events
   const { data: bannedEvents, isLoading: loadingBanned, error: bannedError } = useBannedEvents();
@@ -54,7 +59,7 @@ export function EventModeration() {
       return act.restoreEvent(eventId, reason || 'Allowed from moderation queue');
     },
     onSuccess: (result) => {
-      queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      if (config.relayUrl) void refetchPending();
       // An approve is a restore. Report detail reads a post's ban status from
       // the banned-events list, so re-read it, as after a ban, or a report
       // opened soon after keeps calling the approved post banned and offering
@@ -86,7 +91,7 @@ export function EventModeration() {
       return eventId;
     },
     onSuccess: async (eventId) => {
-      queryClient.invalidateQueries({ queryKey: ['events-needing-moderation'] });
+      if (config.relayUrl) void refetchPending();
       queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       toast({ title: "Event banned", description: "Verifying..." });
       setIsAddDialogOpen(false);
