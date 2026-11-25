@@ -46,7 +46,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
 import { overflowLine } from "@/lib/overflowLine";
-import { invalidateResolutionState } from "@/lib/queueInvalidation";
+import { invalidateBannedEvents, invalidateResolutionState } from "@/lib/queueInvalidation";
 import { extractMediaFiles, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -677,7 +677,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return act.restoreEvent(eventId, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      void invalidateBannedEvents(queryClient);
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
 
@@ -706,7 +706,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // media and bulk content actions, through EventActions, BulkDeleteByKind,
   // UserActions' bulk jobs and the delete below) call it with no change.
   const handleActionComplete = (change?: UserActionChange) => {
-    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+    void invalidateBannedEvents(queryClient);
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     invalidateResolutionState(queryClient);

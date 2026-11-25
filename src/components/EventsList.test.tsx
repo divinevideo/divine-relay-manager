@@ -186,9 +186,13 @@ beforeEach(() => {
   setRelay({});
 });
 
-it('reloads the banned-events list after bulk delete by kind', async () => {
-  renderEvents(`/events?pubkey=${PK}`);
+it('replaces a pending first banned-events read after bulk delete by kind', async () => {
   const bannedEventReads = () => rpc.fn.mock.calls.filter(([method]) => method === 'listbannedevents').length;
+  rpc.fn.mockImplementation((method: string) =>
+    method === 'listbannedevents' && bannedEventReads() === 1
+      ? new Promise(() => {})
+      : Promise.resolve([]));
+  renderEvents(`/events?pubkey=${PK}`);
   await waitFor(() => expect(bannedEventReads()).toBe(1));
 
   fireEvent.click(await screen.findByRole('button', { name: 'Complete bulk delete' }));

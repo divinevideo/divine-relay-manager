@@ -579,7 +579,7 @@ describe('UserManagement drops cached authored-content reads after an account ac
     const onActionComplete = userActionsProps.last?.onActionComplete as (c: UserActionChange) => void;
     await act(async () => { onActionComplete({ accountStatusChanged: false, action: 'delete-all' }); });
 
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true });
   });
 
   it('keeps them after a content action that leaves the account status as it was', async () => {
@@ -592,7 +592,7 @@ describe('UserManagement drops cached authored-content reads after an account ac
     await act(async () => { onActionComplete({ accountStatusChanged: false }); });
 
     expect(client.getQueryData(STATS_KEY)).toEqual({ postCount: 0 });
-    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+    expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true });
   });
 });
 

@@ -8,6 +8,7 @@ import { nip19 } from "nostr-tools";
 import { getKindInfo, getKindCategory, VIDEO_KINDS } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
+import { invalidateBannedEvents } from "@/lib/queueInvalidation";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -1072,7 +1073,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
                 onComplete={() => {
                   // The dialog refreshes the event listing. Refresh the bans
                   // here as well so Reports sees the deletions on return.
-                  queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+                  void invalidateBannedEvents(queryClient);
                 }}
                 getModeratorToken={getModeratorToken}
               />

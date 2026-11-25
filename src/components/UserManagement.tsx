@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useQuery, useMutation, useQueryClient, type QueryClient } from "@tanstack/react-query";
+import { invalidateBannedEvents } from "@/lib/queueInvalidation";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -312,7 +313,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     onSuccess: async ({ pubkey, outcome, auditRecorded }) => {
       invalidateUserQueries();
       // An account ban can also purge the account's posts.
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      void invalidateBannedEvents(queryClient);
       toast({
         title: auditRecorded ? "User banned successfully" : "User banned; audit log not recorded",
         description: banSuccessNote(outcome),
@@ -687,7 +688,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               onActionComplete={(change) => {
                 invalidateUserQueries();
                 if (change.action === 'delete-all' || change.action === 'ban') {
-                  queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+                  void invalidateBannedEvents(queryClient);
                 }
               }}
             />

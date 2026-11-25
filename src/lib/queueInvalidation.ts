@@ -20,3 +20,10 @@ export function invalidateResolutionState(queryClient: QueryClient): void {
   queryClient.invalidateQueries({ queryKey: ['reports'] });
   queryClient.invalidateQueries({ queryKey: [RESOLVED_HISTORY_KEY_ROOT] });
 }
+
+export async function invalidateBannedEvents(queryClient: QueryClient): Promise<void> {
+  // With no cached result, invalidation would reuse a pending pre-action
+  // read. Its reply could then keep deleted events visible until the poll.
+  await queryClient.cancelQueries({ queryKey: ['banned-events'], exact: true });
+  await queryClient.invalidateQueries({ queryKey: ['banned-events'], exact: true });
+}

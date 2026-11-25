@@ -1,7 +1,7 @@
 // ABOUTME: Pins the user ban-status panel's three outcomes on a user report.
 // ABOUTME: A check that could not answer must not render as "User is not banned".
 
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -334,7 +334,7 @@ describe('ReportDetail user ban-status panel', () => {
   });
 
   // The report pane owns this refresh when it hosts the by-kind dialog.
-  it('invalidates the banned-events list when bulk delete by kind completes', () => {
+  it('invalidates the banned-events list when bulk delete by kind completes', async () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
@@ -342,13 +342,13 @@ describe('ReportDetail user ban-status panel', () => {
 
       onComplete();
 
-      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true }));
     } finally {
       invalidate.mockRestore();
     }
   });
 
-  it('invalidates the banned-events list when an account action completes', () => {
+  it('invalidates the banned-events list when an account action completes', async () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
@@ -356,7 +356,7 @@ describe('ReportDetail user ban-status panel', () => {
 
       onActionComplete({ accountStatusChanged: true, action: 'ban', pubkey: 'a'.repeat(64) } as UserActionChange);
 
-      expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'] });
+      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true }));
     } finally {
       invalidate.mockRestore();
     }
