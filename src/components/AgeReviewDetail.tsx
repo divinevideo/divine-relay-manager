@@ -340,7 +340,7 @@ export function AgeReviewDetail({ caseData: c }: Props) {
       if (updates.state === undefined && !conflict) return;
       void invalidateAccountStatus(queryClient, ctx.casePubkey);
       // The viewer uses the relay's suspended list (#437). A deny can also
-      // ban the account and purge its posts, even if the response is lost.
+      // ban the account and run Delete All Content, even if the response is lost.
       const relayLists = [['suspended-pubkeys']];
       if (updates.state === 'denied_closed') {
         relayLists.push(['banned-pubkeys'], ['banned-events']);

@@ -312,8 +312,6 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     },
     onSuccess: async ({ pubkey, outcome, auditRecorded }) => {
       invalidateUserQueries();
-      // An account ban can also purge the account's posts.
-      void invalidateBannedEvents(queryClient);
       toast({
         title: auditRecorded ? "User banned successfully" : "User banned; audit log not recorded",
         description: banSuccessNote(outcome),
@@ -687,7 +685,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               statusPending={loadingSuspended || loadingBanned}
               onActionComplete={(change) => {
                 invalidateUserQueries();
-                if (change.action === 'delete-all' || change.action === 'ban') {
+                if (change.action === 'delete-all') {
                   void invalidateBannedEvents(queryClient);
                 }
               }}
