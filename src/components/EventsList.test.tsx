@@ -129,7 +129,8 @@ function setRelay({ byId = [], byAddress = [], list = [] }: {
     if (f.ids) return [...byId];
     if (f['#d']) return [...byAddress];
     if (f.until) return []; // pagination: pages after the first are empty
-    return [...list];
+    return list.filter(row =>
+      (!f.kinds || f.kinds.includes(row.kind)) && (!f.authors || f.authors.includes(row.pubkey)));
   });
 }
 
@@ -164,6 +165,11 @@ function eventListViewport(container: HTMLElement): HTMLElement {
   const viewport = container.querySelector<HTMLElement>('[data-radix-scroll-area-viewport]');
   if (!viewport) throw new Error('Missing event list viewport');
   return viewport;
+}
+
+async function pickKind(name: string) {
+  fireEvent.click(screen.getByLabelText('Event Kind'));
+  fireEvent.click(await screen.findByRole('option', { name }));
 }
 
 beforeEach(() => {
@@ -244,7 +250,7 @@ describe('EventsList internal navigation (#164 A)', () => {
     rpc.fn.mockImplementation(async (method: string) =>
       method === 'listbannedevents' ? [{ id: bannedId }] : []);
 
-    renderEvents('/events');
+    renderEvents(`/events?pubkey=${PK}`);
 
     const link = await screen.findByRole('link', { name: /on Parent Video/ });
     expect(link).toHaveAttribute('href', '/events?event=nevent1parent');
@@ -259,7 +265,7 @@ describe('EventsList internal navigation (#164 A)', () => {
 
 describe('EventsList recorded moderation', () => {
   it('routes an approved event through allow_event instead of raw relay RPC', async () => {
-    const target = event({ id: 'd'.repeat(64), content: 'review me' });
+    const target = event({ id: 'd'.repeat(64), kind: 34236, content: 'review me' });
     setRelay({ list: [target] });
     renderEvents('/events');
 
@@ -288,7 +294,7 @@ describe('EventsList no-relay-profile globe', () => {
   const globe = () => screen.queryByRole('img', { name: RELAY_PROFILE_BADGE.absent.label });
 
   it('shows no globe while the author lookup has not answered', async () => {
-    setRelay({ list: [event({ id: 'd'.repeat(64), content: 'listed event' })] });
+    setRelay({ list: [event({ id: 'd'.repeat(64), kind: 34236, content: 'listed event' })] });
     renderEvents('/events');
     await screen.findByText('listed event');
     expect(globe()).not.toBeInTheDocument();
@@ -296,7 +302,7 @@ describe('EventsList no-relay-profile globe', () => {
 
   it('shows the globe once the lookup answers that the relay has no profile', async () => {
     authorState.result = { data: { isFunnelcakeUser: false }, isLoading: false };
-    setRelay({ list: [event({ id: 'd'.repeat(64), content: 'listed event' })] });
+    setRelay({ list: [event({ id: 'd'.repeat(64), kind: 34236, content: 'listed event' })] });
     renderEvents('/events');
     await screen.findByText('listed event');
     expect(globe()).toBeInTheDocument();
@@ -306,18 +312,19 @@ describe('EventsList no-relay-profile globe', () => {
 // Kind 0 content is whatever the profile's author published, so a field can
 // hold any JSON value and the content need not be an object at all.
 describe('EventsList profile row', () => {
-  function renderProfileRow(content: string) {
+  async function renderProfileRow(content: string) {
     setRelay({ list: [event({ id: 'd'.repeat(64), kind: 0, content })] });
     renderEvents('/events');
+    await pickKind('Profiles (0)');
   }
 
   it('shows the name and about when they are text', async () => {
-    renderProfileRow(JSON.stringify({ display_name: 'Synthetic Name', about: 'synthetic about' }));
+    await renderProfileRow(JSON.stringify({ display_name: 'Synthetic Name', about: 'synthetic about' }));
     expect(await screen.findByText('Synthetic Name — synthetic about')).toBeInTheDocument();
   });
 
   it('leaves out fields that are not text', async () => {
-    renderProfileRow(JSON.stringify({
+    await renderProfileRow(JSON.stringify({
       display_name: { nested: true },
       about: ['about-as-a-list', 'second-item'],
       nip05: 'synthetic@example.test',
@@ -328,13 +335,13 @@ describe('EventsList profile row', () => {
   });
 
   it('says "Profile update" when no field is text', async () => {
-    renderProfileRow(JSON.stringify({ display_name: 4205, about: { a: 1 }, nip05: ['n'] }));
+    await renderProfileRow(JSON.stringify({ display_name: 4205, about: { a: 1 }, nip05: ['n'] }));
     expect(await screen.findByText('Profile update')).toBeInTheDocument();
     expect(screen.queryByText(/4205/)).not.toBeInTheDocument();
   });
 
   it('shows the content as written when it is JSON but not an object', async () => {
-    renderProfileRow('["not","a","profile"]');
+    await renderProfileRow('["not","a","profile"]');
     expect(await screen.findByText('["not","a","profile"]')).toBeInTheDocument();
   });
 });
@@ -346,8 +353,8 @@ describe('EventsList "Has reports" filter', () => {
     ['lowercase (control)', (id: string) => id],
     ['uppercase', (id: string) => id.toUpperCase()],
   ])('counts a report that spells the event in %s', async (_label, spell) => {
-    const reported = event({ id: 'ab'.repeat(32), pubkey: 'cd'.repeat(32), content: 'reported post' });
-    const quiet = event({ id: '12'.repeat(32), pubkey: '34'.repeat(32), content: 'quiet post' });
+    const reported = event({ id: 'ab'.repeat(32), pubkey: 'cd'.repeat(32), kind: 34236, content: 'reported post' });
+    const quiet = event({ id: '12'.repeat(32), pubkey: '34'.repeat(32), kind: 34236, content: 'quiet post' });
     const report = event({ id: '9'.repeat(64), kind: 1984, pubkey: '5'.repeat(64), tags: [['e', spell(reported.id), 'spam']] });
     relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) => {
       const f = filters[0] ?? {};
@@ -378,10 +385,6 @@ describe('EventsList list query cost', () => {
       .filter((f): f is NostrFilter => !!f && !f.ids && !f['#d'] && f.limit !== 500);
   const video = () => event({ kind: 34236, content: 'a video' });
   const olderVideo = () => event({ id: 'd'.repeat(64), kind: 34236, content: 'older', created_at: 1_700_000_000 });
-  const pickKind = async (name: string) => {
-    fireEvent.click(screen.getByLabelText('Event Kind'));
-    fireEvent.click(await screen.findByRole('option', { name }));
-  };
 
   it('defaults every list request, paged ones included, to the video kinds', async () => {
     relayQuery.fn.mockImplementation(async (filters: NostrFilter[]) =>
@@ -497,7 +500,10 @@ describe('EventsList list query cost', () => {
     // truthy, so the lookup would take it for a banned event with no pubkey and
     // crash EventCard; a real miss is an RPC error (the lookup's catch turns it
     // into "not found").
-    rpc.fn.mockRejectedValue(new Error('Event not found or not banned'));
+    rpc.fn.mockImplementation(async (method: string) => {
+      if (method === 'getbannedevent') throw new Error('Event not found or not banned');
+      return [];
+    });
     renderEvents(`/events?event=${nip19.neventEncode({ id: 'c'.repeat(64) })}`);
     expect(await screen.findByText('No event found on relay', { selector: 'span' })).toBeInTheDocument();
     expect(listFilters()).toEqual([]);
