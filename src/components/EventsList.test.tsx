@@ -709,6 +709,27 @@ describe('EventsList list query cost', () => {
   });
 
   describe('Custom Kind', () => {
+    it('keeps the cached All Events pages after using a custom kind', async () => {
+      const older = olderVideo();
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[]) => {
+        if (filter.kinds?.includes(1111)) return [event({ kind: 1111, content: 'custom comment' })];
+        return filter.until ? [older] : [video()];
+      });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('All Events');
+      fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+      await screen.findByText('older');
+
+      await pickKind('Custom Kind');
+      fireEvent.change(screen.getByLabelText('Kind #'), { target: { value: '1111' } });
+      await screen.findByText('custom comment');
+      relayQuery.fn.mockClear();
+      await pickKind('All Events');
+      expect(await screen.findByText('older')).toBeInTheDocument();
+      expect(listFilters()).toEqual([]);
+    });
+
     it('sends nothing until a valid kind number is entered, then scopes to it', async () => {
       setRelay({ list: [video()] });
       renderEvents('/events');

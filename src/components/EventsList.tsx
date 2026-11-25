@@ -465,11 +465,12 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const hasPendingEventParam = !!searchParams.get('event');
   // null = the moderator has not picked a kind, so the default follows context
   const effectiveKindFilter = kindFilter ?? (filterByPubkey ? RECENT_ACTIVITY_FILTER : VIDEO_KINDS_FILTER);
+  const isCustomKind = effectiveKindFilter === 'custom';
   // Strict: parseInt would accept '1abc' and '-5'; range is NIP-01 0-65535. null = nothing valid yet.
-  const customKindNumber = /^\d+$/.test(customKind.trim()) && parseInt(customKind.trim(), 10) <= 65535
+  const customKindNumber = isCustomKind && /^\d+$/.test(customKind.trim()) && parseInt(customKind.trim(), 10) <= 65535
     ? parseInt(customKind.trim(), 10)
     : null; // NIP-01 kinds are 0-65535
-  const awaitingCustomKind = effectiveKindFilter === 'custom' && customKindNumber === null;
+  const awaitingCustomKind = isCustomKind && customKindNumber === null;
   const listHidden = isDirectLookup || hasPendingEventParam;
   const listEnabled = !!relayUrl && !!nostr && !listHidden && !awaitingCustomKind;
   const listQueryKey = useMemo(
