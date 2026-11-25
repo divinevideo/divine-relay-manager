@@ -103,10 +103,18 @@ export async function walkRelayEvents<T extends { id: string; created_at: number
 
     const fresh: T[] = [];
     let newIds = 0;
+    // The cursor comes from the new rows; the saturation test needs every row.
     let oldest = Infinity;
     let newest = -Infinity;
+    let batchOldest = Infinity;
+    let batchNewest = -Infinity;
     let olderThanPrev = false;
     for (const raw of batch) {
+      const rawCreatedAt = raw && typeof raw === 'object' ? (raw as { created_at?: unknown }).created_at : undefined;
+      if (typeof rawCreatedAt === 'number' && Number.isFinite(rawCreatedAt)) {
+        batchOldest = Math.min(batchOldest, rawCreatedAt);
+        batchNewest = Math.max(batchNewest, rawCreatedAt);
+      }
       const id = raw && typeof raw === 'object' ? (raw as { id?: unknown }).id : undefined;
       if (typeof id === 'string' && seen.has(id)) continue;
       const badKey = JSON.stringify(raw) ?? String(raw);
@@ -143,8 +151,12 @@ export async function walkRelayEvents<T extends { id: string; created_at: number
     await onPage(fresh, oldest);
 
     // A full page entirely inside one second: rows beyond the page share that
-    // second and the cursor cannot reach them.
-    if (batch.length >= opts.pageSize && oldest === newest) {
+    // second and the cursor cannot reach them. Judged over every row in the
+    // page, seen or new: a full page of already-seen rows at second S plus a
+    // few new rows at S-1 is not saturated, and calling it so would skip the
+    // rest of S-1. A second holding exactly pageSize events (or exactly the
+    // evidenced cap, below) also reads as truncated: conservative, never a gap.
+    if (batch.length >= opts.pageSize && batchOldest === batchNewest) {
       return { complete: false, truncated: true, pages, rejected, stopReason: 'saturated_second' };
     }
 

@@ -99,11 +99,19 @@ export function reportIndexRefStatements(
 ): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
   const refs: Array<[string, string, string]> = [];
+  // Deduplicated here, after lowercasing, not left to INSERT OR IGNORE: a report
+  // stuffed with thousands of copies of one tag would otherwise cost a D1
+  // statement per 33 copies.
+  const seenRefs = new Set<string>();
   for (const r of reports) {
     const reportId = lower(r.id);
     for (const tag of Array.isArray(r.tags) ? r.tags : []) {
       if (!Array.isArray(tag) || (tag[0] !== 'e' && tag[0] !== 'p') || typeof tag[1] !== 'string') continue;
-      refs.push([tag[0], lower(tag[1]), reportId]);
+      const ref: [string, string, string] = [tag[0], lower(tag[1]), reportId];
+      const key = ref.join('\u0000');
+      if (seenRefs.has(key)) continue;
+      seenRefs.add(key);
+      refs.push(ref);
     }
   }
   for (let i = 0; i < refs.length; i += REF_ROWS_PER_STATEMENT) {

@@ -7,6 +7,7 @@ import {
   findUnseenReportIds,
   readMeta,
   metaStatement,
+  reportIndexRefStatements,
   runStatements,
   type SignedReport,
 } from '../src/report-index';
@@ -40,7 +41,6 @@ const PK = 'a'.repeat(64);
 function report(n: number, tags: string[][] = [['e', hex(n + 100000)], ['p', PK]]): SignedReport {
   return { id: hex(n), pubkey: PK, created_at: 1000 + n, kind: 1984, tags, content: `c${n}`, sig: 'f'.repeat(128) };
 }
-
 
 /** DB whose batch calls record their statement counts, to assert the 50-statement cap. */
 function withBatchSizes(db: D1Database): { db: D1Database; sizes: number[] } {
@@ -113,6 +113,17 @@ describe('report index helpers', () => {
     expect(refs.results).toContainEqual({ ref_type: 'e', ref_value: upper.toLowerCase() });
     expect(refs.results).toContainEqual({ ref_type: 'e', ref_value: other });
     expect(refs.results).toContainEqual({ ref_type: 'p', ref_value: PK });
+  });
+
+  it('writes one ref row for 2,000 duplicate e tags, in one statement', async () => {
+    const target = hex(55);
+    // Same id in both casings: duplicates once lowercased.
+    const tags = Array.from({ length: 2000 }, (_, i) => ['e', i % 2 ? target : target.toUpperCase()]);
+    const r = report(2, tags);
+    expect(reportIndexRefStatements(DB, [r])).toHaveLength(1);
+    await indexReports(DB, [r], 'live', 100);
+    const refs = await DB.prepare('SELECT ref_type, ref_value FROM report_index_refs WHERE report_id = ?').bind(r.id).all();
+    expect(refs.results).toEqual([{ ref_type: 'e', ref_value: target }]);
   });
 
   it('sets the target from the first e tag, else the first p tag', async () => {

@@ -107,6 +107,21 @@ describe('walkRelayEvents', () => {
     expect(got.length).toBeGreaterThan(0);
   });
 
+  it('does not read a full page of already-seen rows plus a few new ones in an older second as saturated', async () => {
+    // A full page whose new rows all share one second is not a saturated
+    // second when the page also holds seen rows from a newer second.
+    const corpus = [
+      ...Array.from({ length: 10 }, () => signed(2005)),
+      ...Array.from({ length: 490 }, () => signed(2000)),
+      ...Array.from({ length: 20 }, () => signed(1999)),
+    ];
+    const { fetchPage } = relayOver(corpus);
+    const { result, got } = await collect(opts(fetchPage, { pageSize: 500 }));
+    expect(got).toHaveLength(520);
+    expect(new Set(got.map(e => e.id)).size).toBe(520);
+    expect(result).toMatchObject({ complete: true, truncated: false });
+  });
+
   it('stops truncated at maxPages', async () => {
     const { fetchPage } = relayOver(series(40));
     const { result } = await collect(opts(fetchPage, { maxPages: 3 }));

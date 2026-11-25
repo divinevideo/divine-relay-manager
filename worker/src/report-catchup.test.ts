@@ -3,6 +3,7 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  CATCHUP_CLOCK_MARGIN_SECONDS,
   CATCHUP_MAX_STOPPED_PERIODS,
   addStoppedPeriod,
   pruneStoppedPeriods,
@@ -29,8 +30,15 @@ describe('planCatchUpWindow', () => {
     const now = 2_000_000;
     expect(CATCHUP_OVERLAP_SECONDS).toBe(600);
     expect(planCatchUpWindow(lastAliveAt, now)).toEqual([
-      { since: lastAliveAt - 600, until: now, handlerEnabled: true },
+      { since: lastAliveAt - 600, until: now + 120, handlerEnabled: true },
     ]);
+  });
+
+  it('reaches two minutes past the connect time, for a report from a client whose clock runs fast', () => {
+    expect(CATCHUP_CLOCK_MARGIN_SECONDS).toBe(120);
+    const [window] = planCatchUpWindow(1_999_880, 2_000_000);
+    // Filed at 1_999_999 by a client 90 s fast: dated after the connect.
+    expect(window.until).toBeGreaterThanOrEqual(2_000_089);
   });
 
   it('after a deliberate stop, keeps the handler up to the stop and indexes only the stopped period', () => {
@@ -40,13 +48,15 @@ describe('planCatchUpWindow', () => {
     // Whatever was missed before the stop (an outage) gets the live
     // treatment; only (stopAt, now] is index-only. With no outage, the
     // pre-stop slice was seen live and the seen check filters it.
+    // The clock margin after the connect is live time again: handler on.
     expect(planCatchUpWindow(lastAliveAt, now, stopAt)).toEqual([
       { since: lastAliveAt - 600, until: stopAt, handlerEnabled: true },
       { since: stopAt + 1, until: now, handlerEnabled: false },
+      { since: now + 1, until: now + 120, handlerEnabled: true },
     ]);
     // A stop in the current second leaves no stopped period to index.
     expect(planCatchUpWindow(lastAliveAt, now, now)).toEqual([
-      { since: lastAliveAt - 600, until: now, handlerEnabled: true },
+      { since: lastAliveAt - 600, until: now + 120, handlerEnabled: true },
     ]);
   });
 });
@@ -113,12 +123,13 @@ describe('stopped periods', () => {
     expect(windows).toEqual([
       { since: 9_400, until: stopAt, handlerEnabled: true },
       { since: stopAt + 1, until: startAt, handlerEnabled: false },
+      { since: startAt + 1, until: startAt + 120, handlerEnabled: true },
     ]);
     const periods = addStoppedPeriod([], { after: stopAt, until: startAt }, windows);
     for (const w of planCatchUpWindow(heartbeat, 12_020)) windows = addPendingWindow(windows, w).windows;
     // The fold puts a handler-on window spanning the stopped period first.
     expect(windows).toEqual([
-      { since: 9_400, until: 12_020, handlerEnabled: true },
+      { since: 9_400, until: 12_140, handlerEnabled: true },
       { since: stopAt + 1, until: startAt, handlerEnabled: false },
     ]);
     // Classified per report, so the window that finds it does not matter.

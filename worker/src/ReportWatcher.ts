@@ -367,9 +367,14 @@ export class ReportWatcher implements DurableObject {
     // A deliberate stop is not an outage: the next start reads this marker so
     // catch-up does not treat the stopped interval as a gap to replay.
     // Non-critical: if the write fails, /stop still completes. A missing marker
-    // makes catch-up treat the gap as an outage, which is the safe default.
+    // makes catch-up treat the gap as an outage, so auto-hide and age review
+    // run on it: the miss-nothing default, not the stop-respecting one.
+    // An earlier marker that no connect has consumed yet (a start that never
+    // reached the relay) is kept: the watcher has been stopped since then.
     try {
-      await this.state.storage.put(DELIBERATE_STOP_KEY, Math.floor(Date.now() / 1000));
+      if (await this.state.storage.get<number>(DELIBERATE_STOP_KEY) === undefined) {
+        await this.state.storage.put(DELIBERATE_STOP_KEY, Math.floor(Date.now() / 1000));
+      }
     } catch (error) {
       console.error('[ReportWatcher] Failed to record deliberate-stop marker:', error);
     }
@@ -774,8 +779,10 @@ export class ReportWatcher implements DurableObject {
       this.ws.addEventListener('open', () => {
         console.log('[ReportWatcher] WebSocket connected');
         this.connectedAt = Date.now();
-        this.reconnectAttempts = 0;
-        this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+        // The backoff is reset on the live subscription's EOSE, not here: a
+        // relay that opens the socket and then answers the REQ with CLOSED
+        // (rate limit, auth required, a failing stored query) would otherwise
+        // be reconnected every second, each time with a catch-up plan and pass.
 
         // Subscribe to kind 1984 reports
         // Using limit: 0 to only get new events (not historical)
@@ -794,7 +801,12 @@ export class ReportWatcher implements DurableObject {
       });
 
       this.ws.addEventListener('message', (event) => {
-        const work = this.handleMessage(event.data as string).catch(error => {
+        // Only the tracked socket of a running watcher is listened to. A
+        // replaced or orphaned socket (after a reconnect or a /stop) can still
+        // deliver, and handling that would run auto-hide and age review on a
+        // stopped watcher, or act twice.
+        if (!this.running || this.ws !== socket) return;
+        const work = this.handleMessage(event.data as string, socket).catch(error => {
           console.error('[ReportWatcher] Message handler failed:', error);
         });
         this.state.waitUntil(work);
@@ -802,6 +814,9 @@ export class ReportWatcher implements DurableObject {
 
       this.ws.addEventListener('close', (event) => {
         console.log(`[ReportWatcher] WebSocket closed: ${event.code} ${event.reason}`);
+        // A replaced socket's late close must not drop the socket that
+        // replaced it or schedule a second reconnect.
+        if (this.ws !== socket) return;
         this.ws = null;
         this.connectedAt = null;
 
@@ -872,34 +887,36 @@ export class ReportWatcher implements DurableObject {
     const planned = await this.state.blockConcurrencyWhile(async () => {
       if (this.ws !== socket) return false;
       try {
-        const stopMarker = await this.state.storage.get<number>(DELIBERATE_STOP_KEY);
-        const nowSec = Math.floor(Date.now() / 1000);
-        const fresh = planCatchUpWindow(lastAliveAt, nowSec, stopMarker);
-        const writes: Promise<unknown>[] = [];
-        // Every read first: the writes below are issued with no await between
-        // them, so the storage layer commits them together.
-        let windows = (await this.state.storage.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
-        const periods = (await this.state.storage.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
-        if (fresh.length > 0) {
-          for (const window of fresh) {
-            const added = addPendingWindow(windows, window);
-            windows = added.windows;
-            if (added.merged) console.warn('[ReportWatcher] Catch-up windows over the cap; merged the two oldest');
-            if (added.handlerDisabled) disabledMerge.push(...added.mergedWindows.filter(w => !w.handlerEnabled));
+        // One transaction for the marker, the windows and the periods: a
+        // running pass read-modify-writes the same keys (its cursor saves and
+        // its end-of-pass prune), and the marker is consumed exactly when what
+        // it describes is saved.
+        disabledMerge = await this.state.storage.transaction(async (tx) => {
+          const disabled: CatchUpWindow[] = [];
+          const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+          const nowSec = Math.floor(Date.now() / 1000);
+          const fresh = planCatchUpWindow(lastAliveAt, nowSec, stopMarker);
+          let windows = (await tx.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
+          const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+          if (fresh.length > 0) {
+            for (const window of fresh) {
+              const added = addPendingWindow(windows, window);
+              windows = added.windows;
+              if (added.merged) console.warn('[ReportWatcher] Catch-up windows over the cap; merged the two oldest');
+              if (added.handlerDisabled) disabled.push(...added.mergedWindows.filter(w => !w.handlerEnabled));
+            }
+            await tx.put(CATCHUP_WINDOWS_KEY, windows);
           }
-          writes.push(this.state.storage.put(CATCHUP_WINDOWS_KEY, windows));
-        }
-        if (stopMarker !== undefined) {
-          // The stopped period is kept apart from the windows, so catch-up
-          // runs no handler on a report created in it whichever window finds
-          // it (see runPendingCatchUp).
-          const added = stopMarker < nowSec ? [...periods, { after: stopMarker, until: nowSec }] : periods;
-          writes.push(this.state.storage.put(CATCHUP_STOPPED_PERIODS_KEY, pruneStoppedPeriods(added, windows)));
-          // Committed with the window and period writes: the marker is
-          // consumed exactly when what it describes is saved.
-          writes.push(this.state.storage.delete(DELIBERATE_STOP_KEY));
-        }
-        await Promise.all(writes);
+          if (stopMarker !== undefined) {
+            // The stopped period is kept apart from the windows, so catch-up
+            // runs no handler on a report created in it whichever window finds
+            // it (see runPendingCatchUp).
+            const added = stopMarker < nowSec ? [...periods, { after: stopMarker, until: nowSec }] : periods;
+            await tx.put(CATCHUP_STOPPED_PERIODS_KEY, pruneStoppedPeriods(added, windows));
+            await tx.delete(DELIBERATE_STOP_KEY);
+          }
+          return disabled;
+        });
         this.catchUpPlannedForConnection = true;
         return true;
       } catch (error) {
@@ -980,18 +997,21 @@ export class ReportWatcher implements DurableObject {
    * Disconnect from relay
    */
   private disconnect(): void {
-    if (this.ws) {
+    const ws = this.ws;
+    if (ws) {
+      // Untracked before closing, so its close event (sync or late) is
+      // ignored by the close listener's identity check.
+      this.ws = null;
+      this.connectedAt = null;
       // Unsubscribe before closing
       try {
-        if (this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify(['CLOSE', this.subscriptionId]));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(['CLOSE', this.subscriptionId]));
         }
-        this.ws.close();
+        ws.close();
       } catch {
         // Ignore errors during cleanup
       }
-      this.ws = null;
-      this.connectedAt = null;
     }
   }
 
@@ -1038,7 +1058,7 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle incoming WebSocket message
    */
-  private async handleMessage(data: string): Promise<void> {
+  private async handleMessage(data: string, socket: WebSocket): Promise<void> {
     try {
       const message = JSON.parse(data) as unknown[];
 
@@ -1059,6 +1079,11 @@ export class ReportWatcher implements DurableObject {
 
         case 'EOSE': {
           console.log('[ReportWatcher] End of stored events');
+          // The live subscription is healthy: only now is the backoff reset.
+          if (rest[0] === this.subscriptionId) {
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+          }
           break;
         }
 
@@ -1075,6 +1100,19 @@ export class ReportWatcher implements DurableObject {
         case 'CLOSED': {
           const [subId, message] = rest as [string, string];
           console.log(`[ReportWatcher] Subscription closed: ${subId} - ${message}`);
+          // The relay ended the live subscription but may keep the socket
+          // open. A socket with no subscription receives nothing, yet the
+          // alarm would keep stamping the heartbeat on it and hide the dead
+          // period from catch-up. Close it: the close handler schedules the
+          // backoff reconnect, which resubscribes and plans that gap.
+          if (subId === this.subscriptionId) {
+            try {
+              // The socket that received the CLOSED, never this.ws.
+              socket.close(1000, 'live subscription closed by relay');
+            } catch (error) {
+              console.error('[ReportWatcher] Failed to close socket after its subscription closed:', error);
+            }
+          }
           break;
         }
       }
