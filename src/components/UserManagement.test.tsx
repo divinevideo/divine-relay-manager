@@ -4,6 +4,7 @@
 
 import React from 'react';
 import { act, fireEvent, render, renderHook, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import type { UserActionChange } from '@/components/UserActions';
 import { markRestored, RESTORE_SETTLE_MS, useJustRestored } from '@/lib/userStatsCache';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
@@ -1481,43 +1482,25 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       expect(scrollIntoView).toHaveBeenCalledTimes(1);
     });
 
-    it('hands focus to Next when Previous reaches the first page', async () => {
-      serve(entries(120));
+    it('moves focus to the displayed results so keyboard navigation enters the new page', async () => {
+      serve(entries(70));
       renderWithProvider();
       await screen.findAllByTestId('user-card');
-      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-      screen.getByRole('button', { name: /^Previous$/ }).focus();
-      fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
-      expect(screen.getByRole('button', { name: /^Previous$/ })).toBeDisabled();
-      await waitFor(() => expect(screen.getByRole('button', { name: /^Next$/ })).toHaveFocus());
-    });
+      const results = screen.getByRole('group', { name: 'Banned user results' });
+      const next = screen.getByRole('button', { name: /^Next$/ });
+      const previous = screen.getByRole('button', { name: /^Previous$/ });
+      const user = userEvent.setup();
 
-    it('hands focus over without scrolling the page back down', async () => {
-      serve(entries(120));
-      renderWithProvider();
-      await screen.findAllByTestId('user-card');
-      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-      const focus = vi.spyOn(HTMLElement.prototype, 'focus');
-      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-      await waitFor(() => expect(screen.getByRole('button', { name: /^Previous$/ })).toHaveFocus());
-      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-      focus.mockClear();
-      fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
-      fireEvent.click(screen.getByRole('button', { name: /^Previous$/ }));
-      await waitFor(() => expect(screen.getByRole('button', { name: /^Next$/ })).toHaveFocus());
-      expect(focus).toHaveBeenCalledWith({ preventScroll: true });
-      focus.mockRestore();
-    });
-
-    it('moves focus to the other button when the clicked one becomes disabled', async () => {
-      serve(entries(120));
-      renderWithProvider();
-      await screen.findAllByTestId('user-card');
-      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-      screen.getByRole('button', { name: /^Next$/ }).focus();
-      fireEvent.click(screen.getByRole('button', { name: /^Next$/ }));
-      expect(screen.getByRole('button', { name: /^Next$/ })).toBeDisabled();
-      await waitFor(() => expect(screen.getByRole('button', { name: /^Previous$/ })).toHaveFocus());
+      next.focus();
+      await user.keyboard('{Enter}');
+      expect(next).toBeDisabled();
+      expect(results).toHaveFocus();
+      await user.tab();
+      expect(within(results).getAllByRole('button', { name: 'Unban' })[0]).toHaveFocus();
+      previous.focus();
+      await user.keyboard('{Enter}');
+      expect(previous).toBeDisabled();
+      expect(results).toHaveFocus();
     });
   });
 

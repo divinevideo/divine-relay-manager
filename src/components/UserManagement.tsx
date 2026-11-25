@@ -172,7 +172,7 @@ function AccountSearch({ label, value, onChange }: {
       type="search"
       role="searchbox"
       aria-label={label}
-      placeholder="Search by pubkey, npub, reason or name"
+      placeholder="Pubkey, npub, reason or loaded profile name"
       value={value}
       onChange={e => onChange(e.target.value)}
       className="mb-3"
@@ -184,27 +184,19 @@ function Pager({ label, total, page, onPage, listRef, range, filtering }: {
   label: string; total: number; page: number; onPage: (page: number) => void;
   listRef: React.RefObject<HTMLElement>; range: string; filtering: boolean;
 }) {
-  const prevRef = useRef<HTMLButtonElement>(null);
-  const nextRef = useRef<HTMLButtonElement>(null);
   const last = Math.ceil(total / USERS_PAGE_SIZE) - 1;
   // Set by a Previous or Next click, so a page reset from typing in the search
   // box does not scroll the box out of view.
   const clicked = useRef(false);
-  const refocus = useRef<'prev' | 'next' | null>(null);
   useEffect(() => {
     if (!clicked.current) return;
     clicked.current = false;
-    // The list is long: bring its top back after a page change.
+    // Keep focus at the new results so Tab enters the page after scrolling.
+    listRef.current?.focus({ preventScroll: true });
     listRef.current?.scrollIntoView?.({ block: 'start' });
-    // A button that just became disabled drops keyboard focus; hand it to the
-    // other one. preventScroll keeps the view at the list top.
-    if (refocus.current === 'prev') prevRef.current?.focus({ preventScroll: true });
-    if (refocus.current === 'next') nextRef.current?.focus({ preventScroll: true });
-    refocus.current = null;
   }, [page, listRef]);
   const go = (target: number) => {
     clicked.current = true;
-    refocus.current = target >= last ? 'prev' : target <= 0 ? 'next' : null;
     onPage(target);
   };
   // Keep one live region mounted while filtering adds or removes the buttons.
@@ -216,8 +208,8 @@ function Pager({ label, total, page, onPage, listRef, range, filtering }: {
       <p role="status" className={statusClass}>{status}</p>
       {range && (
         <div className="flex gap-2">
-          <Button ref={prevRef} type="button" variant="outline" size="sm" disabled={page === 0} onClick={() => go(page - 1)}>Previous</Button>
-          <Button ref={nextRef} type="button" variant="outline" size="sm" disabled={page >= last} onClick={() => go(page + 1)}>Next</Button>
+          <Button type="button" variant="outline" size="sm" disabled={page === 0} onClick={() => go(page - 1)}>Previous</Button>
+          <Button type="button" variant="outline" size="sm" disabled={page >= last} onClick={() => go(page + 1)}>Next</Button>
         </div>
       )}
     </div>
@@ -750,7 +742,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               ) : (
                 <div className="space-y-3">
                   <AccountSearch label="Search banned users" value={bannedView.query} onChange={bannedView.setQuery} />
-                  <div ref={bannedListRef} tabIndex={-1} className="space-y-3 outline-none">
+                  <div ref={bannedListRef} role="group" aria-label="Banned user results" tabIndex={-1} className="space-y-3">
                   {bannedView.items.map((user: BannedUser) => (
                     <BannedUserCard
                       key={user.pubkey}
@@ -805,7 +797,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               ) : (
                 <div className="space-y-3">
                   <AccountSearch label="Search suspended users" value={suspendedView.query} onChange={suspendedView.setQuery} />
-                  <div ref={suspendedListRef} tabIndex={-1} className="space-y-3 outline-none">
+                  <div ref={suspendedListRef} role="group" aria-label="Suspended user results" tabIndex={-1} className="space-y-3">
                   {suspendedView.items.map((user: BannedPubkeyEntry) => {
                     // The relay keeps legacy rows by their exact spelling. Those rows can
                     // still be removed using Unsuspend. Only the canonical row has a timer.
