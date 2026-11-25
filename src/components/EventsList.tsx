@@ -716,7 +716,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
       }
     },
     onSuccess: async ({ eventId, action, recorded, reconciled }) => {
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+      void invalidateBannedEvents(queryClient);
       queryClient.invalidateQueries({ queryKey: ['relay-events', relayUrl] });
       toast({
         title: recorded && reconciled

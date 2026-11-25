@@ -57,6 +57,7 @@ const modStatus = vi.hoisted(() => ({
   isUserBanned: false as boolean | null,
   isEventGone: false,
   recheck: vi.fn(),
+  recheckAfterContentAction: vi.fn(),
   recheckAfterAction: vi.fn(),
 }));
 vi.mock('@/hooks/useModerationStatus', async () => {
@@ -371,8 +372,7 @@ describe('EventDetail restore routing', () => {
 // A ban or unban ends in the check that treats the account status from before
 // it as unconfirmed until it answers; a plain Re-check would keep the
 // pre-action status on screen as confirmed while the live check runs. A delete
-// or restore changes the post, not the account, so it runs a plain check and
-// leaves a confirmed account status as it was.
+// or restore refreshes the event-ban list and keeps the confirmed account status.
 describe('EventDetail check after each action', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -392,8 +392,9 @@ describe('EventDetail check after each action', () => {
     expect(modStatus.recheck).not.toHaveBeenCalled();
   }
 
-  async function expectPlainCheck() {
-    await waitFor(() => expect(modStatus.recheck).toHaveBeenCalledTimes(1));
+  async function expectContentActionCheck() {
+    await waitFor(() => expect(modStatus.recheckAfterContentAction).toHaveBeenCalledTimes(1));
+    expect(modStatus.recheck).not.toHaveBeenCalled();
     expect(modStatus.recheckAfterAction).not.toHaveBeenCalled();
   }
 
@@ -417,7 +418,7 @@ describe('EventDetail check after each action', () => {
     modStatus.isUserBanned = false;
     renderDetail();
     await banTheEvent();
-    await expectPlainCheck();
+    await expectContentActionCheck();
   });
 
   it('after a restore', async () => {
@@ -427,6 +428,6 @@ describe('EventDetail check after each action', () => {
     await act(async () => {
       fireEvent.click(await screen.findByRole('button', { name: /^Restore Event$/ }));
     });
-    await expectPlainCheck();
+    await expectContentActionCheck();
   });
 });

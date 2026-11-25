@@ -638,8 +638,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     },
     onSuccess: async (eventId) => {
       queryClient.invalidateQueries({ queryKey: ['relay-events'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      moderationStatus.recheck();
+      moderationStatus.recheckAfterContentAction();
       toast({ title: "Event deleted", description: "Verifying..." });
       setConfirmDelete(false);
 
@@ -763,8 +762,7 @@ export function EventDetail({ event, onSelectEvent, onSelectPubkey, onViewReport
     },
     onSuccess: async ({ recorded, reconciled, auditRecorded }) => {
       queryClient.invalidateQueries({ queryKey: ['relay-events'] });
-      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
-      moderationStatus.recheck();
+      moderationStatus.recheckAfterContentAction();
       toast(recorded && reconciled
         ? { title: auditRecorded ? "Event restored" : "Event restored; audit log not recorded" }
         : {
