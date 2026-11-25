@@ -142,10 +142,9 @@ function LocationProbe() {
   return null;
 }
 
-function renderEvents(initialEntry: string) {
+function renderEvents(initialEntry: string, client = createQueryClient()) {
   // The app's own defaults (focus refetch on, 60s staleTime) so a missing
   // per-query override shows up here the way it would in the app.
-  const client = createQueryClient();
   client.setDefaultOptions({
     ...client.getDefaultOptions(),
     queries: { ...client.getDefaultOptions().queries, retry: false },
@@ -414,34 +413,32 @@ describe('EventsList list query cost', () => {
   });
 
   it('does not refetch the list when the window regains focus', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
     try {
       setRelay({ list: [video()] });
-      renderEvents('/events');
+      const { client } = renderEvents('/events');
       await screen.findByText('a video');
-      const before = listFilters().length;
-      vi.setSystemTime(Date.now() + 5 * 60 * 1000); // data is now stale
-      focusManager.setFocused(false);
-      focusManager.setFocused(true);
-      await new Promise(r => setTimeout(r, 50));
-      expect(listFilters().length).toBe(before);
+      await client.invalidateQueries({ queryKey: ['relay-events'], refetchType: 'none' });
+      relayQuery.fn.mockClear();
+      await act(async () => {
+        focusManager.setFocused(false);
+        focusManager.setFocused(true);
+      });
+      expect(listFilters()).toEqual([]);
     } finally {
       focusManager.setFocused(undefined);
-      vi.useRealTimers();
     }
   });
 
   it('does not refetch stale All Events results when the network reconnects', async () => {
-    vi.useFakeTimers({ toFake: ['Date'] });
     try {
       setRelay({ list: [video()] });
-      renderEvents('/events');
+      const { client } = renderEvents('/events');
       await screen.findByText('a video');
       await pickKind('All Events');
       await screen.findByText('a video');
       expect(listFilters().some(f => !f.kinds)).toBe(true);
+      await client.invalidateQueries({ queryKey: ['relay-events'], refetchType: 'none' });
       relayQuery.fn.mockClear();
-      vi.setSystemTime(Date.now() + 5 * 60 * 1000);
       await act(async () => {
         onlineManager.setOnline(false);
         onlineManager.setOnline(true);
@@ -449,6 +446,30 @@ describe('EventsList list query cost', () => {
       expect(listFilters()).toEqual([]);
     } finally {
       onlineManager.setOnline(true);
+    }
+  });
+
+  it('reuses cached pages after reopening the tab and reloads an invalidated list', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      setRelay({ list: [video()] });
+      const firstView = renderEvents('/events');
+      await screen.findByText('a video');
+      firstView.unmount();
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000);
+      relayQuery.fn.mockClear();
+
+      const reopenedView = renderEvents('/events', firstView.client);
+      expect(screen.getByText('a video')).toBeInTheDocument();
+      expect(listFilters()).toEqual([]);
+      reopenedView.unmount();
+
+      await firstView.client.invalidateQueries({ queryKey: ['relay-events'] });
+      setRelay({ list: [event({ kind: 34236, content: 'updated video' })] });
+      renderEvents('/events', firstView.client);
+      expect(await screen.findByText('updated video')).toBeInTheDocument();
+      expect(listFilters()).toEqual([{ limit: 20, kinds: [...VIDEO_KINDS] }]);
+    } finally {
       vi.useRealTimers();
     }
   });

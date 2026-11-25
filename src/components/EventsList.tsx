@@ -523,7 +523,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
       return oldestEvent.created_at - 1;
     },
     enabled: listEnabled,
-    // Avoid background rereads, especially when "All Events" is selected.
+    // Reopening a cached view should not reload every page. Explicit refresh
+    // and invalidation after a moderation action still update the list.
+    staleTime: Infinity,
     refetchOnWindowFocus: false,
     refetchOnReconnect: false,
   });
