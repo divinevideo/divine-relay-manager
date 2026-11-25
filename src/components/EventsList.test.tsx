@@ -435,10 +435,13 @@ describe('EventsList list query cost', () => {
   });
 
   it('does not run the list query in direct-lookup mode', async () => {
+    // Not on the relay and not banned. The shared rpc mock answers `[]`, which is
+    // truthy, so the lookup would take it for a banned event with no pubkey and
+    // crash EventCard; a real miss is an RPC error (the lookup's catch turns it
+    // into "not found").
+    rpc.fn.mockRejectedValue(new Error('Event not found or not banned'));
     renderEvents(`/events?event=${nip19.neventEncode({ id: 'c'.repeat(64) })}`);
-    await screen.findByText(/Event not found|Event found|Searching/i).catch(() => null);
-    await waitFor(() => expect(relayQuery.fn).toHaveBeenCalled());
-    await new Promise(r => setTimeout(r, 50));
+    expect(await screen.findByText('No event found on relay', { selector: 'span' })).toBeInTheDocument();
     expect(listFilters()).toEqual([]);
   });
 
