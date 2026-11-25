@@ -5,10 +5,9 @@ import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohi
 import { reportTime } from '../../shared/handling';
 import { hasCsamSignal } from './constants';
 import {
-  groupResolutionStatus,
   latestAutoHideAtByTarget,
-  reportResolutionStatus,
-  type QueueResolution,
+  reportHandlingStatus,
+  type HandlingContext,
 } from './reportResolution';
 
 // 'hidden-needs-check' is an auto-hidden target whose latest state is
@@ -23,8 +22,8 @@ export type SwitchState = 'auto-hidden' | 'hidden-needs-check' | 'not-hidden';
 // hide or restores the content; the worker writes `auto_hide_reversed` when a
 // person's restore raced its hide. ANY such row counts, not just the newest,
 // because a person has looked at the target either way. Without this, a
-// restored post (the restore writes only `auto_hide_restored`, which the
-// resolved set does not include) would drop straight back behind the switch.
+// restored post (the restore writes only `auto_hide_restored`, which is no
+// handling row) would drop straight back behind the switch.
 const HUMAN_AUTO_HIDE_ACTIONS: readonly string[] = [
   AUTO_HIDE_ACTION.confirmed,
   AUTO_HIDE_ACTION.restored,
@@ -84,13 +83,9 @@ export function buildSwitchMembership(args: {
   pendingReview: ReadonlyMap<string, string>;
   // humanHandledAutoHideTargets: the latest human auto-hide time per target.
   humanHandled: ReadonlyMap<string, number | null>;
-  // The queue's rule. Under the dated rule it is the queue's own: automated
-  // decisions are not handling there (#332). Under the membership rule (a
-  // worker without handling dates) its set must leave out the decisions only
-  // the worker wrote (resolution-state's `automated`): those still count for
-  // Hide resolved, but no person has looked at the target, so they do not take
-  // it out of here.
-  resolution: QueueResolution;
+  // The queue's own rule: automated decisions are not handling there (#332),
+  // so a target only the worker decided on stays here.
+  resolution: HandlingContext;
 }): Map<string, SwitchState> {
   const membership = new Map<string, SwitchState>();
   // Every auto-hidden target, whether or not its reports are loaded.
@@ -118,22 +113,15 @@ function unansweredReports(
   c: SwitchCandidate,
   key: string,
   humanHandled: ReadonlyMap<string, number | null>,
-  resolution: QueueResolution,
+  resolution: HandlingContext,
 ): SwitchCandidate['reports'] {
-  // TODO(#409): the membership branch serves only a worker without handling
-  // dates; it reads any human auto-hide row as answering every report, as the
-  // switch did before #324.
-  if (resolution.rule === 'membership') {
-    const answered = humanHandled.has(key) || groupResolutionStatus(c, resolution) === 'handled';
-    return answered ? [] : c.reports;
-  }
   const autoHideAt = humanHandled.get(key);
   return c.reports.filter(report => {
     if (humanHandled.has(key)) {
       if (autoHideAt === null || autoHideAt === undefined) return false;
-      if (autoHideAt > reportTime(report, resolution.ctx.arrivals)) return false;
+      if (autoHideAt > reportTime(report, resolution.arrivals)) return false;
     }
-    return reportResolutionStatus(
+    return reportHandlingStatus(
       { target: c.target, authorPubkey: c.authorPubkey, id: report.id, created_at: report.created_at },
       resolution,
     ) !== 'handled';

@@ -225,7 +225,7 @@ export function getReportTargetIds(event: { tags: string[][] }): { eventId?: str
 }
 
 // Timeout for the D1 resolution state and relay lists that build the reports
-// queue's resolvedTargets, replacing adminApi's 30s API_TIMEOUT_MS for these reads.
+// queue's resolution, replacing adminApi's 30s API_TIMEOUT_MS for these reads.
 // On a COLD load there is no error to latch onto yet, so every escape hatch the
 // queue offers sits behind the loading skeleton: a source that times out at 30s
 // and then retries strands the moderator on a bare skeleton for a minute with

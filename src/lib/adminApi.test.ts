@@ -1859,38 +1859,20 @@ describe('adminApi', () => {
     });
   });
 
-  // A reopen deletes the D1 decisions unconditionally but clears the relay's
-  // resolution labels best-effort. If this client drops the flag, the caller
-  // reports a clean reopen for a report that is still hidden.
   describe('deleteDecisions', () => {
-    it('surfaces labelCleanupFailed so a partial reopen is not reported as clean', async () => {
+    it('reports the number of reopen rows the worker wrote', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, deleted: 3, labelCleanupFailed: true }),
+        json: async () => ({ success: true, deleted: 2 }),
       });
 
-      const result = await deleteDecisions(API_URL, 'event123');
-
-      expect(result).toEqual({ deleted: 3, labelCleanupFailed: true });
+      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 2 });
     });
 
-    it('reports a clean reopen when every label was cleared', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, deleted: 2, labelCleanupFailed: false }),
-      });
+    it('reads a missing count as none', async () => {
+      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true }) });
 
-      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 2, labelCleanupFailed: false });
-    });
-
-    // An older worker omits the field entirely; absence must not read as failure.
-    it('treats a missing labelCleanupFailed as no failure', async () => {
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, deleted: 1 }),
-      });
-
-      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 1, labelCleanupFailed: false });
+      expect(await deleteDecisions(API_URL, 'event123')).toEqual({ deleted: 0 });
     });
 
     // A resolution label carries an 'e' tag or a 'p' tag, never both, so the
@@ -1900,7 +1882,7 @@ describe('adminApi', () => {
     it('names the target type so the worker skips the filter that cannot match', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+        json: async () => ({ success: true, deleted: 1 }),
       });
 
       await deleteDecisions(API_URL, 'event123', 'event');
@@ -1911,7 +1893,7 @@ describe('adminApi', () => {
     it('omits the target type when it is not known', async () => {
       mockFetch.mockResolvedValueOnce({
         ok: true,
-        json: async () => ({ success: true, deleted: 1, labelCleanupFailed: false }),
+        json: async () => ({ success: true, deleted: 1 }),
       });
 
       await deleteDecisions(API_URL, 'event123');
@@ -2139,24 +2121,6 @@ describe('adminApi', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
 
       expect((await fetchReportsNeedingAttention(API_URL)).truncated).toBe(false);
-    });
-
-    it('reads the keys of targets only automation resolved, keeping strings only', async () => {
-      const key = `pubkey:${'a'.repeat(64)}`;
-      mockFetch.mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ success: true, events: [], automated_targets: [key, 42, null, ['x']] }),
-      });
-
-      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([key]);
-    });
-
-    it('reads none from a worker that sends no automated_targets, or not a list', async () => {
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [] }) });
-      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
-
-      mockFetch.mockResolvedValueOnce({ ok: true, json: async () => ({ success: true, events: [], automated_targets: 'pubkey:x' }) });
-      expect((await fetchReportsNeedingAttention(API_URL)).automatedTargets).toEqual([]);
     });
 
     it('reads the keys of handled-before targets, keeping strings only', async () => {
@@ -2708,19 +2672,27 @@ describe('adminApi', () => {
       mockFetch.mockResolvedValueOnce({ ok: true, json: async () => body });
     }
 
-    it('carries resolved targets and auto-hide states through', async () => {
+    it('carries the handling rows and auto-hide states through', async () => {
+      const row = { target_type: 'pubkey', target_id: 'a'.repeat(64), action: 'reviewed', moderator_pubkey: null, at: 100 };
       mockFetchOnce({
         success: true,
-        resolved: [{ target_type: 'pubkey', target_id: 'a'.repeat(64) }],
-        states: [{ target_type: 'event', target_id: 'b'.repeat(64), action: 'auto_hidden' }],
+        handling_rows: [row],
+        states: [{ target_type: 'event', target_id: 'b'.repeat(64), action: 'auto_hidden', at: 90 }],
       });
 
       const result = await fetchResolutionState(API_URL);
 
-      expect(result.resolved).toHaveLength(1);
+      expect(result.handlingRows).toEqual([row]);
       expect(result.states).toEqual([
-        { target_type: 'event', target_id: 'b'.repeat(64), action: 'auto_hidden' },
+        { target_type: 'event', target_id: 'b'.repeat(64), action: 'auto_hidden', at: 90 },
       ]);
+    });
+
+    it('throws when the response has no handling rows, rather than reading an empty log', async () => {
+      // An empty log would read every target as unhandled and un-hide handled work.
+      mockFetchOnce({ success: true, states: [] });
+
+      await expect(fetchResolutionState(API_URL)).rejects.toThrow('no handling_rows');
     });
 
     it('throws when the resolution-state read reports failure', async () => {
@@ -2736,16 +2708,34 @@ describe('adminApi', () => {
     it('normalizes the label-target unix-seconds bound to epoch milliseconds', async () => {
       mockFetchOnce({
         success: true,
-        targets: [{ type: 'event', value: 'c'.repeat(64) }],
+        targets: [{ type: 'event', value: 'c'.repeat(64), at: 1_759_999_000 }],
         truncated: true,
         oldest_covered: 1_760_000_000,
       });
 
       const result = await fetchResolutionLabelTargets(API_URL);
 
-      expect(result.targets).toEqual([{ type: 'event', value: 'c'.repeat(64) }]);
+      expect(result.targets).toEqual([{ type: 'event', value: 'c'.repeat(64), at: 1_759_999_000 }]);
       expect(result.truncated).toBe(true);
       expect(result.oldestCovered).toBe(1_760_000_000_000);
+    });
+
+    it('throws when the response has no states, rather than reading none', async () => {
+      mockFetchOnce({ success: true, handling_rows: [] });
+
+      await expect(fetchResolutionState(API_URL)).rejects.toThrow('no states');
+    });
+
+    it('throws when the label-target response has no targets, rather than reading none', async () => {
+      mockFetchOnce({ success: true, truncated: false, oldest_covered: null });
+
+      await expect(fetchResolutionLabelTargets(API_URL)).rejects.toThrow('no targets');
+    });
+
+    it('throws when a label target has no date, rather than dropping it', async () => {
+      mockFetchOnce({ success: true, targets: [{ type: 'event', value: 'c'.repeat(64) }], truncated: false, oldest_covered: null });
+
+      await expect(fetchResolutionLabelTargets(API_URL)).rejects.toThrow('no date');
     });
 
     it('throws when the label-target read reports failure', async () => {

@@ -3337,7 +3337,7 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
     expect(body.error).toMatch(/closed before/i);
   });
 
-  // /api/resolution-labels feeds the queue's resolvedTargets set, which decides
+  // /api/resolution-labels feeds the queue's resolution, which decides
   // whether a handled target stays hidden. A truncated read here is worse than
   // an error: it silently re-presents resolved work as pending (#221).
   it('returns labels on an EOSE-complete result', async () => {
@@ -3516,11 +3516,8 @@ describe('bulk relay-query integrity (/api/reports, /api/resolution-labels)', ()
       );
 
       expect(res.status).toBe(200);
-      // Every field an older Pages build reads is still there. deleted counts the
-      // rows written now; nothing is removed, so no label was either.
-      expect(await res.json()).toEqual({
-        success: true, deleted: 1, labelsDeleted: 0, labelCleanupFailed: false,
-      });
+      // deleted counts the rows written; nothing is removed.
+      expect(await res.json()).toEqual({ success: true, deleted: 1 });
       const writes = decisionWrites();
       expect(writes).toHaveLength(1);
       expect(writes[0].sql).toMatch(/^\s*INSERT INTO moderation_decisions/);

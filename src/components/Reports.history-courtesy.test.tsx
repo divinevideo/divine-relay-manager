@@ -26,6 +26,9 @@ function report(id: string, createdAt: number, tags: string[][]) {
 const HANDLED_REPORT = report('a'.repeat(64), 1751000100, [['e', HANDLED_EVENT, 'spam'], ['p', '8'.repeat(64)]]);
 const SPAM_REPORT = report('c'.repeat(64), 1751000050, [['e', SPAM_EVENT, 'spam'], ['p', '9'.repeat(64)]]);
 
+// A person handled it after its report arrived.
+const HANDLED_ROW = { target_type: 'event', target_id: HANDLED_EVENT, action: 'reviewed', moderator_pubkey: 'f'.repeat(64), at: 1751000900 };
+
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
 }
@@ -62,8 +65,8 @@ describe('a /reports/<id> link found only in resolved history', () => {
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
-          resolved: [{ target_type: 'event', target_id: HANDLED_EVENT }],
-          states: state.autoHidden ? [{ target_type: 'event', target_id: HANDLED_EVENT, action: 'auto_hidden' }] : [],
+          handling_rows: [HANDLED_ROW],
+          states: state.autoHidden ? [{ target_type: 'event', target_id: HANDLED_EVENT, action: 'auto_hidden', at: 1751000950 }] : [],
         });
       }
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -111,14 +114,14 @@ function holdFeedReRead(reread: unknown[]) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
     if (url.includes('/api/resolution-state')) {
-      return jsonResponse({ success: true, resolved: [{ target_type: 'event', target_id: HANDLED_EVENT }], states: [] });
+      return jsonResponse({ success: true, handling_rows: [HANDLED_ROW], states: [] });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
   }));
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false, retryDelay: 0 } } });
   queryClient.setQueryData(['reports', RELAY_URL], {
-    events: [SPAM_REPORT], truncated: false, oldestCovered: null, automatedTargets: [],
+    events: [SPAM_REPORT], truncated: false, oldestCovered: null,
   }, { updatedAt: Date.now() - 120_000 });
   return { queryClient, reads, release };
 }

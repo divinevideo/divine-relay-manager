@@ -1,6 +1,6 @@
 import { afterEach, describe, it, expect, vi } from 'vitest';
 import {
-  getReportsForTarget, handledBeforeByLastAction, isResolvedForReview, resolvedKeysFrom, selectReportsNeedingAttention,
+  getReportsForTarget, handledBeforeByLastAction, isResolvedForReview, selectReportsNeedingAttention,
   type RelayReport,
 } from './reports-needing-attention';
 import { handlingByTarget, type HandlingEntry, type HandlingRow } from '../../shared/handling';
@@ -9,43 +9,6 @@ const report = (id: string, tags: string[][], createdAt = 1): RelayReport => ({ 
 const E1 = '1'.repeat(64);
 const E2 = '2'.repeat(64);
 const P1 = 'a'.repeat(64);
-
-describe('resolvedKeysFrom', () => {
-  it('takes every label target and the event and pubkey decisions', () => {
-    const keys = resolvedKeysFrom(
-      [{ target_type: 'event', target_id: E1 }, { target_type: 'pubkey', target_id: P1 }, { target_type: 'media', target_id: 'x' }],
-      [{ type: 'event', value: E2 }],
-    );
-    expect([...keys.resolved].sort()).toEqual([`event:${E1}`, `event:${E2}`, `pubkey:${P1}`]);
-    expect(keys.automated.size).toBe(0);
-  });
-
-  it('keys stored decisions and labels as written', () => {
-    // getReportTarget lowercases a 64-character hex id (#315), but a stored
-    // record is keyed as stored, as the pane's history and Reopen read it. One
-    // in another spelling leaves its report in front of a person rather than
-    // hiding it where Reopen can't reach.
-    const hex = 'ab'.repeat(32);
-    const keys = resolvedKeysFrom(
-      [{ target_type: 'pubkey', target_id: 'AbC' }, { target_type: 'event', target_id: hex.toUpperCase() }],
-      [{ type: 'pubkey', value: hex.toUpperCase() }],
-    );
-    expect([...keys.resolved].sort()).toEqual([`event:${hex.toUpperCase()}`, `pubkey:${hex.toUpperCase()}`, 'pubkey:AbC']);
-  });
-
-  it('keeps a target only the worker decided on out of resolved, unless a label also resolves it', () => {
-    const keys = resolvedKeysFrom(
-      [
-        { target_type: 'pubkey', target_id: P1, automated: true },  // the worker's age-review case only
-        { target_type: 'event', target_id: E1, automated: true },   // the worker's row, and a label
-        { target_type: 'event', target_id: E2 },                    // a person's decision
-      ],
-      [{ type: 'event', value: E1 }],
-    );
-    expect([...keys.resolved].sort()).toEqual([`event:${E1}`, `event:${E2}`]);
-    expect([...keys.automated]).toEqual([`pubkey:${P1}`]);
-  });
-});
 
 // A person handled each key at `at` (default 100). The reports above default
 // to created_at 1, so they are handled unless a test says otherwise.
@@ -116,17 +79,13 @@ describe('selectReportsNeedingAttention', () => {
     expect(result.counts.targets).toBe(0);
   });
 
-  it('keeps a target only the worker resolved, and marks it among the targets it kept', () => {
+  it('keeps a target only the worker resolved: with no handling, its reports stay', () => {
     const result = selectReportsNeedingAttention(
       [report('r1', [['p', P1]]), report('r2', [['p', P1]]), report('r3', [['e', E1]]), report('r4', [['e', E2]])],
       handled([`event:${E2}`]),
       new Set(),
-      // P1 is automation-only. E1 is kept too, but unresolved, so not marked.
-      new Set([`pubkey:${P1}`, `event:${'9'.repeat(64)}`]),
     );
     expect(result.events.map(r => r.id)).toEqual(['r1', 'r2', 'r3']);
-    // Only kept targets are marked: the second automated key names no report here.
-    expect(result.automatedTargets).toEqual([`pubkey:${P1}`]);
     expect(result.counts).toEqual({ targets: 2, resolved: 1, handled_before: 0 });
   });
 
@@ -164,14 +123,14 @@ describe('selectReportsNeedingAttention', () => {
     it('compares by arrival when it is known, not by the time the reporter stamped', () => {
       // Stamped after the handling, but the watcher saw it arrive before.
       const early = selectReportsNeedingAttention(
-        [report('r1', [['e', E1]], 150)], handled([`event:${E1}`], 100), new Set(), new Set(), new Map([['r1', 90]]),
+        [report('r1', [['e', E1]], 150)], handled([`event:${E1}`], 100), new Set(), new Map([['r1', 90]]),
       );
       expect(early.events).toEqual([]);
       expect(early.handledBefore).toEqual([]);
       // And the other way: stamped before, arrived after. A backdated report
       // must not hide itself.
       const late = selectReportsNeedingAttention(
-        [report('r2', [['e', E1]], 50)], handled([`event:${E1}`], 100), new Set(), new Set(), new Map([['r2', 120]]),
+        [report('r2', [['e', E1]], 50)], handled([`event:${E1}`], 100), new Set(), new Map([['r2', 120]]),
       );
       expect(late.events.map(e => e.id)).toEqual(['r2']);
       expect(late.handledBefore).toEqual([`event:${E1}`]);

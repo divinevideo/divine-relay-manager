@@ -51,7 +51,7 @@ beforeEach(() => {
     if (url.includes('/api/resolution-label-targets')) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
-    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
   }));

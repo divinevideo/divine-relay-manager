@@ -98,6 +98,8 @@ function stubFetch(targeted: (url: string) => Response, bulk: unknown[] = [OTHER
     if (isTargeted) return targeted(url);
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events: bulk });
     if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
+    if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
@@ -240,6 +242,8 @@ describe('Reports deep-link resolution', () => {
       }
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
@@ -266,6 +270,8 @@ describe('Reports deep-link resolution', () => {
       if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [BULK_PUBKEY_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
       if (url.includes('/api/relay-rpc')) {
         const body = typeof init?.body === 'string' ? JSON.parse(init.body) as { method?: string } : {};
@@ -372,6 +378,8 @@ describe('Reports deep-link resolution', () => {
       if (url.includes('/api/reports') && url.includes('event=')) return targetedPromise;
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
@@ -464,6 +472,8 @@ describe('Reports deep-link resolution', () => {
       if (url.includes('/api/reports') && url.includes('event=')) return targetedPromise;
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OTHER_REPORT] });
       if (url.includes('/api/resolution-labels')) return jsonResponse({ success: true, events: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
+      if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       if (url.includes('/api/decisions')) return jsonResponse({ success: true, decisions: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });

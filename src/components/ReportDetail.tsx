@@ -411,12 +411,8 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   });
 
   // What a reopen acts on, captured at click time rather than read from
-  // `context` when the mutation runs. The degraded toast below outlives this
-  // panel's selection (duration Infinity, and selecting another report
-  // re-renders ReportDetail rather than remounting it), and mutate() rebuilds
-  // the mutation from the observer's LATEST options -- so a mutationFn closing
-  // over `context` would send the retry at whichever report is selected when
-  // it is clicked, reopening that report instead.
+  // `context` when the mutation runs, so a selection change while the call is in
+  // flight cannot send it at another report.
   // Likewise the promise its toast makes, which depends on what was known
   // about the author's ban at the click.
   type ReopenRequest = { target: ReportTarget | null; promise: string };
@@ -441,67 +437,25 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // known would hide it through every relay outage.
       return act.deleteDecisions(target.value, target.type);
     },
-    onSuccess: ({ labelCleanupFailed }, request) => {
+    onSuccess: (_result, request) => {
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
       // The helper above refreshes the report feeds: a reopen moves the target
       // out of resolved history and back into the needs-attention feed. Reopen
-      // no longer changes resolution labels (#324): the reopen row makes older
-      // labels stop counting. The label refresh is kept for a rolled-back
-      // worker, which bans them, and without a refresh that target would stay
-      // hidden for a poll cycle, a full minute on the label source.
-      // TODO(#409): remove this label refresh once no worker from before #324
-      // can be live.
-      queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
+      // changes no resolution labels (#324): the reopen row makes older
+      // labels stop counting.
       decisionLog.refetch();
       // Report what the reopen did, not where the report ends up: whether it
       // returns to the queue depends on the screen's resolution sources,
       // which a toast cannot see. Under the dated rule a relay ban the
       // decision log dates no longer hides the reopened target's reports
       // (reportResolution.ts), so the copy does not say it does.
-      // TODO(#409): remove the labelCleanupFailed toast branch (and labelsDeleted
-      // handling); only a pre-#324 worker sets it.
-      toast(labelCleanupFailed
-        ? {
-            // Only a worker from before #324 reports this: it deleted the
-            // decisions and banned the resolution labels, and this says the
-            // label half fell short. The current worker clears nothing and
-            // always answers false. Kept so a rolled-back worker still reads
-            // right.
-            //
-            // Deliberately does not name the relay: one of the causes is our
-            // own page cap, where the relay did exactly what it was asked.
-            title: "Reopened, but resolution labels could not all be cleared",
-            description: "Some may remain, so this report may stay hidden.",
-            variant: "destructive" as const,
-            // The decisions ARE gone on this path, so hasHandlingDecisions goes false
-            // and the Reopen button unmounts. Retrying is the right advice and
-            // the cleanup is idempotent, so the retry has to come with it, and
-            // it does not expire on a timer.
-            //
-            // It is still single-use. Radix renders ToastAction as a
-            // ToastClose, so the click that fires the retry also dismisses this
-            // toast. A retry that comes back still-degraded raises a fresh one
-            // carrying a fresh action; a retry that THROWS lands in onError,
-            // which has no action, and ends the chain. TOAST_LIMIT is 1, so any
-            // later toast evicts it too. The fallback in both cases is to
-            // resolve the report again and reopen.
-            //
-            // Re-sends the target this toast was raised for, not whatever is
-            // selected when it is clicked -- see ReopenRequest above.
-            action: (
-              <ToastAction altText="Retry the reopen" onClick={() => reopenMutation.mutate(request)}>
-                Try again
-              </ToastAction>
-            ),
-            duration: Infinity,
-          }
-        : {
-            title: "Report reopened",
-            description: request.promise,
-            // Longer than the 5s Radix default can be read in.
-            duration: 10000,
-          });
+      toast({
+        title: "Report reopened",
+        description: request.promise,
+        // Longer than the 5s Radix default can be read in.
+        duration: 10000,
+      });
     },
     onError: (error: Error) => {
       // A failed call does not prove nothing was written. The worker records
@@ -512,7 +466,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // rather than leaving the panel calling the target handled.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
-      queryClient.invalidateQueries({ queryKey: ['resolution-label-targets'] });
       decisionLog.refetch();
       toast({
         title: "Failed to reopen",

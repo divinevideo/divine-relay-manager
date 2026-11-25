@@ -85,7 +85,7 @@ function stubWorker(stub: WorkerStub) {
       return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
     }
     if (url.pathname === '/api/resolution-state') {
-      return stub.decisions ? stub.decisions() : jsonResponse({ success: true, resolved: [], states: [] });
+      return stub.decisions ? stub.decisions() : jsonResponse({ success: true, states: [], handling_rows: [] });
     }
     if (url.pathname === '/api/relay-rpc') {
       const bannedEventsRead = String(init?.body ?? '').includes('listbannedevents');
@@ -272,11 +272,11 @@ describe('the history footer counts the rows on screen', () => {
       pages: { first: ok(resolvedPage([H1, H2], { nextCursor: PAGE_ONE_CURSOR, done: false })) },
       decisions: ok({
         success: true,
-        resolved: [],
         states: [
-          { target_type: 'event', target_id: hex('7'), action: 'auto_hidden' },
-          { target_type: 'event', target_id: hex('3'), action: 'auto_hidden' },
+          { target_type: 'event', target_id: hex('7'), action: 'auto_hidden', at: 1751000200 },
+          { target_type: 'event', target_id: hex('3'), action: 'auto_hidden', at: 1751000200 },
         ],
+        handling_rows: [],
       }),
     });
     const user = userEvent.setup();
@@ -1045,7 +1045,7 @@ describe('loaded history survives the queue around it', () => {
       },
       decisions: () => (decisionsFail
         ? jsonResponse({ success: false, error: 'cold start timeout' }, 500)
-        : jsonResponse({ success: true, resolved: [], states: [] })),
+        : jsonResponse({ success: true, states: [], handling_rows: [] })),
     });
     const user = userEvent.setup();
     const queryClient = renderQueue();

@@ -77,6 +77,7 @@ function jsonResponse(body: unknown) {
 // feed fails the test, so a read can never be answered by the wrong environment.
 function stubWorkers(
   feeds: Record<string, unknown[]>,
+  // Targets a person handled (after their reports arrived), by host.
   resolvedByHost: Record<string, { target_type: string; target_id: string }[]> = {},
 ) {
   const feedReads: Record<string, number> = {};
@@ -99,7 +100,10 @@ function stubWorkers(
     }
     if (url.includes('/api/resolution-state')) {
       feedReads[`${host}/resolution-state`] = (feedReads[`${host}/resolution-state`] ?? 0) + 1;
-      return jsonResponse({ success: true, resolved: resolvedByHost[host] ?? [], states: [] });
+      const handling_rows = (resolvedByHost[host] ?? []).map(target => ({
+        ...target, action: 'reviewed', moderator_pubkey: 'f'.repeat(64), at: 1751000900,
+      }));
+      return jsonResponse({ success: true, handling_rows, states: [] });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });

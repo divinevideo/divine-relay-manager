@@ -162,13 +162,12 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     const body = await (await get('/api/reports?needs_attention=1')).json() as {
       success: boolean; events: RelayEvent[]; counts: { targets: number; resolved: number; handled_before: number };
       truncated: boolean; resolution_truncated: boolean; oldest_covered: number | null;
-      automated_targets: string[]; handled_before: string[]; report_arrivals: Record<string, number>;
+      handled_before: string[]; report_arrivals: Record<string, number>;
     };
 
     expect(body.success).toBe(true);
     expect(body.events.map(e => e.id).sort()).toEqual([id(1), id(4), id(5), id(6)].sort());
     expect(body.counts).toEqual({ targets: 4, resolved: 2, handled_before: 0 });
-    expect(body.automated_targets).toEqual([]);
     expect(body.truncated).toBe(false);
     expect(body.resolution_truncated).toBe(false);
     expect(body.oldest_covered).toBe(95);
@@ -283,9 +282,8 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
   });
 
   // No person has handled a target only the worker has decided on, so the
-  // sensitive switch must still be able to take it: the read keeps it, and
-  // marks it so the queue's Hide resolved can still count it as resolved (#332).
-  it('keeps a target only the worker has decided on, and marks it', async () => {
+  // sensitive switch must still be able to take it: the read keeps it (#332).
+  it('keeps a target only the worker has decided on', async () => {
     stubRelay([
       report(1, 100, [['p', P1]]),   // an account whose only decision is the worker's age-review case
       report(2, 99, [['e', E(2)]]),  // unresolved
@@ -296,11 +294,10 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     await decide('event', E(3), 'reviewed', 'f'.repeat(64));
 
     const body = await (await get('/api/reports?needs_attention=1')).json() as {
-      events: RelayEvent[]; counts: { targets: number; resolved: number }; automated_targets: string[];
+      events: RelayEvent[]; counts: { targets: number; resolved: number };
     };
 
     expect(body.events.map(e => e.id)).toEqual([id(1), id(2)]);
-    expect(body.automated_targets).toEqual([`pubkey:${P1}`]);
     expect(body.counts).toEqual({ targets: 2, resolved: 1, handled_before: 0 });
   });
 
@@ -428,9 +425,8 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
     }
   });
 
-  // The feed reads its `automated` set from the handling rows it already holds,
-  // so one poll walks the decision log's non-auto-hide rows once, not twice.
-  it('walks the decision log once for its handling and automated reads', async () => {
+  // One poll walks the decision log's non-auto-hide rows once, not twice.
+  it('walks the decision log once for its handling read', async () => {
     stubRelay([report(1, 100, [['e', E(1)]])]);
     await decide('event', E(1), 'reviewed');
     const sql: string[] = [];
@@ -486,13 +482,13 @@ describe('GET /api/reports needs-attention mode, against real D1', () => {
 });
 
 // The two reads split every target between them, the worker's own decisions
-// included, when those sit on either side of getResolvedTargets' 1000-row chunk.
+// included, when those sit on either side of getHandlingRows' 1000-row chunk.
 describe('needs-attention and resolved history with automated decisions across a chunk boundary', () => {
   const PA = 'a1'.repeat(32);  // the worker's row, then a person's in the next chunk: handled
   const PB = 'b2'.repeat(32);  // the worker's rows in both chunks: automation only
   const PG = 'c3'.repeat(32);  // the worker's row, and auto-hidden: pending review
 
-  it('puts each target in exactly one of them, and marks only the automation-only ones', async () => {
+  it('puts each target in exactly one of them', async () => {
     stubRelay([
       report(1, 100, [['p', PA]]),
       report(2, 99, [['p', PB]]),
@@ -521,7 +517,7 @@ describe('needs-attention and resolved history with automated decisions across a
     expect(firstLate!.id).toBeGreaterThan(1000);
 
     const feed = await (await get('/api/reports?needs_attention=1')).json() as {
-      events: RelayEvent[]; automated_targets: string[];
+      events: RelayEvent[];
     };
     const history = await (await get('/api/reports/resolved?limit=50')).json() as { events: RelayEvent[]; done: boolean };
 
@@ -530,7 +526,6 @@ describe('needs-attention and resolved history with automated decisions across a
     expect(feedIds).toEqual([id(2), id(4), id(5)].sort());
     expect(historyIds).toEqual([id(1), id(3)].sort());
     expect(history.done).toBe(true);
-    expect([...feed.automated_targets].sort()).toEqual([`pubkey:${PB}`, `pubkey:${PG}`].sort());
   });
 });
 

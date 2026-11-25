@@ -56,7 +56,7 @@ function stubEnvironments(env: { current: 'a' | 'b' }, stalled: Read) {
     }
     if (url.includes('/api/resolution-state')) {
       if (stall('decisions')) return never;
-      return jsonResponse({ success: true, resolved: [], states: [] });
+      return jsonResponse({ success: true, states: [], handling_rows: [] });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });

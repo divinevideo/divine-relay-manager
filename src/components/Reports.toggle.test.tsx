@@ -103,12 +103,15 @@ function stubFetch(resolvedNow: () => boolean) {
     }
     if (url.includes('/api/resolution-state')) {
       calls.resolutionState += 1;
-      const resolved = [{ target_type: 'event', target_id: OTHER }];
-      if (resolvedNow()) resolved.push({ target_type: 'event', target_id: TARGET });
+      // A person handled each after its report arrived.
+      const handled = (id: string) =>
+        ({ target_type: 'event', target_id: id, action: 'reviewed', moderator_pubkey: 'f'.repeat(64), at: 1751001000 });
+      const handling_rows = [handled(OTHER)];
+      if (resolvedNow()) handling_rows.push(handled(TARGET));
       return jsonResponse({
         success: true,
-        resolved,
-        states: [{ target_type: 'event', target_id: AUTOHIDDEN, action: 'auto_hidden' }],
+        handling_rows,
+        states: [{ target_type: 'event', target_id: AUTOHIDDEN, action: 'auto_hidden', at: 1751000500 }],
       });
     }
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -481,7 +484,7 @@ describe('items handled before a newer report', () => {
 
   function stubDated({
     events,
-    handlingRows,
+    handlingRows = [],
     reportArrivals,
     bannedPubkeys = [],
     labelTargets = [],
@@ -491,7 +494,6 @@ describe('items handled before a newer report', () => {
     resolvedEvents = [],
   }: {
     events: unknown[];
-    // undefined: a worker from before #324, which sends no handling rows.
     handlingRows?: unknown[];
     reportArrivals?: Record<string, number>;
     // What the relay's listbannedpubkeys answers.
@@ -530,9 +532,8 @@ describe('items handled before a newer report', () => {
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
-          resolved: [],
           states: [],
-          ...(handlingRows ? { handling_rows: handlingRows } : {}),
+          handling_rows: handlingRows,
         });
       }
       if (url.includes('/api/relay-rpc')) {
@@ -609,15 +610,6 @@ describe('items handled before a newer report', () => {
     expect(within(row(`pubkey:${HANDLED_BEFORE_B}`)!).getByText('Handled before')).toBeInTheDocument();
     expect(within(row(`pubkey:${NEVER_HANDLED}`)!).queryByText('Handled before')).not.toBeInTheDocument();
     expect(within(row(`pubkey:${HANDLED}`)!).queryByText('Handled before')).not.toBeInTheDocument();
-  });
-
-  it('has no section against a worker that sends no handling dates', async () => {
-    stubDated({ events: FOUR_TARGETS.events });
-    renderQueue();
-
-    await waitFor(() => expect(row(`pubkey:${HANDLED_BEFORE_A}`)).not.toBeNull());
-    expect(section()).not.toBeInTheDocument();
-    expect(screen.queryByText('Handled before')).not.toBeInTheDocument();
   });
 
   // The All tab dates each report by itself: its arrival by id, else its

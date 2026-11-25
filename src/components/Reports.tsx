@@ -66,18 +66,16 @@ import {
   bannedAuthor,
   confirmedAutoHideTargets,
   datedHandling,
-  groupResolutionVerdict,
+  consolidatedHandling,
   handledBeforeBanText,
   handledBeforeView,
   newestReport,
   queueResolution,
   reportHandling,
-  reportResolutionStatus,
-  reportResolutionVerdict,
+  reportHandlingStatus,
   sortsLowest,
   type HandledBeforeView,
   type HandlingVerdict,
-  type QueueResolution,
 } from "@/lib/reportResolution";
 import type { ReportStatus } from "../../shared/handling";
 import { SWITCH_STATE_LABELS, buildSwitchMembership, humanHandledAutoHideTargets, type SwitchState } from "@/lib/sensitiveSwitch";
@@ -185,8 +183,8 @@ const QUEUE_POLL_MS = 60 * 1000;
 
 const NO_REPORTS: NostrEvent[] = [];
 
-// The four polled reads that build resolvedTargets. Named at module scope so the
-// acknowledged-override state can be keyed by it.
+// The four polled reads the queue's resolution rests on. Named at module scope
+// so the acknowledged-override state can be keyed by it.
 type ResolutionSourceKey = 'labels' | 'banned-pubkeys' | 'banned-events' | 'decisions';
 
 // Category priority for sorting
@@ -718,12 +716,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     history.fetchNextPage();
   };
 
-  // resolvedTargets is subtractive: these labels HIDE work already handled, so
-  // a failed fetch makes the queue bigger and wrong rather than smaller and
-  // safe (#221). NOT retried: a retry re-runs the worker's whole relay walk, and
-  // the relay keeps running an abandoned query for up to 30s, so retrying a slow
-  // read doubles the database load. The 60s poll and the blocked pane's Retry
-  // button are the recovery paths.
+  // The resolution sources are subtractive: these labels HIDE work already
+  // handled, so a failed fetch makes the queue bigger and wrong rather than
+  // smaller and safe (#221). NOT retried: a retry re-runs the worker's whole
+  // relay walk, and the relay keeps running an abandoned query for up to 30s,
+  // so retrying a slow read doubles the database load. The 60s poll and the
+  // blocked pane's Retry button are the recovery paths.
   const {
     data: labelsResult,
     error: labelsError,
@@ -781,7 +779,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // Query all moderation decisions from our D1 database.
   // retry: 1, not 0. The original reasoning still holds (stacking retries on a
   // cold-start timeout compounds latency), but it no longer justifies zero:
-  // resolvedTargets is subtractive, so a source that gives up immediately does
+  // the sources are subtractive, so a source that gives up immediately does
   // not fail safe, it un-hides work already handled (#221). One retry buys back
   // most of the single-timeout case without stacking.
   const {
@@ -806,7 +804,6 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     refetchInterval: 15 * 1000,
     retry: 1,
   });
-  const resolvedDecisionTargets = decisionsResult?.resolved;
   const autoHideStates = decisionsResult?.states;
   // The switch's auto-hidden members come only from this read, so membership
   // is known once it has answered. A read that failed, or one paused because
@@ -874,101 +871,22 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     return () => clearInterval(interval);
   }, [dataUpdatedAt]);
 
-  // Build set of resolved target keys (from labels, bans, deletions, and decisions)
-  //
-  // resolvedTargets is the membership rule's set. The queue reads it only
-  // against a worker that sends no handling dates; otherwise it applies the
-  // dated rule (`resolution` below, #324).
-  //
-  // handledTargets is the same set without the decisions only the worker wrote
-  // (`automated`, today an age-review case it opened on a reported account).
-  // The sensitive switch reads it under the membership rule (switchResolution
-  // below): no person has looked at those targets.
-  const { resolvedTargets, handledTargets } = useMemo(() => {
-    const resolved = new Set<string>();
-
-    // Add from resolution labels. The worker now walks every page of labels and
-    // reduces them to target keys, so this no longer re-derives tags in the
-    // browser over a single capped page.
-    //
-    // Every source is keyed as stored, though getReportTarget lowercases a
-    // report's hex id (#315). Labels and decisions: the pane's history and
-    // Reopen read them exactly, so one in another spelling leaves its report
-    // in front of a person rather than hiding it where Reopen can't reach.
-    // Ban lists are relay state: the relay matches a ban exactly, so an
-    // uppercase entry never hid the real, lowercase target. Records written
-    // now are lowercase: decisions are stored that way, labels name the
-    // lowercase target, and the moderation actions ban through the relay-rpc
-    // route or the event coordinator, which refuse any other. Age-review
-    // enforcement bans a case's stored pubkey, lowercase for every case
-    // opened since #313.
-    if (labelTargets) {
-      for (const target of labelTargets) {
-        resolved.add(reportTargetKey(target));
-      }
-    }
-
-    // Add banned pubkeys (now returns BannedPubkeyEntry objects)
-    if (bannedPubkeys) {
-      for (const entry of bannedPubkeys) {
-        resolved.add(`pubkey:${entry.pubkey}`);
-      }
-    }
-
-    // Add deleted events
-    if (bannedEvents) {
-      for (const event of bannedEvents) {
-        resolved.add(`event:${event.id}`);
-      }
-    }
-
-    const handled = new Set(resolved);
-
-    // Targets only the worker's own decisions resolved: from this read's
-    // `automated` flag, and from the feed, which keeps these targets and marks
-    // them so Hide resolved does not depend on this read having landed.
-    const automated = new Set<string>(queueFeed?.automatedTargets);
-
-    // Add from moderation decisions (ban_user, delete_event, etc.). The worker
-    // already excluded auto-hide actions and collapsed the table to distinct
-    // targets, so what arrives here is the resolved set itself rather than a
-    // capped window of decision rows to filter down.
-    if (resolvedDecisionTargets) {
-      for (const target of resolvedDecisionTargets) {
-        if (target.target_type === 'pubkey' || target.target_type === 'event') {
-          const key = `${target.target_type}:${target.target_id}`;
-          if (target.automated) {
-            automated.add(key);
-          } else {
-            resolved.add(key);
-            handled.add(key);
-          }
-        }
-      }
-    }
-
-    // The membership rule counts a target only automation resolved, as it
-    // always has, so a Pages build ahead of its worker shows what it showed
-    // before. The dated rule does not (#332): handlingByTarget counts only what
-    // a person did. The switch counts neither.
-    // TODO(#409): remove with the membership rule; only it reads these.
-    for (const key of automated) resolved.add(key);
-
-    return { resolvedTargets: resolved, handledTargets: handled };
-  }, [labelTargets, bannedPubkeys, bannedEvents, resolvedDecisionTargets, queueFeed?.automatedTargets]);
-
   // Set of relay-banned pubkeys, used to cross-resolve an event-scoped report
   // whose author has been banned. banpubkey purges the account's events without
-  // registering each in listbannedevents, so the event's own key never lands in
-  // resolvedTargets; this bridges that gap. See lib/reportResolution.
+  // registering each in listbannedevents, so the event's own key never appears
+  // among the banned events; this bridges that gap. See lib/reportResolution.
   //
   // Kept as written, while the predicate lowercases the report's side. The
   // relay does not canonicalise this list (funnelcake stores whatever
   // `banpubkey` was given) but matches it exactly, so an entry spelled in
   // uppercase (from a ban placed before #217 began refusing that spelling, or
   // from age-review enforcement on a case opened before #313) never banned the
-  // lowercase account, and the reports on its posts still need a person. How
-  // bans are placed now: see resolvedTargets.
+  // lowercase account, and the reports on its posts still need a person.
+  // Records written now are lowercase: decisions are stored that way, labels
+  // name the lowercase target, and the moderation actions ban through the
+  // relay-rpc route or the event coordinator, which refuse any other.
+  // Age-review enforcement bans a case's stored pubkey, lowercase for every
+  // case opened since #313.
   // Runtime-guarded for the same reason getReportTargetIds is: this is a relay
   // payload, and a malformed entry must not take the whole queue down.
   const bannedPubkeySet = useMemo(
@@ -1010,11 +928,16 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // The dated rule's reading of the decision log and labels (#324), with the
   // worker's own handlingByTarget, so the screen dates every target as the
-  // feed does. Null against a worker without handling_rows or label dates,
-  // which keeps the membership rule. Kept apart from `resolution` so feed and
-  // ban-list polls do not rebuild it over the whole decision log.
+  // feed does. Empty until the reads land. The decisions read gates every view
+  // below; labels and ban lists gate all but pending review, where a label that
+  // has not landed only keeps a target behind the switch. Kept apart from
+  // `resolution` so feed and ban-list polls do not rebuild it over the whole
+  // decision log.
   const handlingRows = decisionsResult?.handlingRows;
-  const dated = useMemo(() => datedHandling(handlingRows, labelTargets), [handlingRows, labelTargets]);
+  const dated = useMemo(
+    () => datedHandling(handlingRows ?? [], labelTargets ?? []),
+    [handlingRows, labelTargets],
+  );
 
   // When a person last confirmed each target's auto-hide, after any reopen. A
   // confirm leaves the post banned on the relay, and it dates that ban: reports
@@ -1024,15 +947,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [autoHideStates, handlingRows],
   );
 
-  // Which rule decides whether a report is handled, and what it reads.
+  // What the dated rule reads to decide whether a report is handled.
   const resolution = useMemo(() => queueResolution({
     dated,
     arrivals,
     bannedPubkeys: bannedPubkeySet,
     bannedEvents: bannedEventSet,
-    resolvedTargets,
     confirmedAutoHide,
-  }), [dated, arrivals, bannedPubkeySet, bannedEventSet, resolvedTargets, confirmedAutoHide]);
+  }), [dated, arrivals, bannedPubkeySet, bannedEventSet, confirmedAutoHide]);
 
   // Targets auto-hidden and still waiting for a human, keyed to their latest
   // auto-hide state so a row can say when a hide needs a check
@@ -1052,7 +974,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     [autoHideStates, handlingRows],
   );
 
-  // The four sources that build resolvedTargets, described once so the gate,
+  // The four sources the resolution rests on, described once so the gate,
   // the banners, and the blocked pane read from one list and cannot drift
   // apart from EACH OTHER the way the queries themselves did. This does not
   // guarantee the list itself stays complete: a new resolution query has to
@@ -1120,14 +1042,14 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     },
     {
       // Decisions feeds the switch membership (through pendingReviewTargets)
-      // as well as resolvedTargets, and the membership is applied on every
+      // as well as the handling dates, and the membership is applied on every
       // path (filtered TO it in the pending view, filtered OUT of it
       // otherwise). So it gates regardless of the hide-resolved toggle, which
       // is what the old decisionsLoading guard did for loading and failed to
       // do for errors.
       key: 'decisions',
       label: 'Moderation decisions',
-      hasData: !!resolvedDecisionTargets,
+      hasData: !!handlingRows,
       error: decisionsError,
       updatedAt: decisionsUpdatedAt,
       isPending: decisionsPending,
@@ -1141,12 +1063,12 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     labelTargets, labelsError, labelsUpdatedAt, labelsPending, labelsFetchStatus, labelsErrorUpdateCount, refetchLabels,
     bannedPubkeys, bannedPubkeysError, bannedPubkeysUpdatedAt, bannedPubkeysPending, bannedPubkeysFetchStatus, bannedPubkeysErrorUpdateCount, refetchBannedPubkeys,
     bannedEvents, bannedEventsError, bannedEventsUpdatedAt, bannedEventsPending, bannedEventsFetchStatus, bannedEventsErrorUpdateCount, refetchBannedEvents,
-    resolvedDecisionTargets, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount, refetchDecisions,
+    handlingRows, decisionsError, decisionsUpdatedAt, decisionsPending, decisionsFetchStatus, decisionsErrorUpdateCount, refetchDecisions,
   ]);
 
   // Whether the list filter (Hide resolved on, outside the pending-review
-  // view) subtracts resolvedTargets. Only the label truncation bound below
-  // still keys on it.
+  // view) subtracts what the resolution sources handled. Only the label
+  // truncation bound below still keys on it.
   const resolvedFilterActive = hideResolved && !showPendingReview;
   // Labels and the ban lists gate every view but pending review. The default
   // view subtracts them from the list; the history view counts resolved rows
@@ -1234,7 +1156,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // uncapped, so it has no bound to contribute.
   //
   // Still gated on resolvedFilterActive: a bounded LABELS read only matters
-  // where resolvedTargets is actually being subtracted. It contributes nothing
+  // where resolved work is actually being subtracted. It contributes nothing
   // to pendingReviewTargets, which is built entirely from the decisions source.
   // It does feed the switch's not-hidden group, but only subtractively: a
   // label missing from a bounded read keeps a CSAM target behind the switch
@@ -1295,21 +1217,21 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
 
   // Each listed target's standing, by `resolution`: 'new' (no one has handled
   // it), 'handled' (every report predates the latest handling) or
-  // 'handled_before' (a person handled it, and a report has come since; only
-  // the dated rule answers this). With Hide resolved on, the main list keeps
-  // only 'new' targets. The 'handled_before' ones outside the switch are the
-  // targets the queue sets apart as already handled; switch members keep their
-  // place behind the switch, whatever their standing. Kept as the whole
-  // verdict: a handled-before row also shows and sorts by its ban.
+  // 'handled_before' (a person handled it, and a report has come since). With
+  // Hide resolved on, the main list keeps only 'new' targets. The
+  // 'handled_before' ones outside the switch are the targets the queue sets
+  // apart as already handled; switch members keep their place behind the
+  // switch, whatever their standing. Kept as the whole verdict: a
+  // handled-before row also shows and sorts by its ban.
   const groupVerdictByTarget = useMemo(
     () => new Map<string, HandlingVerdict>(
-      allConsolidated.map(c => [reportTargetKey(c.target), groupResolutionVerdict(c, resolution)]),
+      allConsolidated.map(c => [reportTargetKey(c.target), consolidatedHandling(c, resolution)]),
     ),
     [allConsolidated, resolution],
   );
   const groupVerdictOf = useCallback(
     (c: ConsolidatedReport): HandlingVerdict =>
-      groupVerdictByTarget.get(reportTargetKey(c.target)) ?? groupResolutionVerdict(c, resolution),
+      groupVerdictByTarget.get(reportTargetKey(c.target)) ?? consolidatedHandling(c, resolution),
     [groupVerdictByTarget, resolution],
   );
   const groupStatusOf = useCallback(
@@ -1337,23 +1259,13 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   //
   // It reads the queue's own rule, so a CSAM-signal report that is 'new' or
   // 'handled_before' makes its target a member, and an answered one keeps
-  // nothing here (#324). Only against a worker without
-  // handling dates does it differ: the membership rule then reads
-  // handledTargets, which leaves out targets only the worker decided on.
-  // TODO(#409): once no worker without handling dates can be live, this is
-  // `resolution` itself.
-  const switchResolution = useMemo<QueueResolution>(
-    () => resolution.rule === 'dated'
-      ? resolution
-      : { rule: 'membership', resolvedTargets: handledTargets, bannedPubkeys: bannedPubkeySet },
-    [resolution, handledTargets, bannedPubkeySet],
-  );
+  // nothing here (#324).
   const switchMembership = useMemo(() => buildSwitchMembership({
     consolidated: switchCandidates,
     pendingReview: pendingReviewTargets,
     humanHandled: humanHandledTargets,
-    resolution: switchResolution,
-  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, switchResolution]);
+    resolution,
+  }), [switchCandidates, pendingReviewTargets, humanHandledTargets, resolution]);
 
   // Where each target goes, in this order (#324): behind the switch if it is a
   // member, whatever its standing; otherwise, with Hide resolved on, 'new' to
@@ -1492,10 +1404,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // opens the group's newest report (newestReport), which is handled before
   // whenever the group is, so the pane and the row agree; a report reached
   // otherwise, such as an older one by a deep link, shows what it is itself.
-  // Undefined for any other report, and always against a worker without
-  // handling dates.
+  // Undefined for any other report.
   const selectedHandledBefore = useMemo<HandledBeforeView | undefined>(() => {
-    if (resolution.rule !== 'dated' || !selectedReport) return undefined;
+    if (!selectedReport) return undefined;
     const target = getReportTarget(selectedReport);
     if (!target) return undefined;
     return handledBeforeView(reportHandling(
@@ -1505,18 +1416,18 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
         id: selectedReport.id,
         created_at: selectedReport.created_at,
       },
-      resolution.ctx,
+      resolution,
     ));
   }, [resolution, selectedReport, authorByTarget]);
 
   // Whether the dated rule has a person's handling on the open report's own
   // target since its last reopen, labels included. The pane offers Reopen on
   // it, as it does on its decision log, so a target only a label handled can
-  // be reopened. False against a worker without handling dates.
+  // be reopened.
   const selectedQueueHandled = useMemo(() => {
-    if (resolution.rule !== 'dated' || !selectedReport) return false;
+    if (!selectedReport) return false;
     const target = getReportTarget(selectedReport);
-    return target ? resolution.ctx.handling.has(reportTargetKey(target)) : false;
+    return target ? resolution.handling.has(reportTargetKey(target)) : false;
   }, [resolution, selectedReport]);
 
   // Whether the queue's author rule applies to the open report (#432): its
@@ -1530,7 +1441,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   // (one kept open after it left the loaded reports): the queue has no author
   // for it, which is not the same as its having none.
   // False for a post with no agreed author, where the rule cannot apply. The
-  // pane reads it only on a post's report. Both rules read the same set
+  // pane reads it only on a post's report. The dated rule reads the same set
   // (queueResolution).
   const selectedAuthorBanned = useMemo<boolean | null>(() => {
     if (!selectedReport) return false;
@@ -1552,7 +1463,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     for (const report of listReports ?? []) {
       const target = getReportTarget(report);
       if (!target) continue;
-      verdicts.set(report.id, reportResolutionVerdict(
+      verdicts.set(report.id, reportHandling(
         {
           target,
           authorPubkey: authorByTarget.get(reportTargetKey(target)),
@@ -1795,7 +1706,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     const target = getReportTarget(selectedReport);
     if (!target) return;
     const key = reportTargetKey(target);
-    const status = groupVerdictByTarget.get(key)?.status ?? reportResolutionStatus(
+    const status = groupVerdictByTarget.get(key)?.status ?? reportHandlingStatus(
       { target, authorPubkey: authorByTarget.get(key), id: selectedReport.id, created_at: selectedReport.created_at },
       resolution,
     );
@@ -2135,9 +2046,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
   }
 
   // Wait for reports AND every gating resolution source. A source that has not
-  // landed contributes nothing to resolvedTargets, so rendering here would show
-  // handled work as pending, and would show auto-hidden content in the default
-  // view (#221).
+  // landed contributes nothing to what is subtracted, so rendering here would
+  // show handled work as pending, and would show auto-hidden content in the
+  // default view (#221).
   if ((isLoading && !queueFailedCold) || blockingLoadStillBlocking.length > 0) {
     return (
       <Card className="h-[calc(100vh-200px)]">
@@ -2322,13 +2233,9 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
     </div>
   );
 
-  // The handled-before section shows with Hide resolved on in the default view.
-  // Under the dated rule it shows even at none (spec decision 6: the count
-  // always shows). Against a worker without handling dates nothing is ever
-  // handled before, so a count of none would say nothing, and it stays away.
-  // TODO(#409): drop the rule check with the membership rule.
-  const showHandledBeforeSection = (count: number) =>
-    !showPendingReview && hideResolved && (count > 0 || resolution.rule === 'dated');
+  // The handled-before section shows with Hide resolved on in the default view,
+  // even at none (spec decision 6: the count always shows).
+  const showHandledBeforeSection = () => !showPendingReview && hideResolved;
 
   // One row each, wherever it is listed: the main list, the handled-before
   // section, or behind the switch. The tag follows the row's own standing.
@@ -2690,7 +2597,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   ) : (
                     consolidated.map(renderConsolidatedRow)
                   )}
-                  {showHandledBeforeSection(handledBeforeConsolidated.length) && (
+                  {showHandledBeforeSection() && (
                     <HandledBeforeSection
                       count={handledBeforeConsolidated.length}
                       open={handledBeforeOpen}
@@ -2707,7 +2614,7 @@ export function Reports({ relayUrl, selectedReportId }: ReportsProps) {
                   ) : (
                     filteredReports.map(renderIndividualRow)
                   )}
-                  {showHandledBeforeSection(handledBeforeReports.length) && (
+                  {showHandledBeforeSection() && (
                     <HandledBeforeSection
                       count={handledBeforeReports.length}
                       open={handledBeforeOpen}

@@ -119,7 +119,7 @@ describe('a poll that adds a CSAM-signal report and stops early', () => {
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -160,7 +160,7 @@ describe('a poll on which the open target has left the feed', () => {
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -202,7 +202,7 @@ describe('a poll on which the open target has left the feed', () => {
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -251,7 +251,7 @@ describe('a poll on which the open target has left the feed', () => {
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -343,7 +343,7 @@ describe('in the history view, the open target moving into resolved history', ()
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -421,7 +421,7 @@ describe('in the history view, the open target moving into resolved history', ()
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -479,7 +479,7 @@ describe('in the history view, the open target moving into resolved history', ()
       if (url.includes('/api/resolution-label-targets')) {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -535,7 +535,7 @@ describe('a target the feed lists as handled before', () => {
         return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
       }
       if (url.includes('/api/resolution-state')) {
-        return jsonResponse({ success: true, resolved: [], states: [], handling_rows: [HANDLING] });
+        return jsonResponse({ success: true, states: [], handling_rows: [HANDLING] });
       }
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });

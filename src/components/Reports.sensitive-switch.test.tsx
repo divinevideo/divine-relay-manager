@@ -51,9 +51,10 @@ const NPUB_CSAM = nip19.npubEncode(CSAM_PROFILE);
 const NOTE_SPAM = nip19.noteEncode(SPAM_EVENT);
 const NOTE_HIDDEN = nip19.noteEncode(HIDDEN_EVENT);
 
-type State = { target_type: string; target_id: string; action: string; at?: number | null };
-type Resolved = { target_type: string; target_id: string; automated?: boolean };
-type LabelTarget = { type: string; value: string; at?: number };
+type State = { target_type: string; target_id: string; action: string; at: number | null };
+type LabelTarget = { type: string; value: string; at: number };
+// When a resolution label was published: after every report below arrived.
+const LABELED_AT = 1751001000;
 
 function jsonResponse(body: unknown) {
   return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
@@ -62,7 +63,6 @@ function jsonResponse(body: unknown) {
 function stubFetch({
   events,
   states = [],
-  resolved = [],
   bannedPubkeys = [],
   bannedEvents = [],
   labels = () => Promise.resolve([] as LabelTarget[]),
@@ -70,12 +70,10 @@ function stubFetch({
   statesGate,
   statesFail = false,
   reportsGate,
-  handlingRows,
+  handlingRows = [],
 }: {
   events: unknown[];
   states?: State[];
-  // The decision targets /api/resolution-state counts as resolved.
-  resolved?: Resolved[];
   // What the relay's listbannedpubkeys answers.
   bannedPubkeys?: string[];
   // The event ids the relay's listbannedevents answers.
@@ -91,8 +89,7 @@ function stubFetch({
   // A deep link's targeted lookup (/api/reports?event= or ?pubkey=), keyed by
   // the target's hex. A target with no entry gets an empty result.
   targeted?: Record<string, unknown[]>;
-  // A worker with the handled-before rule (#324) sends these as handling_rows.
-  // Absent: a worker from before it.
+  // The decision rows /api/resolution-state sends as handling_rows (#324).
   handlingRows?: unknown[];
 }) {
   const calls = { labels: 0, resolutionState: 0 };
@@ -121,7 +118,7 @@ function stubFetch({
       if (typeof statesFail === 'function' ? statesFail() : statesFail) {
         return jsonResponse({ success: false, error: 'unavailable' });
       }
-      return jsonResponse({ success: true, resolved, states, ...(handlingRows ? { handling_rows: handlingRows } : {}) });
+      return jsonResponse({ success: true, states, handling_rows: handlingRows });
     }
     if (url.includes('/api/relay-rpc')) {
       const { method } = JSON.parse(typeof init?.body === 'string' ? init.body : '{}') as { method?: string };
@@ -219,7 +216,7 @@ describe('Reports sensitive pending-review switch', () => {
   it('counts auto-hidden and not-hidden together', async () => {
     stubFetch({
       events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
-      states: [{ target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden' }],
+      states: [{ target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden', at: 1751000200 }],
     });
     const user = userEvent.setup();
     render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -239,7 +236,7 @@ describe('Reports sensitive pending-review switch', () => {
   it('hands the open report its switch state', async () => {
     stubFetch({
       events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
-      states: [{ target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hide_unresolved' }],
+      states: [{ target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hide_unresolved', at: 1751000200 }],
     });
     const user = userEvent.setup();
     render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -261,8 +258,8 @@ describe('Reports sensitive pending-review switch', () => {
     stubFetch({
       events: [SPAM_REPORT, HIDDEN_REPORT],
       states: [
-        { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hide_unresolved' },
-        { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden' },
+        { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hide_unresolved', at: 1751000300 },
+        { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden', at: 1751000200 },
       ],
     });
     const user = userEvent.setup();
@@ -284,13 +281,13 @@ describe('Reports sensitive pending-review switch', () => {
   });
 
   it('does not put a CSAM target a person restored back behind the switch', async () => {
-    // The restore writes only auto_hide_restored, which the resolved set does
-    // not include, so the human auto-hide row is what keeps it out.
+    // The restore writes only auto_hide_restored, which is no handling row, so
+    // the human auto-hide row, dated after the report, is what keeps it out.
     stubFetch({
       events: [CSAM_REPORT, SPAM_REPORT],
       states: [
-        { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hide_restored' },
-        { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hidden' },
+        { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hide_restored', at: 1751000500 },
+        { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'auto_hidden', at: 1751000400 },
       ],
     });
     render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -316,17 +313,15 @@ describe('Reports sensitive pending-review switch', () => {
   });
 
   describe('when only the worker has decided on a target', () => {
-    // ReportWatcher opens an age-review case on a reported account by itself,
-    // and /api/resolution-state marks a target whose only decisions are the
-    // worker's own as automated. Hide resolved still counts it as handled; the
-    // switch must not, because no person has looked at it.
-    const AUTOMATED: Resolved = { target_type: 'pubkey', target_id: CSAM_PROFILE, automated: true };
-    const SPAM_PROFILE = '7'.repeat(64);
-    const SPAM_PROFILE_REPORT = report('0'.repeat(64), 1751000030, [['p', SPAM_PROFILE, 'spam']]);
-    const NPUB_SPAM_PROFILE = nip19.npubEncode(SPAM_PROFILE);
+    // ReportWatcher opens an age-review case on a reported account by itself.
+    // That row is the worker's own, so no person has looked at the target: it
+    // is no handling, and the switch must still take the target.
+    const AUTOMATED_ROW = {
+      target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'age_review_case_created', moderator_pubkey: 'auto', at: 1751000100,
+    };
 
     it('keeps a profile CSAM report behind the switch', async () => {
-      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [AUTOMATED] });
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], handlingRows: [AUTOMATED_ROW] });
       const user = userEvent.setup();
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
 
@@ -341,7 +336,10 @@ describe('Reports sensitive pending-review switch', () => {
     it('treats the target as handled once a person has decided on it', async () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT],
-        resolved: [{ target_type: 'pubkey', target_id: CSAM_PROFILE }],
+        handlingRows: [
+          AUTOMATED_ROW,
+          { target_type: 'pubkey', target_id: CSAM_PROFILE, action: 'reviewed', moderator_pubkey: '6'.repeat(64), at: 1751000500 },
+        ],
       });
       const user = userEvent.setup();
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -352,8 +350,8 @@ describe('Reports sensitive pending-review switch', () => {
     it('treats the target as handled when a resolution label covers it', async () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT],
-        resolved: [AUTOMATED],
-        labels: () => Promise.resolve([{ type: 'pubkey', value: CSAM_PROFILE }]),
+        handlingRows: [AUTOMATED_ROW],
+        labels: () => Promise.resolve([{ type: 'pubkey', value: CSAM_PROFILE, at: 1751000500 }]),
       });
       const user = userEvent.setup();
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
@@ -362,22 +360,11 @@ describe('Reports sensitive pending-review switch', () => {
     });
 
     it('treats the target as handled when the account is banned', async () => {
-      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [AUTOMATED], bannedPubkeys: [CSAM_PROFILE] });
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], handlingRows: [AUTOMATED_ROW], bannedPubkeys: [CSAM_PROFILE] });
       const user = userEvent.setup();
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
 
       await expectHandled(user, NPUB_CSAM);
-    });
-
-    it('still hides a non-CSAM report on such a target as resolved', async () => {
-      stubFetch({
-        events: [SPAM_PROFILE_REPORT, SPAM_REPORT],
-        resolved: [{ target_type: 'pubkey', target_id: SPAM_PROFILE, automated: true }],
-      });
-      const user = userEvent.setup();
-      render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
-
-      await expectHandled(user, NPUB_SPAM_PROFILE);
     });
   });
 
@@ -387,7 +374,6 @@ describe('Reports sensitive pending-review switch', () => {
   describe('by the handled-before rule (#324)', () => {
     const T = CSAM_REPORT.created_at;
     const MODERATOR = '6'.repeat(64);
-    const DECIDED: Resolved = { target_type: 'pubkey', target_id: CSAM_PROFILE };
     const handlingRow = (action: string, at: number) =>
       ({ target_type: 'pubkey', target_id: CSAM_PROFILE, action, moderator_pubkey: MODERATOR, at });
 
@@ -403,8 +389,7 @@ describe('Reports sensitive pending-review switch', () => {
     }
 
     it('keeps a CSAM report that came after its target was handled behind the switch', async () => {
-      // A worker with the rule still sends the decision in `resolved`.
-      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [DECIDED], handlingRows: [handlingRow('reviewed', T - 50)] });
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], handlingRows: [handlingRow('reviewed', T - 50)] });
       const user = userEvent.setup();
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
 
@@ -425,7 +410,7 @@ describe('Reports sensitive pending-review switch', () => {
     });
 
     it('takes a CSAM target out once a person handled it after its reports', async () => {
-      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], resolved: [DECIDED], handlingRows: [handlingRow('reviewed', T + 50)] });
+      stubFetch({ events: [CSAM_REPORT, SPAM_REPORT], handlingRows: [handlingRow('reviewed', T + 50)] });
       const user = userEvent.setup();
       render(<TestApp queryClient={newClient()}><Reports relayUrl={RELAY_URL} /></TestApp>);
 
@@ -598,7 +583,7 @@ describe('Reports sensitive pending-review switch', () => {
     it('drops a resolved CSAM target out of the switch', async () => {
       const { release } = await renderWithLabelsHeld();
 
-      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE, at: LABELED_AT }]); });
       await waitFor(() =>
         expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument());
       // Resolved, and Hide resolved is off, so it is back in the default view.
@@ -634,7 +619,7 @@ describe('Reports sensitive pending-review switch', () => {
       await waitFor(() => expect(calls.labels).toBe(2));
       expect(screen.getByText(NPUB_CSAM)).toBeInTheDocument();
 
-      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE, at: LABELED_AT }]); });
       await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
       const pending = screen.getByRole('switch', { name: /pending review/i });
       expect(pending).toBeChecked();
@@ -659,8 +644,8 @@ describe('Reports sensitive pending-review switch', () => {
       ['p', '6'.repeat(64), 'spam'],
     ]);
     const HIDDEN_STATES: State[] = [
-      { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden' },
-      { target_type: 'event', target_id: LOOKUP_EVENT, action: 'auto_hidden' },
+      { target_type: 'event', target_id: HIDDEN_EVENT, action: 'auto_hidden', at: 1751000200 },
+      { target_type: 'event', target_id: LOOKUP_EVENT, action: 'auto_hidden', at: 1751000200 },
     ];
 
     // Mirrors the app's route: /reports/<id> hands Reports the id to select.
@@ -769,7 +754,7 @@ describe('Reports sensitive pending-review switch', () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
         states: HIDDEN_STATES,
-        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT, at: LABELED_AT }]),
       });
       const user = userEvent.setup();
       renderAt(`/reports?event=${HIDDEN_EVENT}`);
@@ -794,7 +779,7 @@ describe('Reports sensitive pending-review switch', () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
         states: HIDDEN_STATES,
-        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT, at: LABELED_AT }]),
         statesGate,
       });
       const user = userEvent.setup();
@@ -817,7 +802,7 @@ describe('Reports sensitive pending-review switch', () => {
     it('still shows a resolved linked report when resolution state cannot be read', async () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
-        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT, at: LABELED_AT }]),
         statesFail: true,
       });
       const user = userEvent.setup();
@@ -839,7 +824,7 @@ describe('Reports sensitive pending-review switch', () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
         states: HIDDEN_STATES,
-        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT, at: LABELED_AT }]),
         statesFail: () => statesFailing,
       });
       const user = userEvent.setup();
@@ -867,7 +852,7 @@ describe('Reports sensitive pending-review switch', () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
         states: HIDDEN_STATES,
-        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT, at: LABELED_AT }]),
         statesFail: () => statesFailing,
         reportsGate,
       });
@@ -894,7 +879,7 @@ describe('Reports sensitive pending-review switch', () => {
     it('keeps Hide resolved off when the moderator opens and closes the switch over a linked resolved report', async () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT],
-        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT, at: LABELED_AT }]),
       });
       const user = userEvent.setup();
       renderAt(`/reports?event=${SPAM_EVENT}`);
@@ -918,7 +903,7 @@ describe('Reports sensitive pending-review switch', () => {
       stubFetch({
         events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
         states: HIDDEN_STATES,
-        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+        labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT, at: LABELED_AT }]),
       });
       const user = userEvent.setup();
       renderAt(`/reports?event=${SPAM_EVENT}`);
@@ -957,7 +942,7 @@ describe('Reports sensitive pending-review switch', () => {
       it('still shows a resolved linked report while the resolution state read is paused', async () => {
         stubFetch({
           events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
-          labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT }]),
+          labels: () => Promise.resolve([{ type: 'event', value: SPAM_EVENT, at: LABELED_AT }]),
           // The first read never answers, so membership is unknown when the link lands.
           statesGate: new Promise<void>(() => {}),
         });
@@ -986,7 +971,7 @@ describe('Reports sensitive pending-review switch', () => {
         stubFetch({
           events: [CSAM_REPORT, SPAM_REPORT, HIDDEN_REPORT],
           states: HIDDEN_STATES,
-          labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT }]),
+          labels: () => Promise.resolve([{ type: 'event', value: HIDDEN_EVENT, at: LABELED_AT }]),
           statesGate,
         });
         const user = userEvent.setup();
@@ -1047,7 +1032,7 @@ describe('Reports sensitive pending-review switch', () => {
       await waitFor(() => expect(pendingSwitch()).toBeChecked());
       expect(within(rowFor(NPUB_CSAM)).getByText('Not hidden, needs review')).toBeInTheDocument();
 
-      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE, at: LABELED_AT }]); });
 
       await waitFor(() =>
         expect(screen.queryByRole('switch', { name: /pending review/i })).not.toBeInTheDocument());
@@ -1074,7 +1059,7 @@ describe('Reports sensitive pending-review switch', () => {
         void queryClient.resetQueries({ queryKey: ['resolution-label-targets'] });
       });
       await waitFor(() => expect(calls.labels).toBe(2));
-      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE, at: LABELED_AT }]); });
       await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
       await flush();
 
@@ -1100,7 +1085,7 @@ describe('Reports sensitive pending-review switch', () => {
         void queryClient.resetQueries({ queryKey: ['resolution-label-targets'] });
       });
       await waitFor(() => expect(calls.labels).toBe(2));
-      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE, at: LABELED_AT }]); });
       await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
       await flush();
 
@@ -1124,7 +1109,7 @@ describe('Reports sensitive pending-review switch', () => {
         void queryClient.resetQueries({ queryKey: ['resolution-label-targets'] });
       });
       await waitFor(() => expect(calls.labels).toBe(2));
-      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE }]); });
+      await act(async () => { release([{ type: 'pubkey', value: CSAM_PROFILE, at: LABELED_AT }]); });
       await waitFor(() => expect(screen.queryByText(NPUB_CSAM)).not.toBeInTheDocument());
       await flush();
 

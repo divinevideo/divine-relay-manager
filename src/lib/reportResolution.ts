@@ -1,5 +1,5 @@
-// ABOUTME: Whether the queue counts a report as handled: by the dated rule (#324) when the
-// ABOUTME: worker sends handling dates, by target membership when it predates them.
+// ABOUTME: Whether the queue counts a report as handled: the dated rule (#324), which
+// ABOUTME: compares a report's arrival with when a person last handled its target.
 
 import { AUTO_HIDE_ACTION, type AutoHideStateRowLike } from '../../shared/autohide';
 import { reportTargetKey } from '../../shared/report-target';
@@ -24,37 +24,21 @@ export interface ResolvableReport {
   authorPubkey?: string;
 }
 
-// The membership rule, as the queue applied it before #324. It now serves
-// only a worker that sends no handling dates (queueResolution below), for the
-// queue and, through the same QueueResolution, the sensitive switch.
-//
-// A consolidated report is resolved when its exact target key is already in
-// `resolvedTargets`, OR — for an EVENT-scoped report — when its author pubkey is
-// in the relay's banned-pubkey set.
-//
-// The event->author cross-resolution exists for one specific gap: "Ban User"
-// (`banpubkey`) purges the account's events without registering each one in
-// `listbannedevents`, so the event's own target key never appears in
-// `resolvedTargets` and the report would linger even though the account is gone.
-// Bulk "Delete All Content" does NOT need this — it `banevent`s each event, which
-// resolves them through the normal `event:<id>` path.
-//
-// Keying on `bannedPubkeys` (not the decision log) is deliberate: suspension lives
-// on a separate list, so a reversible holding action never cross-resolves.
-export function isConsolidatedReportResolved(
-  report: ResolvableReport,
-  resolvedTargets: ReadonlySet<string>,
-  bannedPubkeys: ReadonlySet<string>,
-): boolean {
-  if (resolvedTargets.has(reportTargetKey(report.target))) return true;
-  return bannedAuthor(report, bannedPubkeys) !== undefined;
-}
-
 // The relay-banned author whose ban the queue's author rule applies to a
 // post's report, lowercased; undefined when the rule does not apply (an
 // account report, no agreed author, or an author the relay does not ban).
-// Both rules read it, and so does the report pane's Reopen (Reports.tsx), so
-// the pane offers Reopen by the queue's own answer (#432).
+// The dated rule reads it, and so does the report pane's Reopen (Reports.tsx),
+// so the pane offers Reopen by the queue's own answer (#432).
+//
+// `banpubkey` purges the account's events without registering each in
+// `listbannedevents`, so a post's own key never appears among the banned
+// events and its report would linger even though the account is gone. This
+// cross-resolution bridges that gap. Bulk "Delete All Content" does not need
+// it: it `banevent`s each event.
+//
+// Keying on `bannedPubkeys` (not the decision log) is deliberate: suspension
+// lives on a separate list, so a reversible holding action never
+// cross-resolves.
 //
 // Only the report's side is lowercased. authorPubkey comes from a
 // reporter-authored `p` tag; consolidateReports lowercases it, and this is a
@@ -75,7 +59,7 @@ export function bannedAuthor(
 // What the dated rule reads. `handling` is handlingByTarget over the worker's
 // handling_rows and the dated label targets, keyed as stored. `arrivals` are
 // the feed's first-seen times by report id. The ban lists are the relay's, as
-// written: the relay matches a ban exactly (see isConsolidatedReportResolved).
+// written: the relay matches a ban exactly (see bannedAuthor).
 export interface HandlingContext {
   handling: ReadonlyMap<string, HandlingEntry>;
   arrivals: ReadonlyMap<string, number>;
@@ -100,15 +84,12 @@ type AutoHideTimingRow = { target_type: string; target_id: string; action: strin
 
 // Each target with a row of one of `actions`, keyed as stored, with the
 // unix-seconds time of the latest such row. null: no such row has a date,
-// either because it predates timestamps (an undated row predates every dated
-// one, as in handlingByTarget) or because a worker from before #324 sends no
-// `at`. TODO(#409): reading an absent `at` as null serves only a worker from
-// before #324; once none can be live, an absent `at` is malformed like any
-// other.
+// because it predates timestamps (an undated row predates every dated one, as
+// in handlingByTarget).
 //
 // A reopen cancels the rows before it, as it cancels any handling. Pass the
-// decision log's handling rows to apply that; without them (a worker from
-// before #324, whose Reopen deleted rows instead) nothing is cancelled.
+// decision log's handling rows to apply that; without them nothing is
+// cancelled.
 export function latestAutoHideAtByTarget(
   states: readonly AutoHideStateRowLike[],
   actions: readonly string[],
@@ -129,7 +110,7 @@ export function latestAutoHideAtByTarget(
     // A malformed date is skipped, as parseHandlingRows skips a human row's:
     // read as undated it would answer every report. Dropping it shows more
     // reports, never fewer.
-    if (row.at !== undefined && row.at !== null && !(typeof row.at === 'number' && Number.isFinite(row.at))) continue;
+    if (row.at !== null && !(typeof row.at === 'number' && Number.isFinite(row.at))) continue;
     const key = `${row.target_type}:${row.target_id}`;
     const at = typeof row.at === 'number' ? row.at : null;
     if (reopened.has(key)) {
@@ -372,19 +353,10 @@ export interface DatedHandling {
   logged: Set<string>;
 }
 
-// Null when a date the rule compares is missing: handling_rows from
-// /api/resolution-state, or an `at` on any label target. A worker that
-// predates #324 sends neither, and the queue then keeps the membership rule.
-// TODO(#409): remove the membership fallback (null return here, the 'membership'
-// rule in queueResolution) once no worker without handling_rows/label `at` can pair with this build.
 export function datedHandling(
-  handlingRows: readonly HandlingRow[] | undefined,
-  labelTargets: readonly { type: 'event' | 'pubkey'; value: string; at?: number }[] | undefined,
-): DatedHandling | null {
-  const labels = labelTargets ?? [];
-  const dated = labels.filter((label): label is HandlingLabel => typeof label.at === 'number');
-  if (!handlingRows || dated.length !== labels.length) return null;
-
+  handlingRows: readonly HandlingRow[],
+  labelTargets: readonly HandlingLabel[],
+): DatedHandling {
   // Same row classes handlingByTarget dates by: a reopen, or a person's
   // decision with a date. Keyed as stored, as handlingByTarget keys them.
   // Labels need no entry here: a labelled target is in `handling` unless a
@@ -396,74 +368,25 @@ export function datedHandling(
       logged.add(`${row.target_type}:${row.target_id}`);
     }
   }
-  return { handling: handlingByTarget(handlingRows, dated), logged };
+  return { handling: handlingByTarget(handlingRows, labelTargets), logged };
 }
 
-// Which rule the queue applies: 'dated' when datedHandling found every date it
-// needs, else today's membership rule exactly, so a Pages build deployed ahead
-// of its worker shows what it showed before. The membership rule never answers
-// 'handled_before'.
-export type QueueResolution =
-  | { rule: 'dated'; ctx: HandlingContext }
-  | { rule: 'membership'; resolvedTargets: ReadonlySet<string>; bannedPubkeys: ReadonlySet<string> };
-
+// What the queue's verdicts read: the dated rule's context, built from the
+// decision log and labels (`dated`) and the feed's arrivals and relay ban lists.
 export function queueResolution(args: {
-  dated: DatedHandling | null;
+  dated: DatedHandling;
   arrivals: ReadonlyMap<string, number>;
   bannedPubkeys: ReadonlySet<string>;
   bannedEvents: ReadonlySet<string>;
-  // The membership rule's set (Reports.tsx resolvedTargets).
-  resolvedTargets: ReadonlySet<string>;
-  // confirmedAutoHideTargets; the dated rule only.
+  // confirmedAutoHideTargets.
   confirmedAutoHide?: ReadonlyMap<string, number | null>;
-}): QueueResolution {
-  if (!args.dated) {
-    return { rule: 'membership', resolvedTargets: args.resolvedTargets, bannedPubkeys: args.bannedPubkeys };
-  }
+}): HandlingContext {
   return {
-    rule: 'dated',
-    ctx: {
-      handling: args.dated.handling,
-      logged: args.dated.logged,
-      arrivals: args.arrivals,
-      bannedPubkeys: args.bannedPubkeys,
-      bannedEvents: args.bannedEvents,
-      confirmedAutoHide: args.confirmedAutoHide,
-    },
+    handling: args.dated.handling,
+    logged: args.dated.logged,
+    arrivals: args.arrivals,
+    bannedPubkeys: args.bannedPubkeys,
+    bannedEvents: args.bannedEvents,
+    confirmedAutoHide: args.confirmedAutoHide,
   };
-}
-
-// The screen's entry points. The verdicts carry what the queue row and the
-// pane show for a handled-before item; the membership rule never answers
-// 'handled_before', so its verdicts are a bare status.
-export function reportResolutionVerdict(report: DatedReport, resolution: QueueResolution): HandlingVerdict {
-  if (resolution.rule === 'dated') return reportHandling(report, resolution.ctx);
-  return {
-    status: isConsolidatedReportResolved(report, resolution.resolvedTargets, resolution.bannedPubkeys)
-      ? 'handled'
-      : 'new',
-  };
-}
-
-export function reportResolutionStatus(report: DatedReport, resolution: QueueResolution): ReportStatus {
-  return reportResolutionVerdict(report, resolution).status;
-}
-
-export function groupResolutionVerdict(
-  c: ResolvableReport & { reports: readonly { id: string; created_at: number }[] },
-  resolution: QueueResolution,
-): HandlingVerdict {
-  if (resolution.rule === 'dated') return consolidatedHandling(c, resolution.ctx);
-  return {
-    status: isConsolidatedReportResolved(c, resolution.resolvedTargets, resolution.bannedPubkeys)
-      ? 'handled'
-      : 'new',
-  };
-}
-
-export function groupResolutionStatus(
-  c: ResolvableReport & { reports: readonly { id: string; created_at: number }[] },
-  resolution: QueueResolution,
-): ReportStatus {
-  return groupResolutionVerdict(c, resolution).status;
 }

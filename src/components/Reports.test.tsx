@@ -59,7 +59,7 @@ beforeEach(() => {
     if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
     if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT, MALFORMED_REPORT] });
     if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
-    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+    if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
     if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
     return jsonResponse({ success: true });
   }));
@@ -127,7 +127,7 @@ describe('Reports stale-data resilience', () => {
         });
       }
       if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -185,14 +185,14 @@ describe('Reports unresolved auto-hide filtering', () => {
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
-          resolved: [],
           // Newest-first, as the worker orders them: getLatestAutoHideState takes
           // the first state action it sees, so 'auto_hide_unresolved' is the
           // state under test and 'auto_hide_restored' is the older one it wins over.
           states: [
-            { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_unresolved' },
-            { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_restored' },
+            { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_unresolved', at: 200 },
+            { target_type: 'event', target_id: 'c'.repeat(64), action: 'auto_hide_restored', at: 100 },
           ],
+          handling_rows: [],
         });
       }
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -213,7 +213,7 @@ describe('Reports unresolved auto-hide filtering', () => {
   });
 });
 
-// resolvedTargets is subtractive: it hides work a moderator already handled, so
+// The resolution is subtractive: it hides work a moderator already handled, so
 // a failed source makes the queue bigger and wrong rather than smaller and safe
 // (#221). Surfacing that incompleteness in the UI is #221's job, not this PR's
 // -- fix/221-resolution-state-completeness reports per-source completeness from
@@ -224,7 +224,7 @@ describe('Reports resolution filtering', () => {
   // The worker reduces resolution labels to target keys before they reach the
   // browser, so the fixture is the projected target rather than the kind-1985
   // event it came from.
-  const RESOLVED_LABEL_TARGET = { type: 'event', value: 'c'.repeat(64) };
+  const RESOLVED_LABEL_TARGET = { type: 'event', value: 'c'.repeat(64), at: 1751000100 };
 
   function stubFetch(labelsResponse: () => Response) {
     vi.stubGlobal('fetch', vi.fn(async (input: RequestInfo | URL) => {
@@ -232,7 +232,7 @@ describe('Reports resolution filtering', () => {
       if (url.includes('/api/resolution-label-targets')) return labelsResponse();
       if (url.includes('/api/reports/resolved')) return jsonResponse(EMPTY_RESOLVED_PAGE);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [REPORT] });
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -304,7 +304,7 @@ describe('Reports CSAM signal priority', () => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [OLD_BUILD_REPORT] });
       if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -374,8 +374,8 @@ describe('Reports CSAM signal priority', () => {
       if (url.includes('/api/resolution-state')) {
         return jsonResponse({
           success: true,
-          resolved: [],
-          states: [{ target_type: 'event', target_id: '9'.repeat(64), action: 'auto_hidden' }],
+          states: [{ target_type: 'event', target_id: '9'.repeat(64), action: 'auto_hidden', at: 100 }],
+          handling_rows: [],
         });
       }
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
@@ -439,7 +439,7 @@ describe('Reports category labels', () => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports')) return jsonResponse({ success: true, events: [INHERITED_KEY_REPORT] });
       if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));
@@ -516,7 +516,7 @@ describe('Reports category sort', () => {
       const url = String(input instanceof Request ? input.url : input);
       if (url.includes('/api/reports')) return new Promise<Response>(() => {});
       if (url.includes('/api/resolution-label-targets')) return jsonResponse({ success: true, targets: [], truncated: false, oldest_covered: null });
-      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, resolved: [], states: [] });
+      if (url.includes('/api/resolution-state')) return jsonResponse({ success: true, states: [], handling_rows: [] });
       if (url.includes('/api/relay-rpc')) return jsonResponse({ success: true, result: [] });
       return jsonResponse({ success: true });
     }));

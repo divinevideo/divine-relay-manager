@@ -1,7 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { AUTO_HIDE_ACTION, pendingReviewTargetKeys, pendingReviewTargetStates } from './autohide';
 
-const row = (id: string, action: string) => ({ target_type: 'event', target_id: id, action });
+const row = (id: string, action: string) => ({ target_type: 'event', target_id: id, action, at: 100 });
 
 describe('pendingReviewTargetKeys', () => {
   // Rows arrive newest first, which is the order getAutoHideStates returns.
@@ -32,7 +32,7 @@ describe('pendingReviewTargetKeys', () => {
 
   it('keys by target type as well as id', () => {
     const keys = pendingReviewTargetKeys([
-      { target_type: 'pubkey', target_id: 'a', action: AUTO_HIDE_ACTION.hidden },
+      { target_type: 'pubkey', target_id: 'a', action: AUTO_HIDE_ACTION.hidden, at: 100 },
     ]);
     expect([...keys]).toEqual(['pubkey:a']);
   });
