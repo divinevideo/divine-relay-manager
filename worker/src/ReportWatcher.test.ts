@@ -3296,7 +3296,7 @@ describe('ReportWatcher', () => {
   describe('report arrival log (#324)', () => {
     const TARGET_PK = 'c4'.repeat(32);
 
-    function arrivalDb(opts: { failArrival?: boolean } = {}) {
+    function arrivalDb(opts: { failArrival?: boolean; failRefs?: boolean } = {}) {
       const arrivalBinds: unknown[][] = [];
       const metaBinds: unknown[][] = [];
       const batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
@@ -3321,6 +3321,7 @@ describe('ReportWatcher', () => {
         batch: vi.fn().mockImplementation(async (statements: Array<{ sql: string; args: unknown[] }>) => {
           batches.push(statements);
           if (opts.failArrival) throw new Error('d1 down');
+          if (opts.failRefs && statements.some(st => st.sql.includes('report_index_refs'))) throw new Error('refs down');
           return statements.map(() => ({ success: true, results: [] }));
         }),
       } as unknown as D1Database;
@@ -3381,17 +3382,53 @@ describe('ReportWatcher', () => {
       consoleError.mockRestore();
     });
 
-    it('writes the arrival and the index row in one batch for a verified report', async () => {
+    it('writes the arrival and the index row in one atomic batch, refs separately', async () => {
       const { db, batches, runSql } = arrivalDb();
       const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
       await new Promise(resolve => setTimeout(resolve, 10));
       await feed(w, signedReport([['p', TARGET_PK], ['report', 'spam']]));
-      const reportBatches = batches.filter(b => b.some(st => st.sql.includes('report_arrivals')));
-      expect(reportBatches).toHaveLength(1);
-      const sqls = reportBatches[0].map(st => st.sql);
+      const first = batches.find(b => b.some(st => st.sql.includes('report_arrivals')))!;
+      const sqls = first.map(st => st.sql);
       expect(sqls.filter(q => q.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(1);
-      expect(sqls.filter(q => q.includes('report_index') && !q.includes('report_index_meta')).length).toBeGreaterThanOrEqual(1);
+      expect(sqls.filter(q => q.includes('INTO report_index\n') || /INTO report_index\s*\(/.test(q))).toHaveLength(1);
+      expect(sqls.some(q => q.includes('report_index_refs'))).toBe(false);
+      expect(batches.some(b => b !== first && b.every(st => st.sql.includes('report_index_refs')))).toBe(true);
       expect(runSql.filter(q => q.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(0);
+    });
+
+    it('records the arrival and index row for a report with 2,000 e tags, every batch within 50 statements, all refs present', async () => {
+      const { db, batches } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const tags = Array.from({ length: 2000 }, (_, i) => ['e', i.toString(16).padStart(64, '0')]);
+      await feed(w, signedReport(tags));
+      for (const b of batches) expect(b.length).toBeLessThanOrEqual(50);
+      const all = batches.flat();
+      expect(all.filter(st => st.sql.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(1);
+      expect(all.filter(st => /INTO report_index\s*\(/.test(st.sql))).toHaveLength(1);
+      const refRows = all.filter(st => st.sql.includes('report_index_refs')).reduce((n, st) => n + st.args.length / 3, 0);
+      expect(refRows).toBe(2000);
+    });
+
+    it('still records the report and runs auto-hide and age review when the refs batch throws', async () => {
+      const { db, batches } = arrivalDb({ failRefs: true });
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await feed(w, signedReport([['e', 'e5'.repeat(32)], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]));
+      const first = batches[0];
+      expect(first.some(st => st.sql.includes('INSERT OR IGNORE INTO report_arrivals'))).toBe(true);
+      expect(first.some(st => /INTO report_index\s*\(/.test(st.sql))).toBe(true);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/refs/i), expect.anything());
+      expect(autoHide).toHaveBeenCalledTimes(1);
+      expect(ageReview).toHaveBeenCalledTimes(1);
+      consoleError.mockRestore();
     });
 
     it('stamps watcher_last_alive_at on the health alarm only while connected and after the catch-up window is saved', async () => {

@@ -43,6 +43,24 @@ export function reportIndexStatements(
   source: ReportIndexSource,
   nowSec: number,
 ): D1PreparedStatement[] {
+  return [
+    ...reportIndexRowStatements(db, reports, source, nowSec),
+    ...reportIndexRefStatements(db, reports),
+  ];
+}
+
+/**
+ * The report_index row statements alone: one per 12 reports, so a single report
+ * is always one statement however many tags it carries. A caller that must stay
+ * under the batch limit for an attacker-sized report writes these atomically
+ * with its other first-seen writes and sends the refs separately.
+ */
+export function reportIndexRowStatements(
+  db: D1Database,
+  reports: readonly SignedReport[],
+  source: ReportIndexSource,
+  nowSec: number,
+): D1PreparedStatement[] {
   const statements: D1PreparedStatement[] = [];
 
   for (let i = 0; i < reports.length; i += INDEX_ROWS_PER_STATEMENT) {
@@ -71,7 +89,15 @@ export function reportIndexStatements(
         .bind(...params),
     );
   }
+  return statements;
+}
 
+/** The report_index_refs statements alone: 33 refs each, and unbounded in count for a tag-stuffed report. */
+export function reportIndexRefStatements(
+  db: D1Database,
+  reports: readonly SignedReport[],
+): D1PreparedStatement[] {
+  const statements: D1PreparedStatement[] = [];
   const refs: Array<[string, string, string]> = [];
   for (const r of reports) {
     const reportId = lower(r.id);

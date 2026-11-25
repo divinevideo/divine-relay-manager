@@ -5,7 +5,7 @@ import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
 import { reportArrivalStatement } from './report-arrivals';
-import { metaStatement, reportIndexStatements, type ReportIndexSource } from './report-index';
+import { metaStatement, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource } from './report-index';
 import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
@@ -943,13 +943,29 @@ export class ReportWatcher implements DurableObject {
         }
         if (verifyEvent(event as unknown as NostrEvent)) {
           const now = Math.floor(Date.now() / 1000);
-          // One batch: the arrival and the index row land together or not at
-          // all. A handful of statements, far under D1's 50-per-batch limit.
+          // verifyEvent above only passes a signed event, so sig is present.
+          const signed = { ...event, sig: event.sig as string };
+          // First batch: the arrival and the index row, atomic and always two
+          // statements, however many tags the report carries. Anyone can publish
+          // a kind 1984 with thousands of e/p tags, and a batch over D1's
+          // 50-statement limit would fail whole and leave the report unseen, so
+          // a later catch-up could re-run the non-idempotent handlers on it.
           await this.env.DB.batch([
             reportArrivalStatement(this.env.DB, event.id, now),
-            // verifyEvent above only passes a signed event, so sig is present.
-            ...reportIndexStatements(this.env.DB, [{ ...event, sig: event.sig as string }], source, now),
+            ...reportIndexRowStatements(this.env.DB, [signed], source, now),
           ]);
+          // The refs follow in groups of at most 50, with their own failure
+          // handling: the report is already recorded as seen. The inner catch
+          // exists for its own log line, and so this write stays isolated if
+          // code is ever added after it inside the outer try. Accepted: a refs
+          // failure leaves this report's refs incomplete for good. It is
+          // recorded as seen, so catch-up will not re-index it, and ref-based
+          // lookups can miss it. The failure is logged.
+          try {
+            await runStatements(this.env.DB, reportIndexRefStatements(this.env.DB, [signed]));
+          } catch (error) {
+            console.error('[ReportWatcher] Failed to record report index refs:', error);
+          }
         }
       } catch (error) {
         console.error('[ReportWatcher] Failed to record report arrival and index row:', error);
