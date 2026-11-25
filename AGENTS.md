@@ -343,7 +343,7 @@ Schema is created on-demand via `ensureDecisionsTable()` and `ensureZendeskTable
 | `zendesk_tickets` | Maps Zendesk ticket IDs to Nostr event IDs and pubkeys |
 | `private_report_intake` | One row per private DM report moderation-service handed over; the idempotency record for `POST /api/internal/private-reports` |
 | `suspended_content_views` | Append-only audit of moderator views of suspended content (verified moderator, target account, event or account page, surface). Triggers refuse UPDATE, DELETE and an insert over an existing id. Created on demand by `ensureSuspendedContentViewsTable()` in `worker/src/suspended-content.ts`; never written to `moderation_decisions` |
-| `report_arrivals` | One row per report ReportWatcher first saw live: the report id and its first-seen time. The handled-before rule compares a report by it, falling back to the report's `created_at` when there is no row |
+| `report_arrivals` | The report id and the first time ReportWatcher recorded it, from the live subscription or reconnect catch-up. The handled-before rule uses this time, falling back to the report's `created_at` when there is no row |
 | `timed_suspensions` | One row per suspended account: optional end time and the auto-lift state machine (`active`, `lifting`, `keycast_pending`, terminal states), versioned for compare-and-swap. Store in `worker/src/timed-suspensions.ts`; end-time compares use `datetime(ends_at)` |
 | `report_index` | Relay Manager's own copy of kind 1984 reports (event JSON, target, source, hide and erase state). Migration 0022 |
 | `report_index_refs` | Every `e` and `p` tag value of an indexed report, so target lookups match any tag as the relay does |
