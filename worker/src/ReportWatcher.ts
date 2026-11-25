@@ -189,6 +189,16 @@ export class ReportWatcher implements DurableObject {
         this.deliberatelyStoppedAt = stored.deliberatelyStoppedAt ?? null;
         this.eventsProcessed = stored.eventsProcessed;
         this.eventsAutoHidden = stored.eventsAutoHidden || 0;
+        // State saved before the marker existed has no field at all (undefined,
+        // not null). That build wrote watcherState only from /start, /stop and
+        // after an auto-hide, so running:false there is a deliberate stop. The
+        // original stop time is unknown, so stamp the load time and persist it
+        // (after the counters are restored, so they are not zeroed); otherwise
+        // the health check's /recover would restart it on upgrade.
+        if (stored.running === false && stored.deliberatelyStoppedAt === undefined) {
+          this.deliberatelyStoppedAt = Date.now();
+          await this.persistState();
+        }
 
         if (this.running) {
           console.log('[ReportWatcher] Restoring connection after restart');

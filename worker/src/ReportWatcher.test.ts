@@ -1318,9 +1318,55 @@ describe('ReportWatcher', () => {
       });
     });
 
-    it('treats legacy stored state without the field as not deliberately stopped', async () => {
-      await mockState.storage.put('watcherState', { running: false, eventsProcessed: 0, eventsAutoHidden: 0 });
-      expect((await status(await reload())).deliberatelyStoppedAt).toBeNull();
+    describe('state saved by a worker that predates the marker', () => {
+      // Before the marker existed, watcherState was written only by /start, /stop
+      // and after an auto-hide, so a stored running:false is a deliberate stop.
+      it('treats stored running:false without the field as a deliberate stop, stamped at load time, and persists it', async () => {
+        vi.spyOn(Date, 'now').mockReturnValue(1_795_595_801_234);
+        await mockState.storage.put('watcherState', { running: false, eventsProcessed: 7, eventsAutoHidden: 2 });
+        const s = await status(await reload());
+        expect(s.running).toBe(false);
+        expect(s.deliberatelyStoppedAt).toBe(1_795_595_801_234);
+        expect(await mockState.storage.get('watcherState')).toMatchObject({
+          running: false, deliberatelyStoppedAt: 1_795_595_801_234, eventsProcessed: 7, eventsAutoHidden: 2,
+        });
+      });
+
+      it('keeps the load-time stamp on a later reload (not re-stamped)', async () => {
+        vi.spyOn(Date, 'now').mockReturnValue(1_795_595_801_234);
+        await mockState.storage.put('watcherState', { running: false, eventsProcessed: 0, eventsAutoHidden: 0 });
+        await reload();
+        vi.spyOn(Date, 'now').mockReturnValue(1_795_999_999_000);
+        expect((await status(await reload())).deliberatelyStoppedAt).toBe(1_795_595_801_234);
+      });
+
+      it('/recover leaves such a stop stopped', async () => {
+        await mockState.storage.put('watcherState', { running: false, eventsProcessed: 0, eventsAutoHidden: 0 });
+        const w = await reload();
+        const body = await (await w.fetch(post('/recover'))).json() as { message: string; status: ReportWatcherStatus };
+        expect(body.message).toMatch(/deliberately stopped/i);
+        expect(body.status.running).toBe(false);
+        expect(getLastMockWebSocket()).toBeNull();
+      });
+
+      it('stored running:true gets no marker and connects', async () => {
+        await mockState.storage.put('watcherState', { running: true, eventsProcessed: 0, eventsAutoHidden: 0 });
+        const s = await status(await reload());
+        expect(s.running).toBe(true);
+        expect(s.deliberatelyStoppedAt).toBeNull();
+        expect(getLastMockWebSocket()).not.toBeNull();
+      });
+
+      it('a stored null (current build) stays null', async () => {
+        await mockState.storage.put('watcherState', { running: false, eventsProcessed: 0, eventsAutoHidden: 0, deliberatelyStoppedAt: null });
+        expect((await status(await reload())).deliberatelyStoppedAt).toBeNull();
+      });
+
+      it('no stored state at all stays eligible for /recover', async () => {
+        const body = await (await (await reload()).fetch(post('/recover'))).json() as { message: string; status: ReportWatcherStatus };
+        expect(body.message).toBe('Started');
+        expect(body.status.running).toBe(true);
+      });
     });
   });
 

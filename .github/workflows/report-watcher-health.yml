@@ -16,7 +16,10 @@
 # reminders described next. It stays that way until someone POSTs /start, which
 # clears the marker. A watcher that is not running
 # with no marker (never started) is still treated as unhealthy, and a status
-# without the field (older worker) counts as not deliberately stopped.
+# without the field (older worker) counts as not deliberately stopped. A stop
+# saved by a worker that predates the marker carries over: on its first load the
+# DO stamps it (with the load time, the original is unknown) and persists it, so
+# nobody needs to re-send /stop after a deploy.
 #
 # In production only, a forgotten stop is surfaced by email, not Slack: the run
 # goes red (GitHub emails the person who last edited this workflow's schedule,
