@@ -470,8 +470,18 @@ export function EventsList({ relayUrl }: EventsListProps) {
     ? parseInt(customKind.trim(), 10)
     : null; // NIP-01 kinds are 0-65535
   const awaitingCustomKind = effectiveKindFilter === 'custom' && customKindNumber === null;
-  const listEnabled = !!relayUrl && !!nostr && !isDirectLookup && !hasPendingEventParam && !awaitingCustomKind;
-  const listQueryKey = ['relay-events', relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey] as const;
+  const listHidden = isDirectLookup || hasPendingEventParam;
+  const listEnabled = !!relayUrl && !!nostr && !listHidden && !awaitingCustomKind;
+  const listQueryKey = useMemo(
+    () => ['relay-events', relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey] as const,
+    [relayUrl, effectiveKindFilter, limit, customKindNumber, filterByPubkey],
+  );
+
+  useEffect(() => {
+    // Disabling a query stops new automatic fetches. Cancel a refetch already
+    // in progress so it can't request older pages during a direct lookup.
+    if (listHidden) void queryClient.cancelQueries({ queryKey: listQueryKey, exact: true });
+  }, [listHidden, listQueryKey, queryClient]);
 
   // Ref for scroll viewport (infinite scroll)
   const scrollViewportRef = useRef<HTMLDivElement>(null);

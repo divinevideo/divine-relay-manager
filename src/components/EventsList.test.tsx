@@ -537,6 +537,40 @@ describe('EventsList list query cost', () => {
     expect(listFilters().every(f => f.authors?.[0] === PK)).toBe(true);
   });
 
+  it('cancels an in-flight list refetch when a direct lookup opens', async () => {
+    const id = 'c'.repeat(64);
+    const firstPage = video();
+    const olderPage = olderVideo();
+    let reloadSignal: AbortSignal | undefined;
+    let releaseReload = () => {};
+    let holdReload = false;
+    relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[], { signal }: { signal: AbortSignal }) => {
+      if (filter.ids) return [event({ id, content: 'looked up' })];
+      if (filter.until) return [olderPage];
+      if (!holdReload) return [firstPage];
+      reloadSignal = signal;
+      return new Promise<NostrEvent[]>(resolve => { releaseReload = () => resolve([firstPage]); });
+    });
+    const { client } = renderEvents('/events');
+    await screen.findByText('a video');
+    await pickKind('All Events');
+    fireEvent.click(await screen.findByRole('button', { name: 'Load older events' }));
+    await screen.findByText('older');
+
+    holdReload = true;
+    relayQuery.fn.mockClear();
+    const reload = client.invalidateQueries({ queryKey: ['relay-events'] });
+    await waitFor(() => expect(reloadSignal).toBeDefined());
+    const search = screen.getByPlaceholderText(/Search by event ID/);
+    fireEvent.change(search, { target: { value: id } });
+    fireEvent.keyDown(search, { key: 'Enter' });
+    await screen.findByText('Event found');
+    expect(reloadSignal?.aborted).toBe(true);
+    releaseReload();
+    await reload;
+    expect(listFilters()).toEqual([{ limit: 20 }]);
+  });
+
   describe('Refresh', () => {
     it('does not run the hidden list query in direct-lookup mode', async () => {
       setRelay({ byId: [event({ id: 'c'.repeat(64), kind: 1, content: 'looked up' })] });
