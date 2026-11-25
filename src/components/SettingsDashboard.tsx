@@ -243,11 +243,13 @@ export function SettingsDashboard() {
   } = useBannedEvents({ enabled: !!relayUrl });
 
   const {
-    data: pendingModeration,
-    isLoading: pendingLoading,
-    isFetching: pendingFetching,
-    refetch: refetchPending,
+    data: recentEvents,
+    isLoading: recentEventsLoading,
+    isFetching: recentEventsFetching,
+    isError: recentEventsError,
+    refetch: refetchRecentEvents,
   } = useEventsNeedingModeration(relayUrl);
+  const recentEventsCount = Array.isArray(recentEvents) ? recentEvents.length : undefined;
 
   const {
     data: supportedMethods,
@@ -758,7 +760,7 @@ export function SettingsDashboard() {
               </div>
               <div className="text-center">
                 <div className="text-2xl font-bold">
-                  {pendingLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : (Array.isArray(pendingModeration) ? pendingModeration.length : 0)}
+                  {recentEventsLoading ? <Skeleton className="h-8 w-12 mx-auto" /> : recentEventsCount ?? '—'}
                 </div>
                 <p
                   className="text-sm text-muted-foreground"
@@ -771,12 +773,17 @@ export function SettingsDashboard() {
                     className="ml-1 h-6 w-6 align-middle"
                     aria-label="Refresh recent events count"
                     title="Refresh recent events count"
-                    disabled={!relayUrl || pendingFetching}
-                    onClick={() => { void refetchPending(); }}
+                    disabled={!relayUrl || recentEventsFetching}
+                    onClick={() => { void refetchRecentEvents(); }}
                   >
-                    <RefreshCw className={cn("h-3 w-3", pendingFetching && "animate-spin")} />
+                    <RefreshCw className={cn("h-3 w-3", recentEventsFetching && "animate-spin")} />
                   </Button>
                 </p>
+                {recentEventsError && (
+                  <p className="text-sm text-destructive" role="status">
+                    {recentEventsCount === undefined ? "Recent events count unavailable." : "Refresh failed. Showing the last count."}
+                  </p>
+                )}
               </div>
             </div>
 

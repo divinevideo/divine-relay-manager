@@ -2,17 +2,17 @@
 // ABOUTME: refreshed only by an explicit button, and that button is off without a relay
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { QueryClientProvider } from '@tanstack/react-query';
 import { createQueryClient } from '@/lib/queryClient';
 import { SettingsDashboard } from './SettingsDashboard';
 
-const rpc = vi.hoisted(() => ({ fn: vi.fn() }));
+const scan = vi.hoisted(() => vi.fn());
 const cfg = vi.hoisted(() => ({ relayUrl: 'wss://relay.test' }));
 vi.mock('@/hooks/useAdminApi', () => ({
   useAdminApi: () => ({
-    callRelayRpc: rpc.fn,
-    listBannedEvents: () => rpc.fn('listbannedevents'),
+    callRelayRpc: async (method: string) => method === 'listeventsneedingmoderation' ? scan() : [],
+    listBannedEvents: async () => [],
     getWorkerInfo: vi.fn().mockResolvedValue({}),
   }),
 }));
@@ -23,9 +23,8 @@ vi.mock('@/hooks/useAppContext', () => ({
   useAppContext: () => ({ config: { relayUrl: cfg.relayUrl, apiUrl: 'https://api.test', theme: 'light' }, updateConfig: vi.fn() }),
 }));
 
-const METHOD = 'listeventsneedingmoderation';
-const scanCalls = () => rpc.fn.mock.calls.filter(c => c[0] === METHOD).length;
 const refreshButton = () => screen.getByRole('button', { name: /refresh recent events count/i });
+const countTile = () => within(screen.getByText('Recent events (up to 100)').parentElement!);
 
 function mount(client = createQueryClient()) {
   return { client, ...render(<QueryClientProvider client={client}><SettingsDashboard /></QueryClientProvider>) };
@@ -33,11 +32,11 @@ function mount(client = createQueryClient()) {
 
 beforeEach(() => {
   cfg.relayUrl = 'wss://relay.test';
-  rpc.fn.mockReset();
-  rpc.fn.mockImplementation(async (m: string) => (m === METHOD ? [{ id: 'a'.repeat(64) }, { id: 'b'.repeat(64) }] : []));
+  scan.mockReset();
+  scan.mockResolvedValue([{ id: 'a'.repeat(64) }, { id: 'b'.repeat(64) }]);
 });
 
-describe('SettingsDashboard pending moderation', () => {
+describe('SettingsDashboard recent events count', () => {
   it('labels the count as recent events, not a review queue', async () => {
     mount();
     expect(await screen.findByText('Recent events (up to 100)')).toBeInTheDocument();
@@ -48,7 +47,7 @@ describe('SettingsDashboard pending moderation', () => {
   it('does not rescan on remount after the cached count has aged', async () => {
     const first = mount();
     await waitFor(() => expect(refreshButton()).toBeEnabled());
-    expect(scanCalls()).toBe(1);
+    expect(scan).toHaveBeenCalledTimes(1);
     first.unmount();
     const later = Date.now() + 11 * 60_000;
     const clock = vi.spyOn(Date, 'now').mockReturnValue(later);
@@ -57,31 +56,50 @@ describe('SettingsDashboard pending moderation', () => {
     } finally {
       clock.mockRestore();
     }
-    expect(scanCalls()).toBe(1);
+    expect(scan).toHaveBeenCalledTimes(1);
   });
 
   it('does not rescan when the count query is invalidated', async () => {
     const { client } = mount();
     await waitFor(() => expect(refreshButton()).toBeEnabled());
-    expect(scanCalls()).toBe(1);
+    expect(scan).toHaveBeenCalledTimes(1);
     await act(async () => {
       await client.invalidateQueries({ queryKey: ['events-needing-moderation'] });
     });
-    expect(scanCalls()).toBe(1);
+    expect(scan).toHaveBeenCalledTimes(1);
   });
 
-  it('rescans on an explicit refresh', async () => {
+  it('updates the count on an explicit refresh', async () => {
     mount();
-    await waitFor(() => expect(scanCalls()).toBe(1));
-    await waitFor(() => expect(refreshButton()).not.toBeDisabled());
+    expect(await countTile().findByText('2')).toBeInTheDocument();
+    scan.mockResolvedValueOnce([{ id: 'a'.repeat(64) }]);
     fireEvent.click(refreshButton());
-    await waitFor(() => expect(scanCalls()).toBe(2));
+    expect(await countTile().findByText('1')).toBeInTheDocument();
+    expect(scan).toHaveBeenCalledTimes(2);
+  });
+
+  it('distinguishes a failed first load from an empty count', async () => {
+    scan.mockRejectedValueOnce(new Error('Relay unavailable'));
+    mount();
+    expect(await countTile().findByRole('status')).toHaveTextContent('Recent events count unavailable.');
+    expect(countTile().queryByText('0')).toBeNull();
+    expect(refreshButton()).toBeEnabled();
+  });
+
+  it('keeps the previous count and reports a failed refresh', async () => {
+    mount();
+    expect(await countTile().findByText('2')).toBeInTheDocument();
+    scan.mockRejectedValueOnce(new Error('Relay unavailable'));
+    fireEvent.click(refreshButton());
+    expect(await countTile().findByRole('status')).toHaveTextContent('Refresh failed. Showing the last count.');
+    expect(countTile().getByText('2')).toBeInTheDocument();
+    expect(refreshButton()).toBeEnabled();
   });
 
   it('disables refresh and makes no call without a relayUrl', async () => {
     cfg.relayUrl = '';
     await act(async () => { mount(); });
-    expect(scanCalls()).toBe(0);
+    expect(scan).not.toHaveBeenCalled();
     expect(refreshButton()).toBeDisabled();
   });
 });
