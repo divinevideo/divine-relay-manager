@@ -80,15 +80,20 @@ describe('planCatchUpWindow after a deliberate stop', () => {
 });
 
 describe('stopPeriodFor', () => {
-  it('runs from the stop to the clock margin after the /start, however late the connect', () => {
+  it('runs from the stop second itself to the clock margin after the /start, however late the connect', () => {
     // Started at 1_500, connected an hour later: nothing after 1_620 is index-only.
-    expect(stopPeriodFor(1_000, 1_500, 5_100)).toEqual({ after: 1_000, until: 1_620 });
+    expect(stopPeriodFor(1_000, 1_500, 5_100)).toEqual({ after: 999, until: 1_620 });
     // No recorded start: anchored at the connect (or now, for a reader before it).
-    expect(stopPeriodFor(1_000, undefined, 1_300)).toEqual({ after: 1_000, until: 1_420 });
+    expect(stopPeriodFor(1_000, undefined, 1_300)).toEqual({ after: 999, until: 1_420 });
     // A start that reads later than the connect is clamped to it.
-    expect(stopPeriodFor(1_000, 1_600, 1_550)).toEqual({ after: 1_000, until: 1_670 });
-    // Stop and start in the same second still leave the margin.
-    expect(stopPeriodFor(1_500, 1_500, 1_500)).toEqual({ after: 1_500, until: 1_620 });
+    expect(stopPeriodFor(1_000, 1_600, 1_550)).toEqual({ after: 999, until: 1_670 });
+    // Stop and start in the same second still leave the margin and cover that second.
+    expect(stopPeriodFor(1_500, 1_500, 1_500)).toEqual({ after: 1_499, until: 1_620 });
+
+    const period = stopPeriodFor(1_000, 1_500, 5_100);
+    expect(reportHandlerEnabled(1_000, [period])).toBe(false);
+    expect(reportHandlerEnabled(999, [period])).toBe(true);
+    expect(reportHandlerEnabled(1_500, [stopPeriodFor(1_500, 1_500, 1_500)])).toBe(false);
   });
 });
 

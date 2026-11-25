@@ -497,7 +497,7 @@ describe('catch-up when the listener connects', () => {
     // The stopped period up to the start, joined with the margin after the
     // connect (two periods if the clock ticked between them).
     const periods = w.data.get('report-catchup-stopped-periods') as Array<{ after: number; until: number }>;
-    expect(periods[0].after).toBe(stopAt);
+    expect(periods[0].after).toBe(stopAt - 1);
     expect(periods.at(-1)!.until).toBeGreaterThanOrEqual(now + 120);
 
     // The socket drops before any heartbeat stamp; the alarm reconnects and
@@ -1550,9 +1550,36 @@ describe('catch-up when the listener connects', () => {
     expect(bansFor(marginTarget)).toHaveLength(0);
     expect(bansFor(stoppedTarget)).toHaveLength(0);
     // Anchored at the start, not the late connect: nothing after it is index-only.
-    expect(w.data.get('report-catchup-stopped-periods')).toEqual([{ after: stopAt, until: startedAt + 120 }]);
+    expect(w.data.get('report-catchup-stopped-periods')).toEqual([{ after: stopAt - 1, until: startedAt + 120 }]);
     expect(w.data.has('report-watcher-deliberate-stop')).toBe(false);
     expect(w.data.has('report-watcher-start-after-stop')).toBe(false);
+  });
+
+  it('treats a report filed in the exact stop second as index-only while handling the second before stop', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 120);
+    const stopAt = now - 30;
+    const beforeStopTarget = hex(0x92a1);
+    const exactStopTarget = hex(0x92a2);
+    const exactStopPubkey = getPublicKey(generateSecretKey());
+    const exactEvent = minorsReport(exactStopTarget, stopAt);
+    const exactUnderage = underageReport(exactStopPubkey, stopAt);
+    relay.corpus = [
+      minorsReport(beforeStopTarget, stopAt - 1),
+      exactEvent,
+      exactUnderage,
+    ];
+
+    const w = await newWatcher();
+    w.data.set('report-watcher-deliberate-stop', stopAt);
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(bansFor(beforeStopTarget)).toHaveLength(1);
+    expect(bansFor(exactStopTarget)).toHaveLength(0);
+    expect(await allRows(`SELECT pubkey FROM age_review_cases WHERE pubkey = '${exactStopPubkey}'`)).toEqual([]);
+    expect(await allRows(`SELECT report_id FROM report_index WHERE report_id IN ('${exactEvent.id}', '${exactUnderage.id}')`)).toHaveLength(2);
+    expect(await allRows(`SELECT report_id FROM report_arrivals WHERE report_id IN ('${exactEvent.id}', '${exactUnderage.id}')`)).toHaveLength(2);
   });
 
   it('after a stop, a report caught up only in the margin after the connect is indexed without automation', async () => {
@@ -1724,7 +1751,7 @@ describe('catch-up when the listener connects', () => {
     await settle(w.pending);
     const periods = w.data.get('report-catchup-stopped-periods') as Array<{ after: number; until: number }>;
     expect(periods.some(p => p.after === old.after)).toBe(false);
-    expect(periods[0].after).toBe(now - 60);
+    expect(periods[0].after).toBe(now - 61);
   });
 
   it('a pass after /start but before the connect plans gives a report from the stop no automation', async () => {
@@ -1762,7 +1789,7 @@ describe('catch-up when the listener connects', () => {
       if (key !== 'report-catchup-stopped-periods' || consume) return;
       // A connect's plan consumes the stop between the two reads.
       consume = w.storage.transaction(async (tx) => {
-        await tx.put('report-catchup-stopped-periods', [{ after: now - 60, until: now + 110 }]);
+        await tx.put('report-catchup-stopped-periods', [{ after: now - 61, until: now + 110 }]);
         await tx.delete('report-watcher-deliberate-stop');
         await tx.delete('report-watcher-start-after-stop');
       });
@@ -1770,7 +1797,7 @@ describe('catch-up when the listener connects', () => {
     });
     const periods = await (w.watcher as unknown as { currentStoppedPeriods(): Promise<Array<{ after: number; until: number }>> }).currentStoppedPeriods();
     await consume;
-    expect(periods).toEqual([{ after: now - 60, until: now + 110 }]);
+    expect(periods).toEqual([{ after: now - 61, until: now + 110 }]);
   });
 
   it('keeps stopped periods the adult replay can still read while the sexual quarantine is active', async () => {

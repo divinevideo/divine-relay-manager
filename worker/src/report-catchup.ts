@@ -80,11 +80,13 @@ export function reportHandlerEnabled(createdAt: number, periods: readonly Stoppe
 }
 
 /**
- * The stopped period of one deliberate stop: from the /stop time to the
- * /start, plus the clock margin after the /start. With no recorded start (its
- * write failed, or the watcher is still stopped), `nowSec` stands in for it:
- * the connect time when a connect consumes the stop, or now for a reader
- * before that.
+ * The stopped period of one deliberate stop: `(after, until]` in whole-second
+ * Nostr `created_at` timestamps, covering from the `/stop` second itself
+ * (`after = Math.min(stopAt, end) - 1`, so `created_at >= stopAt` matches
+ * `createdAt > p.after`) to `/start` plus the clock margin after `/start`.
+ * With no recorded start (its write failed, or the watcher is still stopped),
+ * `nowSec` stands in for it: the connect time when a connect consumes the
+ * stop, or now for a reader before that.
  *
  * The margin: the relay rejects a report dated more than its drift limit
  * (60 s by default) past its own clock, so a report filed during the stop is
@@ -97,7 +99,7 @@ export function reportHandlerEnabled(createdAt: number, periods: readonly Stoppe
  */
 export function stopPeriodFor(stopAt: number, startedAt: number | undefined, nowSec: number): StoppedPeriod {
   const end = Math.min(startedAt ?? nowSec, nowSec);
-  return { after: Math.min(stopAt, end), until: end + CATCHUP_CLOCK_MARGIN_SECONDS };
+  return { after: Math.min(stopAt, end) - 1, until: end + CATCHUP_CLOCK_MARGIN_SECONDS };
 }
 
 /**
