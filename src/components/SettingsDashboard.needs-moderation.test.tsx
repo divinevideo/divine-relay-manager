@@ -40,9 +40,9 @@ beforeEach(() => {
 describe('SettingsDashboard pending moderation', () => {
   it('labels the count as recent events, not a review queue', async () => {
     mount();
-    expect(await screen.findByText(/Recent events \(newest 100, not banned\)/)).toBeInTheDocument();
+    expect(await screen.findByText('Recent events (up to 100)')).toBeInTheDocument();
     expect(screen.queryByText(/Pending Moderation/i)).toBeNull();
-    expect(screen.getByTitle(/no approval tracking/i)).toBeInTheDocument();
+    expect(screen.getByTitle(/suspended, or deactivated accounts.*no approval tracking/i)).toBeInTheDocument();
   });
 
   it('does not rescan on remount after the cached count has aged', async () => {

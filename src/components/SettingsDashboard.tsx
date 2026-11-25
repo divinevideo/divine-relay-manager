@@ -762,9 +762,9 @@ export function SettingsDashboard() {
                 </div>
                 <p
                   className="text-sm text-muted-foreground"
-                  title="The relay has no approval tracking, so this is recent activity, not a review queue."
+                  title="Excludes banned events and posts from banned, suspended, or deactivated accounts. The relay has no approval tracking."
                 >
-                  Recent events (newest 100, not banned)
+                  Recent events (up to 100)
                   <Button
                     variant="ghost"
                     size="icon"
