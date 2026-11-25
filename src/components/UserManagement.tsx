@@ -18,6 +18,7 @@ import { UserX, UserCheck, Plus, Users, Trash2, User, X, Pause, Play, CalendarCl
 import { BannedUserCard } from "@/components/BannedUserCard";
 import { nip19 } from "nostr-tools";
 import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAppContext } from "@/hooks/useAppContext";
 import { useAgeReviewGuardRedirect } from "@/hooks/useAgeReviewGuardRedirect";
 import { UserActions } from "@/components/UserActions";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -60,28 +61,32 @@ function clampPage(total: number, page: number): number {
   return Math.min(page, Math.max(0, Math.ceil(total / USERS_PAGE_SIZE) - 1));
 }
 
-/** Profile names already in the cache. Reads no relay: a card that has not loaded has no name here. */
-function cachedNames(queryClient: QueryClient): Map<string, string> {
-  const names = new Map<string, string>();
-  for (const [key, data] of queryClient.getQueriesData<{ metadata?: { name?: string; display_name?: string } }>({ queryKey: ['author'] })) {
-    const pubkey = key[1];
-    const m = data?.metadata;
-    const name = [m?.display_name, m?.name].filter(Boolean).join(' ');
-    if (typeof pubkey === 'string' && name) names.set(pubkey.toLowerCase(), name.toLowerCase());
-  }
-  return names;
+type CachedProfile = { metadata?: { name?: string; display_name?: string } };
+
+function nameMatches(profile: CachedProfile | undefined, query: string): boolean {
+  const { name, display_name } = profile?.metadata ?? {};
+  return [name, display_name].some(value => typeof value === 'string' && value.toLowerCase().includes(query));
 }
 
-function matcher(query: string, names: Map<string, string>) {
+function cachedNameMatches(queryClient: QueryClient, query: string, apiUrl: string): Set<string> {
+  const matches = new Set<string>();
+  for (const [[, pubkey, url], data] of queryClient.getQueriesData<CachedProfile>({ queryKey: ['author'] })) {
+    if (url === apiUrl && typeof pubkey === 'string' && nameMatches(data, query)) matches.add(pubkey);
+  }
+  return matches;
+}
+
+function matcher(query: string, names: Set<string>) {
   // Search both spellings regardless of how the relay stored the account.
   const q = query.trim().toLowerCase();
   return (entry: BannedPubkeyEntry): boolean => {
     const stored = entry.pubkey.toLowerCase();
-    const pubkey = accountProfilePubkey(stored);
+    const profilePubkey = accountProfilePubkey(entry.pubkey);
+    const pubkey = stored === entry.pubkey ? profilePubkey : accountProfilePubkey(stored);
     if (stored.includes(q) || pubkey.includes(q)) return true;
     if (canonicalHex64(pubkey) && nip19.npubEncode(pubkey).includes(q)) return true;
     if (entry.reason?.toLowerCase().includes(q)) return true;
-    return !!names.get(pubkey)?.includes(q);
+    return names.has(profilePubkey) || names.has(pubkey);
   };
 }
 
@@ -90,7 +95,7 @@ function matcher(query: string, names: Map<string, string>) {
  * (no request), and paging applies to what it leaves. The page is written back
  * when the list or filter changes, so a refetch can't move the view.
  */
-function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: string | undefined) {
+function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: string | undefined, apiUrl: string) {
   const queryClient = useQueryClient();
   // What the box shows, and what the list is filtered by. A card reads a profile
   // and content when it mounts, so the filter waits for typing to pause rather
@@ -98,31 +103,38 @@ function usePagedAccounts(list: BannedPubkeyEntry[] | undefined, environment: st
   const [query, setQueryState] = useState('');
   const [applied, setApplied] = useState('');
   const [page, setPage] = useState(0);
-  const [names, setNames] = useState<Map<string, string>>();
+  const [names, setNames] = useState<Set<string>>();
   const filtering = applied.trim() !== '';
   useEffect(() => {
     if (query === applied) return;
     const timer = setTimeout(() => {
-      setNames(query.trim() ? cachedNames(queryClient) : undefined);
+      const term = query.trim().toLowerCase();
+      setNames(term ? cachedNameMatches(queryClient, term, apiUrl) : undefined);
       setApplied(query);
       setPage(0);
     }, SEARCH_DEBOUNCE_MS);
     return () => clearTimeout(timer);
-  }, [query, applied, queryClient]);
+  }, [query, applied, apiUrl, queryClient]);
   useEffect(() => {
-    if (!filtering) return;
-    const refreshNames = () => setNames(cachedNames(queryClient));
+    const term = applied.trim().toLowerCase();
+    if (!term) return;
     const unsubscribe = queryClient.getQueryCache().subscribe(event => {
-      if (event.query.queryKey[0] !== 'author') return;
-      if (event.type === 'removed'
-        || (event.type === 'updated' && ['success', 'setState'].includes(event.action.type))) {
-        refreshNames();
-      }
+      const [key, pubkey, url] = event.query.queryKey;
+      if (key !== 'author' || url !== apiUrl || typeof pubkey !== 'string') return;
+      if (event.type !== 'removed' && !(event.type === 'updated' && ['success', 'setState'].includes(event.action.type))) return;
+      const matches = event.type !== 'removed' && nameMatches(event.query.state.data as CachedProfile | undefined, term);
+      setNames(previous => {
+        if (!previous || previous.has(pubkey) === matches) return previous;
+        const next = new Set(previous);
+        if (matches) next.add(pubkey);
+        else next.delete(pubkey);
+        return next;
+      });
     });
     // A profile can finish between the initial filter render and subscribing.
-    refreshNames();
+    setNames(cachedNameMatches(queryClient, term, apiUrl));
     return unsubscribe;
-  }, [filtering, queryClient]);
+  }, [applied, apiUrl, queryClient]);
   const filtered = useMemo(() => {
     if (!list || !filtering || !names) return list;
     return list.filter(matcher(applied, names));
@@ -224,6 +236,7 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const { callRelayRpc, verifyPubkeyBanned, verifyPubkeyUnbanned } = api;
   const { getModeratorToken } = useCurrentUser();
   const restoreEnvironment = useRestoreEnvironment();
+  const { config } = useAppContext();
   const [newPubkey, setNewPubkey] = useState("");
   const [newReason, setNewReason] = useState("");
   const [isAddDialogOpen, setIsAddDialogOpen] = useState(false);
@@ -279,8 +292,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     queryFn: () => callRelayRpc<BannedPubkeyEntry[]>('listsuspendedpubkeys'),
   });
 
-  const bannedView = usePagedAccounts(bannedUsers, restoreEnvironment);
-  const suspendedView = usePagedAccounts(suspendedUsers, restoreEnvironment);
+  const bannedView = usePagedAccounts(bannedUsers, restoreEnvironment, config.apiUrl ?? '');
+  const suspendedView = usePagedAccounts(suspendedUsers, restoreEnvironment, config.apiUrl ?? '');
   const bannedListRef = useRef<HTMLDivElement>(null);
   const suspendedListRef = useRef<HTMLDivElement>(null);
 

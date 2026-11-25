@@ -1524,6 +1524,7 @@ describe('UserManagement paged Banned and Suspended lists', () => {
       serve(entries(3));
       const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
       client.setQueryData(['author', hex(2), ''], { metadata: { display_name: 'Zebra Fan' }, isFunnelcakeUser: true });
+      client.setQueryData(['author', hex(1), 'https://other.test'], { metadata: { display_name: 'Zebra Fan' }, isFunnelcakeUser: true });
       renderWithProvider(client);
       await screen.findAllByTestId('user-card');
       type(search(), 'zebra');
