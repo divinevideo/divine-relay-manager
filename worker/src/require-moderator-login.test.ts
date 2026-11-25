@@ -146,16 +146,21 @@ describe('REQUIRE_MODERATOR_LOGIN on', () => {
     expect(res.code).not.toBe('moderator_login_required');
   });
 
-  // The ReportWatcher health workflow restarts a stopped watcher with the Access
-  // service token alone; the restart is an idempotent nudge, not a moderation action.
-  it('leaves the watcher restart POST /api/report-watcher/start alone', async () => {
-    const res = await call({ url: 'https://api.test/api/report-watcher/start', body: {}, headers: await browser() });
-    expect(res.code).not.toBe('moderator_login_required');
-  });
+  // The health workflow calls /recover with Cloudflare Access alone. /start is
+  // still available to an operator resuming a deliberately stopped watcher.
+  it.each(['/start', '/recover'])('forwards ReportWatcher POST %s with Cloudflare Access alone', async (path) => {
+    const watcherFetch = vi.fn(async (_request: Request) => Response.json({ success: true }));
+    const env = {
+      ...baseEnv,
+      REPORT_WATCHER: { idFromName: () => 'singleton', get: () => ({ fetch: watcherFetch }) },
+    };
+    const res = await call({ url: `https://api.test/api/report-watcher${path}`, headers: await browser() }, env);
 
-  it('leaves the health check nudge POST /api/report-watcher/recover alone', async () => {
-    const res = await call({ url: 'https://api.test/api/report-watcher/recover', body: {}, headers: await browser() });
-    expect(res.code).not.toBe('moderator_login_required');
+    expect(res.status).toBe(200);
+    expect(watcherFetch).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      method: 'POST',
+      url: `https://do${path}`,
+    }));
   });
 });
 
