@@ -3,6 +3,17 @@
 
 import { nip19 } from "nostr-tools";
 
+/** Relay account lists may store an npub. Profiles use the decoded pubkey. */
+export function accountProfilePubkey(pubkey: string): string {
+  if (pubkey.startsWith('npub1')) {
+    try {
+      const decoded = nip19.decode(pubkey);
+      if (decoded.type === 'npub') return decoded.data;
+    } catch { /* Keep the relay's stored value if it cannot be decoded. */ }
+  }
+  return pubkey;
+}
+
 export type SearchMode =
   | { type: 'none' }
   | { type: 'event_id'; hex: string }

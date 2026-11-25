@@ -19,6 +19,7 @@ import { parseRepostForDisplay } from "@/lib/nip18";
 import { KindBadge } from "@/components/KindBadge";
 import { ClaimedNip05 } from "@/components/ClaimedNip05";
 import { useAuthor } from "@/hooks/useAuthor";
+import { accountProfilePubkey } from "@/lib/searchInput";
 import { useAppContext } from "@/hooks/useAppContext";
 import { getCommentTarget, formatCommentActivity } from "@/lib/commentActivity";
 import { useEventTitles } from "@/hooks/useEventTitles";
@@ -51,14 +52,7 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
   const [isOpen, setIsOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
-  // Normalize: if an npub was stored, decode to hex; otherwise use as-is
-  let pubkey = rawPubkey;
-  if (rawPubkey.startsWith('npub1')) {
-    try {
-      const decoded = nip19.decode(rawPubkey);
-      if (decoded.type === 'npub') pubkey = decoded.data;
-    } catch { /* keep rawPubkey */ }
-  }
+  const pubkey = accountProfilePubkey(rawPubkey);
 
   // Convert to npub for display
   let npub: string;
@@ -101,9 +95,8 @@ export function BannedUserCard({ pubkey: rawPubkey, reason, onUnban, actionButto
     // The read throws on failure, so one retry like ReporterCard's count: a
     // single dropped subscription settles to "unavailable" only if it repeats.
     retry: 1,
-    // UserManagement renders one card per banned/suspended user and Radix
-    // Tabs remount on tab switch — without staleTime every switch refires
-    // N x 2 relay queries (aligned with useUserStats' 2min)
+    // Radix Tabs and paging can remount cards. Keep recent reads across those
+    // visits (aligned with useUserStats' 2min).
     staleTime: 2 * 60_000,
   });
 
