@@ -4,7 +4,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, useLocation, useNavigate } from 'react-router-dom';
-import { QueryClientProvider, focusManager } from '@tanstack/react-query';
+import { QueryClientProvider, focusManager, onlineManager } from '@tanstack/react-query';
 import { createQueryClient } from '@/lib/queryClient';
 import { nip19 } from 'nostr-tools';
 import type { NostrEvent, NostrFilter } from '@nostrify/nostrify';
@@ -427,6 +427,28 @@ describe('EventsList list query cost', () => {
       expect(listFilters().length).toBe(before);
     } finally {
       focusManager.setFocused(undefined);
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not refetch stale All Events results when the network reconnects', async () => {
+    vi.useFakeTimers({ toFake: ['Date'] });
+    try {
+      setRelay({ list: [video()] });
+      renderEvents('/events');
+      await screen.findByText('a video');
+      await pickKind('All Events');
+      await screen.findByText('a video');
+      expect(listFilters().some(f => !f.kinds)).toBe(true);
+      relayQuery.fn.mockClear();
+      vi.setSystemTime(Date.now() + 5 * 60 * 1000);
+      await act(async () => {
+        onlineManager.setOnline(false);
+        onlineManager.setOnline(true);
+      });
+      expect(listFilters()).toEqual([]);
+    } finally {
+      onlineManager.setOnline(true);
       vi.useRealTimers();
     }
   });

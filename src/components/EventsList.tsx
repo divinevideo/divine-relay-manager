@@ -523,11 +523,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
       return oldestEvent.created_at - 1;
     },
     enabled: listEnabled,
-    // No refetchInterval: this list is manual-refresh only (Refresh button).
-    // Polling it every 30s re-sent the relay a heavy query on a timer. Focus
-    // refetch is off too (the app default is on): with "All Events" selected
-    // every alt-tab would resend the heavy query. staleTime is the app default.
+    // Avoid background rereads, especially when "All Events" is selected.
     refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
   });
 
   // Loading more pages is not a refresh, so it does not spin the button.
