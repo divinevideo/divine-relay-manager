@@ -92,7 +92,11 @@ vi.mock('@/hooks/useToast', () => ({
 }));
 
 // Heavy children irrelevant to lookup/nav behavior
-vi.mock('@/components/EventDetail', () => ({ EventDetail: () => null }));
+vi.mock('@/components/EventDetail', () => ({
+  EventDetail: ({ event, onSelectPubkey }: { event: NostrEvent; onSelectPubkey: (pubkey: string) => void }) => (
+    <button onClick={() => onSelectPubkey(event.pubkey)}>View All by User</button>
+  ),
+}));
 vi.mock('@/components/BulkDeleteByKind', () => ({ BulkDeleteByKind: () => null }));
 
 // The batched parent-title hook is mocked so comment-row links are
@@ -155,6 +159,12 @@ function renderEvents(initialEntry: string) {
     </QueryClientProvider>
   );
   return { ...view, client };
+}
+
+function eventListViewport(container: HTMLElement): HTMLElement {
+  const viewport = container.querySelector<HTMLElement>('[data-radix-scroll-area-viewport]');
+  if (!viewport) throw new Error('Missing event list viewport');
+  return viewport;
 }
 
 beforeEach(() => {
@@ -445,14 +455,41 @@ describe('EventsList list query cost', () => {
     expect(listFilters()).toEqual([]);
   });
 
+  it('does not fetch another page while scrolling a direct lookup after using the list', async () => {
+    const id = 'c'.repeat(64);
+    setRelay({ list: [video()], byId: [event({ id, content: 'looked up' })] });
+    const { container } = renderEvents('/events');
+    const viewport = eventListViewport(container);
+    Object.defineProperties(viewport, { scrollHeight: { value: 800 }, clientHeight: { value: 300 } });
+    await screen.findByText('a video');
+
+    const search = screen.getByPlaceholderText(/Search by event ID/);
+    fireEvent.change(search, { target: { value: id } });
+    fireEvent.keyDown(search, { key: 'Enter' });
+    await screen.findByText('Event found');
+    relayQuery.fn.mockClear();
+    fireEvent.scroll(viewport, { target: { scrollTop: 480 } });
+    expect(listFilters()).toEqual([]);
+  });
+
+  it('can open the author activity from a direct lookup', async () => {
+    const id = 'c'.repeat(64);
+    setRelay({ list: [video()], byId: [event({ id, content: 'looked up' })] });
+    renderEvents(`/events?event=${nip19.neventEncode({ id })}`);
+    fireEvent.click(await screen.findByRole('button', { name: 'View All by User' }));
+
+    expect(await screen.findByText('a video')).toBeInTheDocument();
+    expect(screen.queryByText('Event found')).not.toBeInTheDocument();
+    expect(listFilters().every(f => f.authors?.[0] === PK)).toBe(true);
+  });
+
   describe('Refresh', () => {
     it('does not run the hidden list query in direct-lookup mode', async () => {
       setRelay({ byId: [event({ id: 'c'.repeat(64), kind: 1, content: 'looked up' })] });
       renderEvents(`/events?event=${nip19.neventEncode({ id: 'c'.repeat(64) })}`);
       await screen.findByText('Event found');
       relayQuery.fn.mockClear();
-      fireEvent.click(screen.getByRole('button', { name: /Refresh/ }));
-      await new Promise(r => setTimeout(r, 50));
+      expect(screen.getByRole('button', { name: /Refresh/ })).toBeDisabled();
       expect(listFilters()).toEqual([]);
     });
 
@@ -567,7 +604,7 @@ describe('EventsList list query cost', () => {
       await new Promise(r => setTimeout(r, 50));
       expect(listFilters()).toEqual([]);
       fireEvent.change(input, { target: { value: '70000' } }); // above NIP-01's 65535
-      fireEvent.click(screen.getByRole('button', { name: /Refresh/ })); // bypasses `enabled`
+      expect(screen.getByRole('button', { name: /Refresh/ })).toBeDisabled();
       await new Promise(r => setTimeout(r, 50));
       expect(listFilters()).toEqual([]);
       fireEvent.change(input, { target: { value: '1111' } });

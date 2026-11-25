@@ -472,6 +472,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     ? parseInt(customKind.trim(), 10)
     : null; // NIP-01 kinds are 0-65535
   const awaitingCustomKind = effectiveKindFilter === 'custom' && customKindNumber === null;
+  const listEnabled = !!relayUrl && !!nostr && !isDirectLookup && !hasPendingEventParam && !awaitingCustomKind;
 
   // Ref for scroll viewport (infinite scroll)
   const scrollViewportRef = useRef<HTMLDivElement>(null);
@@ -522,7 +523,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
       // Return timestamp - 1 to get events strictly before this one
       return oldestEvent.created_at - 1;
     },
-    enabled: !!relayUrl && !!nostr && !isDirectLookup && !hasPendingEventParam && !awaitingCustomKind,
+    enabled: listEnabled,
     // No refetchInterval: this list is manual-refresh only (Refresh button).
     // Polling it every 30s re-sent the relay a heavy query on a timer. Focus
     // refetch is off too (the app default is on): with "All Events" selected
@@ -537,8 +538,8 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // cached pages past the first so the refetch reloads page 1 only, instead of
   // re-sending every scrolled page (each a list query) one after another.
   const refreshList = () => {
-    // The list is hidden in direct-lookup mode; refetch() bypasses `enabled`
-    if (isDirectLookup || hasPendingEventParam) return;
+    // Manual fetches bypass the query's enabled option.
+    if (!listEnabled) return;
     queryClient.setQueriesData<InfiniteData<NostrEvent[], number | undefined>>(
       { queryKey: ['relay-events', relayUrl] },
       (data) => data && { pages: data.pages.slice(0, 1), pageParams: data.pageParams.slice(0, 1) },
@@ -605,7 +606,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // Auto-load more when scrolling near bottom of the scroll area
   useEffect(() => {
     const viewport = scrollViewportRef.current;
-    if (!viewport) return;
+    if (!listEnabled || !viewport) return;
 
     const handleScroll = () => {
       const { scrollTop, scrollHeight, clientHeight } = viewport;
@@ -619,7 +620,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
     handleScroll();
 
     return () => viewport.removeEventListener('scroll', handleScroll);
-  }, [hasNextPage, isFetchingNextPage, fetchNextPage]);
+  }, [listEnabled, hasNextPage, isFetchingNextPage, fetchNextPage]);
 
   // Query for banned events to mark them
   const { data: bannedEvents } = useBannedEvents({ enabled: !!relayUrl });
@@ -869,7 +870,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
           <h2 className="text-2xl font-bold">Events & Moderation</h2>
           <p className="text-muted-foreground">View and moderate events using NIP-86</p>
         </div>
-        <Button onClick={refreshList} disabled={refreshing}>
+        <Button onClick={refreshList} disabled={!listEnabled || refreshing}>
           <RefreshCw className={`h-4 w-4 mr-2 ${refreshing ? 'animate-spin' : ''}`} />
           Refresh
         </Button>
@@ -1063,7 +1064,6 @@ export function EventsList({ relayUrl }: EventsListProps) {
               </div>
               <BulkDeleteByKind
                 pubkey={filterByPubkey}
-                onComplete={() => refetch()}
                 getModeratorToken={getModeratorToken}
               />
             </div>
@@ -1254,6 +1254,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
               }}
               onSelectPubkey={(pubkey) => {
                 updatePubkeyFilter(pubkey);
+                clearSearch();
                 setSelectedEvent(null);
               }}
             />
