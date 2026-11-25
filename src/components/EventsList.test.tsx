@@ -559,15 +559,21 @@ describe('EventsList list query cost', () => {
   });
 
   describe('author view', () => {
-    it('defaults to the recent content kinds, not the video-only default', async () => {
-      setRelay({ list: [event({ kind: 1111, content: 'spam comment' })] });
+    it('requests and displays both comments and reactions in recent author activity', async () => {
+      const activity = [
+        event({ kind: 1111, content: 'spam comment' }),
+        event({ id: 'd'.repeat(64), kind: 7, content: 'author reaction' }),
+      ];
+      relayQuery.fn.mockImplementation(async ([filter]: NostrFilter[]) =>
+        activity.filter(row => filter.authors?.includes(row.pubkey) && filter.kinds?.includes(row.kind)));
       renderEvents(`/events?pubkey=${PK}`);
       expect(await screen.findByText('spam comment')).toBeInTheDocument();
+      expect(screen.getByText('author reaction')).toBeInTheDocument();
       const filters = listFilters();
       expect(filters.length).toBeGreaterThan(0);
       for (const f of filters) {
         expect(f.authors).toEqual([PK]);
-        expect(f.kinds).toEqual([...RECENT_CONTENT_KINDS]);
+        expect(f.kinds).toEqual([...RECENT_CONTENT_KINDS, 7]);
       }
     });
 
@@ -575,7 +581,7 @@ describe('EventsList list query cost', () => {
       setRelay({ list: [event({ kind: 1111, content: 'spam comment' })] });
       renderEvents(`/events?pubkey=${PK}`);
       await screen.findByText('spam comment');
-      expect(screen.getByText(/Showing recent content kinds/)).toBeInTheDocument();
+      expect(screen.getByText(/Showing recent activity kinds/)).toBeInTheDocument();
       fireEvent.click(screen.getByRole('button', { name: /Show all kinds/ }));
       await waitFor(() => expect(listFilters().some(f => f.authors && f.kinds === undefined)).toBe(true));
     });
@@ -615,7 +621,7 @@ describe('EventsList list query cost', () => {
       setRelay({ list: [video()] });
       renderEvents('/events');
       await screen.findByText('a video');
-      expect(screen.queryByText(/Showing recent content kinds/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/Showing recent activity kinds/)).not.toBeInTheDocument();
     });
   });
 

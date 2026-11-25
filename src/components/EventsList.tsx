@@ -5,7 +5,7 @@ import { useNostr } from "@/hooks/useNostr";
 import { useAuthor } from "@/hooks/useAuthor";
 import { useToast } from "@/hooks/useToast";
 import { nip19 } from "nostr-tools";
-import { getKindInfo, getKindCategory } from "@/lib/kindNames";
+import { getKindInfo, getKindCategory, VIDEO_KINDS } from "@/lib/kindNames";
 import { useAdminApi } from "@/hooks/useAdminApi";
 import { useBannedEvents } from "@/hooks/useRelayBanLists";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
@@ -24,7 +24,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { EventDetail } from "@/components/EventDetail";
 import { BulkDeleteByKind } from "@/components/BulkDeleteByKind";
 import { getProfileUrl, RECENT_CONTENT_KINDS } from "@/lib/constants";
-import { VIDEO_KINDS } from "@/lib/kindNames";
 import { getCommentTarget } from "@/lib/commentActivity";
 import { parseSearchInput } from "@/lib/searchInput";
 import { useEventTitles, type ResolvedTarget } from "@/hooks/useEventTitles";
@@ -363,10 +362,9 @@ function EventCard({
 
 // A query with no `kinds` makes the relay merge the whole events table, so
 // "All Events" is opt-in. The plain list defaults to the app's video kinds; the
-// author view (?pubkey=) defaults to the recent-content kinds so a comment-spam
-// account's activity is not hidden behind a video-only filter (#156, #159).
+// author view (?pubkey=) also shows activity like comments, reposts and reactions.
 const VIDEO_KINDS_FILTER = VIDEO_KINDS.join(',');
-const RECENT_KINDS_FILTER = RECENT_CONTENT_KINDS.join(',');
+const RECENT_ACTIVITY_FILTER = [...RECENT_CONTENT_KINDS, 7].join(',');
 
 export function EventsList({ relayUrl }: EventsListProps) {
   const { nostr } = useNostr();
@@ -466,7 +464,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   // then isDirectLookup is still false, which would let one list query slip out.
   const hasPendingEventParam = !!searchParams.get('event');
   // null = the moderator has not picked a kind, so the default follows context
-  const effectiveKindFilter = kindFilter ?? (filterByPubkey ? RECENT_KINDS_FILTER : VIDEO_KINDS_FILTER);
+  const effectiveKindFilter = kindFilter ?? (filterByPubkey ? RECENT_ACTIVITY_FILTER : VIDEO_KINDS_FILTER);
   // Strict: parseInt would accept '1abc' and '-5'; range is NIP-01 0-65535. null = nothing valid yet.
   const customKindNumber = /^\d+$/.test(customKind.trim()) && parseInt(customKind.trim(), 10) <= 65535
     ? parseInt(customKind.trim(), 10)
@@ -847,7 +845,7 @@ export function EventsList({ relayUrl }: EventsListProps) {
   const kindOptions = [
     { value: 'all', label: 'All Events' },
     { value: VIDEO_KINDS_FILTER, label: `All Video Kinds (${VIDEO_KINDS.join(', ')})` },
-    { value: RECENT_KINDS_FILTER, label: 'Recent Content (videos, notes, comments, reposts...)' },
+    { value: RECENT_ACTIVITY_FILTER, label: 'Recent Activity' },
     // Video kinds per NIP-71
     { value: '34235', label: 'Video - Addressable (34235)' },
     { value: '34236', label: 'Short Video - Addressable (34236)' },
@@ -1052,9 +1050,9 @@ export function EventsList({ relayUrl }: EventsListProps) {
                 >
                   Clear
                 </Button>
-                {effectiveKindFilter === RECENT_KINDS_FILTER && (
+                {effectiveKindFilter === RECENT_ACTIVITY_FILTER && (
                   <>
-                    <span className="text-xs text-muted-foreground">Showing recent content kinds only.</span>
+                    <span className="text-xs text-muted-foreground">Showing recent activity kinds only.</span>
                     <Button
                       variant="ghost"
                       size="sm"
