@@ -84,6 +84,7 @@ vi.mock('@/hooks/useDecisionLog', async (orig) => {
 });
 const modStatus = vi.hoisted(() => ({
   recheck: vi.fn(),
+  recheckAfterContentAction: vi.fn(),
   recheckAfterAction: vi.fn(),
   isUserBanned: false as boolean | null,
 }));
@@ -267,7 +268,7 @@ describe('ReportDetail reopen reporting', () => {
     expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Content restored' }));
   });
 
-  it('runs a plain check once an auto-hide restore lands, leaving the account status as it was', async () => {
+  it('refreshes event bans after an auto-hide restore and keeps account status current', async () => {
     // A restore changes the post, not the account's ban or suspension, so the
     // account status on screen is not made pre-action by it.
     decisionLog.isPendingReview = true;
@@ -276,7 +277,7 @@ describe('ReportDetail reopen reporting', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Restore Content' }));
 
-    await waitFor(() => expect(modStatus.recheck).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(modStatus.recheckAfterContentAction).toHaveBeenCalledTimes(1));
     expect(modStatus.recheckAfterAction).not.toHaveBeenCalled();
   });
 

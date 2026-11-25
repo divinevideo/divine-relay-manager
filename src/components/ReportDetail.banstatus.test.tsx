@@ -1,7 +1,7 @@
 // ABOUTME: Pins the user ban-status panel's three outcomes on a user report.
 // ABOUTME: A check that could not answer must not render as "User is not banned".
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { TooltipProvider } from '@/components/ui/tooltip';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -316,7 +316,7 @@ describe('ReportDetail user ban-status panel', () => {
     }
   });
 
-  it('runs a plain check, re-reading the account lists, when a content action completes', () => {
+  it('rechecks event bans and the account lists when bulk delete by kind completes', () => {
     const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
     try {
       renderDetail();
@@ -324,39 +324,10 @@ describe('ReportDetail user ban-status panel', () => {
 
       onComplete();
 
-      expect(status.value.recheck).toHaveBeenCalledTimes(1);
+      expect(status.value.recheckAfterContentAction).toHaveBeenCalledTimes(1);
       expect(status.value.recheckAfterAction).not.toHaveBeenCalled();
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-pubkeys'] });
       expect(invalidate).toHaveBeenCalledWith({ queryKey: ['suspended-pubkeys'] });
-    } finally {
-      invalidate.mockRestore();
-    }
-  });
-
-  // The report pane owns this refresh when it hosts the by-kind dialog.
-  it('invalidates the banned-events list when bulk delete by kind completes', async () => {
-    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
-    try {
-      renderDetail();
-      const onComplete = bulkDeleteProps.last?.onComplete as () => void;
-
-      onComplete();
-
-      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true }));
-    } finally {
-      invalidate.mockRestore();
-    }
-  });
-
-  it('invalidates the banned-events list when an account action completes', async () => {
-    const invalidate = vi.spyOn(QueryClient.prototype, 'invalidateQueries');
-    try {
-      renderDetail();
-      const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
-
-      onActionComplete({ accountStatusChanged: true, action: 'ban', pubkey: 'a'.repeat(64) } as UserActionChange);
-
-      await waitFor(() => expect(invalidate).toHaveBeenCalledWith({ queryKey: ['banned-events'], exact: true }));
     } finally {
       invalidate.mockRestore();
     }
@@ -370,13 +341,13 @@ describe('ReportDetail user ban-status panel', () => {
     expect(bulkDeleteProps.last).toMatchObject({ isBanned: true, isSuspended: null });
   });
 
-  it('runs a plain check when a bulk content action from UserActions completes', () => {
+  it('runs a content check when a bulk job from UserActions completes', () => {
     renderDetail();
     const onActionComplete = userActionsProps.last?.onActionComplete as (change?: UserActionChange) => void;
 
     onActionComplete({ accountStatusChanged: false });
 
-    expect(status.value.recheck).toHaveBeenCalledTimes(1);
+    expect(status.value.recheckAfterContentAction).toHaveBeenCalledTimes(1);
     expect(status.value.recheckAfterAction).not.toHaveBeenCalled();
   });
 

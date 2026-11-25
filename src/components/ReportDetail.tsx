@@ -46,7 +46,7 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
 import { useAppContext } from "@/hooks/useAppContext";
 import { historyCount } from "@/lib/historyCount";
 import { overflowLine } from "@/lib/overflowLine";
-import { invalidateBannedEvents, invalidateResolutionState } from "@/lib/queueInvalidation";
+import { invalidateResolutionState } from "@/lib/queueInvalidation";
 import { extractMediaFiles, type ResolutionStatus } from "@/lib/adminApi";
 import { useMediaStatus } from "@/hooks/useMediaStatus";
 import { useDecisionLog } from "@/hooks/useDecisionLog";
@@ -677,11 +677,10 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       return act.restoreEvent(eventId, 'Auto-hide reversed by moderator');
     },
     onSuccess: async (result) => {
-      void invalidateBannedEvents(queryClient);
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
 
-      moderationStatus.recheck();
+      moderationStatus.recheckAfterContentAction();
       decisionLog.refetch();
       toast(result.recorded === true && result.reconciled !== false
         ? { title: "Content restored", description: "Auto-hide has been reversed" }
@@ -706,7 +705,6 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
   // media and bulk content actions, through EventActions, BulkDeleteByKind,
   // UserActions' bulk jobs and the delete below) call it with no change.
   const handleActionComplete = (change?: UserActionChange) => {
-    void invalidateBannedEvents(queryClient);
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['decisions'] });
     invalidateResolutionState(queryClient);
@@ -756,7 +754,7 @@ export function ReportDetail({ report, allReportsForTarget, allReportsForTargetT
       // answer stands while the check runs.
       queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
       queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
-      moderationStatus.recheck();
+      moderationStatus.recheckAfterContentAction();
     }
     decisionLog.refetch();
   };
