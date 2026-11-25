@@ -7,6 +7,7 @@ import { TooltipProvider } from '@/components/ui/tooltip';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { endRestoreWindow, markRestored } from '@/lib/userStatsCache';
 import { GONE_NO_CAUSE_LINE } from '@/lib/suspendedContent';
+import { bannedEventQueryKey } from '@/lib/bannedEventKey';
 import { ReportDetail } from './ReportDetail';
 import type { NostrEvent } from '@nostrify/nostrify';
 import type { ComponentProps } from 'react';
@@ -81,7 +82,7 @@ vi.mock('@/hooks/useBannedEvent', () => ({
     const held = relay.bannedLookup;
     const live = !!held || relay.bannedServes;
     const lookup = useQuery({
-      queryKey: ['banned-event', eventId],
+      queryKey: bannedEventQueryKey(relay.apiUrl ?? API_URL, eventId),
       queryFn: async () => {
         await held;
         relay.bannedReads += 1;

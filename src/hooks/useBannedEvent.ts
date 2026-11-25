@@ -2,7 +2,8 @@
 // ABOUTME: Used as fallback when normal relay queries return nothing for banned events
 
 import { useQuery } from "@tanstack/react-query";
-import { useAdminApi } from "@/hooks/useAdminApi";
+import { useAdminApi, useApiUrl } from "@/hooks/useAdminApi";
+import { bannedEventQueryKey } from "@/lib/bannedEventKey";
 import type { NostrEvent } from "@nostrify/nostrify";
 
 /**
@@ -11,10 +12,11 @@ import type { NostrEvent } from "@nostrify/nostrify";
  * and we suspect the event is banned).
  */
 export function useBannedEvent(eventId: string | undefined, enabled: boolean) {
+  const apiUrl = useApiUrl();
   const { callRelayRpc } = useAdminApi();
 
   return useQuery<NostrEvent | null>({
-    queryKey: ['banned-event', eventId],
+    queryKey: bannedEventQueryKey(apiUrl, eventId),
     queryFn: async () => {
       if (!eventId) return null;
       try {

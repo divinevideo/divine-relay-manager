@@ -74,6 +74,10 @@ interface EventActionsProps {
   /** The media status check has not answered yet, or is checking again. */
   mediaStatusLoading?: boolean;
   onActionComplete?: () => void;
+  /** The post was restored (not any other action): the caller drops what it kept about it being banned. */
+  onEventRestored?: (eventId: string) => void;
+  /** The post was banned (Ban, Delete, or Delete & Media, even when its media then failed): the caller marks what it kept about it stale. */
+  onEventBanned?: (eventId: string) => void;
 }
 
 export function EventActions({
@@ -88,6 +92,8 @@ export function EventActions({
   hasRestrictedMedia = false,
   mediaStatusLoading = false,
   onActionComplete,
+  onEventRestored,
+  onEventBanned,
 }: EventActionsProps) {
   const { toast } = useToast();
   const api = useAdminApi();
@@ -375,22 +381,25 @@ export function EventActions({
     onActionComplete?.();
   };
 
+  // The three ways to ban a post carry its id in the mutation variables, as the
+  // restore does: the panel stays mounted when the moderator opens another report.
   const banEventMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (bannedId: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      const result = await act.hideEvent(eventId, 'Banned by moderator');
+      const result = await act.hideEvent(bannedId, 'Banned by moderator');
       logAudit(act, {
         targetType: 'event',
-        targetId: eventId,
+        targetId: bannedId,
         action: 'ban_event',
         reason: 'Banned by moderator',
       });
       return result;
     },
-    onSuccess: (result) => {
+    onSuccess: (result, bannedId) => {
       toast(result.recorded === true
         ? { title: 'Event banned from relay' }
         : { title: 'Event banned; review state not recorded', variant: 'destructive' });
+      onEventBanned?.(bannedId);
       onActionComplete?.();
     },
     onError: (error: Error) => {
@@ -398,19 +407,21 @@ export function EventActions({
     },
   });
 
+  // The post's id travels with the mutation: the panel stays mounted when the
+  // moderator opens another report, and onSuccess runs the latest render's props.
   const restoreEventMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (restoredId: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      const result = await act.restoreEvent(eventId, 'Restored by moderator');
+      const result = await act.restoreEvent(restoredId, 'Restored by moderator');
       logAudit(act, {
         targetType: 'event',
-        targetId: eventId,
+        targetId: restoredId,
         action: 'restore_event',
         reason: 'Restored by moderator',
       });
       return result;
     },
-    onSuccess: (result) => {
+    onSuccess: (result, restoredId) => {
       toast(result.recorded === true && result.reconciled !== false
         ? { title: 'Event restored' }
         : {
@@ -419,6 +430,7 @@ export function EventActions({
               : 'Restore applied but not recorded',
             variant: 'destructive',
           });
+      onEventRestored?.(restoredId);
       onActionComplete?.();
     },
     onError: (error: Error) => {
@@ -427,18 +439,19 @@ export function EventActions({
   });
 
   const deleteEventMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (bannedId: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
-      await act.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
+      await act.deleteEvent(bannedId, 'Permanently deleted by moderator', pubkey);
       logAudit(act, {
         targetType: 'event',
-        targetId: eventId,
+        targetId: bannedId,
         action: 'delete_event_permanent',
         reason: 'Permanently deleted (banevent)',
       });
     },
-    onSuccess: () => {
+    onSuccess: (_, bannedId) => {
       toast({ title: 'Event permanently deleted', description: 'Banned from relay' });
+      onEventBanned?.(bannedId);
       onActionComplete?.();
     },
     onError: (error: Error) => {
@@ -606,36 +619,42 @@ export function EventActions({
   });
 
   const deleteEventAndMediaMutation = useMutation({
-    mutationFn: async () => {
+    mutationFn: async (bannedId: string) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const completed: string[] = [];
       // Shared by both audit writes: the first can settle after the toast too.
       const shown: ShownToast = {};
       try {
-        await act.deleteEvent(eventId, 'Permanently deleted by moderator', pubkey);
+        await act.deleteEvent(bannedId, 'Permanently deleted by moderator', pubkey);
         completed.push('event_deleted');
-        logAudit(act, { targetType: 'event', targetId: eventId, action: 'delete_event', reason: 'Permanently deleted (combined)' }, shown);
+        logAudit(act, { targetType: 'event', targetId: bannedId, action: 'delete_event', reason: 'Permanently deleted (combined)' }, shown);
 
         const result = await actOnFiles(allFiles, async (hash) => {
           await deleteFile(act, hash);
           completed.push(`media_${hash}`);
         }, 'deleted');
         shown.toast = doneToast('Event and media permanently deleted', (what) => `Event and video deleted; ${what} NOT deleted`, result);
-        logAudit(act, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media', reason: withNote(`Permanently deleted event + ${result.changed} media file(s)`, result.thumbnailNote) }, shown);
+        logAudit(act, { targetType: 'event', targetId: bannedId, action: 'delete_event_and_media', reason: withNote(`Permanently deleted event + ${result.changed} media file(s)`, result.thumbnailNote) }, shown);
         return shown;
       } catch (error) {
         // Reached only when a real action (deleteEvent or a deleteMedia) failed —
         // not the audit log, which is now fire-and-forget. So "media deletion failed"
         // in onError is accurate.
         if (completed.length > 0) {
-          logAudit(act, { targetType: 'event', targetId: eventId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` }, shown);
+          logAudit(act, { targetType: 'event', targetId: bannedId, action: 'delete_event_and_media_partial', reason: `Partial delete (completed: ${completed.join(', ')}). Error: ${error instanceof Error ? error.message : 'unknown'}` }, shown);
         }
         throw Object.assign(error instanceof Error ? error : new Error('Unknown error'), { completed, partial: shown });
       }
     },
-    onSuccess: showDone,
-    onError: (error: Error & { completed?: string[]; partial?: ShownToast }) => {
+    onSuccess: (shown, bannedId) => {
+      onEventBanned?.(bannedId);
+      showDone(shown);
+    },
+    onError: (error: Error & { completed?: string[]; partial?: ShownToast }, bannedId) => {
       const completed = error.completed ?? [];
+      // The event is banned once deleteEvent went through, even if the media
+      // deletion after it failed.
+      if (completed.includes('event_deleted')) onEventBanned?.(bannedId);
       if (completed.length > 0) {
         // Through the shared holder, so an audit failure joins this warning.
         const shown = error.partial ?? {};
@@ -692,7 +711,7 @@ export function EventActions({
       {isEventBanned ? (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => restoreEventMutation.mutate()} disabled={anyPending}>
+            <Button variant="outline" onClick={() => restoreEventMutation.mutate(eventId)} disabled={anyPending}>
               <Undo2 className="h-4 w-4 mr-1" />
               {restoreEventMutation.isPending ? 'Restoring...' : 'Restore Event'}
             </Button>
@@ -702,7 +721,7 @@ export function EventActions({
       ) : (
         <Tooltip>
           <TooltipTrigger asChild>
-            <Button variant="outline" onClick={() => banEventMutation.mutate()} disabled={anyPending}>
+            <Button variant="outline" onClick={() => banEventMutation.mutate(eventId)} disabled={anyPending}>
               <ShieldX className="h-4 w-4 mr-1" />
               {banEventMutation.isPending ? 'Banning...' : 'Ban Event'}
             </Button>
@@ -722,7 +741,7 @@ export function EventActions({
           }
           title="Delete Event"
           summary="This will permanently ban the event from the relay. This cannot be undone."
-          onConfirm={() => deleteEventMutation.mutateAsync()}
+          onConfirm={() => deleteEventMutation.mutateAsync(eventId)}
           isPending={deleteEventMutation.isPending}
         />
       )}
@@ -871,7 +890,7 @@ export function EventActions({
               }
               title="Delete Event & Media"
               summary={`This will permanently ban the event from the relay and delete ${fileCount} media file(s). This cannot be undone.`}
-              onConfirm={async () => { await deleteEventAndMediaMutation.mutateAsync(); }}
+              onConfirm={async () => { await deleteEventAndMediaMutation.mutateAsync(eventId); }}
               isPending={deleteEventAndMediaMutation.isPending}
             />
           )}

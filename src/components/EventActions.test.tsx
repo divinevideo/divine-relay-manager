@@ -135,6 +135,138 @@ describe('EventActions', () => {
     expect(tokensFor(moderatorApi, 'logDecision')).toEqual([MOD_TOKEN]);
   });
 
+  // #445: the pane drops its banned-post reads on a restore. Only a restore:
+  // a ban tells it nothing of the kind.
+  it('tells the caller a restore happened, and a ban does not', async () => {
+    const onEventRestored = vi.fn();
+    const onActionComplete = vi.fn();
+    const { unmount } = renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={true}
+        onEventRestored={onEventRestored} onActionComplete={onActionComplete} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
+    await waitFor(() => expect(onActionComplete).toHaveBeenCalledTimes(1));
+    expect(onEventRestored).toHaveBeenCalledTimes(1);
+    unmount();
+
+    const onBanRestored = vi.fn();
+    const onBanComplete = vi.fn();
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={false}
+        onEventRestored={onBanRestored} onActionComplete={onBanComplete} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Ban Event/i }));
+    await waitFor(() => expect(onBanComplete).toHaveBeenCalled());
+    expect(onBanRestored).not.toHaveBeenCalled();
+  });
+
+  it('does not tell the caller of a restore that failed', async () => {
+    api.restoreEvent.mockRejectedValue(new Error('relay down'));
+    const onEventRestored = vi.fn();
+    renderWithProvider(
+      <EventActions eventId="event-1" pubkey={'a'.repeat(64)} isEventBanned={true} onEventRestored={onEventRestored} />
+    );
+    fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
+    await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ title: 'Failed to restore event' })));
+    expect(onEventRestored).not.toHaveBeenCalled();
+  });
+
+  // The pane stays mounted when the moderator opens another report, and a
+  // mutation runs the latest render's callbacks. The restored post's id must
+  // travel with the mutation, not be read from the props at the end.
+  it('reports the post the restore started on, after the panel moves to another post', async () => {
+    let finish!: (r: unknown) => void;
+    api.restoreEvent.mockReturnValue(new Promise(resolve => { finish = resolve; }));
+    const onEventRestored = vi.fn();
+    const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+    const panel = (id: string) => (
+      <QueryClientProvider client={qc}>
+        <TooltipProvider>
+          <EventActions eventId={id} pubkey={'a'.repeat(64)} isEventBanned={true} onEventRestored={onEventRestored} />
+        </TooltipProvider>
+      </QueryClientProvider>
+    );
+    const { rerender } = render(panel('event-A'));
+    fireEvent.click(screen.getByRole('button', { name: /Restore Event/i }));
+    await waitFor(() => expect(api.restoreEvent).toHaveBeenCalledWith('event-A', 'Restored by moderator'));
+    rerender(panel('event-B'));
+    finish({ success: true, recorded: true, reconciled: true });
+    await waitFor(() => expect(onEventRestored).toHaveBeenCalledTimes(1));
+    expect(onEventRestored).toHaveBeenCalledWith('event-A');
+    expect(api.logDecision).toHaveBeenCalledWith(expect.objectContaining({ targetId: 'event-A', action: 'restore_event' }));
+  });
+
+  // The panel stays mounted when the moderator opens another report, and a
+  // mutation runs the latest render's callbacks. Whichever way the post is taken
+  // down, the caller is told the id of the post the action started on.
+  describe('tells the caller which post was banned', () => {
+    const HASH = 'b'.repeat(64);
+    // Holds the first relay call open; `finish` settles it.
+    const hold = (fn: { mockReturnValue: (v: unknown) => unknown }) => {
+      let settle!: (fail?: boolean) => void;
+      fn.mockReturnValue(new Promise((resolve, reject) => { settle = (fail) => (fail ? reject(new Error('relay down')) : resolve({ success: true, recorded: true })); }));
+      return { finish: (fail?: boolean) => settle(fail) };
+    };
+    const paths: Array<{ name: string; click: () => Promise<void>; gate: () => { finish: (fail?: boolean) => void } }> = [
+      { name: 'Ban Event', gate: () => hold(api.hideEvent),
+        click: async () => { fireEvent.click(screen.getByRole('button', { name: /^Ban Event/i })); } },
+      { name: 'Delete Event', gate: () => hold(api.deleteEvent),
+        click: async () => {
+          fireEvent.click(screen.getByRole('button', { name: /^Delete Event$/i }));
+          fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+        } },
+      { name: 'Delete Event & Media', gate: () => hold(api.deleteEvent),
+        click: async () => {
+          fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+          fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+        } },
+    ];
+
+    it.each(paths)('$name: names the post it started on, after the panel moves to another post', async ({ gate, click }) => {
+      const gated = gate();
+      const onEventBanned = vi.fn();
+      const qc = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
+      const panel = (id: string) => (
+        <QueryClientProvider client={qc}>
+          <TooltipProvider>
+            <EventActions eventId={id} pubkey={'a'.repeat(64)} mediaHashes={[HASH]} onEventBanned={onEventBanned} />
+          </TooltipProvider>
+        </QueryClientProvider>
+      );
+      const { rerender } = render(panel('event-A'));
+      await click();
+      rerender(panel('event-B'));
+      gated.finish();
+      await waitFor(() => expect(onEventBanned).toHaveBeenCalledTimes(1));
+      expect(onEventBanned).toHaveBeenCalledWith('event-A');
+    });
+
+    it.each(paths)('$name: does not tell the caller when the ban failed', async ({ gate, click }) => {
+      const gated = gate();
+      const onEventBanned = vi.fn();
+      renderWithProvider(
+        <EventActions eventId="event-A" pubkey={'a'.repeat(64)} mediaHashes={[HASH]} onEventBanned={onEventBanned} />
+      );
+      await click();
+      gated.finish(true);
+      await waitFor(() => expect(toast).toHaveBeenCalledWith(expect.objectContaining({ variant: 'destructive' })));
+      expect(onEventBanned).not.toHaveBeenCalled();
+    });
+
+    // The event is banned even when the media deletion that follows fails.
+    it('Delete Event & Media: still names the post when only the media deletion failed', async () => {
+      api.deleteMedia.mockRejectedValue(new Error('media server down'));
+      const onEventBanned = vi.fn();
+      renderWithProvider(
+        <EventActions eventId="event-A" pubkey={'a'.repeat(64)} mediaHashes={[HASH]} onEventBanned={onEventBanned} />
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Delete Event & Media' }));
+      fireEvent.click(await screen.findByRole('button', { name: 'Confirm Delete' }));
+      await waitFor(() => expect(onEventBanned).toHaveBeenCalledWith('event-A'));
+      expect(onEventBanned).toHaveBeenCalledTimes(1);
+    });
+  });
+
   it('renders unblock when media is blocked', () => {
     renderWithProvider(
       <EventActions eventId="event-1" pubkey={'a'.repeat(64)} mediaHashes={['abc']} hasBlockedMedia={true} />

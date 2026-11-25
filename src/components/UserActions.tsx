@@ -7,6 +7,7 @@ import { useAdminApi, type ModeratorApi } from '@/hooks/useAdminApi';
 import { useAgeReviewGuardRedirect } from '@/hooks/useAgeReviewGuardRedirect';
 import { useCurrentUser } from '@/hooks/useCurrentUser';
 import { UNDERAGE_REPORT_CATEGORY } from '@/lib/constants';
+import { suspendBannedEventReads, useBannedEventApiUrl } from '@/lib/bannedEventKey';
 import { markRestored, resetAccountContentReads, runHidingAction, useRestoreEnvironment } from '@/lib/userStatsCache';
 import { banFailureToast, banSuccessNote, refreshAfterUnconfirmedBan } from '@/lib/banFeedback';
 import { invalidateResolutionState } from '@/lib/queueInvalidation';
@@ -85,7 +86,8 @@ interface UserActionsProps {
 
 interface AccountActionTarget {
   pubkey: string;
-  reportTarget?: { eventId?: string };
+  /** `selection`: which uninterrupted selection of the post the report pane was on (ReportDetail). */
+  reportTarget?: { eventId?: string; selection?: number };
 }
 
 /**
@@ -93,7 +95,8 @@ interface AccountActionTarget {
  * unban, suspend or unsuspend; the bulk content actions leave the account's
  * status as it was, and so does a Change end date the worker refused because
  * the account is banned or no longer suspended (sent so the host re-reads the
- * status it shows). `pubkey` is the account the action was taken on and
+ * status it shows). Delete All Content also identifies itself so callers can
+ * refresh event ban status. `pubkey` is the account the action was taken on and
  * `reportTarget` the report it was taken from, both captured when it started:
  * TanStack hands a pending mutation the latest render's callbacks, so a value
  * read at completion is whatever is on screen by then, not the one acted on.
@@ -109,8 +112,13 @@ interface AccountActionTarget {
 // usually purged the posts, so "posts can take a few minutes to reappear"
 // would mislead.
 export type UserActionChange =
-  | { accountStatusChanged: false }
-  | (AccountActionTarget & { accountStatusChanged: true; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' });
+  | { accountStatusChanged: false; action?: 'delete-all' }
+  | (AccountActionTarget & {
+    accountStatusChanged: true;
+    action: 'suspend' | 'unsuspend' | 'ban' | 'unban';
+    /** An unban whose outcome confirms the suspension ended too. */
+    suspensionEnded?: boolean;
+  });
 
 // Only the account and report a change reports, not the action's other
 // variables (a suspend's duration, an unban's choice and version).
@@ -131,6 +139,7 @@ export function UserActions({
   const api = useAdminApi();
   const { getModeratorToken } = useCurrentUser();
   const queryClient = useQueryClient();
+  const bannedEventApiUrl = useBannedEventApiUrl();
   const restoreEnvironment = useRestoreEnvironment();
   const accountTarget: AccountActionTarget = { pubkey, reportTarget };
   // The api bound to the moderator's login at bulk-job start; a logout/switch
@@ -214,12 +223,14 @@ export function UserActions({
   // A worker that predates timed suspensions writes none; the deploy order
   // (worker before frontend) covers that (F15).
   const suspendUserMutation = useMutation({
+    // The environment the click happened in, not the one on screen when it lands.
+    onMutate: () => ({ bannedEventApiUrl }),
     mutationFn: async ({ pubkey: target, duration }: AccountActionTarget & { duration: SuspensionDuration | null }) => {
       const act = api.asModerator(getModeratorToken()); // take the login at the click
       const env = restoreEnvironment; // the environment the action ran in
       return runHidingAction(queryClient, target, env, () => act.suspendPubkey(target, 'Suspended by moderator', duration));
     },
-    onSuccess: (outcome, variables) => {
+    onSuccess: (outcome, variables, started) => {
       // Suspend resolution comes only from the decision row, already written.
       queryClient.invalidateQueries({ queryKey: ['decisions'] });
       invalidateResolutionState(queryClient);
@@ -229,8 +240,19 @@ export function UserActions({
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast(suspendToast(outcome, variables.duration));
       onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'suspend' });
+      // A banned-event read cached before this Suspend must not show the
+      // author's post outside the audited viewer, in any host (#445). The report
+      // pane does this itself, and keeps the post it shows.
+      if (context !== 'report' && started?.bannedEventApiUrl) {
+        suspendBannedEventReads(queryClient, started.bannedEventApiUrl, variables.pubkey);
+      }
     },
-    onError: (error: Error, { pubkey: target }) => {
+    onError: (error: Error, { pubkey: target }, started) => {
+      // A suspend that errored or timed out may still have applied: one re-read
+      // is the cost of guessing wrong the other way (as in age review). In every
+      // context, the report pane too, which hears nothing from a failed action
+      // and keeps no post for it.
+      if (started?.bannedEventApiUrl) suspendBannedEventReads(queryClient, started.bannedEventApiUrl, target);
       if (redirectIfGuarded(error, target)) return;
       toast({ title: 'Failed to suspend user', description: error.message, variant: 'destructive' });
     },
@@ -312,14 +334,16 @@ export function UserActions({
         action: 'unban_user',
         reason: 'Unbanned by moderator',
       }, unbanAuditFailedToast(outcome, toastOpts));
-      return outcomeToast;
+      // The unban ended the suspension too (not when the choice was skipped or the
+      // suspension continues): hosts that kept a post from a Suspend drop it.
+      return { outcomeToast, suspensionEnded: !outcome.choiceSkipped && outcome.suspension.state === 'ended' };
     },
-    onSuccess: (outcomeToast, variables) => {
+    onSuccess: ({ outcomeToast, suspensionEnded }, variables) => {
       // Reset, not invalidate: the unban may have ended or changed the timer,
       // and a failed re-read must not leave the old end on screen as current.
       void queryClient.resetQueries({ queryKey: TIMED_SUSPENSIONS_KEY });
       toast(outcomeToast);
-      onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'unban' });
+      onActionComplete?.({ ...accountOf(variables), accountStatusChanged: true, action: 'unban', ...(suspensionEnded && { suspensionEnded }) });
     },
     onError: async (error: Error, { pubkey: target }) => {
       if (redirectIfGuarded(error, target)) return;
@@ -386,7 +410,9 @@ export function UserActions({
           reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
         }))
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
-      onActionComplete?.({ accountStatusChanged: false });
+      onActionComplete?.(job.action === 'delete-all'
+        ? { accountStatusChanged: false, action: 'delete-all' }
+        : { accountStatusChanged: false });
     },
     onError: (error, target) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
