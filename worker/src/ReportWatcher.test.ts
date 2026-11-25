@@ -1208,7 +1208,7 @@ describe('ReportWatcher', () => {
       ((await (await w.fetch(new Request('https://do/status'))).json()) as { status: ReportWatcherStatus }).status;
     const reload = async () => {
       const w = new ReportWatcher(mockState, mockEnv);
-      await new Promise(r => setTimeout(r, 10)); // let the constructor's storage load finish
+      await mockState.blockConcurrencyWhile(async () => {});
       return w;
     };
 
@@ -1244,11 +1244,14 @@ describe('ReportWatcher', () => {
       expect((await status(watcher)).deliberatelyStoppedAt).toBe(1_795_595_801_000);
     });
 
-    it('clears the marker on /start', async () => {
+    it('clears the persisted stop marker on /start', async () => {
       await watcher.fetch(post('/start'));
       await watcher.fetch(post('/stop'));
       await watcher.fetch(post('/start'));
       expect((await status(watcher)).deliberatelyStoppedAt).toBeNull();
+      const restarted = await status(await reload());
+      expect(restarted.running).toBe(true);
+      expect(restarted.deliberatelyStoppedAt).toBeNull();
     });
 
     it('survives a reload of the Durable Object', async () => {
