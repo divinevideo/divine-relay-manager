@@ -542,6 +542,79 @@ describe('sexual quarantine watcher integration', () => {
     expect(order).toEqual(['connect', 'tick', 'replay']);
   });
 
+  it('replays no report created in a stopped period, saved or still waiting for its connect', async () => {
+    const adult = (n: number, createdAt: number) => finalizeEvent({ kind: 1984, created_at: createdAt, content: '',
+      tags: [['e', String(n).repeat(64), 'NS-sexualContent']] }, new Uint8Array(32).fill(n)) as ReportEvent;
+    const stopped = adult(2, 100);
+    // After the stop's margin too (it runs to 120 s past the start).
+    const normal = adult(3, 280);
+    for (const stopState of [
+      { 'report-catchup-stopped-periods': [{ after: 50, until: 270 }] },
+      // A start whose connect has not planned yet: the stop marker and the start time.
+      { 'report-watcher-deliberate-stop': 50, 'report-watcher-start-after-stop': 150 },
+    ]) {
+      const f = fixture(); await f.ready;
+      await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true, trustedClients: [], tiers: [] }) }));
+      for (const [key, value] of Object.entries(stopState)) await f.durable.put(key, value);
+      const actualReplay = replay.replayAdultReports;
+      vi.spyOn(replay, 'replayAdultReports').mockImplementation((storage, url, ingest) => actualReplay(storage, url, ingest, 300));
+      vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [normal, stopped] });
+      vi.spyOn(f.watcher as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+      const processed = vi.spyOn(f.watcher as unknown as { processAutoHide(e: ReportEvent): Promise<void> }, 'processAutoHide').mockResolvedValue();
+      (f.watcher as unknown as { running: boolean }).running = true;
+      await f.watcher.alarm();
+      expect(processed.mock.calls.map(call => call[0].id)).toEqual([normal.id]);
+      expect(await f.durable.get('sexual-replay-through')).toBe(300);
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('a stop during a replay processes no further report and keeps the replay cursor', async () => {
+    const adult = (n: number, createdAt: number) => finalizeEvent({ kind: 1984, created_at: createdAt, content: '',
+      tags: [['e', String(n).repeat(64), 'NS-sexualContent']] }, new Uint8Array(32).fill(n)) as ReportEvent;
+    const first = adult(4, 200);
+    const second = adult(5, 190);
+    const f = fixture(); await f.ready;
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true, trustedClients: [], tiers: [] }) }));
+    const actualReplay = replay.replayAdultReports;
+    vi.spyOn(replay, 'replayAdultReports').mockImplementation((storage, url, ingest) => actualReplay(storage, url, ingest, 300));
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [first, second] });
+    vi.spyOn(f.watcher as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const watcher = f.watcher as unknown as { running: boolean };
+    const processed = vi.spyOn(f.watcher as unknown as { processAutoHide(e: ReportEvent): Promise<void> }, 'processAutoHide')
+      .mockImplementation(async () => { watcher.running = false; });
+    watcher.running = true;
+    await f.watcher.alarm();
+    expect(processed.mock.calls.map(call => call[0].id)).toEqual([first.id]);
+    expect(await f.durable.get('sexual-replay-through')).toBeUndefined();
+    expect(await f.durable.get('sexual-replay-window')).toBeDefined();
+  });
+
+  it('a stop and a start during one replay run: the next report from that stop is skipped', async () => {
+    const adult = (n: number, createdAt: number) => finalizeEvent({ kind: 1984, created_at: createdAt, content: '',
+      tags: [['e', String(n).repeat(64), 'NS-sexualContent']] }, new Uint8Array(32).fill(n)) as ReportEvent;
+    const first = adult(6, 200);
+    const second = adult(7, 190);
+    const f = fixture(); await f.ready;
+    await f.watcher.fetch(new Request('https://do/config', { method: 'PUT', body: JSON.stringify({ enabled: true, trustedClients: [], tiers: [] }) }));
+    const actualReplay = replay.replayAdultReports;
+    vi.spyOn(replay, 'replayAdultReports').mockImplementation((storage, url, ingest) => actualReplay(storage, url, ingest, 300));
+    vi.spyOn(relayProfile, 'queryRelay').mockResolvedValue({ success: true, events: [first, second] });
+    vi.spyOn(f.watcher as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+    // While the first report is processed, a stop at 180 and a start at 195
+    // land; no connect has consumed that stop yet.
+    const processed = vi.spyOn(f.watcher as unknown as { processAutoHide(e: ReportEvent): Promise<void> }, 'processAutoHide')
+      .mockImplementation(async () => {
+        if (processed.mock.calls.length > 1) return;
+        await f.durable.put('report-watcher-deliberate-stop', 180);
+        await f.durable.put('report-watcher-start-after-stop', 195);
+      });
+    (f.watcher as unknown as { running: boolean }).running = true;
+    await f.watcher.alarm();
+    expect(processed.mock.calls.map(call => call[0].id)).toEqual([first.id]);
+  });
+
   it('does not admit new replay reports while watching is stopped', async () => {
     const f = fixture(); await f.send(1, 'NS-sexualContent');
     const replayReports = vi.spyOn(replay, 'replayAdultReports').mockResolvedValue();

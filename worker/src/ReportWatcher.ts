@@ -7,12 +7,14 @@ import { ensureSchema } from './db';
 import { reportArrivalStatement } from './report-arrivals';
 import { metaStatement, readMeta, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource } from './report-index';
 import {
-  CATCHUP_MAX_PENDING_WINDOWS,
   CATCHUP_STOPPED_PERIODS_KEY,
   CATCHUP_WINDOWS_KEY,
   addPendingWindow,
   addStoppedPeriod,
-  pruneStoppedPeriods,
+  inStoppedPeriod,
+  stopPeriodFor,
+  stoppedPeriodMergeAlertText,
+  stoppedPeriodReachFloor,
   type StoppedPeriod,
   planCatchUpWindow,
   runPendingCatchUp,
@@ -39,7 +41,7 @@ import { type KeycastEnv } from './keycast-client';
 import { openReportedAgeReviewCase } from './reported-age-review';
 import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit, QuarantineConflict, adultSexualCategory, type QuarantineSnapshot } from './sexual-quarantine';
 import { createQuarantineIO, type SexualQuarantineEnv } from './sexual-quarantine-io';
-import { replayAdultReports, reportCategory } from './sexual-report-replay';
+import { replayAdultReports, replayReachFloor, reportCategory } from './sexual-report-replay';
 
 const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
 const UNRESOLVED_HUMAN_HIDE_VISIBILITY = 'hide-unresolved';
@@ -156,9 +158,18 @@ const LIVE_EOSE_TIMEOUT_MS = 60000;
 
 /** DO storage key: unix seconds of the last /stop, so catch-up can tell a deliberate stop from an outage. */
 const DELIBERATE_STOP_KEY = 'report-watcher-deliberate-stop';
+/**
+ * DO storage key: unix seconds of the /start after that stop, until a connect
+ * consumes both. The stopped period ends here: time from the start to the
+ * connect is an outage, not more stopped time.
+ */
+const START_AFTER_STOP_KEY = 'report-watcher-start-after-stop';
 
 /** Report ids claimed by the live path or catch-up, kept in insertion order up to this many. */
 const CLAIMED_REPORT_IDS_CAP = 5000;
+
+/** Thrown from the replay's ingest when the watcher stopped mid-replay. */
+class ReplayStopped extends Error {}
 
 const IDLE_CATCHUP: CatchUpSummary = { ran: false, found: 0, handled: 0, autoHidden: 0, complete: false };
 
@@ -340,6 +351,23 @@ export class ReportWatcher implements DurableObject {
     // Persist state
     await this.persistState();
 
+    // The end of the stopped period an unconsumed stop marker opened. Before
+    // the connect, so its plan reads it. Non-critical: without it the period
+    // ends at the connect, as it did before.
+    try {
+      await this.state.storage.transaction(async (tx) => {
+        // Running is checked after the read: a /stop can land during it.
+        if (await tx.get<number>(DELIBERATE_STOP_KEY) !== undefined && this.running) {
+          await tx.put(START_AFTER_STOP_KEY, Math.floor(Date.now() / 1000));
+        }
+      });
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to record the start after a deliberate stop:', error);
+    }
+    // A /stop can land during any await above. It wins: no socket, no alarm
+    // (and the transaction above wrote no start time).
+    if (!this.running) return this.stoppedWhileStarting();
+
     // Start WebSocket connection
     this.connect();
 
@@ -351,6 +379,18 @@ export class ReportWatcher implements DurableObject {
     return new Response(JSON.stringify({
       success: true,
       message: 'Started',
+      status: this.getStatus(),
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private stoppedWhileStarting(): Response {
+    console.log('[ReportWatcher] Stopped while starting; start abandoned');
+    return new Response(JSON.stringify({
+      success: true,
+      message: 'Stopped while starting',
       status: this.getStatus(),
     }), {
       status: 200,
@@ -381,15 +421,31 @@ export class ReportWatcher implements DurableObject {
     // Non-critical: if the write fails, /stop still completes. A missing marker
     // makes catch-up treat the gap as an outage, so auto-hide and age review
     // run on it: the miss-nothing default, not the stop-respecting one.
-    // An earlier marker that no connect has consumed yet (a start that never
-    // reached the relay) is kept: the watcher has been stopped since then.
+    // An earlier marker that no connect has consumed (a start that never
+    // reached the relay) is closed off at that start: its stopped period is
+    // saved (to the clock margin after the start, as a connect would save it),
+    // and this stop opens a new one. The time between was an outage.
+    const merged: StoppedPeriod[] = [];
     try {
-      if (await this.state.storage.get<number>(DELIBERATE_STOP_KEY) === undefined) {
-        await this.state.storage.put(DELIBERATE_STOP_KEY, Math.floor(Date.now() / 1000));
-      }
+      await this.state.storage.transaction(async (tx) => {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+        const startedAt = await tx.get<number>(START_AFTER_STOP_KEY);
+        if (stopMarker !== undefined && startedAt !== undefined) {
+          const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+          const windows = (await tx.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
+          // No heartbeat read here (D1 on /stop), so only the cap prunes; the
+          // next connect and pass prune by the heartbeat.
+          await tx.put(CATCHUP_STOPPED_PERIODS_KEY, addStoppedPeriod(periods, stopPeriodFor(stopMarker, startedAt, nowSec), windows, -Infinity, m => merged.push(m)));
+        }
+        if (stopMarker === undefined || startedAt !== undefined) await tx.put(DELIBERATE_STOP_KEY, nowSec);
+        await tx.delete(START_AFTER_STOP_KEY);
+      });
     } catch (error) {
+      merged.length = 0;
       console.error('[ReportWatcher] Failed to record deliberate-stop marker:', error);
     }
+    for (const m of merged) await sendReportIndexAlert(this.env, stoppedPeriodMergeAlertText(m));
 
     // Persist state
     await this.persistState();
@@ -909,7 +965,7 @@ export class ReportWatcher implements DurableObject {
       console.error('[ReportWatcher] Failed to read the heartbeat for restart catch-up; plan retried by the health alarm:', error);
       return false;
     }
-    let disabledMerge: CatchUpWindow[] = [];
+    let merged: StoppedPeriod[] = [];
     const planned = await this.state.blockConcurrencyWhile(async () => {
       if (this.ws !== socket) return false;
       try {
@@ -917,11 +973,12 @@ export class ReportWatcher implements DurableObject {
         // running pass read-modify-writes the same keys (its cursor saves and
         // its end-of-pass prune), and the marker is consumed exactly when what
         // it describes is saved.
-        disabledMerge = await this.state.storage.transaction(async (tx) => {
-          const disabled: CatchUpWindow[] = [];
+        merged = await this.state.storage.transaction(async (tx) => {
+          const mergedHere: StoppedPeriod[] = [];
           const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+          const startedAt = await tx.get<number>(START_AFTER_STOP_KEY);
           const nowSec = Math.floor(Date.now() / 1000);
-          const fresh = planCatchUpWindow(lastAliveAt, nowSec, stopMarker);
+          const fresh = planCatchUpWindow(lastAliveAt, nowSec);
           let windows = (await tx.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
           const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
           if (fresh.length > 0) {
@@ -929,41 +986,67 @@ export class ReportWatcher implements DurableObject {
               const added = addPendingWindow(windows, window);
               windows = added.windows;
               if (added.merged) console.warn('[ReportWatcher] Catch-up windows over the cap; merged the two oldest');
-              if (added.handlerDisabled) disabled.push(...added.mergedWindows.filter(w => !w.handlerEnabled));
             }
             await tx.put(CATCHUP_WINDOWS_KEY, windows);
           }
           if (stopMarker !== undefined) {
             // The stopped period is kept apart from the windows, so catch-up
             // runs no handler on a report created in it whichever window finds
-            // it (see runPendingCatchUp).
-            const kept = stopMarker < nowSec
-              ? addStoppedPeriod(periods, { after: stopMarker, until: nowSec }, windows)
-              : pruneStoppedPeriods(periods, windows);
+            // it (see runPendingCatchUp). From the stop to the /start plus the
+            // clock margin after it (stopPeriodFor); without a recorded start,
+            // anchored at this connect.
+            const reachFloor = Math.min(stoppedPeriodReachFloor(lastAliveAt, nowSec), await this.otherReachFloor(tx, nowSec));
+            const kept = addStoppedPeriod(periods, stopPeriodFor(stopMarker, startedAt, nowSec), windows, reachFloor, m => mergedHere.push(m));
             await tx.put(CATCHUP_STOPPED_PERIODS_KEY, kept);
             await tx.delete(DELIBERATE_STOP_KEY);
           }
-          return disabled;
+          await tx.delete(START_AFTER_STOP_KEY);
+          return mergedHere;
         });
         this.catchUpPlannedForConnection = true;
         return true;
       } catch (error) {
-        disabledMerge = [];
+        merged = [];
         console.error('[ReportWatcher] Failed to plan restart catch-up; heartbeat held for the next connection:', error);
         return false;
       }
     });
-    if (!planned) return false;
     // Outside the concurrency gate, so the webhook never holds it.
-    if (disabledMerge.length > 0) {
-      const spans = disabledMerge.map(w => `${w.since}..${w.until}`).join(', ');
-      await sendReportIndexAlert(
-        this.env,
-        `Restart catch-up has more than ${CATCHUP_MAX_PENDING_WINDOWS} pending windows; merging took auto-hide and age review away from reports in ${spans}. `
-        + 'They will be indexed only. Check why earlier catch-up windows are not finishing.',
-      );
-    }
-    return true;
+    for (const m of merged) await sendReportIndexAlert(this.env, stoppedPeriodMergeAlertText(m));
+    return planned;
+  }
+
+  /**
+   * The stopped periods as they stand: the saved ones, plus a stop that no
+   * connect has consumed yet (stopPeriodFor, from its marker and the recorded
+   * /start). Catch-up and the adult replay both read this, per report. One
+   * transaction, so a plan consuming the marker cannot fall between the reads.
+   */
+  private async currentStoppedPeriods(): Promise<StoppedPeriod[]> {
+    return this.state.storage.transaction(async (tx) => {
+      const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+      const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+      if (stopMarker === undefined) return periods;
+      const startedAt = await tx.get<number>(START_AFTER_STOP_KEY);
+      return [...periods, stopPeriodFor(stopMarker, startedAt, Math.floor(Date.now() / 1000))];
+    });
+  }
+
+  /**
+   * How far back the adult replay can still read, else Infinity. Stopped
+   * periods are kept from there on, so the replay can still skip them. It
+   * counts while the sexual quarantine is active (env flag or the persisted
+   * flag), and also while the replay has never run (no open window, no
+   * cursor): a first activation reads a day back. Storage only.
+   */
+  private async otherReachFloor(
+    storage: { get<T>(key: string): Promise<T | undefined> },
+    nowSec: number,
+  ): Promise<number> {
+    const active = this.env.SEXUAL_QUARANTINE_ENABLED === 'true' || await storage.get<boolean>('sexual-quarantine-activated');
+    const neverRan = await storage.get('sexual-replay-window') === undefined
+      && await storage.get('sexual-replay-through') === undefined;
+    return active || neverRan ? replayReachFloor(storage, nowSec) : Infinity;
   }
 
   /** One catch-up pass, unless one is already running or the watcher is stopped. Never throws. */
@@ -989,6 +1072,8 @@ export class ReportWatcher implements DurableObject {
             return autoActioned.delete(canonicalHex64(report.id) ?? report.id);
           },
           isRunning: () => this.running,
+          stoppedPeriods: () => this.currentStoppedPeriods(),
+          otherReachFloor: (nowSec) => this.otherReachFloor(this.state.storage, nowSec),
           alert: (text) => sendReportIndexAlert(this.env, text),
           nowMs: () => Date.now(),
         });
@@ -1998,11 +2083,23 @@ export class ReportWatcher implements DurableObject {
     if (this.running && replayActivated && this.autoHideConfig?.enabled) {
       try {
         await replayAdultReports(this.state.storage, this.env.RELAY_URL, async (event, category, target) => {
+          // A stop during the replay: nothing more runs, and the throw keeps
+          // the cursor so the next start replays the rest.
+          if (!this.running) throw new ReplayStopped();
+          // Same gate as catch-up, read as it stands for each report (a stop
+          // and a start can land during the run): no automated action on a
+          // report created while the watcher was deliberately stopped. It
+          // includes the clock margin after the /start. The replay also
+          // re-reads live arrivals, so a report from those two minutes whose
+          // live handling failed is not recovered here. Accepted: the window
+          // is short and the report stays in the queue for a moderator.
+          if (inStoppedPeriod(event.created_at, await this.currentStoppedPeriods())) return;
           if (await this.hasBlockingHumanResolution(target, false) === null) throw new Error('Review state unavailable');
           await this.processAutoHide(event, category, target, false);
         });
-      } catch {
-        console.error('[ALERT] Sexual report replay incomplete; cursor retained');
+      } catch (error) {
+        if (error instanceof ReplayStopped) console.log('[ReportWatcher] Stopped during the sexual report replay; cursor retained');
+        else console.error('[ALERT] Sexual report replay incomplete; cursor retained');
       }
       await this.scheduleHealthCheck();
     }

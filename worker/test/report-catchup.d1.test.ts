@@ -7,7 +7,9 @@ import { finalizeEvent, generateSecretKey, getPublicKey, type Event as NostrEven
 import { ensureSchema } from '../src/db';
 import { ReportWatcher, type ReportWatcherEnv } from '../src/ReportWatcher';
 import {
+  CATCHUP_CLOCK_MARGIN_SECONDS,
   CATCHUP_MIN_ATTEMPT_INTERVAL_MS,
+  CATCHUP_RELAY_CLOCK_ALLOWANCE_SECONDS,
   CATCHUP_SUCCESS_INTERVAL_MS,
   addPendingWindow,
   addStoppedPeriod,
@@ -18,6 +20,7 @@ import {
 import { metaStatement, type SignedReport } from '../src/report-index';
 import { partialEnv } from '../src/test-helpers/partial-env';
 import { createQuarantineIO } from '../src/sexual-quarantine-io';
+import { sendReportIndexAlert } from '../src/report-index-alerts';
 
 vi.mock('../src/relay-profile', async (importOriginal) => ({
   ...await importOriginal<typeof import('../src/relay-profile')>(),
@@ -55,6 +58,9 @@ const relay = {
   // How the relay answers the live subscription: EOSE (healthy), CLOSED (the
   // relay refuses or aborts it), or nothing.
   liveReply: 'eose' as 'eose' | 'closed' | 'none',
+  // The relay's clock. Like funnelcake, which adds created_at <= now() to every
+  // REQ, the fake relay never returns a report dated after it.
+  now: () => Math.floor(Date.now() / 1000),
   reset() {
     this.corpus = [];
     this.queries = [];
@@ -64,6 +70,7 @@ const relay = {
     this.sockets = [];
     this.autoOpen = true;
     this.liveReply = 'eose';
+    this.now = () => Math.floor(Date.now() / 1000);
   },
   pushLive(event: NostrEvent) {
     if (!this.live) throw new Error('no live subscription');
@@ -137,8 +144,10 @@ class FakeSocket {
     const kinds = filter.kinds as number[];
     const since = filter.since as number | undefined;
     const until = filter.until as number | undefined;
+    const relayNow = relay.now();
     const rows = relay.corpus
       .filter(e => kinds.includes(e.kind)
+        && e.created_at <= relayNow
         && (since === undefined || e.created_at >= since)
         && (until === undefined || e.created_at <= until))
       .sort((a, b) => b.created_at - a.created_at || (a.id < b.id ? -1 : 1))
@@ -312,6 +321,26 @@ const underageReport = (pubkey: string, createdAt: number) =>
 async function seedHeartbeat(at: number) {
   await metaStatement(DB, 'watcher_last_alive_at', at).run();
 }
+// Moves the watcher's clock (and the fake relay's) by ms; restored after each test.
+const shiftClock = (ms: number) => {
+  const real = Date.now.bind(Date);
+  return vi.spyOn(Date, 'now').mockImplementation(() => real() + ms);
+};
+// After a connect's pass, only the part of its window the relay could not show
+// yet is left pending (see runPendingCatchUp): from just before the pass to the
+// clock margin past the connect.
+function expectOnlyUnseenTail(windows: unknown, connectedAt: number) {
+  expect(windows).toEqual([{ since: expect.any(Number), until: expect.any(Number) }]);
+  const [w] = windows as CatchUpWindow[];
+  expect(w.since).toBeGreaterThanOrEqual(connectedAt - CATCHUP_RELAY_CLOCK_ALLOWANCE_SECONDS + 1);
+  expect(w.until).toBeGreaterThanOrEqual(connectedAt + CATCHUP_CLOCK_MARGIN_SECONDS);
+}
+// The catch-up deps the watcher supplies from storage, for tests that run a
+// pass directly: the saved stopped periods, and no replay reach.
+const periodDeps = (storage: DurableObjectStorage) => ({
+  stoppedPeriods: async () => (await storage.get<Array<{ after: number; until: number }>>('report-catchup-stopped-periods')) ?? [],
+  otherReachFloor: async () => Infinity,
+});
 const bansFor = (target: string) => nip86.filter(c => c.method === 'banevent' && c.params[0] === target);
 const allRows = async (sql: string) => (await DB.prepare(sql).all()).results ?? [];
 
@@ -348,11 +377,12 @@ describe('catch-up when the listener connects', () => {
     );
     expect((await allRows('SELECT report_id FROM report_arrivals ORDER BY report_id')).map(r => r.report_id)).toEqual([a.id, b.id].sort());
 
-    // The window is done: the cron route finds nothing pending.
-    expect(w.data.get('report-catchup-windows')).toEqual([]);
+    // The window is done but for the part the relay could not show yet; the
+    // cron's pass inside the 30-second floor waits.
+    expectOnlyUnseenTail(w.data.get('report-catchup-windows'), now);
     const response = await w.post('/internal/report-catchup');
     expect(response.status).toBe(200);
-    expect(await response.json()).toMatchObject({ ran: false, complete: true });
+    expect(await response.json()).toMatchObject({ ran: false });
   });
 
   it('skips a report already in report_arrivals', async () => {
@@ -438,7 +468,7 @@ describe('catch-up when the listener connects', () => {
     expect(bansFor(duringStop)).toHaveLength(0);
     expect(await allRows(`SELECT pubkey FROM age_review_cases WHERE pubkey = '${pubkeyDuring}'`)).toEqual([]);
     expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(4);
-    expect(w.data.get('report-catchup-windows')).toEqual([]);
+    expectOnlyUnseenTail(w.data.get('report-catchup-windows'), now);
     expect(w.data.has('report-watcher-deliberate-stop')).toBe(false);
   });
 
@@ -464,16 +494,20 @@ describe('catch-up when the listener connects', () => {
     await w.post('/start');
     await settle(w.pending);
     expect(relay.queries).toEqual([]);
-    expect(w.data.get('report-catchup-stopped-periods')).toEqual([{ after: stopAt, until: expect.any(Number) }]);
+    // The stopped period up to the start, joined with the margin after the
+    // connect (two periods if the clock ticked between them).
+    const periods = w.data.get('report-catchup-stopped-periods') as Array<{ after: number; until: number }>;
+    expect(periods[0].after).toBe(stopAt);
+    expect(periods.at(-1)!.until).toBeGreaterThanOrEqual(now + 120);
 
     // The socket drops before any heartbeat stamp; the alarm reconnects and
-    // the new connection plans [heartbeat - 600, now], which folds into the
-    // handler-on window ahead of the handler-off one.
+    // the new connection plans [heartbeat - 600, now + 120], which folds into
+    // the first connect's window: one handler-on window over the stopped period.
     relay.sockets[0].close();
     await w.watcher.alarm();
     await settle(w.pending);
     const pending = w.data.get('report-catchup-windows') as CatchUpWindow[];
-    expect(pending[0]).toMatchObject({ since: heartbeat - 600, handlerEnabled: true });
+    expect(pending[0]).toMatchObject({ since: heartbeat - 600 });
     expect(pending[0].until).toBeGreaterThan(stopAt);
 
     w.data.delete('report-catchup-last-attempt');
@@ -484,7 +518,7 @@ describe('catch-up when the listener connects', () => {
     expect(bansFor(stoppedTarget)).toHaveLength(0);
     expect(await allRows(`SELECT pubkey FROM age_review_cases WHERE pubkey = '${stoppedPubkey}'`)).toEqual([]);
     expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(3);
-    expect(w.data.get('report-catchup-windows')).toEqual([]);
+    expectOnlyUnseenTail(w.data.get('report-catchup-windows'), now);
   });
 
   it('prunes a stopped period once every pending window starts after it', async () => {
@@ -492,7 +526,7 @@ describe('catch-up when the listener connects', () => {
     const old = { after: now - 5000, until: now - 4000 };
     const live = { after: now - 200, until: now - 100 };
     const s = makeState();
-    await s.storage.put('report-catchup-windows', [{ since: now - 1000, until: now - 900, handlerEnabled: true }, { since: now - 300, until: now, handlerEnabled: true }]);
+    await s.storage.put('report-catchup-windows', [{ since: now - 1000, until: now - 900 }, { since: now - 300, until: now }]);
     await s.storage.put('report-catchup-stopped-periods', [old, live]);
     // Query 0 walks the first window (empty, so complete); query 1, the
     // second window's first page, fails.
@@ -500,13 +534,13 @@ describe('catch-up when the listener connects', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage, claim: () => true, handle: async () => {},
-      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => 9_000_000,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => Date.now(),
     });
 
     // The first window finished; the second failed and is kept. Only the
     // period that window can still reach survives.
-    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: now - 300, until: now, handlerEnabled: true }]);
+    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: now - 300, until: now }]);
     expect(await s.storage.get('report-catchup-stopped-periods')).toEqual([live]);
   });
 
@@ -633,7 +667,7 @@ describe('catch-up when the listener connects', () => {
 
   it('keeps a failed window and resumes it from its saved cursor no sooner than the attempt interval', async () => {
     const base = nowSec() - 1000;
-    const window: CatchUpWindow = { since: base - 600, until: base, handlerEnabled: true };
+    const window: CatchUpWindow = { since: base - 600, until: base };
     const reports = [minorsReport(hex(0xe1), base - 10), minorsReport(hex(0xe2), base - 20), minorsReport(hex(0xe3), base - 30)];
     relay.corpus = reports;
     // Page 1 answers; page 2 (the walk's confirming page) fails.
@@ -643,11 +677,11 @@ describe('catch-up when the listener connects', () => {
     await s.storage.put('report-catchup-windows', [window]);
     const claimed = new Set<string>();
     const handled: Array<{ id: string; handlerEnabled: boolean }> = [];
-    let clock = 5_000_000;
+    let clock = Date.now();
     const deps = {
       db: DB,
       relayUrl: RELAY_URL,
-      storage: s.storage,
+      storage: s.storage, ...periodDeps(s.storage),
       claim: (id: string) => (claimed.has(id) ? false : (claimed.add(id), true)),
       handle: async (report: SignedReport, handlerEnabled: boolean) => { handled.push({ id: report.id, handlerEnabled }); },
       isRunning: () => true,
@@ -680,15 +714,15 @@ describe('catch-up when the listener connects', () => {
   });
   it('a pass runs no handler on a stopped-period report found by a folded handler-on window', async () => {
     // The reviewer's sequence against the real planning functions, then a real
-    // pass: the handler-on window found first spans the stopped period.
+    // pass: the handler-on window spans the stopped period.
     const now = nowSec();
     const heartbeat = now - 300;
     const stopAt = now - 200;
     const startAt = now - 100;
-    let windows = planCatchUpWindow(heartbeat, startAt, stopAt);
-    const periods = addStoppedPeriod([], { after: stopAt, until: startAt }, windows);
+    let windows = planCatchUpWindow(heartbeat, startAt);
+    const periods = addStoppedPeriod([], { after: stopAt, until: startAt }, windows, heartbeat - 600);
     for (const w of planCatchUpWindow(heartbeat, startAt + 20)) windows = addPendingWindow(windows, w).windows;
-    expect(windows[0]).toEqual({ since: heartbeat - 600, until: startAt + 20 + 120, handlerEnabled: true });
+    expect(windows[0]).toEqual({ since: heartbeat - 600, until: startAt + 20 + 120 });
 
     const outage = minorsReport(hex(0xc1), heartbeat + 50);
     const stopped = minorsReport(hex(0xc2), stopAt + 50);
@@ -701,24 +735,25 @@ describe('catch-up when the listener connects', () => {
     const handled = new Map<string, boolean>();
 
     await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage),
       claim: (id: string) => (claimed.has(id) ? false : (claimed.add(id), true)),
       handle: async (report: SignedReport, handlerEnabled: boolean) => { handled.set(report.id, handlerEnabled); },
       isRunning: () => true,
       alert: vi.fn(async () => {}),
-      nowMs: () => 9_000_000,
+      nowMs: () => Date.now(),
     });
 
     expect(handled.get(stopped.id)).toBe(false);
     expect(handled.get(outage.id)).toBe(true);
     expect(handled.get(afterStart.id)).toBe(true);
-    expect(await s.storage.get('report-catchup-windows')).toEqual([]);
+    // The window reaches 40 s past now: that part waits for a later pass.
+    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: expect.any(Number), until: startAt + 140 }]);
   });
 
   it('a failed page stops the pass: no later window is walked', async () => {
     const base = nowSec() - 1000;
-    const first: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };
-    const second: CatchUpWindow = { since: base + 100, until: base + 200, handlerEnabled: true };
+    const first: CatchUpWindow = { since: base - 100, until: base };
+    const second: CatchUpWindow = { since: base + 100, until: base + 200 };
     relay.corpus = [minorsReport(hex(0xe4), base - 50), minorsReport(hex(0xe5), base + 150)];
     relay.closeQueries = new Set([0]);
     const s = makeState();
@@ -727,12 +762,12 @@ describe('catch-up when the listener connects', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     const result = await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage),
       claim: () => true,
       handle: async (report: SignedReport) => { handled.push(report.id); },
       isRunning: () => true,
       alert: vi.fn(async () => {}),
-      nowMs: () => 9_000_000,
+      nowMs: () => Date.now(),
     });
 
     expect(result).toMatchObject({ ran: true, complete: false, handled: 0 });
@@ -745,8 +780,8 @@ describe('catch-up when the listener connects', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const alerts = () => errors.mock.calls.filter(call => String(call[0]).startsWith('[ALERT] [report-index]'));
     const base = nowSec() - 2000;
-    const flooded: CatchUpWindow = { since: base - 1000, until: base, handlerEnabled: true };
-    const later: CatchUpWindow = { since: base + 100, until: base + 200, handlerEnabled: true };
+    const flooded: CatchUpWindow = { since: base - 1000, until: base };
+    const later: CatchUpWindow = { since: base + 100, until: base + 200 };
     const second = base - 500;
     // 501 reports in one second: a full page of 500 cannot move the cursor
     // below that second. A category no tier acts on keeps 500 handlings cheap.
@@ -774,7 +809,7 @@ describe('catch-up when the listener connects', () => {
     const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
     const alerts = () => errors.mock.calls.filter(call => String(call[0]).startsWith('[ALERT] [report-index]'));
     const base = nowSec() - 3000;
-    const window: CatchUpWindow = { since: base - 1000, until: base, handlerEnabled: true };
+    const window: CatchUpWindow = { since: base - 1000, until: base };
     const first = base - 200;
     const second = base - 400;
     const flood = (at: number, offset: number) =>
@@ -798,8 +833,8 @@ describe('catch-up when the listener connects', () => {
 
   it('a stop halts a running pass at the next page boundary without stranding claimed ids', async () => {
     const base = nowSec() - 2000;
-    const first: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };
-    const second: CatchUpWindow = { since: base + 100, until: base + 200, handlerEnabled: true };
+    const first: CatchUpWindow = { since: base - 100, until: base };
+    const second: CatchUpWindow = { since: base + 100, until: base + 200 };
     const targetA = hex(0xf2);
     const targetB = hex(0xf3);
     const b = minorsReport(targetB, base + 150);
@@ -832,8 +867,8 @@ describe('catch-up when the listener connects', () => {
 
   it('a stop between windows starts no walk of the next window', async () => {
     const base = nowSec() - 2000;
-    const first: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };
-    const second: CatchUpWindow = { since: base + 100, until: base + 200, handlerEnabled: true };
+    const first: CatchUpWindow = { since: base - 100, until: base };
+    const second: CatchUpWindow = { since: base + 100, until: base + 200 };
     relay.corpus = [minorsReport(hex(0xf4), base - 50), minorsReport(hex(0xf5), base + 150)];
 
     const w = await newWatcher();
@@ -845,36 +880,6 @@ describe('catch-up when the listener connects', () => {
 
     expect(relay.queries).toHaveLength(2);
     expect(w.data.get('report-catchup-windows')).toEqual([second]);
-  });
-
-  it('alerts when a window merge turns the handler off for a window that had it on', async () => {
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
-    const alerts = () => errors.mock.calls.filter(call => String(call[0]).startsWith('[ALERT] [report-index]'));
-    const base = nowSec() - 5000;
-    const windows = (firstTwo: [boolean, boolean]): CatchUpWindow[] => [
-      { since: base, until: base + 10, handlerEnabled: firstTwo[0] },
-      { since: base + 20, until: base + 30, handlerEnabled: firstTwo[1] },
-      ...[1, 2, 3, 4, 5, 6].map(i => ({ since: base + 100 * i, until: base + 100 * i + 10, handlerEnabled: true })),
-    ];
-
-    // Both on: the merge keeps the handler, no alert.
-    await seedHeartbeat(nowSec() - 120);
-    const quiet = await newWatcher({ SLACK_WEBHOOK_URL: WEBHOOK_URL });
-    quiet.data.set('report-catchup-windows', windows([true, true]));
-    await quiet.post('/start');
-    await settle(quiet.pending);
-    expect(alerts()).toHaveLength(0);
-
-    // On merged with off: the on window's reports lose auto-hide; say so.
-    relay.reset();
-    await seedHeartbeat(nowSec() - 120);
-    const loud = await newWatcher({ SLACK_WEBHOOK_URL: WEBHOOK_URL });
-    loud.data.set('report-catchup-windows', windows([true, false]));
-    await loud.post('/start');
-    await settle(loud.pending);
-    expect(alerts()).toHaveLength(1);
-    expect(String(alerts()[0][0])).toContain(`${base}..${base + 30}`);
-    expect(webhookPosts).toHaveLength(1);
   });
 
   it('a superseded connection\'s late plan does not start the heartbeat for the newer connection', async () => {
@@ -997,7 +1002,7 @@ describe('catch-up when the listener connects', () => {
     releaseMeta();
     await settle(w.pending);
     expect(metaReads).toBe(1);
-    expect(w.data.get('report-catchup-windows')).toEqual([]);
+    expectOnlyUnseenTail(w.data.get('report-catchup-windows'), nowSec() - 1);
   });
 
   it('counts sexual-quarantine hide triggers toward the burst alert', async () => {
@@ -1144,8 +1149,8 @@ describe('catch-up when the listener connects', () => {
 
   it('a window a connect adds while a pass saves its cursor is not lost', async () => {
     const base = nowSec() - 3000;
-    const first: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };
-    const added: CatchUpWindow = { since: base + 500, until: base + 600, handlerEnabled: true };
+    const first: CatchUpWindow = { since: base - 100, until: base };
+    const added: CatchUpWindow = { since: base + 500, until: base + 600 };
     const r1 = minorsReport(hex(0x7001), base - 50);
     const r2 = minorsReport(hex(0x7002), base + 550);
     relay.corpus = [r1, r2];
@@ -1168,9 +1173,9 @@ describe('catch-up when the listener connects', () => {
     const handled: string[] = [];
 
     await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage, claim: () => true,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true,
       handle: async (report: SignedReport) => { handled.push(report.id); },
-      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => 9_000_000,
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => Date.now(),
     });
     await connect;
 
@@ -1180,8 +1185,8 @@ describe('catch-up when the listener connects', () => {
 
   it('a stopped period a connect adds while a pass prunes is not lost', async () => {
     const base = nowSec() - 3000;
-    const done: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };
-    const kept: CatchUpWindow = { since: base + 500, until: base + 600, handlerEnabled: true };
+    const done: CatchUpWindow = { since: base - 100, until: base };
+    const kept: CatchUpWindow = { since: base + 500, until: base + 600 };
     // The empty first window completes on query 0; the second fails on query 1.
     relay.closeQueries = new Set([1]);
     const oldPeriod = { after: base - 2000, until: base - 1900 };
@@ -1202,8 +1207,8 @@ describe('catch-up when the listener connects', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage, claim: () => true, handle: async () => {},
-      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => 9_000_000,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => Date.now(),
     });
     await connect;
 
@@ -1215,7 +1220,7 @@ describe('catch-up when the listener connects', () => {
     const now = nowSec();
     const heartbeat = now - 120;
     await seedHeartbeat(heartbeat);
-    const old: CatchUpWindow = { since: now - 90_000, until: now - 89_000, handlerEnabled: true };
+    const old: CatchUpWindow = { since: now - 90_000, until: now - 89_000 };
     const w = await newWatcher();
     w.data.set('report-catchup-windows', [old]);
     // Hold the connect's own pass, so only the plan writes.
@@ -1237,25 +1242,58 @@ describe('catch-up when the listener connects', () => {
 
     const windows = w.data.get('report-catchup-windows') as CatchUpWindow[];
     expect(windows).toHaveLength(1);
-    expect(windows[0]).toMatchObject({ since: heartbeat - 600, handlerEnabled: true });
+    expect(windows[0]).toMatchObject({ since: heartbeat - 600 });
   });
 
-  it('a second stop keeps the earlier unconsumed stop time', async () => {
+  // Stopped at now - 400, started at now - 300 while the relay is unreachable
+  // (so that start never planned), stopped again at now - 100, then started
+  // and connected now.
+  async function stopUnconnectedStartStop(corpus: NostrEvent[]) {
+    const now = nowSec();
+    await seedHeartbeat(now - 500);
     const w = await newWatcher();
-    // Stopped earlier; started while the relay is unreachable, so that start
-    // never planned and the marker is still unconsumed; then stopped again.
-    const earlier = nowSec() - 100;
-    w.data.set('report-watcher-deliberate-stop', earlier);
+    w.data.set('report-watcher-deliberate-stop', now - 400);
     relay.autoOpen = false;
+    let clock = shiftClock(-300_000);
     await w.post('/start');
+    clock.mockRestore();
+    clock = shiftClock(-100_000);
     await w.post('/stop');
-    expect(w.data.get('report-watcher-deliberate-stop')).toBe(earlier);
+    clock.mockRestore();
+    relay.corpus = corpus;
+    relay.autoOpen = true;
+    await w.post('/start');
+    await settle(w.pending);
+    return w;
+  }
+
+  it('a stop after a start that never connected ends the first stopped period two minutes after that start', async () => {
+    const now = nowSec();
+    // The time it ran without a relay, past the first start's margin, was an
+    // outage; only the two stopped periods are index-only.
+    const stoppedFirst = hex(0x9204);
+    const outage = hex(0x9203);
+    const stoppedSecond = hex(0x9205);
+    await stopUnconnectedStartStop([minorsReport(stoppedFirst, now - 350), minorsReport(outage, now - 150), minorsReport(stoppedSecond, now - 50)]);
+    expect(bansFor(outage)).toHaveLength(1);
+    expect(bansFor(stoppedFirst)).toHaveLength(0);
+    expect(bansFor(stoppedSecond)).toHaveLength(0);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(3);
+  });
+
+  it('a report filed during the first stop by a fast phone, dated just after that unconnected start, gets no automation', async () => {
+    const now = nowSec();
+    const fast = hex(0x9206);
+    // Dated 30 s after the first start.
+    await stopUnconnectedStartStop([minorsReport(fast, now - 270)]);
+    expect(bansFor(fast)).toHaveLength(0);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(1);
   });
 
   it('runs a window a connect adds during the pass in the same invocation', async () => {
     const base = nowSec() - 3000;
-    const first: CatchUpWindow = { since: base - 100, until: base, handlerEnabled: true };
-    const added: CatchUpWindow = { since: base + 500, until: base + 600, handlerEnabled: true };
+    const first: CatchUpWindow = { since: base - 100, until: base };
+    const added: CatchUpWindow = { since: base + 500, until: base + 600 };
     const r1 = minorsReport(hex(0x7101), base - 50);
     const r2 = minorsReport(hex(0x7102), base + 550);
     relay.corpus = [r1, r2];
@@ -1271,9 +1309,9 @@ describe('catch-up when the listener connects', () => {
     const handled: string[] = [];
 
     const result = await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage, claim: () => true,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true,
       handle: async (report: SignedReport) => { handled.push(report.id); },
-      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => 9_000_000,
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => Date.now(),
     });
 
     expect(handled.sort()).toEqual([r1.id, r2.id].sort());
@@ -1287,18 +1325,18 @@ describe('catch-up when the listener connects', () => {
     const r2 = minorsReport(hex(0x7202), base + 550);
     relay.corpus = [r1, r2];
     const s = makeState();
-    await s.storage.put('report-catchup-windows', [{ since: base - 100, until: base, handlerEnabled: true }]);
+    await s.storage.put('report-catchup-windows', [{ since: base - 100, until: base }]);
     const handled: string[] = [];
-    let clock = 9_000_000;
+    let clock = Date.now();
     const deps = {
-      db: DB, relayUrl: RELAY_URL, storage: s.storage, claim: () => true,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true,
       handle: async (report: SignedReport) => { handled.push(report.id); },
       isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => clock,
     };
     expect(await runPendingCatchUp(deps)).toMatchObject({ ran: true, complete: true });
 
     // Back-to-back connects add windows; inside the floor they wait.
-    await s.storage.put('report-catchup-windows', [{ since: base + 500, until: base + 600, handlerEnabled: true }]);
+    await s.storage.put('report-catchup-windows', [{ since: base + 500, until: base + 600 }]);
     clock += 10_000;
     expect(await runPendingCatchUp(deps)).toMatchObject({ ran: false });
     clock += CATCHUP_SUCCESS_INTERVAL_MS - 10_000 - 1;
@@ -1313,12 +1351,12 @@ describe('catch-up when the listener connects', () => {
     const second = nowSec() - 3000;
     relay.corpus = Array.from({ length: 501 }, (_, i) => signed([['e', hex(0x40000 + i)], ['report', 'spam']], second));
     const s = makeState();
-    await s.storage.put('report-catchup-windows', [{ since: second, until: second, handlerEnabled: true }]);
+    await s.storage.put('report-catchup-windows', [{ since: second, until: second }]);
     const alert = vi.fn(async () => {});
 
     await runPendingCatchUp({
-      db: DB, relayUrl: RELAY_URL, storage: s.storage, claim: () => true, handle: async () => {},
-      isRunning: () => true, alert, nowMs: () => 9_000_000,
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert, nowMs: () => Date.now(),
     });
 
     expect(relay.queries).toHaveLength(1);
@@ -1441,4 +1479,531 @@ describe('catch-up when the listener connects', () => {
     expect(tracked.readyState).toBe(FakeSocket.OPEN);
     expect((w.watcher as unknown as { ws: unknown }).ws).toBe(tracked);
   });
+
+  it('a stop mid-page handles no further report, and the next pass re-reads the page', async () => {
+    const base = nowSec() - 2000;
+    const window: CatchUpWindow = { since: base - 100, until: base };
+    const firstTarget = hex(0x9101);
+    const secondTarget = hex(0x9102);
+    const second = minorsReport(secondTarget, base - 20);
+    // One page, newest first: the first report, then the second.
+    relay.corpus = [minorsReport(firstTarget, base - 10), second];
+
+    const w = await newWatcher();
+    w.data.set('report-catchup-windows', [window]);
+    // The stop lands while catch-up hides the first report on the page.
+    onBan = async (params) => { if (params[0] === firstTarget) await w.post('/stop'); };
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(bansFor(firstTarget)).toHaveLength(1);
+    expect(bansFor(secondTarget)).toHaveLength(0);
+    expect(await allRows(`SELECT report_id FROM report_index WHERE report_id = '${second.id}'`)).toEqual([]);
+    // The cursor was not saved past the report left unhandled.
+    expect(w.data.get('report-catchup-windows')).toEqual([window]);
+
+    // The halted pass counts as a finished one for the 30-second floor, so an
+    // immediate start waits: a stop/start loop cannot bypass the throttle.
+    expect(w.data.has('report-catchup-last-ok')).toBe(true);
+    onBan = undefined;
+    await w.post('/start');
+    await settle(w.pending);
+    expect(bansFor(secondTarget)).toHaveLength(0);
+    // Past the floor, the next pass (the cron here) re-reads the page: the
+    // second report is handled, the first is skipped as seen.
+    shiftClock(CATCHUP_SUCCESS_INTERVAL_MS + 1000);
+    await w.post('/internal/report-catchup');
+    await settle(w.pending);
+    expect(bansFor(firstTarget)).toHaveLength(1);
+    expect(bansFor(secondTarget)).toHaveLength(1);
+  });
+
+  it('the stopped period ends at /start plus its margin: a report filed later, while the relay was unreachable, gets automation', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 300);
+    const stopAt = now - 200;
+    const stoppedTarget = hex(0x9201);
+    const marginTarget = hex(0x9203);
+    const outageTarget = hex(0x9202);
+    relay.corpus = [
+      minorsReport(stoppedTarget, now - 100),
+      // In the two minutes after the start: index-only for catch-up finds.
+      minorsReport(marginTarget, now + 30),
+      // Later in the outage after the start.
+      minorsReport(outageTarget, now + 150),
+    ];
+    const w = await newWatcher();
+    w.data.set('report-watcher-deliberate-stop', stopAt);
+    relay.autoOpen = false;
+    await w.post('/start');
+    const startedAt = w.data.get('report-watcher-start-after-stop') as number;
+    // The relay is unreachable for 200 s after the start. (Catch-up's own
+    // sockets open as usual.)
+    relay.autoOpen = true;
+    shiftClock(200_000);
+    relay.sockets[0].open();
+    await settle(w.pending);
+
+    expect(bansFor(outageTarget)).toHaveLength(1);
+    expect(bansFor(marginTarget)).toHaveLength(0);
+    expect(bansFor(stoppedTarget)).toHaveLength(0);
+    // Anchored at the start, not the late connect: nothing after it is index-only.
+    expect(w.data.get('report-catchup-stopped-periods')).toEqual([{ after: stopAt, until: startedAt + 120 }]);
+    expect(w.data.has('report-watcher-deliberate-stop')).toBe(false);
+    expect(w.data.has('report-watcher-start-after-stop')).toBe(false);
+  });
+
+  it('after a stop, a report caught up only in the margin after the connect is indexed without automation', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 120);
+    const w = await newWatcher();
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    // Filed during the stop by a phone 20 s fast: dated after the connect, so
+    // it arrived before the live subscription and only catch-up finds it.
+    const target = hex(0x9301);
+    const fast = minorsReport(target, now + 20);
+    relay.corpus = [fast];
+    // Hold the connect's own pass; the cron's pass five minutes on finds it.
+    w.data.set('report-catchup-last-attempt', Date.now());
+    await w.post('/start');
+    await settle(w.pending);
+    w.data.delete('report-catchup-last-attempt');
+    shiftClock(300_000);
+    await w.post('/internal/report-catchup');
+    await settle(w.pending);
+
+    expect(await allRows(`SELECT report_id FROM report_index WHERE report_id = '${fast.id}'`)).toHaveLength(1);
+    expect(bansFor(target)).toHaveLength(0);
+  });
+
+  it('a report filed just before a reconnect by a fast phone is found on a later pass and gets automation', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 120);
+    const target = hex(0x9401);
+    // Filed during the outage by a phone 20 s fast. The relay will not return
+    // it until its own clock passes created_at.
+    relay.corpus = [minorsReport(target, now + 20)];
+    const w = await newWatcher();
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(bansFor(target)).toHaveLength(0);
+    // Only the part of the window the relay could not show yet stays pending.
+    const kept = w.data.get('report-catchup-windows') as CatchUpWindow[];
+    expect(kept).toHaveLength(1);
+    expect(kept[0].since).toBeGreaterThan(now - 10);
+    expect(kept[0].until).toBeGreaterThanOrEqual(now + 120);
+
+    shiftClock(300_000);
+    await w.post('/internal/report-catchup');
+    await settle(w.pending);
+    expect(bansFor(target)).toHaveLength(1);
+    expect(w.data.get('report-catchup-windows')).toEqual([]);
+  });
+
+  it('keeps the part of a window the relay could not show, then drops the window once the clock passes its end', async () => {
+    const now = nowSec();
+    const window: CatchUpWindow = { since: now - 700, until: now + 120 };
+    relay.corpus = [minorsReport(hex(0x9402), now - 30)];
+    let clock = now * 1000;
+    relay.now = () => Math.floor(clock / 1000);
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [window]);
+    const handled: string[] = [];
+    const deps = {
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true,
+      handle: async (report: SignedReport) => { handled.push(report.id); },
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => clock,
+    };
+
+    expect(await runPendingCatchUp(deps)).toMatchObject({ ran: true, complete: false });
+    expect(handled).toHaveLength(1);
+    // Everything up to five seconds before the pass was visible; the rest is kept.
+    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: now - 4, until: now + 120 }]);
+
+    clock += 30_000;
+    expect(await runPendingCatchUp(deps)).toMatchObject({ ran: true, complete: false });
+    expect(relay.queries.at(-1)).toMatchObject({ since: now - 4, until: now + 120 });
+    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: now + 26, until: now + 120 }]);
+
+    clock += 300_000;
+    expect(await runPendingCatchUp(deps)).toMatchObject({ ran: true, complete: true });
+    expect(await s.storage.get('report-catchup-windows')).toEqual([]);
+    expect(handled).toHaveLength(1);
+  });
+
+  it('a walk cut short below a window end the relay could not show keeps that end pending', async () => {
+    const now = nowSec();
+    const window: CatchUpWindow = { since: now - 700, until: now + 120 };
+    // Two pages below the pass; the second page fails.
+    relay.corpus = Array.from({ length: 501 }, (_, i) => signed([['e', hex(0x50000 + i)], ['report', 'spam']], now - 600 + i));
+    relay.closeQueries = new Set([1]);
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [window]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runPendingCatchUp({
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => now * 1000,
+    });
+
+    expect(await s.storage.get('report-catchup-windows')).toEqual([
+      { since: now - 700, until: now - 599 },
+      { since: now - 4, until: now + 120 },
+    ]);
+  }, 60_000);
+
+  it('an outage window keeps automation when repeated stops push the pending list over the cap', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const now = nowSec();
+    // Filed during an outage that ran into the first stop.
+    const outageTarget = hex(0x9701);
+    relay.corpus = [minorsReport(outageTarget, now - 9800)];
+    const w = await newWatcher();
+    // Every pass is held, so windows pile up as they do while catch-up keeps
+    // failing.
+    w.data.set('report-catchup-last-attempt', Date.now());
+    for (let i = 0; i < 7; i += 1) {
+      const heartbeat = now - 10_000 + i * 1200;
+      await seedHeartbeat(heartbeat);
+      w.data.set('report-watcher-deliberate-stop', heartbeat + 500);
+      await w.post('/start');
+      await settle(w.pending);
+      await w.post('/stop');
+    }
+    w.data.delete('report-watcher-deliberate-stop');
+    w.data.delete('report-catchup-last-attempt');
+    await seedHeartbeat(now - 120);
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(bansFor(outageTarget)).toHaveLength(1);
+  });
+
+  it('a pass keeps a stopped period a frozen heartbeat can still reach, and the next connect runs no handler in it', async () => {
+    const now = nowSec();
+    // The relay dropped 3000 s ago and the heartbeat froze there. An earlier
+    // stop's period lies after it, but more than ten minutes before now.
+    const heartbeat = now - 3000;
+    await seedHeartbeat(heartbeat);
+    const period = { after: now - 2800, until: now - 2700 };
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [{ since: now - 100, until: now - 50 }]);
+    await s.storage.put('report-catchup-stopped-periods', [period]);
+    await runPendingCatchUp({
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => Date.now(),
+    });
+    expect(await s.storage.get('report-catchup-stopped-periods')).toEqual([period]);
+
+    // The next connect plans from the frozen heartbeat and finds a report
+    // filed in that stopped period: indexed, no automation.
+    const target = hex(0x9801);
+    relay.corpus = [minorsReport(target, now - 2750)];
+    const w = await newWatcher();
+    w.data.set('report-catchup-stopped-periods', await s.storage.get('report-catchup-stopped-periods'));
+    await w.post('/start');
+    await settle(w.pending);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(1);
+    expect(bansFor(target)).toHaveLength(0);
+  });
+
+  it('a connect that consumes a stop drops stopped periods no window can reach any more', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 120);
+    const old = { after: now - 90_000, until: now - 89_000 };
+    const w = await newWatcher();
+    w.data.set('report-catchup-stopped-periods', [old]);
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    // Hold the pass, so only the plan prunes.
+    w.data.set('report-catchup-last-attempt', Date.now());
+    await w.post('/start');
+    await settle(w.pending);
+    const periods = w.data.get('report-catchup-stopped-periods') as Array<{ after: number; until: number }>;
+    expect(periods.some(p => p.after === old.after)).toBe(false);
+    expect(periods[0].after).toBe(now - 60);
+  });
+
+  it('a pass after /start but before the connect plans gives a report from the stop no automation', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 300);
+    const beforeStop = hex(0x9a01);
+    const duringStop = hex(0x9a02);
+    relay.corpus = [minorsReport(beforeStop, now - 90), minorsReport(duringStop, now - 30)];
+    const w = await newWatcher();
+    // A window left pending from an earlier connect (its unseen tail, say).
+    w.data.set('report-catchup-windows', [{ since: now - 700, until: now }]);
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    // Started, but the relay is unreachable: no connect has consumed the stop.
+    relay.autoOpen = false;
+    await w.post('/start');
+    relay.autoOpen = true;
+    // The cron's pass runs first.
+    await w.post('/internal/report-catchup');
+    await settle(w.pending);
+
+    expect(bansFor(beforeStop)).toHaveLength(1);
+    expect(bansFor(duringStop)).toHaveLength(0);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(2);
+    // Still unconsumed: the stop is saved when a connect plans.
+    expect(w.data.has('report-watcher-deliberate-stop')).toBe(true);
+  });
+
+  it('reads the stopped periods and the unconsumed stop in one transaction', async () => {
+    const now = nowSec();
+    const w = await newWatcher();
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    w.data.set('report-watcher-start-after-stop', now - 10);
+    let consume: Promise<unknown> | undefined;
+    w.setOnGet(async (key) => {
+      if (key !== 'report-catchup-stopped-periods' || consume) return;
+      // A connect's plan consumes the stop between the two reads.
+      consume = w.storage.transaction(async (tx) => {
+        await tx.put('report-catchup-stopped-periods', [{ after: now - 60, until: now + 110 }]);
+        await tx.delete('report-watcher-deliberate-stop');
+        await tx.delete('report-watcher-start-after-stop');
+      });
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    const periods = await (w.watcher as unknown as { currentStoppedPeriods(): Promise<Array<{ after: number; until: number }>> }).currentStoppedPeriods();
+    await consume;
+    expect(periods).toEqual([{ after: now - 60, until: now + 110 }]);
+  });
+
+  it('keeps stopped periods the adult replay can still read while the sexual quarantine is active', async () => {
+    const now = nowSec();
+    const old = { after: now - 5000, until: now - 4900 };
+    const run = async (env: Partial<ReportWatcherEnv>, replayState: Record<string, unknown>) => {
+      relay.reset();
+      await seedHeartbeat(now - 120);
+      const w = await newWatcher(env);
+      w.data.set('report-catchup-windows', [{ since: now - 200, until: now - 100 }]);
+      w.data.set('report-catchup-stopped-periods', [old]);
+      for (const [key, value] of Object.entries(replayState)) w.data.set(key, value);
+      await w.post('/start');
+      await settle(w.pending);
+      await w.post('/stop');
+      return w.data.get('report-catchup-stopped-periods');
+    };
+    // Catch-up alone cannot reach it any more.
+    expect(await run({}, { 'sexual-replay-through': now - 6000 })).toEqual([]);
+    // The replay's next run reads from 60 s before its last cursor.
+    expect(await run({ SEXUAL_QUARANTINE_ENABLED: 'true' }, { 'sexual-replay-through': now - 6000 })).toEqual([old]);
+    // Or from its open window's start.
+    expect(await run({ SEXUAL_QUARANTINE_ENABLED: 'true' }, { 'sexual-replay-window': { from: now - 4950, through: now, until: now } })).toEqual([old]);
+    // Activated earlier through storage, with no cursor: a day back.
+    expect(await run({}, { 'sexual-quarantine-activated': true })).toEqual([old]);
+    // Never activated and never run: a first activation would read a day back,
+    // so the period is kept for that too.
+    expect(await run({}, {})).toEqual([old]);
+    // Not active, but the replay has run (an open window is a cursor): the
+    // inactive replay holds nothing.
+    expect(await run({}, { 'sexual-replay-window': { from: now - 4950, through: now, until: now } })).toEqual([]);
+    // ... but not beyond the day.
+    const ancient = { after: now - 90_000, until: now - 89_000 };
+    relay.reset();
+    await seedHeartbeat(now - 120);
+    const w = await newWatcher();
+    w.data.set('report-catchup-windows', [{ since: now - 200, until: now - 100 }]);
+    w.data.set('report-catchup-stopped-periods', [ancient, old]);
+    await w.post('/start');
+    await settle(w.pending);
+    expect(w.data.get('report-catchup-stopped-periods')).toEqual([old]);
+    // A replay cursor already past it lets it go.
+    expect(await run({ SEXUAL_QUARANTINE_ENABLED: 'true' }, { 'sexual-replay-through': now - 100 })).toEqual([]);
+  });
+
+  it('a pass never takes the pending list past eight windows when it splits off an unseen tail', async () => {
+    const now = nowSec();
+    const future = { since: now - 700, until: now + 120 };
+    const older = Array.from({ length: 7 }, (_, i) => ({ since: now - 90_000 + i * 1000, until: now - 89_900 + i * 1000 }));
+    // Two pages in the future window, walked first; the second page fails.
+    relay.corpus = Array.from({ length: 501 }, (_, i) => signed([['e', hex(0x60000 + i)], ['report', 'spam']], now - 600 + i));
+    relay.closeQueries = new Set([1]);
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [future, ...older]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runPendingCatchUp({
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => now * 1000,
+    });
+
+    // No room for a ninth: the window keeps covering everything it had.
+    expect(await s.storage.get('report-catchup-windows')).toEqual([future, ...older]);
+  }, 60_000);
+
+  it('a /stop during /start wins: no start time, no socket, no alarm', async () => {
+    const now = nowSec();
+    const w = await newWatcher();
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    let stop: Promise<Response> | undefined;
+    w.setOnGet(async (key) => {
+      if (key !== 'report-watcher-deliberate-stop' || stop) return;
+      // Not awaited: its own transaction queues behind the start's.
+      stop = w.post('/stop');
+      await new Promise(resolve => setTimeout(resolve, 20));
+    });
+    const started = await w.post('/start');
+    await stop;
+    w.setOnGet(undefined);
+    await settle(w.pending);
+
+    expect(await started.json()).toMatchObject({ message: 'Stopped while starting', status: { running: false } });
+    expect(relay.sockets).toHaveLength(0);
+    expect(await w.storage.getAlarm()).toBeNull();
+    // The stop saw no start: the marker is the first one, and no period was saved.
+    expect(w.data.get('report-watcher-deliberate-stop')).toBe(now - 60);
+    expect(w.data.has('report-catchup-stopped-periods')).toBe(false);
+  });
+
+  it('raises the alert for a flooded second in an unseen tail once, from the pass that can see it', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const alerts = () => errors.mock.calls.filter(call => String(call[0]).startsWith('[ALERT] [report-index]'));
+    const now = nowSec();
+    // 501 reports in one second just before the pass, inside its unseen tail.
+    const second = now - 2;
+    relay.corpus = Array.from({ length: 501 }, (_, i) => signed([['e', hex(0x70000 + i)], ['report', 'spam']], second));
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [{ since: now - 700, until: now + 120 }]);
+    let clock = now * 1000;
+    const deps = {
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: (text: string) => sendReportIndexAlert({}, text), nowMs: () => clock,
+    };
+    await runPendingCatchUp(deps);
+    clock += 30_000;
+    await runPendingCatchUp(deps);
+    clock += 300_000;
+    await runPendingCatchUp(deps);
+
+    expect(alerts()).toHaveLength(1);
+    expect(String(alerts()[0][0])).toContain(String(second));
+  }, 90_000);
+
+  it('a stop and a start during one catch-up page: the next report from that stop gets no automation', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 300);
+    const firstTarget = hex(0x9b01);
+    const secondTarget = hex(0x9b02);
+    relay.corpus = [minorsReport(firstTarget, now - 20), minorsReport(secondTarget, now - 30)];
+    const w = await newWatcher();
+    // While catch-up hides the first report, a stop at now - 40 and a start at
+    // now - 5 land; no connect has consumed that stop yet.
+    onBan = async (params) => {
+      if (params[0] !== firstTarget) return;
+      w.data.set('report-watcher-deliberate-stop', now - 40);
+      w.data.set('report-watcher-start-after-stop', now - 5);
+    };
+    await w.post('/start');
+    await settle(w.pending);
+    expect(bansFor(firstTarget)).toHaveLength(1);
+    expect(bansFor(secondTarget)).toHaveLength(0);
+  });
+
+  it('a connect that consumes a stop keeps the periods the adult replay can still read', async () => {
+    const now = nowSec();
+    await seedHeartbeat(now - 120);
+    const old = { after: now - 5000, until: now - 4900 };
+    const w = await newWatcher({ SEXUAL_QUARANTINE_ENABLED: 'true' });
+    w.data.set('report-catchup-stopped-periods', [old]);
+    w.data.set('sexual-replay-through', now - 6000);
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    // Hold the pass, so only the plan prunes.
+    w.data.set('report-catchup-last-attempt', Date.now());
+    await w.post('/start');
+    await settle(w.pending);
+    const periods = w.data.get('report-catchup-stopped-periods') as Array<{ after: number; until: number }>;
+    expect(periods[0]).toEqual(old);
+    expect(periods).toHaveLength(2);
+  });
+
+  it('alerts once when a connect has to merge stopped periods at the cap', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const alerts = () => errors.mock.calls.filter(call => String(call[0]).startsWith('[ALERT] [report-index]'));
+    const now = nowSec();
+    await seedHeartbeat(now - 120);
+    // Eight stops still within reach.
+    const eight = Array.from({ length: 8 }, (_, i) => ({ after: now - 700 + i * 50, until: now - 680 + i * 50 }));
+    const w = await newWatcher({ SLACK_WEBHOOK_URL: WEBHOOK_URL });
+    w.data.set('report-catchup-stopped-periods', eight);
+    w.data.set('report-watcher-deliberate-stop', now - 60);
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(w.data.get('report-catchup-stopped-periods')).toHaveLength(8);
+    expect(alerts()).toHaveLength(1);
+    expect(String(alerts()[0][0])).toContain(`${eight[0].after}..${eight[1].until}`);
+    expect(webhookPosts).toHaveLength(1);
+    // The pass after it merges nothing more and says nothing more.
+    shiftClock(CATCHUP_SUCCESS_INTERVAL_MS + 1000);
+    await w.post('/internal/report-catchup');
+    await settle(w.pending);
+    expect(alerts()).toHaveLength(1);
+  });
+
+  it('alerts once when a stop after an unconnected start has to merge stopped periods at the cap', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const alerts = () => errors.mock.calls.filter(call => String(call[0]).startsWith('[ALERT] [report-index]'));
+    const now = nowSec();
+    const eight = Array.from({ length: 8 }, (_, i) => ({ after: now - 9000 + i * 1000, until: now - 8900 + i * 1000 }));
+    const w = await newWatcher({ SLACK_WEBHOOK_URL: WEBHOOK_URL });
+    w.data.set('report-catchup-stopped-periods', eight);
+    w.data.set('report-watcher-deliberate-stop', now - 300);
+    relay.autoOpen = false;
+    await w.post('/start');
+    await w.post('/stop');
+
+    expect(w.data.get('report-catchup-stopped-periods')).toHaveLength(8);
+    expect(alerts()).toHaveLength(1);
+    expect(String(alerts()[0][0])).toContain(`${eight[0].after}..${eight[1].until}`);
+    expect(webhookPosts).toHaveLength(1);
+  });
+
+  it('a pass splits off an unseen tail when that brings the pending list to exactly eight', async () => {
+    const now = nowSec();
+    const future = { since: now - 700, until: now + 120 };
+    const older = Array.from({ length: 6 }, (_, i) => ({ since: now - 90_000 + i * 1000, until: now - 89_900 + i * 1000 }));
+    // Two pages in the future window, walked first; the second page fails.
+    relay.corpus = Array.from({ length: 501 }, (_, i) => signed([['e', hex(0x80000 + i)], ['report', 'spam']], now - 600 + i));
+    relay.closeQueries = new Set([1]);
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [future, ...older]);
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runPendingCatchUp({
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true, handle: async () => {},
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => now * 1000,
+    });
+
+    expect(await s.storage.get('report-catchup-windows')).toEqual([
+      { since: now - 700, until: now - 599 }, { since: now - 4, until: now + 120 }, ...older,
+    ]);
+  }, 60_000);
+
+  it('a step past a flooded second keeps walking while the pending list is full', async () => {
+    const now = nowSec();
+    const future = { since: now - 700, until: now + 120 };
+    const older = Array.from({ length: 7 }, (_, i) => ({ since: now - 90_000 + i * 1000, until: now - 89_900 + i * 1000 }));
+    // 501 reports in one second, and below it a report the walk only reaches
+    // after stepping past that second.
+    const flood = Array.from({ length: 501 }, (_, i) => signed([['e', hex(0x90000 + i)], ['report', 'spam']], now - 300));
+    const below = minorsReport(hex(0x9c01), now - 400);
+    relay.corpus = [...flood, below];
+    const s = makeState();
+    await s.storage.put('report-catchup-windows', [future, ...older]);
+    const handled: string[] = [];
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await runPendingCatchUp({
+      db: DB, relayUrl: RELAY_URL, storage: s.storage, ...periodDeps(s.storage), claim: () => true,
+      handle: async (report: SignedReport) => { handled.push(report.id); },
+      isRunning: () => true, alert: vi.fn(async () => {}), nowMs: () => now * 1000,
+    });
+
+    expect(handled).toContain(below.id);
+    // The walk finished: only the unseen tail is left of it.
+    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: now - 4, until: now + 120 }]);
+  }, 60_000);
 });
