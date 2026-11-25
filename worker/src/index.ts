@@ -73,6 +73,7 @@ import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { handlePrivateReport, type PrivateReportEnv } from './private-reports';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
+import { isResolutionLabel as isResolutionLabelEvent, recordResolutionLabel } from './resolution-label-index';
 import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, noteClaimedModerator, requireVerifiedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 import {
   applyUnbanChoice,
@@ -1369,6 +1370,18 @@ async function handlePublish(
     return jsonResponse({ success: false, error: publishResult.error,
       ...(resolutionVisibility ? { recorded: resolutionVisibility.recorded, reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true } : {}),
     }, 500, corsHeaders);
+  }
+
+  // Keep Relay Manager's own copy of the resolution label, after the relay accepted
+  // it. Non-critical: a failed write is logged and never changes the answer. A label
+  // missing here is repaired by the later backfill and reconcile writes.
+  if (env.DB && isResolutionLabelEvent(event)) {
+    try {
+      await ensureSchemaOnce(env.DB);
+      await recordResolutionLabel(env.DB, event, Math.floor(Date.now() / 1000));
+    } catch (err) {
+      console.error('[handlePublish] Failed to record resolution label:', err);
+    }
   }
 
   // If this is a moderation/resolution label (kind 1985), sync to Zendesk
