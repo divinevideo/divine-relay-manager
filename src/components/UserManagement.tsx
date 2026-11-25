@@ -240,8 +240,6 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
   const invalidateUserQueries = () => {
     queryClient.invalidateQueries({ queryKey: ['banned-users'] });
     queryClient.invalidateQueries({ queryKey: ['banned-pubkeys'] });
-    // Delete All Content bans each post on the relay.
-    queryClient.invalidateQueries({ queryKey: ['banned-events'] });
     queryClient.invalidateQueries({ queryKey: ['allowed-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-users'] });
     queryClient.invalidateQueries({ queryKey: ['suspended-pubkeys'] });
@@ -313,6 +311,8 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
     },
     onSuccess: async ({ pubkey, outcome, auditRecorded }) => {
       invalidateUserQueries();
+      // An account ban can also purge the account's posts.
+      queryClient.invalidateQueries({ queryKey: ['banned-events'] });
       toast({
         title: auditRecorded ? "User banned successfully" : "User banned; audit log not recorded",
         description: banSuccessNote(outcome),
@@ -684,7 +684,12 @@ export function UserManagement({ selectedPubkey }: UserManagementProps) {
               isBanned={bannedListAnswered ? listHas(bannedUsers, selectedPubkey) : null}
               isSuspended={suspendedListAnswered ? listHas(suspendedUsers, selectedPubkey) : null}
               statusPending={loadingSuspended || loadingBanned}
-              onActionComplete={invalidateUserQueries}
+              onActionComplete={(change) => {
+                invalidateUserQueries();
+                if (change.action === 'delete-all' || change.action === 'ban') {
+                  queryClient.invalidateQueries({ queryKey: ['banned-events'] });
+                }
+              }}
             />
           </CardContent>
         </Card>

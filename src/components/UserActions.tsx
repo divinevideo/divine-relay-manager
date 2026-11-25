@@ -109,7 +109,7 @@ interface AccountActionTarget {
 // usually purged the posts, so "posts can take a few minutes to reappear"
 // would mislead.
 export type UserActionChange =
-  | { accountStatusChanged: false }
+  | { accountStatusChanged: false; action?: 'delete-all' }
   | (AccountActionTarget & { accountStatusChanged: true; action: 'suspend' | 'unsuspend' | 'ban' | 'unban' });
 
 // Only the account and report a change reports, not the action's other
@@ -386,7 +386,9 @@ export function UserActions({
           reason: `Bulk ${job.action}: ${job.mediaProcessed} media file(s)`,
         }))
         .catch((e) => console.warn('[UserActions] bulk audit log failed', e));
-      onActionComplete?.({ accountStatusChanged: false });
+      onActionComplete?.(job.action === 'delete-all'
+        ? { accountStatusChanged: false, action: 'delete-all' }
+        : { accountStatusChanged: false });
     },
     onError: (error, target) => {
       // A guard-refused enqueue (open age-review case) routes to the case, for
