@@ -4,9 +4,10 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
-import { reportArrivalStatement } from './report-arrivals';
-import { metaStatement, readMeta, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource } from './report-index';
+import { reportArrivalStatements } from './report-arrivals';
+import { metaStatement, readMeta, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource, type SignedReport } from './report-index';
 import {
+  CATCHUP_INDEX_BATCH_SIZE,
   CATCHUP_STOPPED_PERIODS_KEY,
   CATCHUP_WINDOWS_KEY,
   addPendingWindow,
@@ -211,6 +212,9 @@ export class ReportWatcher implements DurableObject {
   // (a legacy hide or a quarantine hide trigger), so the pass counts exactly
   // its own auto actions for the burst alert. Null outside a pass.
   private autoActionedReportIds: Set<string> | null = null;
+  // Set for the duration of a catch-up pass so every D1 query executed during
+  // report handling counts against the per-invocation catch-up D1 budget.
+  private catchUpDb: D1Database | null = null;
   private connectedAt: number | null = null;
   private lastEventAt: number | null = null;
   private eventsProcessed: number = 0;
@@ -1063,12 +1067,22 @@ export class ReportWatcher implements DurableObject {
           relayUrl: this.env.RELAY_URL,
           storage: this.state.storage,
           claim: (id) => this.claimReport(id),
-          handle: async (report, handlerEnabled) => {
-            await this.handleReportEvent(report, {
-              source: 'catchup',
-              preClaimed: true,
-              sideEffects: handlerEnabled,
-            });
+          unclaim: (id) => this.unclaimReport(id),
+          canBatch: (report, handlerEnabled) => this.canBatchCatchUpReport(report, handlerEnabled),
+          handleBatch: async (reports, passDb) => {
+            await this.handleReportBatch(reports, passDb);
+          },
+          handle: async (report, handlerEnabled, passDb) => {
+            this.catchUpDb = passDb;
+            try {
+              await this.handleReportEvent(report, {
+                source: 'catchup',
+                preClaimed: true,
+                sideEffects: handlerEnabled,
+              });
+            } finally {
+              this.catchUpDb = null;
+            }
             return autoActioned.delete(canonicalHex64(report.id) ?? report.id);
           },
           isRunning: () => this.running,
@@ -1104,6 +1118,21 @@ export class ReportWatcher implements DurableObject {
       if (oldest !== undefined) this.claimedReportIds.delete(oldest);
     }
     return true;
+  }
+
+  /** Releases an in-memory claim when catch-up failed to record the report in D1. */
+  private unclaimReport(id: string): void {
+    this.claimedReportIds.delete(canonicalHex64(id) ?? String(id));
+  }
+
+  private get activeDb(): D1Database | undefined {
+    return this.catchUpDb ?? this.env.DB;
+  }
+
+  private get quarantineEnv(): SexualQuarantineEnv {
+    return new Proxy(this.env, {
+      get: (target, prop) => (prop === 'DB' ? this.activeDb : Reflect.get(target, prop)),
+    });
   }
 
   /**
@@ -1327,43 +1356,25 @@ export class ReportWatcher implements DurableObject {
     // compares this clock. Live by default; catch-up passes its own source, and
     // sideEffects:false makes this write the only thing done. replayAdultReports
     // does not record. A report no path has seen has no row, and a missing row
-    // falls back to created_at. Non-critical: logged, never allowed to stop
-    // auto-hide or the age review below. Only a verified event is recorded,
-    // since the relay does not vouch for the id.
-    if (this.env.DB) {
+    // falls back to created_at. Live writes are non-critical (logged, never
+    // allowed to stop auto-hide or age review); catch-up rethrows arrival/index
+    // write errors so unrecorded reports remain pending for retry. Only a
+    // verified event is recorded, since the relay does not vouch for the id.
+    const db = this.activeDb;
+    if (db) {
       try {
-        if (!this.schemaReady) {
-          await ensureSchema(this.env.DB);
-          this.schemaReady = true;
-        }
         if (verifyEvent(event as unknown as NostrEvent)) {
           const now = Math.floor(Date.now() / 1000);
           // verifyEvent above only passes a signed event, so sig is present.
           const signed = { ...event, sig: event.sig as string };
-          // First batch: the arrival and the index row, atomic and always two
-          // statements, however many tags the report carries. Anyone can publish
-          // a kind 1984 with thousands of e/p tags, and a batch over D1's
-          // 50-statement limit would fail whole and leave the report unseen, so
-          // a later catch-up could re-run the non-idempotent handlers on it.
-          await this.env.DB.batch([
-            reportArrivalStatement(this.env.DB, event.id, now),
-            ...reportIndexRowStatements(this.env.DB, [signed], source, now),
-          ]);
-          // The refs follow in groups of at most 50, with their own failure
-          // handling: the report is already recorded as seen. The inner catch
-          // exists for its own log line, and so this write stays isolated if
-          // code is ever added after it inside the outer try. Accepted: a refs
-          // failure leaves this report's refs incomplete for good. It is
-          // recorded as seen, so catch-up will not re-index it, and ref-based
-          // lookups can miss it. The failure is logged.
-          try {
-            await runStatements(this.env.DB, reportIndexRefStatements(this.env.DB, [signed]));
-          } catch (error) {
-            console.error('[ReportWatcher] Failed to record report index refs:', error);
-          }
+          await this.recordVerifiedReports([signed], source, now, db);
         }
       } catch (error) {
         console.error('[ReportWatcher] Failed to record report arrival and index row:', error);
+        if (source !== 'live') {
+          this.eventsProcessed -= 1;
+          throw error;
+        }
       }
     }
 
@@ -1400,15 +1411,76 @@ export class ReportWatcher implements DurableObject {
     }
   }
 
+  private canBatchCatchUpReport(event: ReportEvent, handlerEnabled: boolean): boolean {
+    if (!handlerEnabled) return true;
+    const targetEventTag = event.tags.find(t => t[0] === 'e');
+    const targetEventId = canonicalHex64(targetEventTag?.[1]);
+    if (targetEventId && this.autoHideConfig?.enabled) {
+      const category = reportCategory(event.tags);
+      const adultReport = adultSexualCategory(category) && !getReportedList(event);
+      const tier = this.autoHideConfig.tiers.find(t => t.categories.includes(category));
+      if (adultReport || tier) return false;
+    }
+    const targetPubkeyTag = event.tags.find(t => t[0] === 'p');
+    const reportedPubkey = canonicalHex64(targetPubkeyTag?.[1]);
+    if (reportedPubkey && ageReviewCategory(event) === 'NS-underageUser') return false;
+    return true;
+  }
+
+  private async handleReportBatch(reports: readonly SignedReport[], db: D1Database): Promise<void> {
+    const verified: SignedReport[] = [];
+    for (const report of reports) {
+      if (verifyEvent(report as unknown as NostrEvent)) {
+        verified.push({ ...report, sig: report.sig as string });
+      }
+    }
+    await this.recordVerifiedReports(verified, 'catchup', Math.floor(Date.now() / 1000), db);
+    this.lastEventAt = Date.now();
+    this.eventsProcessed += reports.length;
+  }
+
+  private async recordVerifiedReports(
+    reports: readonly SignedReport[],
+    source: ReportIndexSource,
+    now: number,
+    db: D1Database,
+  ): Promise<void> {
+    if (reports.length === 0) return;
+    if (!this.schemaReady) {
+      await ensureSchema(db);
+      this.schemaReady = true;
+    }
+    for (let i = 0; i < reports.length; i += CATCHUP_INDEX_BATCH_SIZE) {
+      const chunk = reports.slice(i, i + CATCHUP_INDEX_BATCH_SIZE);
+      // First batch: arrivals and index rows, atomic and well within D1's
+      // 50-statement and 100-parameter limits (1 arrival statement + up to 5
+      // index-row statements for 50 reports). Anyone can publish a kind 1984
+      // with thousands of e/p tags, and putting refs in the same batch would
+      // overflow D1's 50-statement limit and leave the report unseen.
+      await db.batch([
+        ...reportArrivalStatements(db, chunk.map(r => r.id), now),
+        ...reportIndexRowStatements(db, chunk, source, now),
+      ]);
+      // Write refs separately after recording the report as seen. Catch-up
+      // skips seen reports, so missing refs wait for the full reconcile.
+      try {
+        await runStatements(db, reportIndexRefStatements(db, chunk));
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to record report index refs:', error);
+      }
+    }
+  }
+
   private async processAutoHide(
     event: ReportEvent,
     category: string,
     targetEventId: string,
     advanceNow = true,
   ): Promise<void> {
-    if (!this.schemaReady && this.env.DB) {
+    const db = this.activeDb;
+    if (!this.schemaReady && db) {
       try {
-        await ensureSchema(this.env.DB);
+        await ensureSchema(db);
         this.schemaReady = true;
       } catch (error) {
         console.error('[ReportWatcher] Failed to ensure schema:', error);
@@ -1467,7 +1539,7 @@ export class ReportWatcher implements DurableObject {
         // IO validates the target signature before throwing OutsideVideoScope.
         // Transport uncertainty retains replay. A confirmed absent response is
         // archived separately so one missing target cannot pin unrelated reports.
-        try { snapshot = await createQuarantineIO(this.env).snapshot(targetEventId); }
+        try { snapshot = await createQuarantineIO(this.quarantineEnv).snapshot(targetEventId); }
         catch (error) {
           if (error instanceof ConfirmedAbsentTarget || error instanceof TargetEvidenceLimit) {
             const archiveKey = error instanceof TargetEvidenceLimit ? boundKey : absentKey;
@@ -1801,13 +1873,14 @@ export class ReportWatcher implements DurableObject {
   }
 
   private async countUniqueReporters(targetEventId: string, category: string): Promise<number> {
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.warn('[ReportWatcher] D1 not available for reporter count');
       return 0;
     }
 
     try {
-      const result = await this.env.DB.prepare(`
+      const result = await db.prepare(`
         SELECT COUNT(DISTINCT reporter_pubkey) as count
         FROM moderation_decisions
         WHERE target_id = ?
@@ -1835,14 +1908,15 @@ export class ReportWatcher implements DurableObject {
     if (await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow') {
       return false;
     }
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       // No D1 available - can't dedupe, allow processing
       console.warn('[ReportWatcher] D1 not available for deduplication check');
       return false;
     }
 
     try {
-      const result = await this.env.DB.prepare(`
+      const result = await db.prepare(`
         SELECT 1 FROM moderation_decisions
         WHERE target_type = 'event'
           AND target_id = ?
@@ -1863,13 +1937,14 @@ export class ReportWatcher implements DurableObject {
    * Reads from moderation_targets (persistent, survives reopen).
    */
   private async hasHumanResolution(targetEventId: string): Promise<boolean | null> {
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.error(`[ALERT] [ReportWatcher] Cannot check human resolution for ${targetEventId}: D1 is not bound`);
       return null;
     }
 
     try {
-      const result = await this.env.DB.prepare(`
+      const result = await db.prepare(`
         SELECT 1 FROM moderation_targets
         WHERE target_id = ? AND ever_human_reviewed = 1
       `).bind(targetEventId).first();
@@ -1895,10 +1970,11 @@ export class ReportWatcher implements DurableObject {
    * The permanent reviewed bit alone is direction-free: hides and deletes set it too.
    */
   private async hasHumanRestore(targetEventId: string): Promise<boolean | null> {
-    if (!this.env.DB) return false;
+    const db = this.activeDb;
+    if (!db) return false;
 
     try {
-      return await hasLatestHumanRestore(this.env.DB, targetEventId);
+      return await hasLatestHumanRestore(db, targetEventId);
     } catch (error) {
       console.error('[ReportWatcher] Failed to check latest human action:', error);
       return null;
@@ -1917,13 +1993,14 @@ export class ReportWatcher implements DurableObject {
     reporterPubkey: string | null;
     moderatorPubkey?: string;
   }): Promise<boolean> {
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.warn('[ReportWatcher] D1 database not available, skipping log');
       return false;
     }
 
     try {
-      await this.env.DB.prepare(`
+      await db.prepare(`
         INSERT INTO moderation_decisions
         (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -1998,14 +2075,15 @@ export class ReportWatcher implements DurableObject {
       console.error('[ReportWatcher] Refusing to open an age review case: pubkey is not lowercase hex');
       return;
     }
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
       return;
     }
 
     if (!this.schemaReady) {
       try {
-        await ensureSchema(this.env.DB);
+        await ensureSchema(db);
         this.schemaReady = true;
       } catch (error) {
         console.error('[ReportWatcher] Failed to ensure schema:', error);
@@ -2014,7 +2092,7 @@ export class ReportWatcher implements DurableObject {
     }
 
     await openReportedAgeReviewCase(
-      this.env.DB,
+      db,
       this.env,
       reportedPubkey,
       { kind: 'report', reportEventId: event.id, reporterPubkey: event.pubkey },
@@ -2114,7 +2192,7 @@ export class ReportWatcher implements DurableObject {
   }
 
   private sexualQuarantine(): SexualQuarantine {
-    return this.sexualEngine ??= new SexualQuarantine(this.state.storage, createQuarantineIO(this.env));
+    return this.sexualEngine ??= new SexualQuarantine(this.state.storage, createQuarantineIO(this.quarantineEnv));
   }
 
   // Only reached through the Worker's authenticated report-watcher proxy.

@@ -45,6 +45,12 @@ export const CATCHUP_MIN_ATTEMPT_INTERVAL_MS = 270_000;
 export const CATCHUP_SUCCESS_INTERVAL_MS = 30_000;
 export const CATCHUP_MAX_PENDING_WINDOWS = 8;
 export const AUTO_ACTION_BURST_THRESHOLD = 10;
+// Non-actionable catch-up reports share arrival+index+ref batches of this size
+// so a 500-report page stays well under Cloudflare D1's per-invocation query cap.
+export const CATCHUP_INDEX_BATCH_SIZE = 50;
+// Workers Paid allows 1,000 D1 queries per invocation (one db.batch() counts as
+// one query). Stop below the limit so a pass never trips it mid-window.
+export const CATCHUP_MAX_D1_QUERIES_PER_PASS = 750;
 
 /** DO storage: the pending windows, oldest first. */
 export const CATCHUP_WINDOWS_KEY = 'report-catchup-windows';
@@ -252,8 +258,16 @@ export interface CatchUpDeps {
   storage: DurableObjectStorage;
   /** True the first time an id is claimed in this instance; the live path claims too. */
   claim(id: string): boolean;
+  /** Releases a claim taken during this pass when recording the report in D1 failed. */
+  unclaim?(id: string): void;
   /** Resolves true when handling this report took an automated hide action. */
-  handle(report: SignedReport, handlerEnabled: boolean): Promise<boolean | void>;
+  handle(report: SignedReport, handlerEnabled: boolean, db: D1Database): Promise<boolean | void>;
+  /** True when a report needs no moderation side effects and can share an arrival+index batch. */
+  canBatch?(report: SignedReport, handlerEnabled: boolean): boolean;
+  /** Records a contiguous batch of non-actionable reports atomically in D1. */
+  handleBatch?(reports: readonly SignedReport[], db: D1Database): Promise<void>;
+  /** Optional per-pass D1 query cap (defaults to CATCHUP_MAX_D1_QUERIES_PER_PASS). */
+  maxD1Queries?: number;
   /**
    * The stopped periods as they stand: the saved ones and a stop no connect
    * has consumed yet. Read before each report is claimed, so a stop and start
@@ -289,6 +303,61 @@ const STEP_REASON_TEXT: Record<Exclude<WalkStopReason, 'page_cap'>, string> = {
 
 /** Thrown from a page handler when the watcher stopped: no further id is claimed, and the page's cursor is not saved. */
 class CatchUpStopped extends Error {}
+
+/** Thrown when the pass reaches its per-invocation D1 query budget; progress so far is saved and the rest waits for the next pass. */
+class CatchUpBudgetReached extends Error {}
+
+/**
+ * Counts D1 queries against Cloudflare's per-invocation limit: each batch()
+ * call counts as one query regardless of statement count, and each single
+ * statement execution (run/first/all/raw) or exec() counts as one query.
+ * Preserves unwrapped D1PreparedStatement instances for native D1 batch().
+ */
+function countD1Queries(db: D1Database, onQuery: () => void): D1Database {
+  const rawStatements = new WeakMap<object, D1PreparedStatement>();
+  const wrapStatement = (stmt: D1PreparedStatement): D1PreparedStatement => {
+    const proxy = new Proxy(stmt, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (typeof value !== 'function') return value;
+        if (prop === 'bind') {
+          return (...args: unknown[]) => wrapStatement(value.apply(target, args) as D1PreparedStatement);
+        }
+        if (prop === 'run' || prop === 'first' || prop === 'all' || prop === 'raw') {
+          return (...args: unknown[]) => {
+            onQuery();
+            return value.apply(target, args);
+          };
+        }
+        return value.bind(target);
+      },
+    });
+    rawStatements.set(proxy, stmt);
+    return proxy;
+  };
+  return new Proxy(db, {
+    get(target, prop) {
+      const value = Reflect.get(target, prop);
+      if (typeof value !== 'function') return value;
+      if (prop === 'prepare') {
+        return (...args: unknown[]) => wrapStatement(value.apply(target, args) as D1PreparedStatement);
+      }
+      if (prop === 'batch') {
+        return (statements: D1PreparedStatement[]) => {
+          onQuery();
+          return value.call(target, statements.map(s => rawStatements.get(s as object) ?? s));
+        };
+      }
+      if (prop === 'exec') {
+        return (...args: unknown[]) => {
+          onQuery();
+          return value.apply(target, args);
+        };
+      }
+      return value.bind(target);
+    },
+  });
+}
 
 async function alertQuietly(deps: CatchUpDeps, text: string): Promise<void> {
   try {
@@ -375,8 +444,12 @@ export async function runPendingCatchUp(deps: CatchUpDeps): Promise<CatchUpSumma
   const steps: string[] = [];
   // Windows as this pass left them, to tell them from windows a connect added.
   const ours = new Set<string>(pending.map(windowKey));
+  const maxD1Queries = deps.maxD1Queries ?? CATCHUP_MAX_D1_QUERIES_PER_PASS;
+  let d1Queries = 0;
+  const countedDb = countD1Queries(deps.db, () => { d1Queries += 1; });
   let failed = false;
   let stopped = false;
+  let budgetReached = false;
 
   const save = async (current: CatchUpWindow, next: readonly CatchUpWindow[]) => {
     const result = await replaceWindow(deps.storage, current, next);
@@ -399,7 +472,7 @@ export async function runPendingCatchUp(deps: CatchUpDeps): Promise<CatchUpSumma
   // the same page budget per pass, so one cannot starve the ones after it.
   const walkWindows = async (windows: readonly CatchUpWindow[]): Promise<void> => {
     for (const window of windows) {
-      if (failed || stopped) return;
+      if (failed || stopped || budgetReached) return;
       if (!deps.isRunning()) { stopped = true; return; }
       // `stored` is this window as it now stands in storage; `cursor` is where
       // the walk is. They differ only while the pending list is full (below).
@@ -450,29 +523,79 @@ export async function runPendingCatchUp(deps: CatchUpDeps): Promise<CatchUpSumma
             async (events, nextUntil) => {
               if (!deps.isRunning()) throw new CatchUpStopped();
               summary.found += events.length;
+              if (d1Queries >= maxD1Queries) throw new CatchUpBudgetReached();
               // Seen check first, then the claim, so a failed lookup leaves no id
               // claimed-but-unhandled in this instance. Exactly-once holds in
               // either order: the claim is taken right before handle(), and the
               // live path claims before it does anything. A report the live
               // path took meanwhile fails the claim here; one it finished
               // before the lookup is already in report_arrivals.
-              const unseen = await findUnseenReportIds(deps.db, events.map(e => e.id));
-              for (const report of events) {
-                const id = canonicalHex64(report.id) ?? report.id;
-                if (!unseen.has(id)) continue;
-                // Per report, not only per page: each handling awaits D1 and
-                // the relay, so a stop (or a stop and a start) can land
-                // mid-page. Nothing claimed after a stop runs, and the periods
-                // are read as they stand now, before the claim so a failed read
-                // strands no claim.
+              const unseen = await findUnseenReportIds(countedDb, events.map(e => e.id));
+              const unseenEvents = events.filter(r => unseen.has(canonicalHex64(r.id) ?? r.id));
+              let i = 0;
+              while (i < unseenEvents.length) {
                 if (!deps.isRunning()) throw new CatchUpStopped();
+                if (d1Queries >= maxD1Queries) {
+                  if (i > 0) {
+                    // Advance past the reports already recorded on this page so
+                    // the next pass resumes from the remaining reports' max created_at.
+                    const resumeUntil = Math.max(...unseenEvents.slice(i).map(r => r.created_at));
+                    if (Number.isFinite(resumeUntil) && resumeUntil < cursor) {
+                      cursor = resumeUntil;
+                      await advance(resumeUntil);
+                    }
+                  }
+                  throw new CatchUpBudgetReached();
+                }
                 const periods = await deps.stoppedPeriods();
-                if (!deps.claim(id)) continue;
-                if (await deps.handle(report, reportHandlerEnabled(report.created_at, periods))) summary.autoHidden += 1;
+                const report = unseenEvents[i];
+                const handlerEnabled = reportHandlerEnabled(report.created_at, periods);
+                if (deps.canBatch && deps.handleBatch && deps.canBatch(report, handlerEnabled)) {
+                  const claimedBatch: SignedReport[] = [];
+                  const claimedIds: string[] = [];
+                  let k = i;
+                  while (
+                    k < unseenEvents.length
+                    && claimedBatch.length < CATCHUP_INDEX_BATCH_SIZE
+                    && deps.canBatch(unseenEvents[k], reportHandlerEnabled(unseenEvents[k].created_at, periods))
+                  ) {
+                    const candidate = unseenEvents[k];
+                    const cid = canonicalHex64(candidate.id) ?? candidate.id;
+                    if (deps.claim(cid)) {
+                      claimedBatch.push(candidate);
+                      claimedIds.push(cid);
+                    }
+                    k += 1;
+                  }
+                  if (claimedBatch.length > 0) {
+                    try {
+                      await deps.handleBatch(claimedBatch, countedDb);
+                    } catch (error) {
+                      for (const cid of claimedIds) deps.unclaim?.(cid);
+                      throw error;
+                    }
+                    summary.handled += claimedBatch.length;
+                  }
+                  i = k;
+                  continue;
+                }
+                const id = canonicalHex64(report.id) ?? report.id;
+                if (!deps.claim(id)) {
+                  i += 1;
+                  continue;
+                }
+                try {
+                  if (await deps.handle(report, handlerEnabled, countedDb)) summary.autoHidden += 1;
+                } catch (error) {
+                  deps.unclaim?.(id);
+                  throw error;
+                }
                 summary.handled += 1;
+                i += 1;
               }
               cursor = nextUntil;
               await advance(nextUntil);
+              if (d1Queries >= maxD1Queries) throw new CatchUpBudgetReached();
             },
           );
           pagesLeft -= result.pages;
@@ -511,6 +634,9 @@ export async function runPendingCatchUp(deps: CatchUpDeps): Promise<CatchUpSumma
         if (error instanceof CatchUpStopped) {
           stopped = true;
           console.log('[report-catchup] Watcher stopped; pass halted with the window at its saved cursor', stored);
+        } else if (error instanceof CatchUpBudgetReached) {
+          budgetReached = true;
+          console.warn(`[report-catchup] Reached per-pass D1 query budget (${d1Queries}/${maxD1Queries}); kept remaining work at saved cursor`, stored);
         } else {
           failed = true;
           console.error('[report-catchup] Window page failed; kept at its saved cursor, not retried this pass', stored, error);
@@ -522,15 +648,16 @@ export async function runPendingCatchUp(deps: CatchUpDeps): Promise<CatchUpSumma
   await walkWindows(pending);
   // A connect that added a window during the pass found the pass in flight,
   // so nothing else will walk it before the next cron. Walk those once more
-  // now: sequential, after the pass, never a retry of a failed page (a failure
-  // or a stop ends here).
-  if (!failed && !stopped) {
+  // now: sequential, after the pass, never a retry of a failed page (a failure,
+  // stop, or budget halt ends here).
+  if (!failed && !stopped && !budgetReached) {
     const stored = (await deps.storage.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
     const added = stored.filter(w => !ours.has(windowKey(w)));
     if (added.length > 0) await walkWindows(added);
   }
-  // A pass halted by /stop deliberately counts as a success for the floor, so a
-  // stop/start loop cannot bypass the relay throttle; the cron resumes it.
+  // A pass halted by /stop or the per-invocation D1 budget counts as a success
+  // for the floor, so a stop/start loop cannot bypass the throttle and a
+  // budgeted continuation waits 30 s rather than 270 s.
   if (!failed) await deps.storage.put(CATCHUP_LAST_OK_KEY, deps.nowMs());
 
   if (steps.length > 0) {
@@ -546,11 +673,11 @@ export async function runPendingCatchUp(deps: CatchUpDeps): Promise<CatchUpSumma
   // period to prune. A floor that cannot be read prunes nothing but what the
   // cap merges, and so does a period a connect adds after this check.
   let reachFloor = -Infinity;
-  if (((await deps.storage.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? []).length > 0) {
+  if (!budgetReached && ((await deps.storage.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? []).length > 0) {
     try {
       const nowSec = Math.floor(deps.nowMs() / 1000);
       reachFloor = Math.min(
-        stoppedPeriodReachFloor((await readMeta(deps.db)).watcher_last_alive_at, nowSec),
+        stoppedPeriodReachFloor((await readMeta(countedDb)).watcher_last_alive_at, nowSec),
         await deps.otherReachFloor(nowSec),
       );
     } catch (error) {

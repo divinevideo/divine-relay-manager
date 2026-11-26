@@ -3693,5 +3693,30 @@ describe('ReportWatcher', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
       await expect(feed(w, signedReport([['p', TARGET_PK], ['report', 'spam']]))).resolves.toBeUndefined();
     });
+
+    it('rethrows arrival and index batch errors for catch-up without running side effects', async () => {
+      const { db } = arrivalDb({ failArrival: true });
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        eventsProcessed: number;
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+        handleReportEvent(e: ReportEvent, o: { source: string; preClaimed: boolean }): Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(
+        internals.handleReportEvent(
+          signedReport([['e', 'e5'.repeat(32)], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]),
+          { source: 'catchup', preClaimed: true },
+        ),
+      ).rejects.toThrow('d1 down');
+      expect(autoHide).not.toHaveBeenCalled();
+      expect(ageReview).not.toHaveBeenCalled();
+      expect(internals.eventsProcessed).toBe(0);
+      consoleError.mockRestore();
+    });
   });
 });

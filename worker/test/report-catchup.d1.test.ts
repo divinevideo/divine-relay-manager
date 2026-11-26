@@ -8,6 +8,7 @@ import { ensureSchema } from '../src/db';
 import { ReportWatcher, type ReportWatcherEnv } from '../src/ReportWatcher';
 import {
   CATCHUP_CLOCK_MARGIN_SECONDS,
+  CATCHUP_MAX_D1_QUERIES_PER_PASS,
   CATCHUP_MAX_PENDING_WINDOWS,
   CATCHUP_MIN_ATTEMPT_INTERVAL_MS,
   CATCHUP_OVERLAP_SECONDS,
@@ -346,6 +347,41 @@ const periodDeps = (storage: DurableObjectStorage) => ({
 });
 const bansFor = (target: string) => nip86.filter(c => c.method === 'banevent' && c.params[0] === target);
 const allRows = async (sql: string) => (await DB.prepare(sql).all()).results ?? [];
+
+function wrapCountingDb(db: D1Database, onQuery: () => void): D1Database {
+  const rawStatements = new WeakMap<object, D1PreparedStatement>();
+  const wrapStmt = (stmt: D1PreparedStatement): D1PreparedStatement => {
+    const proxy = new Proxy(stmt, {
+      get(target, prop) {
+        const val = Reflect.get(target, prop);
+        if (typeof val !== 'function') return val;
+        if (prop === 'bind') return (...args: unknown[]) => wrapStmt(val.apply(target, args) as D1PreparedStatement);
+        if (prop === 'run' || prop === 'first' || prop === 'all' || prop === 'raw') {
+          return (...args: unknown[]) => {
+            onQuery();
+            return val.apply(target, args);
+          };
+        }
+        return val.bind(target);
+      },
+    });
+    rawStatements.set(proxy, stmt);
+    return proxy;
+  };
+  return new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'prepare') return (sql: string) => wrapStmt(target.prepare(sql));
+      if (prop === 'batch') {
+        return (stmts: D1PreparedStatement[]) => {
+          onQuery();
+          return target.batch(stmts.map(s => rawStatements.get(s as object) ?? s));
+        };
+      }
+      const value = Reflect.get(target, prop);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
 
 describe('catch-up when the listener connects', () => {
   it('runs auto-hide and age-review intake on a report filed while the watcher was down', async () => {
@@ -2059,5 +2095,124 @@ describe('catch-up when the listener connects', () => {
     expect(handled).toContain(below.id);
     // The walk finished: only the unseen tail is left of it.
     expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: now - 4, until: now + 120 }]);
+  }, 60_000);
+
+  it('retains unrecorded reports for retry when a catch-up D1 write fails mid-page', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    const now = nowSec();
+    const t1 = hex(0x9d01);
+    const t2 = hex(0x9d02);
+    const t3 = hex(0x9d03);
+    relay.corpus = [
+      minorsReport(t1, now - 100),
+      minorsReport(t2, now - 200),
+      minorsReport(t3, now - 300),
+    ];
+    let indexBatches = 0;
+    const flakyDb = new Proxy(DB, {
+      get(target, prop) {
+        if (prop === 'batch') {
+          return async (stmts: D1PreparedStatement[]) => {
+            indexBatches += 1;
+            // Batch 1 = findUnseenReportIds, Batch 2 = r1 arrival+index, Batch 3 = r1 refs,
+            // Batch 4 = r2 arrival+index -> fail before r2 or r3 are recorded.
+            if (indexBatches === 4) throw new Error('synthetic D1 arrival write failure');
+            return target.batch(stmts);
+          };
+        }
+        const value = Reflect.get(target, prop);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+    });
+    const w = await newWatcher({ DB: flakyDb });
+    w.data.set('report-catchup-windows', [{ since: now - 400, until: now - 50 }]);
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(bansFor(t1)).toHaveLength(1);
+    expect(bansFor(t2)).toHaveLength(0);
+    expect(bansFor(t3)).toHaveLength(0);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(1);
+    expect(w.data.get('report-catchup-windows')).toEqual([{ since: now - 400, until: now - 50 }]);
+
+    // Failed pass holds for the attempt interval, then retries in the same
+    // watcher instance and finishes the two unrecorded reports without
+    // re-handling the already recorded one.
+    const held = await w.post('/internal/report-catchup');
+    expect(await held.json()).toMatchObject({ ran: false });
+    const clock = shiftClock(CATCHUP_MIN_ATTEMPT_INTERVAL_MS + 1000);
+    try {
+      const retried = await w.post('/internal/report-catchup');
+      expect(await retried.json()).toMatchObject({ ran: true, complete: true, handled: 2, autoHidden: 2 });
+    } finally {
+      clock.mockRestore();
+    }
+    expect(bansFor(t1)).toHaveLength(1);
+    expect(bansFor(t2)).toHaveLength(1);
+    expect(bansFor(t3)).toHaveLength(1);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(3);
+    expect(w.data.get('report-catchup-windows')).toEqual([]);
+  });
+
+  it('batches non-actionable catch-up reports within a small D1 query count', async () => {
+    const now = nowSec();
+    relay.corpus = Array.from(
+      { length: 500 },
+      (_, i) => signed([['e', hex(0x9e000 + i)], ['report', 'spam']], now - 600 + i),
+    );
+    let d1Queries = 0;
+    let schemaPrewarmed = false;
+    const countedDb = wrapCountingDb(DB, () => { if (schemaPrewarmed) d1Queries += 1; });
+    const w = await newWatcher({ DB: countedDb });
+    // Pre-warm schemaReady via one live report before measuring the 500-report page.
+    await (w.watcher as unknown as { handleReportEvent(e: NostrEvent): Promise<void> }).handleReportEvent(
+      signed([['e', hex(0x9dfff)], ['report', 'spam']], now - 700),
+    );
+    schemaPrewarmed = true;
+    w.data.set('report-catchup-windows', [{ since: now - 650, until: now - 50 }]);
+    await w.post('/start');
+    await settle(w.pending);
+
+    expect(d1Queries).toBeLessThan(30);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(501);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_arrivals').first<{ n: number }>())?.n).toBe(501);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index_refs').first<{ n: number }>())?.n).toBe(501);
+    expect(w.data.get('report-catchup-windows')).toEqual([]);
+  }, 60_000);
+
+  it('stops within the per-invocation D1 query budget on a burst of actionable reports and finishes on the next pass', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const now = nowSec();
+    const targets = Array.from({ length: 150 }, (_, i) => hex(0x9f000 + i));
+    relay.corpus = targets.map((t, i) => minorsReport(t, now - 250 + i));
+    let invocationQueries = 0;
+    const boundedDb = wrapCountingDb(DB, () => {
+      invocationQueries += 1;
+      if (invocationQueries > 1000) throw new Error('Too many API requests by single Worker invocation');
+    });
+    const w = await newWatcher({ DB: boundedDb });
+    w.data.set('report-catchup-windows', [{ since: now - 300, until: now - 50 }]);
+    await w.post('/start');
+    await settle(w.pending);
+
+    const afterPass1 = (await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n ?? 0;
+    expect(afterPass1).toBeGreaterThan(80);
+    expect(afterPass1).toBeLessThan(150);
+    expect(invocationQueries).toBeLessThan(CATCHUP_MAX_D1_QUERIES_PER_PASS + 120);
+    expect(w.data.get('report-catchup-windows')).toHaveLength(1);
+
+    // Next Worker invocation resets the per-invocation query counter and finishes the remainder.
+    invocationQueries = 0;
+    const clock = shiftClock(CATCHUP_SUCCESS_INTERVAL_MS + 1000);
+    try {
+      const pass2 = await w.post('/internal/report-catchup');
+      expect(await pass2.json()).toMatchObject({ ran: true, complete: true });
+    } finally {
+      clock.mockRestore();
+    }
+    expect(nip86.filter(c => c.method === 'banevent')).toHaveLength(150);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(150);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_arrivals').first<{ n: number }>())?.n).toBe(150);
+    expect(w.data.get('report-catchup-windows')).toEqual([]);
   }, 60_000);
 });
