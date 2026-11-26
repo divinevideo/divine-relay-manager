@@ -150,7 +150,7 @@ A Platform member reviews and approves it; Matt may name a specific reviewer.
 1. **Catch-up + live writes** (safety fix, ships alone): listener catch-up through the live handler, burst alert, and live inserts into `report_index` (dual write; reads unchanged).
 2. **Backfill + reconcile + shadow diff.**
 3. **Read cutover** behind the flag, plus the hidden-reason marking in the UI.
-4. **The divine-funnelcake PR** (can start in parallel with phase 2): the moderation-review report read with reasons. Once it ships, Relay Manager's reads switch to it and the 30-day fallback retires.
+4. **The divine-funnelcake PR** (can start in parallel with phase 2): the moderation-review report read with reasons. Relay Manager switches its reads to it once it ships. The 30-day fallback for missing reports stays until an authoritative deletion or erasure signal is available.
 5. **Later, optional**: NIP-77 negentropy or an arrival-ordered cursor so reconcile doesn't walk everything; confirm the production per-REQ limit is at least 2,000.
 
 ### Load cuts outside this design (separate small PRs, Matt 2026-11-24)
