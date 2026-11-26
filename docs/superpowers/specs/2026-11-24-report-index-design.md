@@ -173,7 +173,7 @@ These are listed so the plan can decide whether each lands in phase 3 or as a se
 
 - D1 tests (`npm run test:d1`) for upsert idempotency, catch-up after a simulated disconnect, the mass-absence guard, the certification gate, erasure, and hidden-reason marking.
 - Catch-up must be proven to run the live handler (auto-hide and age-review intake) on a missed report, with a test that fails if it doesn't, and the burst alert must fire past N.
-- Local stack end to end (prod and staging blocked in the browser): file a report while the worker is stopped, start it, and see auto-hide plus the queue entry.
+- On the local stack, wait for the watcher's first heartbeat, terminate the worker, and file a report. Restart the worker and verify auto-hide and the queue entry. Repeat with the watcher's `/stop` and `/start` endpoints and verify that catch-up records the report without automated action.
 - The shadow period in prod before cutover.
 
 ## What's left to the builder
