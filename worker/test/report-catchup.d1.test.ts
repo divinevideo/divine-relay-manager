@@ -2195,14 +2195,18 @@ describe('catch-up when the listener connects', () => {
     await w.post('/start');
     await settle(w.pending);
 
-    const afterPass1 = (await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n ?? 0;
-    expect(afterPass1).toBeGreaterThan(80);
-    expect(afterPass1).toBeLessThan(150);
+    const firstPass = await DB.prepare('SELECT COUNT(*) AS n, MIN(created_at) AS oldest FROM report_index')
+      .first<{ n: number; oldest: number }>();
+    expect(firstPass!.n).toBeGreaterThan(80);
+    expect(firstPass!.n).toBeLessThan(150);
     expect(invocationQueries).toBeLessThan(CATCHUP_MAX_D1_QUERIES_PER_PASS + 120);
-    expect(w.data.get('report-catchup-windows')).toHaveLength(1);
+    // The reports have consecutive timestamps. Resume at the newest unrecorded report.
+    const resumeWindow = { since: now - 300, until: firstPass!.oldest - 1 };
+    expect(w.data.get('report-catchup-windows')).toEqual([resumeWindow]);
 
     // Next Worker invocation resets the per-invocation query counter and finishes the remainder.
     invocationQueries = 0;
+    const nextQuery = relay.queries.length;
     const clock = shiftClock(CATCHUP_SUCCESS_INTERVAL_MS + 1000);
     try {
       const pass2 = await w.post('/internal/report-catchup');
@@ -2210,6 +2214,7 @@ describe('catch-up when the listener connects', () => {
     } finally {
       clock.mockRestore();
     }
+    expect(relay.queries[nextQuery]).toMatchObject(resumeWindow);
     expect(nip86.filter(c => c.method === 'banevent')).toHaveLength(150);
     expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(150);
     expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_arrivals').first<{ n: number }>())?.n).toBe(150);
