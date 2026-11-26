@@ -5,7 +5,7 @@
 import { Miniflare } from 'miniflare';
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
 import { ensureSchema } from '../src/db';
-import { recordReportArrival, readReportArrivals } from '../src/report-arrivals';
+import { recordReportArrival, readReportArrivals, reportArrivalStatements } from '../src/report-arrivals';
 
 let mf: Miniflare;
 let DB: D1Database;
@@ -93,5 +93,17 @@ describe('report_arrivals', () => {
 
     await readReportArrivals(counting, []);
     expect(batches).toEqual([3]);
+  });
+
+  it('reportArrivalStatements chunks writes within 100 bound parameters and preserves first arrival', async () => {
+    await recordReportArrival(DB, 'id0', 50);
+    const ids = Array.from({ length: 120 }, (_, i) => `id${i}`);
+    const stmts = reportArrivalStatements(DB, ids, 200);
+    expect(stmts).toHaveLength(3);
+    await DB.batch(stmts);
+    const found = await readReportArrivals(DB, ids);
+    expect(found.size).toBe(120);
+    expect(found.get('id0')).toBe(50);
+    expect(found.get('id119')).toBe(200);
   });
 });

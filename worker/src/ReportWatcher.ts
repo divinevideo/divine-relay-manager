@@ -4,7 +4,25 @@
 import { verifyEvent, type Event as NostrEvent } from 'nostr-tools';
 import { callNip86Rpc, type Nip86Env } from './nip86';
 import { ensureSchema } from './db';
-import { recordReportArrival } from './report-arrivals';
+import { reportArrivalStatements } from './report-arrivals';
+import { metaStatement, readMeta, reportIndexRefStatements, reportIndexRowStatements, runStatements, type ReportIndexSource, type SignedReport } from './report-index';
+import {
+  CATCHUP_INDEX_BATCH_SIZE,
+  CATCHUP_STOPPED_PERIODS_KEY,
+  CATCHUP_WINDOWS_KEY,
+  addPendingWindow,
+  addStoppedPeriod,
+  inStoppedPeriod,
+  stopPeriodFor,
+  stoppedPeriodMergeAlertText,
+  stoppedPeriodReachFloor,
+  type StoppedPeriod,
+  planCatchUpWindow,
+  runPendingCatchUp,
+  type CatchUpSummary,
+  type CatchUpWindow,
+} from './report-catchup';
+import { sendReportIndexAlert } from './report-index-alerts';
 import { type EventVisibilityOperation, type EventVisibilityResult } from './event-visibility';
 import { markHumanAction, markHumanReviewed } from './human-decision';
 import {
@@ -24,7 +42,7 @@ import { type KeycastEnv } from './keycast-client';
 import { openReportedAgeReviewCase } from './reported-age-review';
 import { SexualQuarantine, OutsideVideoScope, ConfirmedAbsentTarget, TargetEvidenceLimit, QuarantineConflict, adultSexualCategory, type QuarantineSnapshot } from './sexual-quarantine';
 import { createQuarantineIO, type SexualQuarantineEnv } from './sexual-quarantine-io';
-import { replayAdultReports, reportCategory } from './sexual-report-replay';
+import { replayAdultReports, replayReachFloor, reportCategory } from './sexual-report-replay';
 
 const UNRESOLVED_AUTO_HIDE_VISIBILITY = 'unresolved-hide';
 const UNRESOLVED_HUMAN_HIDE_VISIBILITY = 'hide-unresolved';
@@ -36,6 +54,8 @@ export interface ReportWatcherEnv extends Nip86Env, KeycastEnv, SexualQuarantine
   DB?: D1Database;
   AUTO_HIDE_ENABLED?: string;
   TRUSTED_CLIENTS?: string;
+  SLACK_WEBHOOK_URL?: string;
+  ENVIRONMENT?: string;
 }
 
 export async function hasLatestHumanRestore(db: D1Database, targetEventId: string): Promise<boolean> {
@@ -132,6 +152,28 @@ const RECONNECT_BACKOFF_MULTIPLIER = 2;
 // Alarm interval for connection health checks
 const HEALTH_CHECK_INTERVAL_MS = 30000;
 
+// How long the live REQ may go without EOSE before its socket is dropped.
+// Funnelcake ends every REQ with EOSE, CLOSED or a dropped socket within about
+// 35 s, so this never fires against a healthy relay.
+const LIVE_EOSE_TIMEOUT_MS = 60000;
+
+/** DO storage key: unix seconds of the last /stop, so catch-up can tell a deliberate stop from an outage. */
+const DELIBERATE_STOP_KEY = 'report-watcher-deliberate-stop';
+/**
+ * DO storage key: unix seconds of the /start after that stop, until a connect
+ * consumes both. The stopped period ends here: time from the start to the
+ * connect is an outage, not more stopped time.
+ */
+const START_AFTER_STOP_KEY = 'report-watcher-start-after-stop';
+
+/** Report ids claimed by the live path or catch-up, kept in insertion order up to this many. */
+const CLAIMED_REPORT_IDS_CAP = 5000;
+
+/** Thrown from the replay's ingest when the watcher stopped mid-replay. */
+class ReplayStopped extends Error {}
+
+const IDLE_CATCHUP: CatchUpSummary = { ran: false, found: 0, handled: 0, autoHidden: 0, complete: false };
+
 /**
  * ReportWatcher Durable Object
  *
@@ -148,6 +190,31 @@ export class ReportWatcher implements DurableObject {
   private schemaReady: boolean = false;
   private running: boolean = false;
   private ws: WebSocket | null = null;
+  // True once the catch-up window for this connection is saved. Until then the
+  // health alarm must not stamp watcher_last_alive_at: a stamp taken before the
+  // window is saved would hide the gap from the next restart.
+  private catchUpPlannedForConnection = false;
+  // True once this connection's live subscription has reached EOSE. Until then
+  // the relay has not acknowledged the REQ, so the socket may be receiving
+  // nothing and the health alarm must not stamp watcher_last_alive_at either.
+  private liveSubscriptionAcked = false;
+  // Closes the socket if its live REQ never reaches EOSE (see armEoseWatchdog).
+  private eoseWatchdog: ReturnType<typeof setTimeout> | null = null;
+  // A plan is running (from the connect, or a retry from the alarm).
+  private catchUpPlanInFlight = false;
+  // Every report id the live path or catch-up has taken in this instance, so a
+  // report found both ways is handled once. In memory only: after a restart,
+  // report_arrivals and report_index carry the same guarantee.
+  private claimedReportIds = new Map<string, number>();
+  // One catch-up pass at a time: the connect and the cron can both ask.
+  private catchUpInFlight: Promise<CatchUpSummary> | null = null;
+  // While a catch-up pass runs: report ids that took an automated hide action
+  // (a legacy hide or a quarantine hide trigger), so the pass counts exactly
+  // its own auto actions for the burst alert. Null outside a pass.
+  private autoActionedReportIds: Set<string> | null = null;
+  // Set for the duration of a catch-up pass so every D1 query executed during
+  // report handling counts against the per-invocation catch-up D1 budget.
+  private catchUpDb: D1Database | null = null;
   private connectedAt: number | null = null;
   private lastEventAt: number | null = null;
   private eventsProcessed: number = 0;
@@ -231,6 +298,12 @@ export class ReportWatcher implements DurableObject {
         return this.handleStatus();
       }
 
+      // Same caller and the same refusal as above: the cron resumes pending
+      // restart catch-up windows here.
+      if (path === '/internal/report-catchup' && request.method === 'POST') {
+        return Response.json(await this.runCatchUp());
+      }
+
       if (path === '/config' && request.method === 'GET') {
         return this.handleGetConfig();
       }
@@ -282,6 +355,23 @@ export class ReportWatcher implements DurableObject {
     // Persist state
     await this.persistState();
 
+    // The end of the stopped period an unconsumed stop marker opened. Before
+    // the connect, so its plan reads it. Non-critical: without it the period
+    // ends at the connect, as it did before.
+    try {
+      await this.state.storage.transaction(async (tx) => {
+        // Running is checked after the read: a /stop can land during it.
+        if (await tx.get<number>(DELIBERATE_STOP_KEY) !== undefined && this.running) {
+          await tx.put(START_AFTER_STOP_KEY, Math.floor(Date.now() / 1000));
+        }
+      });
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to record the start after a deliberate stop:', error);
+    }
+    // A /stop can land during any await above. It wins: no socket, no alarm
+    // (and the transaction above wrote no start time).
+    if (!this.running) return this.stoppedWhileStarting();
+
     // Start WebSocket connection
     this.connect();
 
@@ -293,6 +383,18 @@ export class ReportWatcher implements DurableObject {
     return new Response(JSON.stringify({
       success: true,
       message: 'Started',
+      status: this.getStatus(),
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+
+  private stoppedWhileStarting(): Response {
+    console.log('[ReportWatcher] Stopped while starting; start abandoned');
+    return new Response(JSON.stringify({
+      success: true,
+      message: 'Stopped while starting',
       status: this.getStatus(),
     }), {
       status: 200,
@@ -317,6 +419,37 @@ export class ReportWatcher implements DurableObject {
 
     this.running = false;
     this.disconnect();
+
+    // A deliberate stop is not an outage: the next start reads this marker so
+    // catch-up does not treat the stopped interval as a gap to replay.
+    // Non-critical: if the write fails, /stop still completes. A missing marker
+    // makes catch-up treat the gap as an outage, so auto-hide and age review
+    // run on it: the miss-nothing default, not the stop-respecting one.
+    // An earlier marker that no connect has consumed (a start that never
+    // reached the relay) is closed off at that start: its stopped period is
+    // saved (to the clock margin after the start, as a connect would save it),
+    // and this stop opens a new one. The time between was an outage.
+    const merged: StoppedPeriod[] = [];
+    try {
+      await this.state.storage.transaction(async (tx) => {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+        const startedAt = await tx.get<number>(START_AFTER_STOP_KEY);
+        if (stopMarker !== undefined && startedAt !== undefined) {
+          const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+          const windows = (await tx.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
+          // No heartbeat read here (D1 on /stop), so only the cap prunes; the
+          // next connect and pass prune by the heartbeat.
+          await tx.put(CATCHUP_STOPPED_PERIODS_KEY, addStoppedPeriod(periods, stopPeriodFor(stopMarker, startedAt, nowSec), windows, -Infinity, m => merged.push(m)));
+        }
+        if (stopMarker === undefined || startedAt !== undefined) await tx.put(DELIBERATE_STOP_KEY, nowSec);
+        await tx.delete(START_AFTER_STOP_KEY);
+      });
+    } catch (error) {
+      merged.length = 0;
+      console.error('[ReportWatcher] Failed to record deliberate-stop marker:', error);
+    }
+    for (const m of merged) await sendReportIndexAlert(this.env, stoppedPeriodMergeAlertText(m));
 
     // Persist state
     await this.persistState();
@@ -706,18 +839,27 @@ export class ReportWatcher implements DurableObject {
     if (this.ws) {
       this.disconnect();
     }
+    this.catchUpPlannedForConnection = false;
+    this.liveSubscriptionAcked = false;
 
     const relayUrl = this.env.RELAY_URL;
     console.log(`[ReportWatcher] Connecting to ${relayUrl}`);
 
     try {
-      this.ws = new WebSocket(relayUrl);
+      const socket = new WebSocket(relayUrl);
+      this.ws = socket;
 
       this.ws.addEventListener('open', () => {
+        // A replaced or orphaned socket's late open must not subscribe, arm a
+        // watchdog or plan catch-up: only the tracked socket of a running
+        // watcher does.
+        if (!this.running || this.ws !== socket) return;
         console.log('[ReportWatcher] WebSocket connected');
         this.connectedAt = Date.now();
-        this.reconnectAttempts = 0;
-        this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+        // The backoff is reset on the live subscription's EOSE, not here: a
+        // relay that opens the socket and then answers the REQ with CLOSED
+        // (rate limit, auth required, a failing stored query) would otherwise
+        // be reconnected every second, each time with a catch-up plan and pass.
 
         // Subscribe to kind 1984 reports
         // Using limit: 0 to only get new events (not historical)
@@ -726,12 +868,30 @@ export class ReportWatcher implements DurableObject {
           this.subscriptionId,
           { kinds: [1984], limit: 0 }
         ]);
-        this.ws?.send(subscription);
+        // Armed before the send: if the send throws, the watchdog still drops
+        // this socket, which would otherwise sit open with no live REQ.
+        this.armEoseWatchdog(socket);
+        try {
+          socket.send(subscription);
+        } catch (error) {
+          console.error('[ReportWatcher] Failed to send the live REQ; the EOSE watchdog will drop the socket:', error);
+          return;
+        }
         console.log('[ReportWatcher] Subscribed to kind 1984 reports');
+
+        // After the live REQ, so nothing filed from here on is missed: plan the
+        // gap since the last heartbeat, then walk it in the background. The
+        // claim keeps a report seen both ways to one handling.
+        this.state.waitUntil(this.planAndRunCatchUp(socket));
       });
 
       this.ws.addEventListener('message', (event) => {
-        const work = this.handleMessage(event.data as string).catch(error => {
+        // Only the tracked socket of a running watcher is listened to. A
+        // replaced or orphaned socket (after a reconnect or a /stop) can still
+        // deliver, and handling that would run auto-hide and age review on a
+        // stopped watcher, or act twice.
+        if (!this.running || this.ws !== socket) return;
+        const work = this.handleMessage(event.data as string, socket).catch(error => {
           console.error('[ReportWatcher] Message handler failed:', error);
         });
         this.state.waitUntil(work);
@@ -739,8 +899,12 @@ export class ReportWatcher implements DurableObject {
 
       this.ws.addEventListener('close', (event) => {
         console.log(`[ReportWatcher] WebSocket closed: ${event.code} ${event.reason}`);
+        // A replaced socket's late close must not drop the socket that
+        // replaced it or schedule a second reconnect.
+        if (this.ws !== socket) return;
         this.ws = null;
         this.connectedAt = null;
+        this.clearEoseWatchdog();
 
         // Reconnect if still supposed to be running
         if (this.running) {
@@ -761,22 +925,275 @@ export class ReportWatcher implements DurableObject {
   }
 
   /**
+   * Saves this connection's catch-up windows, then runs a pass.
+   *
+   * D1 (schema, heartbeat) is read before blockConcurrencyWhile: a slow D1
+   * there could hold the gate past 30 s, which resets the object. Reading the
+   * heartbeat outside the gate is safe: only this connection's plan can make
+   * the alarm stamp it, and that has not happened yet. The pending list and
+   * the stop marker are read and written inside the gate, so nothing else
+   * touches them between the read and the write. Every failure inside the
+   * callback is caught there (a throw resets the object). A failed plan leaves
+   * catchUpPlannedForConnection false, so the heartbeat stays where it was;
+   * the health alarm retries the plan while the socket stays open, and the
+   * next connection plans the same gap otherwise.
+   */
+  private async planAndRunCatchUp(socket: WebSocket): Promise<void> {
+    const db = this.env.DB;
+    // One plan at a time (the connect, or an alarm retry). The flag covers only
+    // the plan, not the pass after it, so a reconnect during a long pass still
+    // plans its own gap.
+    if (!db || this.catchUpPlanInFlight) return;
+    this.catchUpPlanInFlight = true;
+    let planned = false;
+    try {
+      planned = await this.planCatchUp(db, socket);
+    } finally {
+      this.catchUpPlanInFlight = false;
+    }
+    if (planned) await this.runCatchUp();
+  }
+
+  /** Saves this connection's windows; true once they are saved. Never throws. */
+  private async planCatchUp(db: D1Database, socket: WebSocket): Promise<boolean> {
+    // A newer connection replaced this one; it plans for itself.
+    if (this.ws !== socket) return false;
+    let lastAliveAt: number | undefined;
+    try {
+      if (!this.schemaReady) {
+        await ensureSchema(db);
+        this.schemaReady = true;
+      }
+      lastAliveAt = (await readMeta(db)).watcher_last_alive_at;
+    } catch (error) {
+      console.error('[ReportWatcher] Failed to read the heartbeat for restart catch-up; plan retried by the health alarm:', error);
+      return false;
+    }
+    let merged: StoppedPeriod[] = [];
+    const planned = await this.state.blockConcurrencyWhile(async () => {
+      if (this.ws !== socket) return false;
+      try {
+        // One transaction for the marker, the windows and the periods: a
+        // running pass read-modify-writes the same keys (its cursor saves and
+        // its end-of-pass prune), and the marker is consumed exactly when what
+        // it describes is saved.
+        merged = await this.state.storage.transaction(async (tx) => {
+          const mergedHere: StoppedPeriod[] = [];
+          const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+          const startedAt = await tx.get<number>(START_AFTER_STOP_KEY);
+          const nowSec = Math.floor(Date.now() / 1000);
+          const fresh = planCatchUpWindow(lastAliveAt, nowSec);
+          let windows = (await tx.get<CatchUpWindow[]>(CATCHUP_WINDOWS_KEY)) ?? [];
+          const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+          if (fresh.length > 0) {
+            for (const window of fresh) {
+              const added = addPendingWindow(windows, window);
+              windows = added.windows;
+              if (added.merged) console.warn('[ReportWatcher] Catch-up windows over the cap; merged the two oldest');
+            }
+            await tx.put(CATCHUP_WINDOWS_KEY, windows);
+          }
+          if (stopMarker !== undefined) {
+            // The stopped period is kept apart from the windows, so catch-up
+            // runs no handler on a report created in it whichever window finds
+            // it (see runPendingCatchUp). From the stop to the /start plus the
+            // clock margin after it (stopPeriodFor); without a recorded start,
+            // anchored at this connect.
+            const reachFloor = Math.min(stoppedPeriodReachFloor(lastAliveAt, nowSec), await this.otherReachFloor(tx, nowSec));
+            const kept = addStoppedPeriod(periods, stopPeriodFor(stopMarker, startedAt, nowSec), windows, reachFloor, m => mergedHere.push(m));
+            await tx.put(CATCHUP_STOPPED_PERIODS_KEY, kept);
+            await tx.delete(DELIBERATE_STOP_KEY);
+          }
+          await tx.delete(START_AFTER_STOP_KEY);
+          return mergedHere;
+        });
+        this.catchUpPlannedForConnection = true;
+        return true;
+      } catch (error) {
+        merged = [];
+        console.error('[ReportWatcher] Failed to plan restart catch-up; heartbeat held for the next connection:', error);
+        return false;
+      }
+    });
+    // Outside the concurrency gate, so the webhook never holds it.
+    for (const m of merged) await sendReportIndexAlert(this.env, stoppedPeriodMergeAlertText(m));
+    return planned;
+  }
+
+  /**
+   * The stopped periods as they stand: the saved ones, plus a stop that no
+   * connect has consumed yet (stopPeriodFor, from its marker and the recorded
+   * /start). Catch-up and the adult replay both read this, per report. One
+   * transaction, so a plan consuming the marker cannot fall between the reads.
+   */
+  private async currentStoppedPeriods(): Promise<StoppedPeriod[]> {
+    return this.state.storage.transaction(async (tx) => {
+      const periods = (await tx.get<StoppedPeriod[]>(CATCHUP_STOPPED_PERIODS_KEY)) ?? [];
+      const stopMarker = await tx.get<number>(DELIBERATE_STOP_KEY);
+      if (stopMarker === undefined) return periods;
+      const startedAt = await tx.get<number>(START_AFTER_STOP_KEY);
+      return [...periods, stopPeriodFor(stopMarker, startedAt, Math.floor(Date.now() / 1000))];
+    });
+  }
+
+  /**
+   * How far back the adult replay can still read, else Infinity. Stopped
+   * periods are kept from there on, so the replay can still skip them. It
+   * counts while the sexual quarantine is active (env flag or the persisted
+   * flag), and also while the replay has never run (no open window, no
+   * cursor): a first activation reads a day back. Storage only.
+   */
+  private async otherReachFloor(
+    storage: { get<T>(key: string): Promise<T | undefined> },
+    nowSec: number,
+  ): Promise<number> {
+    const active = this.env.SEXUAL_QUARANTINE_ENABLED === 'true' || await storage.get<boolean>('sexual-quarantine-activated');
+    const neverRan = await storage.get('sexual-replay-window') === undefined
+      && await storage.get('sexual-replay-through') === undefined;
+    return active || neverRan ? replayReachFloor(storage, nowSec) : Infinity;
+  }
+
+  /** One catch-up pass, unless one is already running or the watcher is stopped. Never throws. */
+  private async runCatchUp(): Promise<CatchUpSummary> {
+    const db = this.env.DB;
+    // Stopped means no automated actions: pending windows wait for the next start.
+    if (!db || !this.running || this.catchUpInFlight) return { ...IDLE_CATCHUP };
+    const autoActioned = new Set<string>();
+    this.autoActionedReportIds = autoActioned;
+    const pass = (async (): Promise<CatchUpSummary> => {
+      try {
+        return await runPendingCatchUp({
+          db,
+          relayUrl: this.env.RELAY_URL,
+          storage: this.state.storage,
+          claim: (id) => this.claimReport(id),
+          unclaim: (id) => this.unclaimReport(id),
+          canBatch: (report, handlerEnabled) => this.canBatchCatchUpReport(report, handlerEnabled),
+          handleBatch: async (reports, passDb) => {
+            await this.handleReportBatch(reports, passDb);
+          },
+          handle: async (report, handlerEnabled, passDb) => {
+            this.catchUpDb = passDb;
+            try {
+              await this.handleReportEvent(report, {
+                source: 'catchup',
+                preClaimed: true,
+                sideEffects: handlerEnabled,
+              });
+            } finally {
+              this.catchUpDb = null;
+            }
+            return autoActioned.delete(canonicalHex64(report.id) ?? report.id);
+          },
+          isRunning: () => this.running,
+          stoppedPeriods: () => this.currentStoppedPeriods(),
+          otherReachFloor: (nowSec) => this.otherReachFloor(this.state.storage, nowSec),
+          alert: (text) => sendReportIndexAlert(this.env, text),
+          nowMs: () => Date.now(),
+        });
+      } catch (error) {
+        console.error('[ReportWatcher] Restart catch-up pass failed:', error);
+        return { ...IDLE_CATCHUP };
+      } finally {
+        this.catchUpInFlight = null;
+        this.autoActionedReportIds = null;
+      }
+    })();
+    this.catchUpInFlight = pass;
+    return pass;
+  }
+
+  /** Records an automated hide action for a report while a catch-up pass is counting. */
+  private noteAutoAction(reportId: string): void {
+    this.autoActionedReportIds?.add(canonicalHex64(reportId) ?? reportId);
+  }
+
+  /** True the first time an id is claimed in this instance. */
+  private claimReport(id: string): boolean {
+    const key = canonicalHex64(id) ?? String(id);
+    if (this.claimedReportIds.has(key)) return false;
+    this.claimedReportIds.set(key, Date.now());
+    if (this.claimedReportIds.size > CLAIMED_REPORT_IDS_CAP) {
+      const oldest = this.claimedReportIds.keys().next().value;
+      if (oldest !== undefined) this.claimedReportIds.delete(oldest);
+    }
+    return true;
+  }
+
+  /** Releases an in-memory claim when catch-up failed to record the report in D1. */
+  private unclaimReport(id: string): void {
+    this.claimedReportIds.delete(canonicalHex64(id) ?? String(id));
+  }
+
+  private get activeDb(): D1Database | undefined {
+    return this.catchUpDb ?? this.env.DB;
+  }
+
+  private get quarantineEnv(): SexualQuarantineEnv {
+    return new Proxy(this.env, {
+      get: (target, prop) => (prop === 'DB' ? this.activeDb : Reflect.get(target, prop)),
+    });
+  }
+
+  /**
    * Disconnect from relay
    */
   private disconnect(): void {
-    if (this.ws) {
-      // Unsubscribe before closing
+    this.clearEoseWatchdog();
+    const ws = this.ws;
+    if (ws) {
+      // Untracked before closing, so its close event (sync or late) is
+      // ignored by the close listener's identity check.
+      this.ws = null;
+      this.connectedAt = null;
+      // Unsubscribe before closing. Separate try blocks: a send that throws
+      // must not leave the socket open.
       try {
-        if (this.ws.readyState === WebSocket.OPEN) {
-          this.ws.send(JSON.stringify(['CLOSE', this.subscriptionId]));
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(['CLOSE', this.subscriptionId]));
         }
-        this.ws.close();
       } catch {
         // Ignore errors during cleanup
       }
-      this.ws = null;
-      this.connectedAt = null;
+      try {
+        ws.close();
+      } catch {
+        // Ignore errors during cleanup
+      }
     }
+  }
+
+  /**
+   * Drops `socket` if its live subscription has not reached EOSE in
+   * LIVE_EOSE_TIMEOUT_MS. A relay that accepts the socket but never answers the
+   * REQ would otherwise leave the watcher on a subscription that delivers
+   * nothing, with no heartbeat to show for it. The watchdog disconnects and
+   * schedules the backoff reconnect itself rather than waiting for the close
+   * event, which a hung peer may never send; disconnect() untracks the socket
+   * first, so a late close event is ignored and cannot schedule a second
+   * reconnect. The backoff is not reset (only EOSE resets it), so repeated
+   * stalls back off. The reconnect resubscribes and plans the gap. Cleared on
+   * EOSE, on close and on disconnect.
+   */
+  private armEoseWatchdog(socket: WebSocket): void {
+    // A replaced socket's late open must not disarm the tracked socket's watchdog.
+    if (this.ws !== socket) return;
+    this.clearEoseWatchdog();
+    this.eoseWatchdog = setTimeout(() => {
+      this.eoseWatchdog = null;
+      // Only the socket it was armed for, never one that replaced it.
+      if (this.ws !== socket) return;
+      console.error(`[ReportWatcher] Live subscription had no EOSE after ${LIVE_EOSE_TIMEOUT_MS} ms; dropping the socket to reconnect`);
+      // disconnect() catches its own send/close errors.
+      this.disconnect();
+      if (this.running) this.scheduleReconnect();
+    }, LIVE_EOSE_TIMEOUT_MS);
+  }
+
+  private clearEoseWatchdog(): void {
+    if (this.eoseWatchdog === null) return;
+    clearTimeout(this.eoseWatchdog);
+    this.eoseWatchdog = null;
   }
 
   /**
@@ -822,7 +1239,7 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle incoming WebSocket message
    */
-  private async handleMessage(data: string): Promise<void> {
+  private async handleMessage(data: string, socket: WebSocket): Promise<void> {
     try {
       const message = JSON.parse(data) as unknown[];
 
@@ -843,6 +1260,14 @@ export class ReportWatcher implements DurableObject {
 
         case 'EOSE': {
           console.log('[ReportWatcher] End of stored events');
+          // The live subscription is healthy: only now is the backoff reset,
+          // and only now may the health alarm stamp the heartbeat.
+          if (rest[0] === this.subscriptionId && this.ws === socket) {
+            this.reconnectAttempts = 0;
+            this.reconnectDelay = INITIAL_RECONNECT_DELAY_MS;
+            this.liveSubscriptionAcked = true;
+            this.clearEoseWatchdog();
+          }
           break;
         }
 
@@ -859,6 +1284,19 @@ export class ReportWatcher implements DurableObject {
         case 'CLOSED': {
           const [subId, message] = rest as [string, string];
           console.log(`[ReportWatcher] Subscription closed: ${subId} - ${message}`);
+          // The relay ended the live subscription but may keep the socket
+          // open. A socket with no subscription receives nothing, yet the
+          // alarm would keep stamping the heartbeat on it and hide the dead
+          // period from catch-up. Close it: the close handler schedules the
+          // backoff reconnect, which resubscribes and plans that gap.
+          if (subId === this.subscriptionId) {
+            try {
+              // The socket that received the CLOSED, never this.ws.
+              socket.close(1000, 'live subscription closed by relay');
+            } catch (error) {
+              console.error('[ReportWatcher] Failed to close socket after its subscription closed:', error);
+            }
+          }
           break;
         }
       }
@@ -870,7 +1308,18 @@ export class ReportWatcher implements DurableObject {
   /**
    * Handle a kind 1984 report event
    */
-  private async handleReportEvent(event: ReportEvent): Promise<void> {
+  private async handleReportEvent(
+    event: ReportEvent,
+    // preClaimed: catch-up already claimed this id.
+    opts: { source?: ReportIndexSource; preClaimed?: boolean; sideEffects?: boolean } = {},
+  ): Promise<void> {
+    const { source = 'live', sideEffects = true, preClaimed = false } = opts;
+    // The live path claims before any await, so a report catch-up is handling
+    // (or has handled) in this instance is not handled again.
+    if (!preClaimed && !this.claimReport(event.id)) {
+      console.log('[ReportWatcher] Report already claimed in this instance, skipping');
+      return;
+    }
     this.lastEventAt = Date.now();
     this.eventsProcessed++;
 
@@ -902,27 +1351,34 @@ export class ReportWatcher implements DurableObject {
       console.log('[ReportWatcher] Report e tag is not a 64-character hex id, skipping auto-hide');
     }
 
-    // Record when this report arrived: created_at is the reporter's claim and
+    // Record when this report arrived, and index it: created_at is the reporter's claim and
     // can be backdated, so "reported after the last human handling" (#324)
-    // compares this clock. Live path only: replayAdultReports does not record,
-    // and the live subscription has no `since` catch-up, so a report filed
-    // during a watcher outage has no row. A missing row falls back to
-    // created_at. Non-critical: logged, never allowed to stop auto-hide or the
-    // age review below. Only a verified event is recorded, since the relay
-    // does not vouch for the id.
-    if (this.env.DB) {
+    // compares this clock. Live by default; catch-up passes its own source, and
+    // sideEffects:false makes this write the only thing done. replayAdultReports
+    // does not record. A report no path has seen has no row, and a missing row
+    // falls back to created_at. Live writes are non-critical (logged, never
+    // allowed to stop auto-hide or age review); catch-up rethrows arrival/index
+    // write errors so unrecorded reports remain pending for retry. Only a
+    // verified event is recorded, since the relay does not vouch for the id.
+    const db = this.activeDb;
+    if (db) {
       try {
-        if (!this.schemaReady) {
-          await ensureSchema(this.env.DB);
-          this.schemaReady = true;
-        }
         if (verifyEvent(event as unknown as NostrEvent)) {
-          await recordReportArrival(this.env.DB, event.id, Math.floor(Date.now() / 1000));
+          const now = Math.floor(Date.now() / 1000);
+          // verifyEvent above only passes a signed event, so sig is present.
+          const signed = { ...event, sig: event.sig as string };
+          await this.recordVerifiedReports([signed], source, now, db);
         }
       } catch (error) {
-        console.error('[ReportWatcher] Failed to record report arrival:', error);
+        console.error('[ReportWatcher] Failed to record report arrival and index row:', error);
+        if (source !== 'live') {
+          this.eventsProcessed -= 1;
+          throw error;
+        }
       }
     }
+
+    if (!sideEffects) return;
 
     // Process auto-hide if enabled and category qualifies
     if (targetEventId) {
@@ -955,15 +1411,76 @@ export class ReportWatcher implements DurableObject {
     }
   }
 
+  private canBatchCatchUpReport(event: ReportEvent, handlerEnabled: boolean): boolean {
+    if (!handlerEnabled) return true;
+    const targetEventTag = event.tags.find(t => t[0] === 'e');
+    const targetEventId = canonicalHex64(targetEventTag?.[1]);
+    if (targetEventId && this.autoHideConfig?.enabled) {
+      const category = reportCategory(event.tags);
+      const adultReport = adultSexualCategory(category) && !getReportedList(event);
+      const tier = this.autoHideConfig.tiers.find(t => t.categories.includes(category));
+      if (adultReport || tier) return false;
+    }
+    const targetPubkeyTag = event.tags.find(t => t[0] === 'p');
+    const reportedPubkey = canonicalHex64(targetPubkeyTag?.[1]);
+    if (reportedPubkey && ageReviewCategory(event) === 'NS-underageUser') return false;
+    return true;
+  }
+
+  private async handleReportBatch(reports: readonly SignedReport[], db: D1Database): Promise<void> {
+    const verified: SignedReport[] = [];
+    for (const report of reports) {
+      if (verifyEvent(report as unknown as NostrEvent)) {
+        verified.push({ ...report, sig: report.sig as string });
+      }
+    }
+    await this.recordVerifiedReports(verified, 'catchup', Math.floor(Date.now() / 1000), db);
+    this.lastEventAt = Date.now();
+    this.eventsProcessed += reports.length;
+  }
+
+  private async recordVerifiedReports(
+    reports: readonly SignedReport[],
+    source: ReportIndexSource,
+    now: number,
+    db: D1Database,
+  ): Promise<void> {
+    if (reports.length === 0) return;
+    if (!this.schemaReady) {
+      await ensureSchema(db);
+      this.schemaReady = true;
+    }
+    for (let i = 0; i < reports.length; i += CATCHUP_INDEX_BATCH_SIZE) {
+      const chunk = reports.slice(i, i + CATCHUP_INDEX_BATCH_SIZE);
+      // First batch: arrivals and index rows, atomic and well within D1's
+      // 50-statement and 100-parameter limits (1 arrival statement + up to 5
+      // index-row statements for 50 reports). Anyone can publish a kind 1984
+      // with thousands of e/p tags, and putting refs in the same batch would
+      // overflow D1's 50-statement limit and leave the report unseen.
+      await db.batch([
+        ...reportArrivalStatements(db, chunk.map(r => r.id), now),
+        ...reportIndexRowStatements(db, chunk, source, now),
+      ]);
+      // Write refs separately after recording the report as seen. Catch-up
+      // skips seen reports, so missing refs wait for the full reconcile.
+      try {
+        await runStatements(db, reportIndexRefStatements(db, chunk));
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to record report index refs:', error);
+      }
+    }
+  }
+
   private async processAutoHide(
     event: ReportEvent,
     category: string,
     targetEventId: string,
     advanceNow = true,
   ): Promise<void> {
-    if (!this.schemaReady && this.env.DB) {
+    const db = this.activeDb;
+    if (!this.schemaReady && db) {
       try {
-        await ensureSchema(this.env.DB);
+        await ensureSchema(db);
         this.schemaReady = true;
       } catch (error) {
         console.error('[ReportWatcher] Failed to ensure schema:', error);
@@ -1022,7 +1539,7 @@ export class ReportWatcher implements DurableObject {
         // IO validates the target signature before throwing OutsideVideoScope.
         // Transport uncertainty retains replay. A confirmed absent response is
         // archived separately so one missing target cannot pin unrelated reports.
-        try { snapshot = await createQuarantineIO(this.env).snapshot(targetEventId); }
+        try { snapshot = await createQuarantineIO(this.quarantineEnv).snapshot(targetEventId); }
         catch (error) {
           if (error instanceof ConfirmedAbsentTarget || error instanceof TargetEvidenceLimit) {
             const archiveKey = error instanceof TargetEvidenceLimit ? boundKey : absentKey;
@@ -1048,6 +1565,7 @@ export class ReportWatcher implements DurableObject {
       // Once activated, video admission rollback must not resume base bans:
       // those cannot be released by this stream's named-hold Restore.
       if (this.env.SEXUAL_QUARANTINE_ENABLED !== 'true') return;
+      let hideTriggered = false;
       const admitted = await this.state.blockConcurrencyWhile(async () => {
         // Decided cases still retain incoming evidence. admit() keeps their
         // human intent final, so this cannot re-hide a restored event. Other
@@ -1057,12 +1575,17 @@ export class ReportWatcher implements DurableObject {
           const human = await this.hasBlockingHumanResolution(targetEventId, false);
           if (human !== false) return false;
         }
-        await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
+        const before = currentCase?.goal;
+        const admittedCase = await q.admit(targetEventId, { id: event.id, pubkey: event.pubkey, reason: category,
           source: JSON.parse(JSON.stringify(wire)) as object }, // A legacy fractional threshold means the next whole reporter count.
           Math.max(2, Math.ceil(videoTier.threshold)), snapshot);
+        // This report is the one that sent the case to a hide: an automated
+        // hide action, counted like a legacy hide.
+        hideTriggered = before !== 'hide' && admittedCase?.goal === 'hide';
         return true;
       });
       if (!admitted) return;
+      if (hideTriggered) this.noteAutoAction(event.id);
       await this.scheduleHealthCheck();
       if (advanceNow) await q.advance(targetEventId);
       return;
@@ -1324,6 +1847,7 @@ export class ReportWatcher implements DurableObject {
 
       console.log(`[ReportWatcher] Successfully auto-hidden event ${targetEventId}`);
       this.eventsAutoHidden++;
+      this.noteAutoAction(event.id);
       await this.persistState();
 
       await this.logDecision({
@@ -1349,13 +1873,14 @@ export class ReportWatcher implements DurableObject {
   }
 
   private async countUniqueReporters(targetEventId: string, category: string): Promise<number> {
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.warn('[ReportWatcher] D1 not available for reporter count');
       return 0;
     }
 
     try {
-      const result = await this.env.DB.prepare(`
+      const result = await db.prepare(`
         SELECT COUNT(DISTINCT reporter_pubkey) as count
         FROM moderation_decisions
         WHERE target_id = ?
@@ -1383,14 +1908,15 @@ export class ReportWatcher implements DurableObject {
     if (await this.state.storage.get<string>(this.visibilityStorageKey(targetEventId)) === 'raw-allow') {
       return false;
     }
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       // No D1 available - can't dedupe, allow processing
       console.warn('[ReportWatcher] D1 not available for deduplication check');
       return false;
     }
 
     try {
-      const result = await this.env.DB.prepare(`
+      const result = await db.prepare(`
         SELECT 1 FROM moderation_decisions
         WHERE target_type = 'event'
           AND target_id = ?
@@ -1411,13 +1937,14 @@ export class ReportWatcher implements DurableObject {
    * Reads from moderation_targets (persistent, survives reopen).
    */
   private async hasHumanResolution(targetEventId: string): Promise<boolean | null> {
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.error(`[ALERT] [ReportWatcher] Cannot check human resolution for ${targetEventId}: D1 is not bound`);
       return null;
     }
 
     try {
-      const result = await this.env.DB.prepare(`
+      const result = await db.prepare(`
         SELECT 1 FROM moderation_targets
         WHERE target_id = ? AND ever_human_reviewed = 1
       `).bind(targetEventId).first();
@@ -1443,10 +1970,11 @@ export class ReportWatcher implements DurableObject {
    * The permanent reviewed bit alone is direction-free: hides and deletes set it too.
    */
   private async hasHumanRestore(targetEventId: string): Promise<boolean | null> {
-    if (!this.env.DB) return false;
+    const db = this.activeDb;
+    if (!db) return false;
 
     try {
-      return await hasLatestHumanRestore(this.env.DB, targetEventId);
+      return await hasLatestHumanRestore(db, targetEventId);
     } catch (error) {
       console.error('[ReportWatcher] Failed to check latest human action:', error);
       return null;
@@ -1465,13 +1993,14 @@ export class ReportWatcher implements DurableObject {
     reporterPubkey: string | null;
     moderatorPubkey?: string;
   }): Promise<boolean> {
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.warn('[ReportWatcher] D1 database not available, skipping log');
       return false;
     }
 
     try {
-      await this.env.DB.prepare(`
+      await db.prepare(`
         INSERT INTO moderation_decisions
         (target_type, target_id, action, reason, moderator_pubkey, report_id, reporter_pubkey, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))
@@ -1546,14 +2075,15 @@ export class ReportWatcher implements DurableObject {
       console.error('[ReportWatcher] Refusing to open an age review case: pubkey is not lowercase hex');
       return;
     }
-    if (!this.env.DB) {
+    const db = this.activeDb;
+    if (!db) {
       console.warn('[ReportWatcher] D1 database not available, cannot create age review case');
       return;
     }
 
     if (!this.schemaReady) {
       try {
-        await ensureSchema(this.env.DB);
+        await ensureSchema(db);
         this.schemaReady = true;
       } catch (error) {
         console.error('[ReportWatcher] Failed to ensure schema:', error);
@@ -1562,7 +2092,7 @@ export class ReportWatcher implements DurableObject {
     }
 
     await openReportedAgeReviewCase(
-      this.env.DB,
+      db,
       this.env,
       reportedPubkey,
       { kind: 'report', reportEventId: event.id, reporterPubkey: event.pubkey },
@@ -1588,6 +2118,29 @@ export class ReportWatcher implements DurableObject {
       }
     }
 
+    // A connection whose plan failed (D1 down at connect) retries it here, in
+    // the background like the connect does, while its socket stays open.
+    if (this.running && !this.catchUpPlannedForConnection && this.env.DB
+      && this.ws && this.ws.readyState === WebSocket.OPEN) {
+      this.state.waitUntil(this.planAndRunCatchUp(this.ws));
+    }
+
+    // Heartbeat for restart catch-up: only a live socket whose catch-up window
+    // is already saved and whose live subscription has reached EOSE may
+    // advance it. Without EOSE the relay may be delivering nothing, and a stamp
+    // would move the next catch-up window past reports filed meanwhile.
+    // Non-critical, so its own try/catch.
+    if (
+      this.running && this.catchUpPlannedForConnection && this.liveSubscriptionAcked && this.env.DB
+      && this.ws && this.ws.readyState === WebSocket.OPEN
+    ) {
+      try {
+        await metaStatement(this.env.DB, 'watcher_last_alive_at', Math.floor(Date.now() / 1000)).run();
+      } catch (error) {
+        console.error('[ReportWatcher] Failed to stamp watcher heartbeat:', error);
+      }
+    }
+
     if (await this.state.storage.get('sexual-jobs-exist')) {
       // Case recovery must not abort the watcher's next health check.
       try {
@@ -1608,11 +2161,23 @@ export class ReportWatcher implements DurableObject {
     if (this.running && replayActivated && this.autoHideConfig?.enabled) {
       try {
         await replayAdultReports(this.state.storage, this.env.RELAY_URL, async (event, category, target) => {
+          // A stop during the replay: nothing more runs, and the throw keeps
+          // the cursor so the next start replays the rest.
+          if (!this.running) throw new ReplayStopped();
+          // Same gate as catch-up, read as it stands for each report (a stop
+          // and a start can land during the run): no automated action on a
+          // report created while the watcher was deliberately stopped. It
+          // includes the clock margin after the /start. The replay also
+          // re-reads live arrivals, so a report from those two minutes whose
+          // live handling failed is not recovered here. Accepted: the window
+          // is short and the report stays in the queue for a moderator.
+          if (inStoppedPeriod(event.created_at, await this.currentStoppedPeriods())) return;
           if (await this.hasBlockingHumanResolution(target, false) === null) throw new Error('Review state unavailable');
           await this.processAutoHide(event, category, target, false);
         });
-      } catch {
-        console.error('[ALERT] Sexual report replay incomplete; cursor retained');
+      } catch (error) {
+        if (error instanceof ReplayStopped) console.log('[ReportWatcher] Stopped during the sexual report replay; cursor retained');
+        else console.error('[ALERT] Sexual report replay incomplete; cursor retained');
       }
       await this.scheduleHealthCheck();
     }
@@ -1627,7 +2192,7 @@ export class ReportWatcher implements DurableObject {
   }
 
   private sexualQuarantine(): SexualQuarantine {
-    return this.sexualEngine ??= new SexualQuarantine(this.state.storage, createQuarantineIO(this.env));
+    return this.sexualEngine ??= new SexualQuarantine(this.state.storage, createQuarantineIO(this.quarantineEnv));
   }
 
   // Only reached through the Worker's authenticated report-watcher proxy.

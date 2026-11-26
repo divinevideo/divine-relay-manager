@@ -327,6 +327,72 @@ describe('human decision persistence', () => {
       expect(upsert!.bindings).not.toContain(pubkey.toUpperCase());
     });
 
+    describe('recording the label in D1', () => {
+      const resolutionBody = {
+        kind: 1985,
+        content: 'Reviewed',
+        tags: [
+          ['L', 'moderation/resolution'],
+          ['l', 'reviewed', 'moderation/resolution'],
+          ['e', 'target_event_xyz'],
+        ],
+      };
+      const publish = (env: unknown) => worker.fetch(new Request('http://localhost/api/publish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Admin-Key': TEST_ADMIN_KEY },
+        body: JSON.stringify(resolutionBody),
+      }), env as never, mockCtx);
+      const labelInserts = (log: { sql: string; bindings: unknown[] }[]) => log.filter(s => s.sql.includes('INSERT OR IGNORE INTO resolution_labels'));
+
+      it('records the label after the relay accepts it', async () => {
+        const { db, sqlLog } = createMockDB();
+        const response = await publish(createEnv(db));
+        expect(response.status).toBe(200);
+        const inserts = labelInserts(sqlLog);
+        expect(inserts).toHaveLength(1);
+        // [label_id, created_at, signer, target_event, target_pubkey, status, event_json, source, recorded_at]
+        expect(inserts[0].bindings[3]).toBe('target_event_xyz');
+        expect(inserts[0].bindings[5]).toBe('reviewed');
+        expect(inserts[0].bindings[7]).toBe('publish');
+        const stored = JSON.parse(inserts[0].bindings[6] as string);
+        expect(stored.id).toBe(inserts[0].bindings[0]);
+        expect(stored.sig).toMatch(/^[0-9a-f]{128}$/);
+      });
+
+      it('records nothing when the relay rejects it', async () => {
+        const { db, sqlLog } = createMockDB();
+        class RejectingWebSocket extends MockWebSocket {
+          send(data: string): void {
+            const parsed = JSON.parse(data);
+            if (parsed[0] === 'EVENT') {
+              (this as unknown as { emit: (t: string, e: unknown) => void })
+                .emit('message', { data: JSON.stringify(['OK', parsed[1]?.id, false, 'blocked: no']) });
+            } else super.send(data);
+          }
+        }
+        vi.stubGlobal('WebSocket', RejectingWebSocket);
+        const response = await publish(createEnv(db));
+        expect(response.status).toBe(500);
+        expect(labelInserts(sqlLog)).toHaveLength(0);
+      });
+
+      it('still answers success when the label write throws', async () => {
+        const { db, sqlLog } = createMockDB();
+        const realPrepare = db.prepare.getMockImplementation()!;
+        db.prepare.mockImplementation((sql: string) => {
+          if (sql.includes('INSERT OR IGNORE INTO resolution_labels')) throw new Error('d1 down');
+          return realPrepare(sql);
+        });
+        const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+        const response = await publish(createEnv(db));
+        const body = await response.json() as { success: boolean };
+        expect(response.status).toBe(200);
+        expect(body.success).toBe(true);
+        expect(errors.mock.calls.some(c => String(c[0]).includes('resolution label'))).toBe(true);
+        expect(labelInserts(sqlLog)).toHaveLength(0);
+      });
+    });
+
     it('should NOT call markHumanReviewed for non-resolution labels', async () => {
       const { db, sqlLog } = createMockDB();
       const env = createEnv(db);

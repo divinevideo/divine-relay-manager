@@ -73,6 +73,7 @@ import { handleConsentVideo, type ConsentVideoEnv } from './consent-video';
 import { handlePrivateReport, type PrivateReportEnv } from './private-reports';
 import { verifyAccessJwt } from './access-jwt';
 import { secretsMatch } from './secret-compare';
+import { isResolutionLabel as isResolutionLabelEvent, recordResolutionLabel } from './resolution-label-index';
 import { MODERATOR_LOGIN_HEADER, moderatorLoginRequired, needsModeratorLogin, noteClaimedModerator, requireVerifiedModerator, verifyModeratorLogin, type ModeratorLoginEnv } from './moderator-identity';
 import {
   applyUnbanChoice,
@@ -1164,8 +1165,9 @@ export default {
         }
       }
 
-      // Lift timed suspensions whose end has passed. Last, so no other job waits on its relay,
-      // notify and Keycast calls; its own try/catch, so a failure here stops nothing else.
+      // Lift timed suspensions whose end has passed. Last of the D1 jobs (only restart catch-up
+      // follows), so no other job waits on its relay, notify and Keycast calls; its own
+      // try/catch, so a failure here stops nothing else.
       try {
         await ensureSchemaOnce(env.DB);
         const io = liveSuspensionIo(env, (pk, action, text, endsAt) =>
@@ -1196,6 +1198,24 @@ export default {
         await sendDbUnavailableAlert(env.SLACK_WEBHOOK_URL, env.ENVIRONMENT ?? 'unknown');
       } catch (error) {
         console.error('[scheduled] Failed to send DB-unavailable Slack alert:', errorNameOnly(error));
+      }
+    }
+
+    // Resume restart catch-up windows a connect could not finish (a failed
+    // page waits out the attempt interval). Last of all: a pass can read many
+    // relay pages, and age-review deadlines, retention and the suspension tick
+    // must not wait on it. Its own try/catch.
+    if (env.REPORT_WATCHER) {
+      try {
+        const stub = env.REPORT_WATCHER.get(env.REPORT_WATCHER.idFromName('singleton'));
+        const response = await stub.fetch(new Request('https://do/internal/report-catchup', { method: 'POST' }));
+        if (!response.ok) throw new Error(`ReportWatcher catch-up failed (${response.status})`);
+        const summary = await response.json() as { ran?: boolean; found?: number; handled?: number; complete?: boolean };
+        if (summary.ran) {
+          console.log(`[scheduled] Report catch-up: found=${summary.found} handled=${summary.handled} complete=${summary.complete}`);
+        }
+      } catch (error) {
+        console.error('[scheduled] Report catch-up failed:', error);
       }
     }
   },
@@ -1350,6 +1370,18 @@ async function handlePublish(
     return jsonResponse({ success: false, error: publishResult.error,
       ...(resolutionVisibility ? { recorded: resolutionVisibility.recorded, reconciled: resolutionVisibility.success && resolutionVisibility.recorded === true } : {}),
     }, 500, corsHeaders);
+  }
+
+  // Keep Relay Manager's own copy of the resolution label, after the relay accepted
+  // it. Non-critical: a failed write is logged and never changes the answer. A label
+  // missing here is repaired by the later backfill and reconcile writes.
+  if (env.DB && isResolutionLabelEvent(event)) {
+    try {
+      await ensureSchemaOnce(env.DB);
+      await recordResolutionLabel(env.DB, event, Math.floor(Date.now() / 1000));
+    } catch (err) {
+      console.error('[handlePublish] Failed to record resolution label:', err);
+    }
   }
 
   // If this is a moderation/resolution label (kind 1985), sync to Zendesk

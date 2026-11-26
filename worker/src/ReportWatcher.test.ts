@@ -1,7 +1,7 @@
 // ABOUTME: Tests for ReportWatcher Durable Object
 // ABOUTME: Tests start/stop/status and WebSocket functionality
 
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach, type MockInstance } from 'vitest';
 import { ReportWatcher, type ReportWatcherEnv, type ReportEvent, type ReportWatcherStatus, type AutoHideConfig } from './ReportWatcher';
 import { AUTO_HIDE_ACTION } from '../../shared/autohide';
 import { finalizeEvent, generateSecretKey } from 'nostr-tools';
@@ -1297,6 +1297,172 @@ describe('ReportWatcher', () => {
       expect(ws!.send).toHaveBeenCalledWith(
         expect.stringContaining('CLOSE')
       );
+    });
+  });
+
+  // A relay that accepts the socket but never acknowledges the live REQ would
+  // leave the watcher on a dead subscription: nothing arrives and, without
+  // EOSE, the heartbeat must not move. The watchdog drops that socket so the
+  // backoff reconnect resubscribes and catch-up plans the gap.
+  describe('live subscription EOSE watchdog', () => {
+    const LIVE_EOSE_TIMEOUT_MS = 60_000;
+    const eose = (ws: MockWebSocket) => ws.simulateMessage(JSON.stringify(['EOSE', 'auto-hide-reports']));
+    const status = async () =>
+      ((await (await watcher.fetch(new Request('https://do/status'))).json()) as { status: ReportWatcherStatus }).status;
+
+    beforeEach(() => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      vi.spyOn(console, 'log').mockImplementation(() => {});
+      vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+    });
+
+    const reconnectDelay = async () => (await mockState.storage.getAlarm())! - Date.now();
+
+    it('closes a socket whose live subscription has no EOSE 60 s after the REQ', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS - 1);
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+    });
+
+    it('repeated stalls keep growing the reconnect backoff', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+      const first = await reconnectDelay();
+
+      // The reconnect alarm opens a new socket, whose REQ also gets no EOSE.
+      await watcher.alarm();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(getLastMockWebSocket()!.readyState).toBe(MockWebSocket.OPEN);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 2 });
+      const second = await reconnectDelay();
+      expect(first).toBeLessThanOrEqual(1000);
+      expect(second).toBeGreaterThan(1500);
+    });
+
+    it('schedules the reconnect itself when the hung peer never answers the close', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      // A black-holed relay: close() starts the handshake, no close event comes.
+      ws.close = () => { ws.readyState = MockWebSocket.CLOSING; };
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+      expect(await reconnectDelay()).toBeLessThanOrEqual(1000);
+      // The subscription is closed before the socket.
+      expect(ws.send).toHaveBeenCalledWith(JSON.stringify(['CLOSE', 'auto-hide-reports']));
+
+      // The close event finally arrives: no second reconnect.
+      ws.simulateClose(1006, 'late');
+      expect(await status()).toMatchObject({ reconnectAttempts: 1 });
+    });
+
+    it('arms before sending the REQ, so a send that throws still gets the socket dropped', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      const ws = getLastMockWebSocket()!;
+      ws.send.mockImplementation(() => { throw new Error('send failed'); });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+      expect(vi.getTimerCount()).toBe(1);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+      expect(await status()).toMatchObject({ connected: false, reconnectAttempts: 1 });
+    });
+
+    it('a replaced socket\'s late open sends no REQ on either socket', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const old = getLastMockWebSocket()!;
+      (watcher as unknown as { connect(): void }).connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const tracked = getLastMockWebSocket()!;
+      const reqs = (ws: MockWebSocket) => ws.send.mock.calls.filter(([data]) => String(data).startsWith('["REQ"')).length;
+      expect(reqs(old)).toBe(1);
+      expect(reqs(tracked)).toBe(1);
+
+      old.emit('open', {});
+      expect(reqs(old)).toBe(1);
+      expect(reqs(tracked)).toBe(1);
+    });
+
+    it('does not fire once the live subscription has reached EOSE', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      await vi.advanceTimersByTimeAsync(10_000);
+      eose(ws);
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS * 2);
+      expect(ws.readyState).toBe(MockWebSocket.OPEN);
+    });
+
+    it('an EOSE for another subscription id does not disarm it', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const ws = getLastMockWebSocket()!;
+      ws.simulateMessage(JSON.stringify(['EOSE', 'some-other-sub']));
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS);
+      expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('an old socket\'s watchdog never closes the socket that replaced it', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const old = getLastMockWebSocket()!;
+      await vi.advanceTimersByTimeAsync(30_000);
+      (watcher as unknown as { connect(): void }).connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const tracked = getLastMockWebSocket()!;
+      expect(tracked).not.toBe(old);
+
+      // The old socket's 60 s passes; the new one is 30 s into its own.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(tracked.readyState).toBe(MockWebSocket.OPEN);
+      // Its own watchdog still runs.
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(tracked.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('a replaced socket\'s late open does not disarm the tracked socket\'s watchdog', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      const old = getLastMockWebSocket()!;
+      (watcher as unknown as { connect(): void }).connect();
+      await vi.advanceTimersByTimeAsync(0);
+      const tracked = getLastMockWebSocket()!;
+      await vi.advanceTimersByTimeAsync(10_000);
+      old.emit('open', {});
+      await vi.advanceTimersByTimeAsync(LIVE_EOSE_TIMEOUT_MS - 10_000);
+      expect(tracked.readyState).toBe(MockWebSocket.CLOSED);
+    });
+
+    it('is cleared by a stop', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      await watcher.fetch(new Request('https://do/stop', { method: 'POST' }));
+      expect(vi.getTimerCount()).toBe(0);
+    });
+
+    it('is cleared when its socket closes', async () => {
+      await watcher.fetch(new Request('https://do/start', { method: 'POST' }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(vi.getTimerCount()).toBe(1);
+      getLastMockWebSocket()!.simulateClose(1006, 'dropped');
+      expect(vi.getTimerCount()).toBe(0);
     });
   });
 
@@ -3296,13 +3462,16 @@ describe('ReportWatcher', () => {
   describe('report arrival log (#324)', () => {
     const TARGET_PK = 'c4'.repeat(32);
 
-    function arrivalDb(opts: { failArrival?: boolean } = {}) {
+    function arrivalDb(opts: { failArrival?: boolean; failRefs?: boolean } = {}) {
       const arrivalBinds: unknown[][] = [];
+      const metaBinds: unknown[][] = [];
+      const batches: Array<Array<{ sql: string; args: unknown[] }>> = [];
+      const runSql: string[] = [];
       const db = {
         prepare: vi.fn().mockImplementation((sql: string) => {
           const isArrival = sql.includes('INSERT OR IGNORE INTO report_arrivals');
           const run = vi.fn().mockImplementation(async () => {
-            if (isArrival && opts.failArrival) throw new Error('d1 down');
+            runSql.push(sql);
             return { success: true, meta: { changes: 1 } };
           });
           return {
@@ -3310,12 +3479,19 @@ describe('ReportWatcher', () => {
             first: vi.fn().mockResolvedValue(null),
             bind: vi.fn().mockImplementation((...args: unknown[]) => {
               if (isArrival) arrivalBinds.push(args);
-              return { run, first: vi.fn().mockResolvedValue(null), all: vi.fn().mockResolvedValue({ results: [] }) };
+              if (sql.includes('report_index_meta')) metaBinds.push(args);
+              return { sql, args, run, first: vi.fn().mockResolvedValue(null), all: vi.fn().mockResolvedValue({ results: [] }) };
             }),
           };
         }),
+        batch: vi.fn().mockImplementation(async (statements: Array<{ sql: string; args: unknown[] }>) => {
+          batches.push(statements);
+          if (opts.failArrival) throw new Error('d1 down');
+          if (opts.failRefs && statements.some(st => st.sql.includes('report_index_refs'))) throw new Error('refs down');
+          return statements.map(() => ({ success: true, results: [] }));
+        }),
       } as unknown as D1Database;
-      return { db, arrivalBinds };
+      return { db, arrivalBinds, metaBinds, batches, runSql };
     }
 
     function signedReport(tags: string[][]): ReportEvent {
@@ -3372,10 +3548,175 @@ describe('ReportWatcher', () => {
       consoleError.mockRestore();
     });
 
+    it('writes the arrival and the index row in one atomic batch, refs separately', async () => {
+      const { db, batches, runSql } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      await feed(w, signedReport([['p', TARGET_PK], ['report', 'spam']]));
+      const first = batches.find(b => b.some(st => st.sql.includes('report_arrivals')))!;
+      const sqls = first.map(st => st.sql);
+      expect(sqls.filter(q => q.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(1);
+      expect(sqls.filter(q => q.includes('INTO report_index\n') || /INTO report_index\s*\(/.test(q))).toHaveLength(1);
+      expect(sqls.some(q => q.includes('report_index_refs'))).toBe(false);
+      expect(batches.some(b => b !== first && b.every(st => st.sql.includes('report_index_refs')))).toBe(true);
+      expect(runSql.filter(q => q.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(0);
+    });
+
+    it('records the arrival and index row for a report with 2,000 e tags, every batch within 50 statements, all refs present', async () => {
+      const { db, batches } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const tags = Array.from({ length: 2000 }, (_, i) => ['e', i.toString(16).padStart(64, '0')]);
+      await feed(w, signedReport(tags));
+      for (const b of batches) expect(b.length).toBeLessThanOrEqual(50);
+      const all = batches.flat();
+      expect(all.filter(st => st.sql.includes('INSERT OR IGNORE INTO report_arrivals'))).toHaveLength(1);
+      expect(all.filter(st => /INTO report_index\s*\(/.test(st.sql))).toHaveLength(1);
+      const refRows = all.filter(st => st.sql.includes('report_index_refs')).reduce((n, st) => n + st.args.length / 3, 0);
+      expect(refRows).toBe(2000);
+    });
+
+    it('still records the report and runs auto-hide and age review when the refs batch throws', async () => {
+      const { db, batches } = arrivalDb({ failRefs: true });
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await feed(w, signedReport([['e', 'e5'.repeat(32)], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]));
+      const first = batches[0];
+      expect(first.some(st => st.sql.includes('INSERT OR IGNORE INTO report_arrivals'))).toBe(true);
+      expect(first.some(st => /INTO report_index\s*\(/.test(st.sql))).toBe(true);
+      expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/refs/i), expect.anything());
+      expect(autoHide).toHaveBeenCalledTimes(1);
+      expect(ageReview).toHaveBeenCalledTimes(1);
+      consoleError.mockRestore();
+    });
+
+    it('stamps watcher_last_alive_at on the health alarm only while connected, after the catch-up window is saved and the live subscription reached EOSE', async () => {
+      const { db, metaBinds } = arrivalDb();
+      const state = createMockState();
+      const w = new ReportWatcher(state, createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        running: boolean; ws: { readyState: number } | null; catchUpPlannedForConnection: boolean; liveSubscriptionAcked: boolean;
+      };
+      internals.running = true;
+      internals.ws = { readyState: WebSocket.OPEN };
+      internals.liveSubscriptionAcked = true;
+
+      internals.catchUpPlannedForConnection = false;
+      await w.alarm();
+      expect(metaBinds).toHaveLength(0);
+
+      // Planned, but the live subscription has not reached EOSE yet.
+      internals.catchUpPlannedForConnection = true;
+      internals.liveSubscriptionAcked = false;
+      await w.alarm();
+      expect(metaBinds).toHaveLength(0);
+
+      internals.liveSubscriptionAcked = true;
+      const before = Math.floor(Date.now() / 1000);
+      await w.alarm();
+      expect(metaBinds).toHaveLength(1);
+      expect(metaBinds[0][0]).toBe('watcher_last_alive_at');
+      expect(metaBinds[0][1] as number).toBeGreaterThanOrEqual(before);
+      expect(metaBinds[0][1] as number).toBeLessThan(before + 60);
+
+      // A closed socket is not a live listener; the alarm reconnects but must not stamp.
+      metaBinds.length = 0;
+      internals.ws = { readyState: WebSocket.CLOSED };
+      vi.spyOn(w as unknown as { connect(): void }, 'connect').mockImplementation(() => {});
+      await w.alarm();
+      expect(metaBinds).toHaveLength(0);
+    });
+
+    it('stop records a deliberate-stop marker', async () => {
+      const state = createMockState();
+      const w = new ReportWatcher(state, createMockEnv({ DB: arrivalDb().db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      (w as unknown as { running: boolean }).running = true;
+      const before = Math.floor(Date.now() / 1000);
+      await w.fetch(new Request('https://do/stop', { method: 'POST' }));
+      const marker = await state.storage.get<number>('report-watcher-deliberate-stop');
+      expect(marker).toBeGreaterThanOrEqual(before);
+      expect(marker).toBeLessThan(before + 60);
+    });
+
+    it('a failed marker write leaves /stop working: 200, watcher stopped, state persisted', async () => {
+      const state = createMockState();
+      const w = new ReportWatcher(state, createMockEnv({ DB: arrivalDb().db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      (w as unknown as { running: boolean }).running = true;
+      const put = state.storage.put as unknown as MockInstance<(k: string, v: unknown) => Promise<void>>;
+      const realPut = put.getMockImplementation()!;
+      put.mockImplementation(async (key: string, value: unknown) => {
+        if (key === 'report-watcher-deliberate-stop') throw new Error('storage down');
+        return realPut(key, value);
+      });
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      const res = await w.fetch(new Request('https://do/stop', { method: 'POST' }));
+      expect(res.status).toBe(200);
+      expect((w as unknown as { running: boolean }).running).toBe(false);
+      expect(await state.storage.get('report-watcher-deliberate-stop')).toBeUndefined();
+      expect(await state.storage.get('watcherState')).toMatchObject({ running: false });
+      expect(consoleError).toHaveBeenCalledWith(expect.stringMatching(/deliberate-stop/), expect.anything());
+      consoleError.mockRestore();
+    });
+
+    it('with sideEffects false records the arrival and index and skips auto-hide and age review', async () => {
+      const { db, batches } = arrivalDb();
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+        handleReportEvent(e: ReportEvent, o: { sideEffects: boolean; source: string }): Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      await internals.handleReportEvent(
+        signedReport([['e', 'e5'.repeat(32)], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]),
+        { sideEffects: false, source: 'catchup' },
+      );
+      expect(batches.length).toBeGreaterThanOrEqual(1);
+      expect(autoHide).not.toHaveBeenCalled();
+      expect(ageReview).not.toHaveBeenCalled();
+    });
+
     it('records nothing and does not throw without a DB binding', async () => {
       const w = new ReportWatcher(createMockState(), createMockEnv());
       await new Promise(resolve => setTimeout(resolve, 10));
       await expect(feed(w, signedReport([['p', TARGET_PK], ['report', 'spam']]))).resolves.toBeUndefined();
+    });
+
+    it('rethrows arrival and index batch errors for catch-up without running side effects', async () => {
+      const { db } = arrivalDb({ failArrival: true });
+      const w = new ReportWatcher(createMockState(), createMockEnv({ DB: db }));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      const internals = w as unknown as {
+        eventsProcessed: number;
+        processAutoHide: (...a: unknown[]) => Promise<void>;
+        createAgeReviewCase: (...a: unknown[]) => Promise<void>;
+        handleReportEvent(e: ReportEvent, o: { source: string; preClaimed: boolean }): Promise<void>;
+      };
+      const autoHide = vi.spyOn(internals, 'processAutoHide').mockResolvedValue(undefined);
+      const ageReview = vi.spyOn(internals, 'createAgeReviewCase').mockResolvedValue(undefined);
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => {});
+      await expect(
+        internals.handleReportEvent(
+          signedReport([['e', 'e5'.repeat(32)], ['p', TARGET_PK], ['l', 'NS-underageUser', 'social.nos.ontology']]),
+          { source: 'catchup', preClaimed: true },
+        ),
+      ).rejects.toThrow('d1 down');
+      expect(autoHide).not.toHaveBeenCalled();
+      expect(ageReview).not.toHaveBeenCalled();
+      expect(internals.eventsProcessed).toBe(0);
+      consoleError.mockRestore();
     });
   });
 });

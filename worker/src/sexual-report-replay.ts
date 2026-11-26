@@ -7,6 +7,10 @@ import { getReportedList } from '../../shared/list-report';
 import { canonicalHex64 } from '../../shared/hex-id';
 
 const PAGE = 100;
+// Each replay window starts this far before the last one ended.
+const REPLAY_OVERLAP_SECONDS = 60;
+// With no cursor yet, the first replay reads this far back.
+const FIRST_REPLAY_LOOKBACK_SECONDS = 86400;
 const CHILD_CATEGORIES = new Map(CSAM_CATEGORIES.map(c => [c.toLowerCase(), c]));
 
 export function reportCategory(tags: string[][]): string {
@@ -21,6 +25,22 @@ export function reportCategory(tags: string[][]): string {
   return (child && CHILD_CATEGORIES.get(child.toLowerCase())) || candidates.find(Boolean) || 'unknown';
 }
 
+/**
+ * The earliest report created_at the next replay run can read: its open
+ * window's start, else the overlap before its last cursor, else the first-run
+ * lookback. Storage reads only. Catch-up keeps stopped periods from here on,
+ * so the replay can still skip them.
+ */
+export async function replayReachFloor(
+  storage: { get<T>(key: string): Promise<T | undefined> },
+  now: number,
+): Promise<number> {
+  const window = await storage.get<{ from: number }>('sexual-replay-window');
+  if (window) return window.from;
+  const through = await storage.get<number>('sexual-replay-through');
+  return Math.max(0, (through ?? now - FIRST_REPLAY_LOOKBACK_SECONDS) - REPLAY_OVERLAP_SECONDS);
+}
+
 export async function replayAdultReports(
   storage: DurableObjectStorage,
   relayUrl: string,
@@ -29,8 +49,8 @@ export async function replayAdultReports(
 ): Promise<void> {
   let window = await storage.get<{ from: number; through: number; until: number }>('sexual-replay-window');
   if (!window) {
-    const through = await storage.get<number>('sexual-replay-through') ?? now - 86400;
-    window = { from: Math.max(0, through - 60), through: now, until: now };
+    const through = await storage.get<number>('sexual-replay-through') ?? now - FIRST_REPLAY_LOOKBACK_SECONDS;
+    window = { from: Math.max(0, through - REPLAY_OVERLAP_SECONDS), through: now, until: now };
     await storage.put('sexual-replay-window', window);
   }
   const result = await queryRelay({ kinds: [1984], since: window.from, until: window.until, limit: PAGE }, relayUrl);

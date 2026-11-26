@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { finalizeEvent } from 'nostr-tools';
-import { replayAdultReports, reportCategory } from './sexual-report-replay';
+import { replayAdultReports, replayReachFloor, reportCategory } from './sexual-report-replay';
 import { queryRelay } from './relay-profile';
 vi.mock('./relay-profile', () => ({ queryRelay: vi.fn() }));
 const event = finalizeEvent({ kind: 1984, created_at: 100, content: '', tags: [['e', 'a'.repeat(64), 'NS-sexualContent']] }, new Uint8Array(32).fill(3));
@@ -68,5 +68,15 @@ describe('adult report replay', () => {
     await replayAdultReports(f.storage, 'wss://relay.test', async () => {}, 200);
     await expect(replayAdultReports(f.storage, 'wss://relay.test', async () => {}, 200)).rejects.toThrow('saturated');
     expect(f.data.has('sexual-replay-through')).toBe(false);
+  });
+});
+describe('adult report replay reach', () => {
+  it('reports the earliest created_at its next run can read', async () => {
+    const f = fixture();
+    expect(await replayReachFloor(f.storage, 100_000)).toBe(100_000 - 86_400 - 60);
+    f.data.set('sexual-replay-through', 90_000);
+    expect(await replayReachFloor(f.storage, 100_000)).toBe(89_940);
+    f.data.set('sexual-replay-window', { from: 80_000, through: 100_000, until: 95_000 });
+    expect(await replayReachFloor(f.storage, 100_000)).toBe(80_000);
   });
 });

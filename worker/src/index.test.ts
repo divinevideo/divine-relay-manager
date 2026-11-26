@@ -2719,6 +2719,77 @@ describe('scheduled cron — DB-unavailable alert', () => {
   });
 });
 
+// -- scheduled() restart catch-up ---------------------------------------------
+
+describe('scheduled cron — restart catch-up', () => {
+  const zeroSummary = {
+    lifted: 0, alreadyLifted: 0, cancelledByBan: 0, waiting: 0, failed: 0, keycastSettled: 0, recovered: 0,
+    dueForManualLift: 0,
+  };
+  const tolerantDb = () => {
+    const statement = (): unknown => ({
+      bind: () => statement(),
+      run: async () => ({ success: true, meta: { changes: 0 } }),
+      first: async () => null,
+      all: async () => ({ results: [] }),
+    });
+    return { prepare: statement };
+  };
+
+  function watcherCalls(catchUp: () => Promise<Response>, order: string[] = []) {
+    const paths: string[] = [];
+    const doFetch = vi.fn(async (request: Request) => {
+      const path = new URL(request.url).pathname;
+      paths.push(`${request.method} ${path}`);
+      order.push(path);
+      if (path === '/internal/report-catchup') return catchUp();
+      return Response.json({ status: { running: true } });
+    });
+    const binding = { idFromName: vi.fn().mockReturnValue('singleton-id'), get: vi.fn().mockReturnValue({ fetch: doFetch }) };
+    return { paths, binding };
+  }
+
+  beforeEach(() => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('asks the ReportWatcher to resume catch-up last, after every other cron job', async () => {
+    const order: string[] = [];
+    vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockImplementation(async () => {
+      order.push('tick');
+      return zeroSummary;
+    });
+    const { paths, binding } = watcherCalls(async () => Response.json({ ran: false }), order);
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ENVIRONMENT: 'test',
+      DB: tolerantDb(), REPORT_WATCHER: binding,
+    } as never;
+
+    await worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent, env, ctx);
+
+    expect(order).toEqual(['/internal/sexual-quarantine-maintenance', 'tick', '/internal/report-catchup']);
+    expect(paths).toEqual(['POST /internal/sexual-quarantine-maintenance', 'POST /internal/report-catchup']);
+  });
+
+  it('a failed catch-up call does not fail the cron', async () => {
+    const tick = vi.spyOn(timedSuspensions, 'runTimedSuspensionTick').mockResolvedValue(zeroSummary);
+    const { paths, binding } = watcherCalls(async () => { throw new Error('catch-up down'); });
+    const env = {
+      ALLOWED_ORIGINS: 'https://app.divine.video', RELAY_URL: 'wss://relay.divine.video', ENVIRONMENT: 'test',
+      DB: tolerantDb(), REPORT_WATCHER: binding,
+    } as never;
+
+    await expect(worker.scheduled({ scheduledTime: Date.UTC(2026, 10, 20, 14, 5) } as ScheduledEvent, env, ctx)).resolves.toBeUndefined();
+
+    expect(paths).toContain('POST /internal/report-catchup');
+    expect(tick).toHaveBeenCalledTimes(1);
+  });
+});
+
 // -- scheduled() timed-suspension tick (#263) ----------------------------------
 
 describe('scheduled cron — timed-suspension tick', () => {
