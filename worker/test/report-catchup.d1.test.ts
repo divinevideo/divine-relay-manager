@@ -8,7 +8,9 @@ import { ensureSchema } from '../src/db';
 import { ReportWatcher, type ReportWatcherEnv } from '../src/ReportWatcher';
 import {
   CATCHUP_CLOCK_MARGIN_SECONDS,
+  CATCHUP_MAX_PENDING_WINDOWS,
   CATCHUP_MIN_ATTEMPT_INTERVAL_MS,
+  CATCHUP_OVERLAP_SECONDS,
   CATCHUP_RELAY_CLOCK_ALLOWANCE_SECONDS,
   CATCHUP_SUCCESS_INTERVAL_MS,
   addPendingWindow,
@@ -1689,30 +1691,48 @@ describe('catch-up when the listener connects', () => {
 
   it('an outage window keeps automation when repeated stops push the pending list over the cap', async () => {
     vi.spyOn(console, 'warn').mockImplementation(() => {});
-    vi.spyOn(console, 'error').mockImplementation(() => {});
     const now = nowSec();
+    const firstHeartbeat = now - 12_000;
     // Filed during an outage that ran into the first stop.
     const outageTarget = hex(0x9701);
-    relay.corpus = [minorsReport(outageTarget, now - 9800)];
+    const stoppedTarget = hex(0x9702);
+    relay.corpus = [
+      minorsReport(outageTarget, firstHeartbeat + 20),
+      minorsReport(stoppedTarget, firstHeartbeat + 70),
+    ];
     const w = await newWatcher();
-    // Every pass is held, so windows pile up as they do while catch-up keeps
-    // failing.
-    w.data.set('report-catchup-last-attempt', Date.now());
-    for (let i = 0; i < 7; i += 1) {
-      const heartbeat = now - 10_000 + i * 1200;
+    // Start at distinct times so the windows are disjoint. Hold each catch-up
+    // pass to retain all eight windows until the final reconnect adds a ninth.
+    for (let i = 0; i < CATCHUP_MAX_PENDING_WINDOWS; i += 1) {
+      const heartbeat = firstHeartbeat + i * 1200;
+      const clock = shiftClock((heartbeat + 100 - now) * 1000);
+      w.data.set('report-catchup-last-attempt', Date.now());
       await seedHeartbeat(heartbeat);
-      w.data.set('report-watcher-deliberate-stop', heartbeat + 500);
+      w.data.set('report-watcher-deliberate-stop', heartbeat + 50);
       await w.post('/start');
       await settle(w.pending);
       await w.post('/stop');
+      clock.mockRestore();
     }
-    w.data.delete('report-watcher-deliberate-stop');
-    w.data.delete('report-catchup-last-attempt');
+    const pending = (await w.storage.get<CatchUpWindow[]>('report-catchup-windows'))!;
+    expect(pending).toHaveLength(CATCHUP_MAX_PENDING_WINDOWS);
+    expect(relay.queries).toEqual([]);
+
+    w.data.set('report-catchup-last-attempt', Date.now());
     await seedHeartbeat(now - 120);
     await w.post('/start');
     await settle(w.pending);
 
+    const capped = (await w.storage.get<CatchUpWindow[]>('report-catchup-windows'))!;
+    expect(capped).toHaveLength(CATCHUP_MAX_PENDING_WINDOWS);
+    expect(capped[0]).toEqual({ since: firstHeartbeat - CATCHUP_OVERLAP_SECONDS, until: pending[1].until });
+    w.data.delete('report-catchup-last-attempt');
+    await w.post('/internal/report-catchup');
+    await settle(w.pending);
+
     expect(bansFor(outageTarget)).toHaveLength(1);
+    expect(bansFor(stoppedTarget)).toHaveLength(0);
+    expect((await DB.prepare('SELECT COUNT(*) AS n FROM report_index').first<{ n: number }>())?.n).toBe(2);
   });
 
   it('a pass keeps a stopped period a frozen heartbeat can still reach, and the next connect runs no handler in it', async () => {
