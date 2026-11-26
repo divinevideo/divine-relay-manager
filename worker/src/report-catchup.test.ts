@@ -105,16 +105,14 @@ describe('stopped periods', () => {
     const stopAt = 10_030;
     const startAt = 12_000;
     let windows = planCatchUpWindow(heartbeat, startAt);
-    const periods = addStoppedPeriod([], { after: stopAt, until: startAt }, windows, heartbeat - 600);
+    const periods = addStoppedPeriod([], stopPeriodFor(stopAt, startAt, startAt), windows, heartbeat - 600);
     for (const w of planCatchUpWindow(heartbeat, 12_020)) windows = addPendingWindow(windows, w).windows;
     expect(windows).toEqual([{ since: 9_400, until: 12_140 }]);
-    for (const createdAt of [stopAt + 1, 10_500, startAt]) {
+    for (const createdAt of [stopAt, 10_500, startAt, startAt + CATCHUP_CLOCK_MARGIN_SECONDS]) {
       expect(reportHandlerEnabled(createdAt, periods)).toBe(false);
     }
-    // Filed before the stop (the outage) or after the start: live treatment.
-    expect(reportHandlerEnabled(stopAt, periods)).toBe(true);
-    expect(reportHandlerEnabled(10_010, periods)).toBe(true);
-    expect(reportHandlerEnabled(startAt + 1, periods)).toBe(true);
+    expect(reportHandlerEnabled(stopAt - 1, periods)).toBe(true);
+    expect(reportHandlerEnabled(startAt + CATCHUP_CLOCK_MARGIN_SECONDS + 1, periods)).toBe(true);
   });
 
   it('prunes a period once it ends before every pending window, and keeps at most eight', () => {

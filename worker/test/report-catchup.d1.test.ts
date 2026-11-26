@@ -15,6 +15,7 @@ import {
   addStoppedPeriod,
   planCatchUpWindow,
   runPendingCatchUp,
+  stopPeriodFor,
   type CatchUpWindow,
 } from '../src/report-catchup';
 import { metaStatement, type SignedReport } from '../src/report-index';
@@ -720,16 +721,18 @@ describe('catch-up when the listener connects', () => {
     const now = nowSec();
     const heartbeat = now - 300;
     const stopAt = now - 200;
-    const startAt = now - 100;
+    const startAt = now - 150;
     let windows = planCatchUpWindow(heartbeat, startAt);
-    const periods = addStoppedPeriod([], { after: stopAt, until: startAt }, windows, heartbeat - 600);
-    for (const w of planCatchUpWindow(heartbeat, startAt + 20)) windows = addPendingWindow(windows, w).windows;
-    expect(windows[0]).toEqual({ since: heartbeat - 600, until: startAt + 20 + 120 });
+    const periods = addStoppedPeriod([], stopPeriodFor(stopAt, startAt, startAt), windows, heartbeat - 600);
+    const reconnectAt = startAt + 60;
+    for (const w of planCatchUpWindow(heartbeat, reconnectAt)) windows = addPendingWindow(windows, w).windows;
+    expect(windows).toEqual([{ since: heartbeat - 600, until: reconnectAt + CATCHUP_CLOCK_MARGIN_SECONDS }]);
 
     const outage = minorsReport(hex(0xc1), heartbeat + 50);
-    const stopped = minorsReport(hex(0xc2), stopAt + 50);
-    const afterStart = minorsReport(hex(0xc3), startAt + 10);
-    relay.corpus = [outage, stopped, afterStart];
+    const stopped = minorsReport(hex(0xc2), stopAt);
+    const withinMargin = minorsReport(hex(0xc3), startAt + CATCHUP_CLOCK_MARGIN_SECONDS);
+    const afterMargin = minorsReport(hex(0xc4), startAt + CATCHUP_CLOCK_MARGIN_SECONDS + 1);
+    relay.corpus = [outage, stopped, withinMargin, afterMargin];
     const s = makeState();
     await s.storage.put('report-catchup-windows', windows);
     await s.storage.put('report-catchup-stopped-periods', periods);
@@ -747,9 +750,11 @@ describe('catch-up when the listener connects', () => {
 
     expect(handled.get(stopped.id)).toBe(false);
     expect(handled.get(outage.id)).toBe(true);
-    expect(handled.get(afterStart.id)).toBe(true);
-    // The window reaches 40 s past now: that part waits for a later pass.
-    expect(await s.storage.get('report-catchup-windows')).toEqual([{ since: expect.any(Number), until: startAt + 140 }]);
+    expect(handled.get(withinMargin.id)).toBe(false);
+    expect(handled.get(afterMargin.id)).toBe(true);
+    expect(await s.storage.get('report-catchup-windows')).toEqual([
+      { since: expect.any(Number), until: reconnectAt + CATCHUP_CLOCK_MARGIN_SECONDS },
+    ]);
   });
 
   it('a failed page stops the pass: no later window is walked', async () => {
